@@ -63,6 +63,7 @@ struct H {
     int (*fields)(Ctx *, const char *, u32);                   /* the body's fields are among these (NUL-separated) */
     int (*json_id)(Ctx *, u32, u32);                           /* an item written as its id: "slot.generation" or the slot */
     int (*wr_int)(Ctx *, u64, u32, i64);                       /* an integer of `size` bytes at a byte offset (the value already known to fit) */
+    int (*move_elems)(Ctx *, u64, u32, i64, i64, i64);        /* move `count` elements of `esize` bytes within an array at byte offset `base`: from, to, count (already in range) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -526,6 +527,7 @@ fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
             match s {
                 Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
                 Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
+                Stmt::Move(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); st(t, out); st(e, out); }
@@ -569,6 +571,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
             match s {
                 Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
                 Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
+                Stmt::Move(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); calls(t, out); calls(e, out); }
@@ -665,9 +668,10 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         }
     }
     stmts.iter().any(|s| match s {
-        Stmt::Alloc { .. } | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
+        Stmt::Alloc { .. } | Stmt::Move(..) | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
+        Stmt::Move(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || writes(api, t, seen) || writes(api, e, seen),
         Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || writes(api, b, seen),
@@ -691,6 +695,7 @@ fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         Stmt::Alloc { .. } => true,
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
+        Stmt::Move(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || allocates(api, t, seen) || allocates(api, e, seen),
         Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || allocates(api, b, seen),
@@ -1165,6 +1170,23 @@ impl<'p> G<'p> {
                 }
                 let collect = allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
                 self.each(it, env, collect, |g, env, _| g.block(body, env))?;
+            }
+            Stmt::Move(arr, from, to, count) => {
+                let av = self.expr(arr, env, None)?;
+                let mut pos = |g: &mut Self, e: &'p Expr, env: &mut Vec<Option<CV>>| -> R<String> { let v = g.expr(e, env, None)?; let k = g.int_or(v, 400, "a position and a count must be integers"); Ok(g.hold_int(k)) };
+                let (f, t2, n) = (pos(self, from, env)?, pos(self, to, env)?, pos(self, count, env)?);
+                let (base, esize, len) = match av {
+                    CV::ArrCol(c, idx, ci) => {
+                        self.may_write_col(c, &self.prog.colls[c].cols[ci].path.clone())?;
+                        let col = &self.prog.colls[c].cols[ci];
+                        let CKind::Arr(_, len) = col.kind else { unreachable!() };
+                        (format!("{}ULL + (u64)({}) * {}ULL", col.off, idx, col.kind.size()), col.kind.size() / len, len)
+                    }
+                    CV::PlainArr(off, e, len) => { self.may_write_plain(off)?; (format!("{}ULL", off), self.prog.plain_size(&e).0, len) }
+                    _ => return no("`move` works on a fixed array"),
+                };
+                self.line(&format!("if (UNLIKELY({f} < 0 || {f} > {len}LL || {t2} < 0 || {t2} > {len}LL || {n} < 0 || {n} > {len}LL || {f} + {n} > {len}LL || {t2} + {n} > {len}LL)) FAIL(400, \"move out of range\", 17);"));
+                self.call(&format!("c->h->move_elems(c, {}, {}, {}, {}, {})", base, esize, f, t2, n));
             }
             Stmt::Remove(coll, e) => {
                 let CV::Coll(want, _) = self.expr(coll, env, None)? else { return no("`remove` is a function of a collection") };

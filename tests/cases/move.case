@@ -1,0 +1,61 @@
+// array.move(from, to, count): elements of a fixed array move within it, overlapping ranges either way, range checked,
+// in an item's array and in plain state, and undone with the rest of a request that fails
+--- program
+struct Row { cells: i32[6]; small: u8[4]; }
+struct App {
+    plain: i64[6];
+    rows: pool<Row, 2>;
+}
+state app: App;
+
+@post("/plain/{k}")
+fn post_plain_k(k: i64, v: i64) -> Response<{}> { app.plain[k] = v; return ok({}); }
+@post("/plain/move/{from}/{to}/{n}")
+fn post_plain_move(from: i64, to: i64, n: i64) -> Response<{}> { app.plain.move(from, to, n); return ok({}); }
+@get("/plain")
+fn get_plain() -> Response<{ x: [i64] }> { return ok({ "x": [each i in 0..6 app.plain[i]] }); }
+@post("/rows")
+fn post_rows() -> Response<{ slot: i64 }> {
+    let r = app.rows.add();
+    each i in 0..6 { r.cells[i] = i * 10; }
+    each i in 0..4 { r.small[i] = i + 1; }
+    return created({ "slot": slot(r) });
+}
+@post("/rows/{s}/move/{from}/{to}/{n}")
+fn post_rows_move(s: i64, from: i64, to: i64, n: i64) -> Response<{}> { let r = app.rows[s]; r.cells.move(from, to, n); return ok({}); }
+@post("/rows/{s}/small/{from}/{to}/{n}")
+fn post_rows_small(s: i64, from: i64, to: i64, n: i64) -> Response<{}> { let r = app.rows[s]; r.small.move(from, to, n); return ok({}); }
+@get("/rows/{s}")
+fn get_rows_s(s: i64) -> Response<{ cells: [i64], small: [i64] }> { let r = app.rows[s]; return ok({ "cells": [each i in 0..6 r.cells[i]], "small": [each i in 0..4 r.small[i]] }); }
+@post("/rows/{s}/move-then-fail")
+fn post_rows_move_fail(s: i64) -> Response<{}> { let r = app.rows[s]; r.cells.move(0, 2, 4); fail 422 "changed my mind"; }
+--- requests
+POST /plain/0 {"v": 1}
+POST /plain/1 {"v": 2}
+POST /plain/2 {"v": 3}
+POST /plain/3 {"v": 4}
+POST /plain/4 {"v": 5}
+POST /plain/5 {"v": 6}
+GET /plain
+POST /plain/move/0/2/4
+GET /plain
+POST /plain/move/2/0/4
+GET /plain
+POST /plain/move/1/1/3
+POST /plain/move/0/3/0
+GET /plain
+POST /plain/move/4/0/3
+POST /plain/move/0/4/3
+POST /plain/move/-1/0/2
+POST /plain/move/0/0/7
+GET /plain
+POST /rows
+POST /rows/0/move/1/0/5
+GET /rows/0
+POST /rows/0/move/0/1/5
+GET /rows/0
+POST /rows/0/small/0/2/2
+GET /rows/0
+POST /rows/0/move-then-fail
+GET /rows/0
+POST /rows/0/move/0/2/99

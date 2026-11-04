@@ -323,7 +323,7 @@ static u32 gen_of(Mem *m, u32 c, u64 idx) { return coll(m, c)->checked ? (u32)rd
 static u64 count(Mem *m, u32 c, u64 inst) { return hget(m, c, coll(m, c)->list ? LEN : COUNT, inst); }
 
 static int item_live(Mem *m, u32 c, u64 idx) {
-    const MitoColl *k = coll(m, c); u64 cap = k->cap, inst = idx / cap, s = idx % cap;
+    const MitoColl *k = coll(m, c); u64 cap = k->cap, inst = k->mult == 1 ? 0 : idx / cap, s = k->mult == 1 ? idx : idx % cap; /* one instance: the index is the slot */
     if (inst >= k->mult) return 0;
     if (k->list) return (s + cap - hget(m, c, HEAD, inst)) % cap < hget(m, c, LEN, inst);
     return s < hget(m, c, HW, inst) && bit(m, c, inst, s);
@@ -399,7 +399,7 @@ static u64 push_item(Mem *m, u32 c, u64 inst) {
 }
 /* Free a pool slot (the caller checked it is a live pool item). */
 static void free_item(Mem *m, u32 c, u64 idx) {
-    const MitoColl *k = coll(m, c); u64 cap = k->cap, inst = idx / cap, s = idx % cap;
+    const MitoColl *k = coll(m, c); u64 cap = k->cap, inst = k->mult == 1 ? 0 : idx / cap, s = k->mult == 1 ? idx : idx % cap;
     if (k->list || !item_live(m, c, idx)) return;
     shrank(m, c);
     reset_children(m, c, idx);
@@ -1042,6 +1042,16 @@ static int h_binop(Ctx *c, int op, const Val *l, const Val *r, Val *out) {
 static int h_truthy(Ctx *c, const Val *v, int *out) { if (v->tag == 3) { *out = v->i != 0; return 0; } if (v->tag == 0) { *out = 0; return 0; } return fail(M_(c), 500, "condition is not a boolean"); }
 /* An integer of `size` bytes (the generated code has checked it fits the column) at byte offset `off`. */
 static int h_wr_int(Ctx *c, u64 off, u32 size, i64 v) { wr(&M_(c)->mem, off, size, (u64)v); return 0; }
+/* `count` elements of `esize` bytes move within an array at byte offset `base`, from position `from` to `to`: one commit, one
+   undo-log pass over the range they touch, one memmove (the generated code checked the range). */
+static int h_move_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 to, i64 count) {
+    if (count <= 0 || from == to) return 0;
+    Mem *m = &M_(c)->mem;
+    u64 lo = base + (u64)(from < to ? from : to) * esize, hi = base + (u64)((from > to ? from : to) + count) * esize;
+    ensure(m, lo, hi); save(m, lo, hi - lo);
+    memmove(m->base + base + (u64)to * esize, m->base + base + (u64)from * esize, (u64)count * esize);
+    return 0;
+}
 static int h_store(Ctx *c, u32 cid, u32 idx, u32 ci, const Val *v) { return store_col(M_(c), cid, idx, ci, -1, v); }
 static int h_store_elem(Ctx *c, u32 cid, u32 idx, u32 ci, i64 k, const Val *v) { return store_col(M_(c), cid, idx, ci, k, v); }
 /* A plain value at `off`: code 1..11 a scalar, 20 a string<cap>, 30 a reference to top-level pool `cap`. */
@@ -1245,7 +1255,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_int,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_int, h_move_elems,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

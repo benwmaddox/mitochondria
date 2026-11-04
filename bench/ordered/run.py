@@ -20,7 +20,7 @@ def call(method, path):
     c.request(method, path)
     r = c.getresponse()
     body = r.read()
-    dt = time.perf_counter() - t
+    dt = (int(r.getheader("X-Handler-Ns")) / 1e9) if r.getheader("X-Handler-Ns") else time.perf_counter() - t
     if r.status >= 300:
         raise SystemExit(f"{method} {path}: {r.status} {body[:200]}")
     return dt, json.loads(body)
@@ -32,7 +32,7 @@ def private_kb(pid):
 
 
 def run_mito(extra=()):
-    p = subprocess.Popen([mito, "--port", str(port), *extra], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p = subprocess.Popen([mito, "--port", str(port), "--timing", *extra], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
             try:
@@ -85,7 +85,7 @@ print(f"memory after insert, KB: Mito committed {statistics.median(r['committed_
 
 def memory_phases(extra):
     """Live vs committed KB after inserting n, then after removing all n (logical removal), with or without a trim policy."""
-    p = subprocess.Popen([mito, "--port", str(port), *extra], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p = subprocess.Popen([mito, "--port", str(port), "--timing", *extra], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
             try:

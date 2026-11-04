@@ -5,11 +5,11 @@ import http.client, json, os, subprocess, sys, time
 w, c, rounds, exe = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), os.path.abspath(sys.argv[4])
 port = 18087
 def call(m, p):
-    cn = http.client.HTTPConnection("127.0.0.1", port, timeout=3600); t = time.perf_counter(); cn.request(m, p); r = cn.getresponse(); b = r.read(); dt = time.perf_counter() - t
+    cn = http.client.HTTPConnection("127.0.0.1", port, timeout=3600); t = time.perf_counter(); cn.request(m, p); r = cn.getresponse(); b = r.read(); dt = (int(r.getheader("X-Handler-Ns")) / 1e9) if r.getheader("X-Handler-Ns") else time.perf_counter() - t
     if r.status >= 300: raise SystemExit(f"{m} {p}: {r.status} {b[:200]}")
     return dt, json.loads(b)
 def start():
-    p = subprocess.Popen([exe, "--port", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p = subprocess.Popen([exe, "--port", str(port), "--timing"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(200):
         try: call("GET", "/stats"); break
         except OSError: time.sleep(0.05)

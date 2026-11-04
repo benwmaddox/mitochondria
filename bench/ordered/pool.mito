@@ -18,3 +18,10 @@ fn clear(from: i64, n: i64 in 1..16384) -> Response<{ size: i64 }> {
     each i in from..from + n { p.items.remove(p.items[i]); }
     return ok({ "size": p.items.count() });
 }
+// pieces of a remove, to find where its time goes: only reading the items; the full remove is /clear
+@get("/touch/{from}/{n}")
+fn touch(from: i64, n: i64 in 1..16384) -> Response<{ sum: i64 }> {
+    var s = 0;
+    each i in from..from + n { s = s + p.items[i].k; }
+    return ok({ "sum": s });
+}

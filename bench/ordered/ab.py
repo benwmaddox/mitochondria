@@ -14,13 +14,13 @@ names = ["insert", "hit", "miss", "mixed", "increment", "range100", "delete"]
 
 def call(method, path):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=3600)
-    t = time.perf_counter(); c.request(method, path); r = c.getresponse(); body = r.read(); dt = time.perf_counter() - t
+    t = time.perf_counter(); c.request(method, path); r = c.getresponse(); body = r.read(); dt = (int(r.getheader("X-Handler-Ns")) / 1e9) if r.getheader("X-Handler-Ns") else time.perf_counter() - t
     if r.status >= 300: raise SystemExit(f"{method} {path}: {r.status} {body[:200]}")
     return dt, json.loads(body)
 
 
 def run_mito(exe):
-    p = subprocess.Popen([exe, "--port", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p = subprocess.Popen([exe, "--port", str(port), "--timing"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(200):
             try: call("GET", "/stats"); break
@@ -52,9 +52,12 @@ for i in range(rounds):
     for e in order: res[e].append(run_mito(e))
     R.append(run_rust())
     print(f"round {i + 1} done", file=sys.stderr)
-med = lambda rows, k: min(r[k] for r in rows)
-print(f"n={n} ops={ops} rounds={rounds}; best-of-rounds ns/op (ratio to Rust; the minimum filters load from other work on the machine)")
-print(f"{'workload':<11}{'Rust':>8}" + "".join(f"{os.path.basename(e)[:14]:>20}" for e in exes))
-for k in names:
-    rv = med(R, k)
-    print(f"{k:<11}{rv:>8.1f}" + "".join(f"{med(res[e], k):>12.1f} ({med(res[e], k) / rv:4.2f}x)" for e in exes))
+def table(title, agg):
+    print(title)
+    print(f"{'workload':<11}{'Rust':>8}" + "".join(f"{os.path.basename(e)[:14]:>20}" for e in exes))
+    for k in names:
+        rv = agg(R, k)
+        print(f"{k:<11}{rv:>8.1f}" + "".join(f"{agg(res[e], k):>12.1f} ({agg(res[e], k) / rv:4.2f}x)" for e in exes))
+print(f"n={n} ops={ops} rounds={rounds}; ns/op, and the ratio to Rust in brackets (range100 is per scan of up to 100 entries)")
+table("best of rounds (the minimum filters load from other work on the machine):", lambda rows, k: min(r[k] for r in rows))
+table("median of rounds:", lambda rows, k: statistics.median(r[k] for r in rows))

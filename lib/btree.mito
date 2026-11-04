@@ -101,17 +101,15 @@ fn place(item_slot) {
     }
     let leaf = self.descend(new_key, true);
     let pos = self.leaf_pos(leaf, new_key, true);
-    var at = self.leaves[leaf - 1].count;
-    each step in 0..17 while at > pos {
-        self.leaves[leaf - 1].keys[at] = self.leaves[leaf - 1].keys[at - 1];
-        self.leaves[leaf - 1].slots[at] = self.leaves[leaf - 1].slots[at - 1];
-        at = at - 1;
-    }
-    self.leaves[leaf - 1].keys[pos] = new_key;
-    self.leaves[leaf - 1].slots[pos] = item_slot;
-    self.leaves[leaf - 1].count = self.leaves[leaf - 1].count + 1;
+    let node = self.leaves[leaf - 1];
+    let count = node.count;
+    node.keys.move(pos, pos + 1, count - pos);
+    node.slots.move(pos, pos + 1, count - pos);
+    node.keys[pos] = new_key;
+    node.slots[pos] = item_slot;
+    node.count = count + 1;
     self.locs[item_slot].leaf = leaf;
-    if self.leaves[leaf - 1].count == 17 { self.split_leaf(leaf); }
+    if count + 1 == 17 { self.split_leaf(leaf); }
 }
 // leaf `leaf` holds 17: the first 9 stay, the last 8 move to a new leaf after it
 fn split_leaf(leaf) {
@@ -156,17 +154,15 @@ fn insert_up(left_node, right_node, separator, first_level) {
             going = 0;
         } else {
             let at = self.kid_index(parent, left);
-            var shifted = self.inners[parent - 1].count;
-            each shift in 0..18 while shifted > at + 1 {
-                self.inners[parent - 1].kids[shifted] = self.inners[parent - 1].kids[shifted - 1];
-                self.inners[parent - 1].keys[shifted - 1] = self.inners[parent - 1].keys[shifted - 2];
-                shifted = shifted - 1;
-            }
-            self.inners[parent - 1].kids[at + 1] = right;
-            self.inners[parent - 1].keys[at] = up_key;
-            self.inners[parent - 1].count = self.inners[parent - 1].count + 1;
+            let node = self.inners[parent - 1];
+            let kids = node.count;
+            node.kids.move(at + 1, at + 2, kids - at - 1);
+            node.keys.move(at, at + 1, kids - 1 - at);
+            node.kids[at + 1] = right;
+            node.keys[at] = up_key;
+            node.count = kids + 1;
             self.set_parent(right, level, parent);
-            if self.inners[parent - 1].count < 17 {
+            if kids + 1 < 17 {
                 going = 0;
             } else {
                 // the parent holds 17 children: the first 9 stay, the key after them goes up, the last 8 move to a new node
@@ -205,12 +201,11 @@ fn unplace(item_slot) {
     let leaf = self.locs[item_slot].leaf;
     var index = 0;
     each step in 0..17 while self.leaves[leaf - 1].slots[index] != item_slot { index = index + 1; }
-    let count = self.leaves[leaf - 1].count;
-    each at in index..count - 1 {
-        self.leaves[leaf - 1].keys[at] = self.leaves[leaf - 1].keys[at + 1];
-        self.leaves[leaf - 1].slots[at] = self.leaves[leaf - 1].slots[at + 1];
-    }
-    self.leaves[leaf - 1].count = count - 1;
+    let node = self.leaves[leaf - 1];
+    let count = node.count;
+    node.keys.move(index + 1, index, count - index - 1);
+    node.slots.move(index + 1, index, count - index - 1);
+    node.count = count - 1;
     self.locs[item_slot].leaf = 0;
     if count == 1 { self.drop_leaf(leaf); } else { self.merge_leaf(leaf); }
 }
@@ -232,15 +227,16 @@ fn drop_kid(first_node, gone) {
     var going = 1;
     each step in 0..20 while going == 1 {
         let index = self.kid_index(node, child);
-        let count = self.inners[node - 1].count;
-        each at in index..count - 1 { self.inners[node - 1].kids[at] = self.inners[node - 1].kids[at + 1]; }
+        let inner = self.inners[node - 1];
+        let count = inner.count;
+        inner.kids.move(index + 1, index, count - 1 - index);
         if count > 1 {
             // the separator between the removed child and its neighbour goes with it (the one on its left, else on its right)
             var key_at = 0;
             if index > 0 { key_at = index - 1; }
-            each at in key_at..count - 2 { self.inners[node - 1].keys[at] = self.inners[node - 1].keys[at + 1]; }
+            inner.keys.move(key_at + 1, key_at, count - 2 - key_at);
         }
-        self.inners[node - 1].count = count - 1;
+        inner.count = count - 1;
         if count == 1 {
             let above = self.inners[node - 1].parent;
             self.inners.remove(self.inners[node - 1]);

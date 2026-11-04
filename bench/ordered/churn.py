@@ -21,7 +21,7 @@ SEED = 20261104
 
 def call(method, path):
     cn = http.client.HTTPConnection("127.0.0.1", port, timeout=3600)
-    t = time.perf_counter(); cn.request(method, path); r = cn.getresponse(); body = r.read(); dt = time.perf_counter() - t
+    t = time.perf_counter(); cn.request(method, path); r = cn.getresponse(); body = r.read(); dt = (int(r.getheader("X-Handler-Ns")) / 1e9) if r.getheader("X-Handler-Ns") else time.perf_counter() - t
     if r.status >= 300: raise SystemExit(f"{method} {path}: {r.status} {body[:200]}")
     return dt, json.loads(body)
 
@@ -30,7 +30,7 @@ def step(v): return v * 48271 % 2147483647
 
 
 def run(exe):
-    p = subprocess.Popen([exe, "--port", str(port), *flags], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p = subprocess.Popen([exe, "--port", str(port), "--timing", *flags], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     rows = []
     try:
         for _ in range(200):

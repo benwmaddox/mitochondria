@@ -73,6 +73,9 @@ pub enum Stmt {
     Each(Iter, Vec<Stmt>),
     /// `coll.remove(item)`: the item leaves the collection when the request succeeds.
     Remove(Expr, Expr),
+    /// `array.move(from, to, count)`: `count` elements of a fixed array move from position `from` to position `to`, as
+    /// if through a temporary (the array, from, to, count).
+    Move(Expr, Expr, Expr, Expr),
     Fail(u16, String),
     Respond(u16, Json),
     Return(Option<Expr>),
@@ -571,7 +574,7 @@ impl Binder<'_> {
         let Expr::Call(n, args, _) = e else { return };
         if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
         let Some((recv, op)) = n.rsplit_once('.') else { return };
-        if !matches!(op, "add" | "try_add" | "remove" | "count" | "capacity") { return; }
+        if !matches!(op, "add" | "try_add" | "remove" | "move" | "count" | "capacity") { return; }
         let mut parts = recv.split('.');
         let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
         for f in parts { r = Expr::Field(Box::new(r), f.to_string()); }
@@ -588,6 +591,10 @@ impl Binder<'_> {
             Stmt::Let(n, _, Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => Some(Stmt::Alloc { var: n.clone(), slot: 0, coll: args.remove(0), try_: op == ".try_add" }),
             Stmt::Do(Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => { self.hidden += 1; Some(Stmt::Alloc { var: format!("__mito__added{}", self.hidden), slot: 0, coll: args.remove(0), try_: op == ".try_add" }) }
             Stmt::Do(Expr::Call(op, args, _)) if op == ".remove" && args.len() == 2 => { let item = args.remove(1); Some(Stmt::Remove(args.remove(0), item)) }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".move" && args.len() == 4 => {
+                let count = args.remove(3); let to = args.remove(2); let from = args.remove(1);
+                Some(Stmt::Move(args.remove(0), from, to, count))
+            }
             _ => None,
         };
         if let Some(l) = lowered { *s = l; }
@@ -608,6 +615,7 @@ impl Binder<'_> {
             Stmt::If(c, t, e) => { self.expr(c)?; self.block(t)?; self.block(e)?; }
             Stmt::Each(it, body) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.block(body)?; self.names.truncate(mark); self.next = next; }
             Stmt::Remove(c, e) => { self.expr(c)?; self.expr(e)?; }
+            Stmt::Move(a, f, t2, n) => { self.expr(a)?; self.expr(f)?; self.expr(t2)?; self.expr(n)?; }
             Stmt::Do(e) => self.expr(e)?,
             Stmt::Return(e) => { if let Some(e) = e { self.expr(e)?; } }
             Stmt::Respond(_, j) => self.json(j)?,
@@ -656,6 +664,7 @@ impl Binder<'_> {
                     (".remove", 2) => return self.err("`remove(item)` is a statement: `coll.remove(item);`".into()),
                     (".count" | ".capacity" | ".add" | ".try_add", k) => return self.err(format!("`{}()` takes no arguments, given {}", &n[1..], k - 1)),
                     (".remove", k) => return self.err(format!("`remove` takes one item, given {}", k - 1)),
+                    (".move", _) => return self.err("`array.move(from, to, count)` is a statement".into()),
                     _ => return self.err(format!("unknown function `{}`", &n[1..])),
                 };
             }

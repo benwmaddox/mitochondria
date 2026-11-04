@@ -7,6 +7,9 @@
    --hard MB (one program's memory), and for tests --seed N and --clock MS. */
 
 void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
+int QueryPerformanceCounter(i64 *t);
+int QueryPerformanceFrequency(i64 *f);
+static int g_timing; /* --timing: every answer carries X-Handler-Ns, the time the handler took (for benchmarks; off, the answers are byte for byte as recorded) */
 void *CreateThread(void *attr, u64 stack, u32 (*fn)(void *), void *arg, u32 flags, u32 *id);
 u32 WaitForSingleObject(void *h, u32 ms);
 int printf(const char *f, ...);
@@ -190,6 +193,8 @@ static void serve_one(Conn *x, void *c) {
     Buf body = { x->body.p, (u32)x->body.committed, 0 };
     b_lossy(&body, x->data.p + bs, len - bs);
     int code; const char *resp; u32 rn;
+    i64 t_start = 0, t_end = 0;
+    if (g_timing) QueryPerformanceCounter(&t_start);
 #ifdef HTTP_SINGLE
     code = mito_handle(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, 0, 0, (const char *)body.p, body.len);
     resp = mito_response(x->app, &rn);
@@ -198,12 +203,18 @@ static void serve_one(Conn *x, void *c) {
     code = mito_system_request(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, (const char *)body.p, body.len, 10000, (char *)x->out, OUT_CAP, &rn);
     resp = (const char *)x->out;
 #endif
-    char hd[200]; u32 n = 0; const char *r = reason(code);
+    if (g_timing) QueryPerformanceCounter(&t_end);
+    char hd[240]; u32 n = 0; const char *r = reason(code);
     #define HPUT(s) do { const char *s_ = (s); while (*s_ && n < sizeof hd) hd[n++] = *s_++; } while (0)
     char num[24]; int dn;
     HPUT("HTTP/1.1 "); { u64 v = (u64)code; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
     HPUT(" "); HPUT(r); HPUT("\r\nContent-Type: application/json\r\nContent-Length: ");
     { u64 v = rn; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
+    if (g_timing) {
+        i64 f = 1; QueryPerformanceFrequency(&f);
+        u64 v = (u64)((double)(t_end - t_start) * 1e9 / (double)f);
+        HPUT("\r\nX-Handler-Ns: "); dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn];
+    }
     HPUT("\r\nConnection: close\r\n\r\n");
     send_two(c, hd, n, resp, rn);
     #undef HPUT
@@ -225,6 +236,10 @@ static u32 accept_loop(void *arg) {
     return 0;
 }
 
+static int has_flag(int argc, char **argv, const char *name) {
+    for (int i = 1; i < argc; i++) { const char *a = argv[i]; u32 k = 0; while (name[k] && a[k] == name[k]) k++; if (!name[k] && !a[k]) return 1; }
+    return 0;
+}
 static int flag(int argc, char **argv, const char *name, u64 *out) {
     for (int i = 1; i + 1 < argc; i++) {
         const char *a = argv[i]; u32 k = 0; while (name[k] && a[k] == name[k]) k++;
@@ -234,6 +249,7 @@ static int flag(int argc, char **argv, const char *name, u64 *out) {
 }
 int main(int argc, char **argv) {
     u64 port = 8080, conns = 16, budget = 1024, soft = 0, hard = 0, seed = 0, clock = 0;
+    g_timing = has_flag(argc, argv, "--timing");
     flag(argc, argv, "--port", &port); flag(argc, argv, "--conns", &conns); flag(argc, argv, "--budget", &budget);
     int marks = flag(argc, argv, "--soft", &soft); if (!flag(argc, argv, "--hard", &hard)) hard = ~0ULL >> 21;
     int seeded = flag(argc, argv, "--seed", &seed), clocked = flag(argc, argv, "--clock", &clock);

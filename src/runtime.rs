@@ -101,16 +101,33 @@ impl Instance {
         let t0 = std::time::Instant::now();
         let mut r = Vec::new();
         for (_, ty, off) in &self.prog.globals { self.ranges(ty, *off, false, &mut r); }
+        let pages = self.committed.len();
+        self.release_dead(r, 0, pages, t0)
+    }
+
+    /// Trim only the pages wholly inside `path` (a global or a field of one). Cost follows the size of that part,
+    /// not the whole program. Pages shared with neighbours are left alone.
+    pub fn trim_path(&mut self, path: &str) -> Result<usize, Error> {
+        let t0 = std::time::Instant::now();
+        let Loc::Mem(off, ty) = self.resolve(path)? else { return bad("trim a list, table, struct or array") };
+        let size = self.prog.size_align(&ty).0;
+        let mut r = Vec::new();
+        self.ranges(&ty, off, false, &mut r);
+        Ok(self.release_dead(r, up(off, PAGE) / PAGE, (off + size) / PAGE, t0))
+    }
+
+    /// Decommit committed pages in `lo..hi` that no live range touches.
+    fn release_dead(&mut self, ranges: Vec<(usize, usize)>, lo: usize, hi: usize, t0: std::time::Instant) -> usize {
         let mut live = vec![false; self.committed.len()];
-        let mut st = TrimStats { ranges: r.len(), ..Default::default() };
-        for (a, b) in r { if b > a { for p in a / PAGE..=(b - 1) / PAGE { live[p] = true; } } }
+        let mut st = TrimStats { ranges: ranges.len(), ..Default::default() };
+        for (a, b) in ranges { if b > a { for p in a / PAGE..=(b - 1) / PAGE { live[p] = true; } } }
         st.scan_ns = t0.elapsed().as_nanos();
         let t1 = std::time::Instant::now();
-        let (mut freed, mut p) = (0, 0);
-        while p < live.len() {
+        let (mut freed, mut p) = (0, lo);
+        while p < hi {
             if self.committed[p] && !live[p] {
                 let s = p;
-                while p < live.len() && self.committed[p] && !live[p] { p += 1; }
+                while p < hi && self.committed[p] && !live[p] { p += 1; }
                 os::decommit(unsafe { self.base.add(s * PAGE) }, (p - s) * PAGE);
                 st.os_calls += 1;
                 for q in s..p { self.committed[q] = false; }

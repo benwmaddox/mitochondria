@@ -146,3 +146,23 @@ A second `trim` right after (nothing to free) costs just the scan, 0.5-9 ms depe
 - **Page granularity is the real limit:** one live 8-byte name per 256-row page keeps the whole 4 KB page. The fix is layout (denser columns), not a faster trim.
 
 **Cost controls to add (not built):** skip dead runs shorter than a threshold (for example 16 pages) so tiny holes never reach the OS; keep a high-water slack that decays over several epochs; maintain per-page live counters on write so `trim` does not rescan live strings; run `trim` only at epoch end or when committed exceeds live by a set ratio. **Not measured:** multi-threaded decommit (it makes other cores flush their address-translation caches) and Linux `madvise` costs.
+
+## Trimming part vs whole, and the mailbox/worker shape
+`trim <path>` (and `Instance::trim_path`) trims only the pages wholly inside one global or field. Globals of 4 KB or more now start on a page boundary so a scope never shares a page with a neighbour; a scope's two edge pages are left alone if they are shared.
+
+**Measured** (`cargo run --release -- exp trim`, second table): `big` holds 1M live strings and never changes; `worker` bursts to 50,000 rows with names and then clears. Both trims freed the same 1.14 MB.
+
+| | Scan | Live ranges scanned | OS calls |
+|---|---|---|---|
+| `trim worker` | 0.02 ms | 3 | 1 |
+| `trim` (whole) | 17.6 ms | 1,000,006 | 1 |
+
+Whole-program trim pays for rescanning every live string in regions that did not change; scoped trim pays only for the part you name. The OS work is identical.
+
+**Design for mailbox and worker programs (not built)**
+- **One region per worker.** Each worker's private state and scratch is its own page-aligned region, owned by that worker alone. A worker trims only its own region, at a time it chooses.
+- **Natural trigger:** the mailbox empties. Idle is the epoch boundary, so the burst's scratch is dead and the next burst is not imminent. Trimming mid-burst would pay the ~4 us per page recommit.
+- **Mailbox in the always-committed tier.** A mailbox is a fixed ring of fixed-size message slots (string bodies bounded), committed at startup and never trimmed. Senders write into it without ever committing or releasing pages in the receiver's region, so there is no commit race between threads. Bursty payload stays in the worker's own region.
+- **Admission, not growth:** a full mailbox is a typed `FULL` the sender sees (retry, drop, or backpressure), and the sum of all mailboxes plus worker regions is the static budget.
+- **Commit state per region:** the prototype's page bitmap is one array and is single-threaded. Real workers need it split per region (each owner updates only its own), so scoped trim needs no lock. Decommit still makes other cores flush translation caches; that cost is not measured here.
+- **Whole-program trim becomes a rare maintenance operation** (shutdown, memory-pressure signal), not the routine path.

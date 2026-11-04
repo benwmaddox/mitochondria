@@ -131,7 +131,7 @@ impl Program {
         for (n, ty, _) in globals {
             let ty = prog.resolve(ty, &names)?;
             let (s, a) = prog.size_align(&ty);
-            off = up(off, a.max(8)); // each global starts 8-aligned
+            off = up(off, if s >= 4096 { 4096 } else { a.max(8) }); // big globals start on a page, so trimming one never shares a page with another
             prog.globals.push((n, ty, off));
             off += s;
         }

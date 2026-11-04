@@ -1,0 +1,17 @@
+# every worker bursts: scratch fills, with a body set on each row
+fill w0.scratch 20000
+fill w1.scratch 20000
+fill w2.scratch 20000
+fill w3.scratch 20000
+fill w4.scratch 20000
+fill w5.scratch 20000
+fill w6.scratch 20000
+fill w7.scratch 20000
+fill w0.inbox 5
+# worker 3 finishes its burst and goes idle: its mailbox is empty
+clear w3.scratch
+# trim only worker 3
+trim w3
+# trim everything (workers 0-2, 4-7 still hold their bursts, so little more to free)
+clear w5.scratch
+trim

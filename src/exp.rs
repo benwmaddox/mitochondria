@@ -92,3 +92,23 @@ pub fn trim_cost() {
         println!("  {:>9}   second trim: scan {:.2} ms, OS calls {}", "", t2.scan_ns as f64 / 1e6, t2.os_calls);
     }
 }
+
+/// Whole-program trim vs trimming only the part that changed.
+pub fn scoped_cost() {
+    use crate::layout::Program;
+    use crate::runtime::Instance;
+    const SRC: &str = "struct I { id: i32; name: string<16>; } global big: table<I, 1000000>; global worker: table<I, 50000>;";
+    let mut i = Instance::start(Program::parse(SRC).unwrap(), 1 << 30).unwrap();
+    for r in 0..1_000_000 { i.push("big").unwrap(); i.set(&format!("big[{}].name", r), "keepme").unwrap(); } // 1M live strings in a quiet region
+    println!("\nscoped vs whole trim: `big` has 1M live strings and never changes; `worker` bursts to 50,000 rows with names, then clears");
+    println!("  {:<22} {:>9} {:>9} {:>9} {:>9}", "", "scan ms", "ranges", "OS calls", "freed MB");
+    for round in 0..2 {
+        for r in 0..50_000 { i.push("worker").unwrap(); i.set(&format!("worker[{}].name", r), "burst").unwrap(); }
+        i.clear("worker").unwrap();
+        let before = i.committed();
+        let f = if round == 0 { i.trim_path("worker").unwrap() } else { i.trim() };
+        let t = i.last_trim;
+        println!("  {:<22} {:>9.2} {:>9} {:>9} {:>9.2}  (committed {:.1} -> {:.1} MB)", if round == 0 { "trim worker" } else { "trim everything" }, t.scan_ns as f64 / 1e6, t.ranges, t.os_calls, f as f64 / MB as f64, before as f64 / MB as f64, i.committed() as f64 / MB as f64);
+    }
+    println!("  big untouched by scoped trim: {}", i.get("big[999999].name").unwrap());
+}

@@ -479,3 +479,16 @@ written as `inf`, which is not JSON (now `null`); `order by ... desc` reversed t
 assigning `a[-1] = v` wrote element 0 (now 404, as reading does).
 
 Speed is unchanged: GET messages 5.2-5.7 us compiled before and after these changes, in alternating runs.
+
+## Round 9 (2026-11-04): behaviour as recorded cases, behind one interface
+Tests that checked runtime behaviour through Rust APIs are now cases: 16 files in `tests/cases` (8 language cases, chat,
+auth, input, pressure, frees, and three systems of workers), each run through a small `Backend` interface (handle a
+request, set the clock or pressure marks, report state and counters). The Rust runtime is that interface's first
+implementation, interpreted and compiled, as one program or as a system. Logs must match each other and the record; the
+record now ends with reserved, committed and live bytes. Every successful request of every case is replayed after its
+script and must make no heap allocations when compiled (one exemption: `stat("live_kb")` in the Rust runtime).
+
+Found and fixed on the way: request bodies were parsed leniently (an unterminated string was accepted; nested values
+silently ended parsing); they must now be empty or one valid JSON object, else 400. Query values and path parameters are
+percent-decoded. `try_alloc` on a full collection built an error message it then dropped (3 allocations). Tests went
+from 39 to 22 Rust tests plus the 16 cases, with more scenarios covered than before.

@@ -190,8 +190,10 @@ is the layer above it. Details and the comparison with arenas, garbage collectio
 - **Debug-only orphan report** (rows nothing refers to) and **FIFO slot reuse** for pools.
 
 ## Status: prototype vs this design (2026-11-03)
-Every concept above, and the worker system, is built and tested (39 tests, including the language cases in `tests/cases`).
-Known differences:
+Every concept above, and the worker system, is built and tested. Behaviour is specified by the cases in `tests/cases`
+(16 programs and systems with request scripts and recorded logs, including memory totals); every way of running a program
+must reproduce them, and compiled ones without heap allocations in warm requests. Unit tests cover the compiler and
+runtime internals. Known differences:
 - Endpoints are compiled: generated as C and compiled in memory with the bundled TinyCC (`emit-c` writes the same C as one
   file for review). Every construct compiles. Known items and columns become constant-offset loads; a value whose kind is
   only known at run time is a tagged `Val`, and dynamic operations call helpers that still run the interpreter's Rust code.
@@ -213,8 +215,9 @@ Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat
 
 ## Next
 1. One self-contained C program: the runtime (memory, journal, collections, JSON, HTTP, workers) rewritten in C under the
-   same rules, checked against today's build on the same request scripts, then the Rust runtime and the interpreter removed.
-   Rust stays only as the compiler. Clang (for release builds and for sanitizer runs in tests) is needed for this step.
+   same rules, implementing the same helper table so generated code does not change, and passing the same cases as a
+   third backend; then the Rust runtime and the interpreter removed. Rust stays only as the compiler. Clang (for release
+   builds and for sanitizer runs in tests) is needed for this step.
 2. Long uneven text (the deferred 92% waste): `text<N>` fields packed into a per-collection text area, a ring for `drop_oldest` lists.
 3. Placing items on shards by load rather than `id % count` (20 rooms over 8 shards left workers 35-98% busy).
 4. Worker messages beyond `forward`: one-way `send` with `on Msg` handlers, fan-out with gathered replies, links and monitors.

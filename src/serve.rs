@@ -965,6 +965,12 @@ impl<'a> Run<'a> {
 
 // ---------------------------------------------------------------- HTTP
 
+/// The reason phrase of an HTTP status (the same in every front end, runtime/http.c included).
+pub fn reason(code: u16) -> &'static str {
+    match code { 200 => "OK", 201 => "Created", 204 => "No Content", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found", 409 => "Conflict",
+        413 => "Payload Too Large", 429 => "Too Many Requests", 500 => "Internal Server Error", 503 => "Service Unavailable", 504 => "Gateway Timeout", 507 => "Insufficient Storage", _ => "Error" }
+}
+
 pub fn serve(server: &mut Server, port: u16) -> std::io::Result<()> {
     let l = std::net::TcpListener::bind(("127.0.0.1", port))?;
     l.set_nonblocking(true)?;
@@ -1000,7 +1006,7 @@ pub fn serve(server: &mut Server, port: u16) -> std::io::Result<()> {
         while data.len() < he + 4 + want { match c.read(&mut chunk) { Ok(0) | Err(_) => break, Ok(n) => data.extend_from_slice(&chunk[..n]) } }
         let body = String::from_utf8_lossy(&data[(he + 4).min(data.len())..]).into_owned();
         let code = server.handle_raw(&method, &target, &headers, &body);
-        let reason = match code { 200 => "OK", 201 => "Created", 204 => "No Content", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found", 413 => "Payload Too Large", 429 => "Too Many Requests", 503 => "Service Unavailable", 507 => "Insufficient Storage", _ => "Error" };
+        let reason = reason(code);
         let out = server.response();
         let _ = c.write_all(format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", code, reason, out.len()).as_bytes());
         let _ = c.write_all(out.as_bytes());

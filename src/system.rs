@@ -461,7 +461,7 @@ pub fn serve(sys: Arc<System>, port: u16, conns: usize) -> std::io::Result<()> {
                 let body = String::from_utf8_lossy(&data[(he + 4).min(data.len())..]).into_owned();
                 let hv: Vec<(&str, &str)> = headers.iter().map(|h| (h.0.as_str(), h.1.as_str())).collect();
                 let (code, out) = sys.request(&method, &target, &hv, &body, Duration::from_secs(10));
-                let reason = match code { 200 => "OK", 201 => "Created", 204 => "No Content", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found", 413 => "Payload Too Large", 429 => "Too Many Requests", 503 => "Service Unavailable", 504 => "Gateway Timeout", _ => "Error" };
+                let reason = crate::serve::reason(code);
                 let _ = c.write_all(format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", code, reason, out.len()).as_bytes());
                 let _ = c.write_all(&out);
             }

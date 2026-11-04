@@ -237,10 +237,17 @@ runtime internals. Known differences:
 Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat-api-findings.md.
 
 ## Next
-1. One self-contained C program: the runtime (memory, journal, collections, JSON, HTTP, workers) rewritten in C under the
-   same rules, implementing the same helper table so generated code does not change, and passing the same cases as a
-   third backend; then the Rust runtime and the interpreter removed. Rust stays only as the compiler. Clang (for release
-   builds and for sanitizer runs in tests) is needed for this step.
+1. One self-contained C program (in progress): the C runtime (runtime/mito.c) runs every single-program case, with the
+   same declared limits as the Rust runtime. Left: workers, mailboxes and HTTP in C; a sanitizer-checked clang build as
+   another backend; then the Rust runtime, the interpreter, `.script` and `exp` removed. Rust stays only as the compiler.
+   TinyCC builds for development (20-40 ms to load), clang -O2 for release (about 1 s; about 4x faster requests).
 2. Long uneven text (the deferred 92% waste): `text<N>` fields packed into a per-collection text area, a ring for `drop_oldest` lists.
 3. Placing items on shards by load rather than `id % count` (20 rooms over 8 shards left workers 35-98% busy).
 4. Worker messages beyond `forward`: one-way `send` with `on Msg` handlers, fan-out with gathered replies, links and monitors.
+
+Low priority:
+- A faster TinyCC check: TinyCC's library crashes when it reports a compile error to this host, so generated C is first
+  checked by starting `tcc.exe` (15 ms of the 20-40 ms a reload takes). Checking in process, or catching the crash,
+  would cut reloads to a few ms.
+- Smaller generated code: module functions are inlined into every endpoint that calls them (sorted.case generates
+  almost 3x the chat's endpoint C). Compiling larger ones once, as C functions, would cut compile time and output size.

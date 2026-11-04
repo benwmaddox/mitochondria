@@ -9,6 +9,7 @@ Status: **decided, except where marked "open".** Nothing here is built yet. Deci
 5. Items can be made with their fields in one statement; JSON keys are unquoted; `+=` and friends exist.
 6. Request inputs are typed: no untyped strings for path parameters, the query or the body.
 7. Endpoints are ordinary functions with an attribute, `@get("/path")`, `@post("/path")`; no `endpoint` keyword.
+   They return a typed `Response<T>`, which carries the status (as C#'s `ActionResult<T>`).
 8. C-style braces and semicolons stay.
 
 ## 1. One extension: `.mito`
@@ -18,7 +19,18 @@ becomes `.mito`:
 
 - **A program is one file**: its structs, its state, its functions.
 - **A system is a `.mito` file** with a `system { ... }` block naming its worker programs, each one a `.mito` file with
-  its own state.
+  its own state (decided):
+
+  ```
+  // chat.mito
+  system {
+      worker auth  { program "auth.mito";  count 2; mailbox 1024; slot 4096; }
+      worker rooms { program "rooms.mito"; count 4; mailbox 1024; slot 4096; }
+      entry auth;
+      inflight 4096;
+      budget 8192;
+  }
+  ```
 - **A module is a `.mito` file** in `lib/`, in the same syntax as a program (no `--- state` and `--- functions`
   sections): it declares the struct an instance is (section 3) and its functions.
 - Test data stays as it is (`tests/cases/*.case` and the recorded `.out`, `tests/http.record`): it is not the language.
@@ -100,20 +112,25 @@ longer read the running request behind its caller's back: inputs are values pass
 - **Unknown fields** (`{"pionts": 500}`): answered 400, `unknown field pionts`, rather than ignored. Ignoring hides the
   typo whenever the field has a default. Strict for now.
 
-## 7. Endpoints are functions with an attribute
+## 7. Endpoints are functions with an attribute, returning `Response<T>`
 
 ```
-@post("/players", status: 201)
-fn add_player(name: string<1..24>) { ... }
+@post("/players")
+fn add_player(name: string<1..24>) -> Response<{ id: Player }> {
+    ...
+    return created({ id: p });
+}
 ```
 
 - `@get`, `@post`, `@put`, `@patch`, `@delete`, each with a path; `{name}` in the path is the parameter of that name.
-- The function's **return value is the JSON answer**, status 200, or the attribute's `status:` (for example 201 for
-  something created). `fail CODE "message"` ends the request with an error as now. `respond` goes.
+- **`Response<T>`** is the answer. `T` is its JSON shape: a declared struct (`Response<Row>`) or one written inline
+  (`Response<{ best: i64 }>`); `[Row]` is a JSON array of `Row`. The compiler checks every returned value against `T`,
+  so the shape of every answer is declared, as the inputs are.
+- **The status** is chosen by how the response is made: `ok(x)` 200, `created(x)` 201, `no_content()` 204 (for
+  `Response<none>`), `status(code, x)` any other success code. An endpoint can choose between them at run time.
+- **Errors stay `fail CODE "message"`.** It can happen in any function an endpoint calls, and it undoes everything the
+  request did, which a returned value could do neither of. `respond` goes.
 - An endpoint function can also be called from other code like any function.
-
-**Open:** an answer whose success status is chosen at run time (200 or 201 by what happened) has no syntax yet;
-`fail` covers errors. Recommended: wait until a program needs it.
 
 ## The scoreboard in this syntax
 
@@ -131,36 +148,37 @@ struct Game {
 
 state game: Game;
 
-@post("/players", status: 201)
-fn add_player(name: string<1..24>) {
+struct Row { name: string<24>; points: i64; }
+
+@post("/players")
+fn add_player(name: string<1..24>) -> Response<{ id: Player }> {
     let p = game.players.add { name: name };
     p.entry = game.board.add(0) { who: p };
-    return { id: p };
+    return created({ id: p });
 }
 
 @post("/players/{p}/games")
-fn record(p: Player, points: i64) {
+fn record(p: Player, points: i64) -> Response<{ best: i64 }> {
     game.games += 1;
     game.recent.add { who: p, points: points, at: now() };
     if points > p.best { p.best = points; game.board.set_key(p.entry, points); }
     if points > 1000000 { fail 422 "not a believable score"; }
-    return { best: p.best };
+    return ok({ best: p.best });
 }
 
 @get("/board")
-fn board(top: i64 in 1..100 = 10) {
-    return { top: [each e in game.board reverse limit top { name: e.who.name, points: e.points }] };
+fn board(top: i64 in 1..100 = 10) -> Response<{ top: [Row] }> {
+    return ok({ top: [each e in game.board reverse limit top { name: e.who.name, points: e.points }] });
 }
 
 @delete("/players/{p}")
-fn remove_player(p: Player) {
+fn remove_player(p: Player) -> Response<none> {
     game.board.remove(p.entry);
     game.players.remove(p);
-    return { ok: true };
+    return no_content();
 }
 ```
 
 ## Questions for Ben
 
-1. Section 7: `status:` in the attribute for the success status, and `return` as the answer: right?
-2. How a system file reads (section 1): worth a sketch before building, or decide while building?
+None open. Next: build it (parser, module expansion, every example, case and the tutorial rewritten in one pass).

@@ -1,0 +1,24 @@
+# a fresh world: everything is reserved, only headers and fixed fields are committed
+inspect
+set world.title "Mito test"
+set world.tick 42
+set world.scores[3] 99
+get world.scores[3]
+fill world.items 200000
+set world.items[0].name "first"
+set world.items[0].hp 12.5
+push world.items[0].tags
+set world.items[0].tags[0] 7
+get world.items[0].name
+get world.items[0].tags[0]
+inspect
+# typed failures, not crashes
+set world.title "this title is far too long to fit into forty bytes at all"
+fill world.log 1001
+get world.log
+set world.scores[8] 1
+# shrink and give the memory back
+fill world.items 0
+clear world.items
+trim
+inspect

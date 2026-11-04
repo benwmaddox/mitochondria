@@ -39,6 +39,14 @@ Exhaustion is a typed `Full` result, or a refusal at startup if the declared tot
 5. **Full is a value.** An over-budget region and a scratch allocation past the reservation both return `Full`.
 6. **Suspended jobs.** 10,000 waiters as 96-byte records: 0.92 MB live, OS +0.94 MB. The baseline (one page-backed stack each) cost +40 MB, but that is arithmetic and a strawman: the real test needs the compiler to compute record sizes per suspend point.
 
+## Prototype 2: declared state tree (`examples/world.mito`)
+Language so far: `struct`, `global`, scalars, `string<N>`, `list<T,N>`, `T[N]`, nested structs. A struct that contains itself is rejected (sizes must be fixed). Run a script of `push/pop/fill/set/get/clear/trim/inspect` against it.
+- **Layout:** 30.59 MB reserved for a world with a 500,000-slot item list; committed 0.008 MB at start (headers and fixed fields only).
+- **Live is structural:** after 200,000 pushes `inspect` reports per path reserved vs live (items: 32,000,004 reserved, 3,200,013 live). OS commit +12.3 MB matched the program's committed 12.2 MB.
+- **Typed limits:** a 57-byte string into `string<40>` -> `FULL`; the 1001st push into a 1000-slot list -> `FULL`; `scores[8]` -> index error; `--budget 16` -> refused to start.
+- **After clear + trim:** released 12.2 MB; committed 0.074 MB.
+- **Finding (important):** 200,000 items have only 3.05 MB live but 12.2 MB committed, 4x. Each 64-byte item slot is mostly dead capacity (an empty 8-slot tag list, a 16-byte name), and every page contains some live bytes, so page trimming cannot reclaim the dead parts. Stasis solves this layout problem by lowering struct arrays to structure-of-arrays (one contiguous column per field). Doing that here puts all `tags` capacity together and all `name` capacity together, so dead space forms whole pages that `trim` can release. Next step.
+
 ## Gaps and risks (honest list)
 - Pool id tables (`slot_of`, `gen`, ...) are not in a region yet; they should be a `fixed` region sized from the pool declaration.
 - Fixed-size records only. The size-class idea for suspend records is untested.
@@ -48,6 +56,7 @@ Exhaustion is a typed `Full` result, or a refusal at startup if the declared tot
 - No language yet: no parser, layout compiler, or interpreter.
 
 ## Next
+0. Lower `list<Struct>` to structure-of-arrays columns so dead capacity clusters (see Prototype 2 finding).
 1. Move pool id tables into regions; add `seq`, `text`, `fixed`, sparse pool; a Linux backend.
 2. Measure re-fault cost after trim and pick default slack policy.
 3. Tiny frontend: parse a `state { ... }` tree with capacities, compute layout, fail over budget, print `inspect`.

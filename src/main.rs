@@ -1,67 +1,55 @@
+mod exp;
+mod layout;
 mod os;
 mod region;
-use os::{os_mem, OsMem};
-use region::*;
-use std::time::Instant;
+mod runtime;
+use runtime::{Error, Instance};
 
 const MB: usize = 1 << 20;
-fn mb(n: usize) -> f64 { n as f64 / MB as f64 }
-fn delta(a: OsMem, b: OsMem) -> (f64, f64) {
-    (mb(b.private) - mb(a.private), mb(b.resident) - mb(a.resident))
-}
-fn row(step: &str, live: usize, committed: usize, base: OsMem) {
-    let (p, r) = delta(base, os_mem());
-    println!("  {:<28} live {:>7.1}  committed {:>7.1}  | OS commit {:>+8.1}  OS resident {:>+8.1}  (MB)", step, mb(live), mb(committed), p, r);
-}
 
 fn main() {
-    // Static layout: declared maxima, summed at startup. Over budget = refuse to start.
-    let mut space = Space::new(2048 * MB);
-    println!("E0 reserve: reserving 2 GB of address space");
-    let t = os_mem();
-    let scratch_r = space.region(512 * MB, 1 * MB).unwrap();
-    let pool_r = space.region(512 * MB, 1 * MB).unwrap();
-    let waiters_r = space.region(64 * MB, 64 * 1024).unwrap();
-    let (p, r) = delta(t, os_mem());
-    println!("  declared total {:.0} MB; OS commit {:+.1} MB, resident {:+.1} MB (reserve alone costs ~nothing)", mb(space.reserved_total()), p, r);
-    println!("  over-budget region -> {:?}", space.region(4096 * MB, MB).err());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|s| s.as_str()) == Some("exp") { return exp::run(); }
+    let mut budget = 1024 * MB;
+    let mut files = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--budget" { budget = it.next().and_then(|v| v.parse::<usize>().ok()).expect("--budget <MB>") * MB; } else { files.push(a.clone()); }
+    }
+    if files.is_empty() { eprintln!("usage: mitochondria <state.mito> [script] [--budget MB]  |  mitochondria exp"); std::process::exit(2); }
+    let src = std::fs::read_to_string(&files[0]).expect("read state file");
+    let prog = match layout::Program::parse(&src) { Ok(p) => p, Err(e) => { eprintln!("error: {}", e); std::process::exit(1); } };
+    let base = os::os_mem();
+    let mut inst = match Instance::start(prog, budget) { Ok(i) => i, Err(e) => { eprintln!("error: {}", e); std::process::exit(1); } };
+    println!("started: reserved {:.2} MB; committed {:.3} MB (live bytes only); budget {} MB", mb(inst.reserved()), mb(inst.committed()), budget / MB);
+    let Some(script) = files.get(1) else { return inspect(&inst, base) };
+    for line in std::fs::read_to_string(script).expect("read script").lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let (cmd, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let (a, b) = rest.split_once(' ').unwrap_or((rest, ""));
+        println!("> {}", line);
+        let r: Result<(), Error> = match cmd {
+            "push" => inst.push(a).map(|i| println!("  index {}", i)),
+            "fill" => (0..b.parse::<usize>().unwrap_or(0)).try_for_each(|_| inst.push(a).map(|_| ())),
+            "pop" => inst.pop(a),
+            "clear" => inst.clear(a),
+            "set" => inst.set(a, b.trim()),
+            "get" => inst.get(a).map(|v| println!("  {}", v)),
+            "trim" => { let f = inst.trim(); println!("  released {:.3} MB", mb(f)); Ok(()) }
+            "inspect" => { inspect(&inst, base); Ok(()) }
+            _ => Err(Error::Bad(format!("unknown command `{}`", cmd))),
+        };
+        match r { Ok(()) => {}, Err(Error::Full(m)) => println!("  FULL: {}", m), Err(Error::Bad(m)) => println!("  error: {}", m) }
+    }
+}
 
-    println!("\nE1 scratch epoch: fill 300 MB, reset, trim");
-    let mut s = Scratch::new(scratch_r);
-    let base = os_mem();
-    for _ in 0..300 { let p = s.alloc(MB).unwrap(); unsafe { std::ptr::write_bytes(p, 0xAB, MB) }; }
-    row("after 300 x 1 MB alloc", s.live(), s.r.committed(), base);
-    let t0 = Instant::now(); s.reset(); let dt = t0.elapsed();
-    row("after reset (O(1))", s.live(), s.r.committed(), base);
-    println!("  reset took {:?}", dt);
-    s.trim(8 * MB);
-    row("after trim (keep 8 MB slack)", s.live(), s.r.committed(), base);
-    println!("  alloc past reservation -> {:?}", s.alloc(600 * MB).err());
+fn mb(n: usize) -> f64 { n as f64 / MB as f64 }
 
-    println!("\nE2 dense pool: 1M x 64 B items, remove 90%, trim");
-    let mut p = DensePool::<64>::new(pool_r, 1_000_000);
-    let base = os_mem();
-    let mut ids = Vec::new();
-    for i in 0..1_000_000u32 { let mut it = [0u8; 64]; it[..4].copy_from_slice(&i.to_le_bytes()); ids.push(p.insert(&it).unwrap()); }
-    row("after 1M inserts", p.live_bytes(), p.r.committed(), base);
-    for (i, id) in ids.iter().enumerate() { if i % 10 != 0 { assert!(p.remove(*id)); } }
-    row("after removing 90%", p.live_bytes(), p.r.committed(), base);
-    p.trim(MB);
-    row("after trim (keep 1 MB slack)", p.live_bytes(), p.r.committed(), base);
-    let ok = ids.iter().enumerate().all(|(i, id)| (i % 10 == 0) == p.get(*id).is_some());
-    let intact = ids.iter().step_by(10).enumerate().all(|(k, id)| { let it = p.get(*id).unwrap(); u32::from_le_bytes(it[..4].try_into().unwrap()) == (k * 10) as u32 });
-    println!("  stale ids rejected, live ids intact: {} / {}", ok, intact);
-
-    println!("\nE3 10,000 waiting jobs: suspend records vs one page-backed stack each");
-    const REC: usize = 96; // size of the biggest suspend record the compiler would compute
-    let mut w = DensePool::<REC>::new(waiters_r, 10_000);
-    let base = os_mem();
-    for i in 0..10_000u32 { let mut it = [0u8; REC]; it[..4].copy_from_slice(&i.to_le_bytes()); w.insert(&it).unwrap(); }
-    let (pc, rs) = delta(base, os_mem());
-    println!("  records: live {:.2} MB ({} B each); OS commit {:+.2} MB, resident {:+.2} MB", mb(w.live_bytes()), REC, pc, rs);
-    let base = os_mem();
-    let stacks = (0..10_000).map(|_| { let q = os::reserve(64 * 1024); os::commit(q, 4096); unsafe { *q = 1 }; q }).collect::<Vec<_>>();
-    let (pc, rs) = delta(base, os_mem());
-    println!("  stack each (1 page min):     OS commit {:+.2} MB, resident {:+.2} MB", pc, rs);
-    drop(stacks);
+fn inspect(inst: &Instance, base: os::OsMem) {
+    println!("  {:<22} {:<34} {:>10} {:>11} {:>11}", "path", "type", "offset", "reserved", "live");
+    for (p, t, o, r, l) in inst.inspect() { println!("  {:<22} {:<34} {:>10} {:>11} {:>11}", p, t, o, r, l); }
+    let now = os::os_mem();
+    println!("  totals: reserved {:.3} MB, live {:.3} MB, committed {:.3} MB | OS commit {:+.3} MB, resident {:+.3} MB (since start)",
+        mb(inst.reserved()), mb(inst.live_total()), mb(inst.committed()), mb(now.private) - mb(base.private), mb(now.resident) - mb(base.resident));
 }

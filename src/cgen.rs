@@ -1432,12 +1432,24 @@ impl<'p> G<'p> {
                 _ => {}
             }
         }
-        // anything else (strings, mixed kinds): the interpreter's own operator
+        // strings (and a value joined to one): the runtime's operator, with the kind of its result known here
+        let kind = |v: &CV| match v { CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) => "string", CV::Int(_) => "i64", CV::Flt(_) => "f64", CV::Bool(_) => "bool", CV::Null => "null", CV::Any(_) => "?", _ => "an item or collection" };
+        let (lk, rk) = (kind(&l), kind(&r));
+        let joined = op == "+" && (lk == "string" || rk == "string") && [lk, rk].iter().all(|k| matches!(*k, "string" | "i64" | "f64" | "bool" | "null"));
+        let compared = matches!(op, "<" | "<=" | ">" | ">=" | "==" | "!=") && lk == "string" && rk == "string";
+        if !joined && !compared && lk != "?" && rk != "?" {
+            // a null here comes from a copy of a function made for a null argument, in a branch that cannot run with it
+            // (a walk with no `from`): it fails if reached, as it always has; any other mix does not load
+            if lk == "null" || rk == "null" { self.fail(500, "operator does not fit these values"); return Ok(CV::Bool("0".into())); }
+            return no(format!("operator `{}` does not fit {} and {}", op, lk, rk));
+        }
         let code = OPS.iter().position(|o| *o == op).ok_or_else(|| format!("operator `{}`", op))?;
         let (lv, rv) = (self.val(l)?, self.val(r)?);
         let t = self.tmp("v");
         self.line(&format!("Val {};", t));
         self.call(&format!("c->h->binop(c, {}, &{}, &{}, &{})", code, lv, rv, t));
+        if joined { let x = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", x, t, t)); return Ok(CV::Txt(x)); }
+        if compared { return Ok(CV::Bool(format!("({}.i != 0)", t))); }
         Ok(CV::Any(t))
     }
 

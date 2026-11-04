@@ -195,8 +195,13 @@ Every concept above, and the worker system, is built and tested. Behaviour is sp
 must reproduce them, and compiled ones without heap allocations in warm requests. Unit tests cover the compiler and
 runtime internals. Known differences:
 - Endpoints are compiled: generated as C and compiled in memory with the bundled TinyCC (`emit-c` writes the same C as one
-  file for review). Every construct compiles. Known items and columns become constant-offset loads; a value whose kind is
-  only known at run time is a tagged `Val`, and dynamic operations call helpers that still run the interpreter's Rust code.
+  file for review). Known items and columns become constant-offset loads; a value whose kind is only known at run time is
+  a tagged `Val`, checked where an integer is required, and dynamic operations call helpers that still run the
+  interpreter's Rust code. What the compiler refuses does not load, interpreted or not, so both always agree on which
+  programs run. Refused: wrong names and wrong kinds that would fail when reached (an unknown field, `count` of something
+  that is not a collection, `auth` of a nested pool, ...), and three narrow gaps the interpreter could run: a struct field
+  or fixed array of an item passed to a recursive function, returned by a function or held in a `var`; values that mix a
+  collection or struct with other kinds; `maxlen` of an item held as a run-time value.
   Recursive functions become C functions, one per combination of argument kinds, with the interpreter's limit of 64 nested
   calls. Generated C follows an enforced safety profile (docs/codegen-options.md). The interpreter remains as the
   reference the tests compare against (`--interpret` runs it); it goes once the runtime is C (Next, 1).

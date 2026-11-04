@@ -256,6 +256,8 @@ impl Server {
     pub fn new(inst: Instance, api_src: &str) -> Result<Server, String> {
         let mut api = parse(api_src)?;
         bind(&mut api, &|n| inst.prog.global(n))?; // every name resolved once, before the first request
+        // the compiler defines what loads: a program it refuses is refused here too, interpreted or not
+        if let Some(n) = crate::cgen::generate(&inst.prog, &api).notes.first() { return Err(n.replace(": interpreted (", ": ").trim_end_matches(')').to_string()); }
         let mut space = Space::new(RESPONSE_CAP + TEXT_CAP + 8192);
         let region = space.region(RESPONSE_CAP + TEXT_CAP + 4096, 64 * 1024).map_err(|_| "request epoch region".to_string())?;
         let mut scratch = Scratch::new(region);
@@ -540,7 +542,7 @@ impl<'a> Run<'a> {
             Expr::Un(op, x) => {
                 let v = self.eval(x)?;
                 if *op == '!' { return Ok(Value::Bool(!self.truthy(&v)?)); }
-                match v { Value::Int(i) => Ok(Value::Int(-i)), Value::Float(f) => Ok(Value::Float(-f)), _ => fail(500, "cannot negate") }
+                match v { Value::Int(i) => i.checked_neg().map(Value::Int).map_or_else(|| fail(500, "integer overflow"), Ok), Value::Float(f) => Ok(Value::Float(-f)), _ => fail(500, "cannot negate") }
             }
             Expr::Bin(op, a, b) => {
                 if op == "&&" { let l = self.eval(a)?; return if !self.truthy(&l)? { Ok(Value::Bool(false)) } else { let r = self.eval(b)?; Ok(Value::Bool(self.truthy(&r)?)) }; }
@@ -1122,6 +1124,10 @@ struct Helpers {
     sel_sort: extern "C" fn(*mut Ctx, u32, i32, i32, i64, *mut u32) -> i32,
     sel_get: extern "C" fn(*mut Ctx, u32, u32, *mut u32) -> i32,
     sel_end: extern "C" fn(*mut Ctx, u32) -> i32,
+    field_val: extern "C" fn(*mut Ctx, *const CVal, *const u8, u32, *mut CVal) -> i32,
+    store_field: extern "C" fn(*mut Ctx, *const CVal, *const u8, u32, *const CVal) -> i32,
+    free_val: extern "C" fn(*mut Ctx, *const CVal) -> i32,
+    was_dead: extern "C" fn(*mut Ctx) -> i32,
 }
 static HELPERS: Helpers = Helpers {
     out: h_out, json_i64: h_json_i64, json_col: h_json_col, json_txt: h_json_txt, json_val: h_json_val, auth: h_auth, index: h_index, lit: h_lit,
@@ -1129,6 +1135,7 @@ static HELPERS: Helpers = Helpers {
     store_plain: h_store_plain, alloc: h_alloc, free_: h_free, fwd_begin: h_fwd_begin, fwd_put: h_fwd_put, forward: h_forward, crash: h_crash, builtin: h_builtin,
     json_f64: h_json_f64, elem: h_elem, store_elem: h_store_elem,
     sel_mark: h_sel_mark, sel_add: h_sel_add, sel_sort: h_sel_sort, sel_get: h_sel_get, sel_end: h_sel_end,
+    field_val: h_field_val, store_field: h_store_field, free_val: h_free_val, was_dead: h_was_dead,
 };
 
 /// Run a helper body on the request behind `c`. A stored error returns -1; a panic is caught here (it must not unwind
@@ -1195,6 +1202,37 @@ extern "C" fn h_elem(c: *mut Ctx, k: i64, n: u32) -> i32 {
         if k >= n as i64 { return Err(Error::Bad(format!("index {} out of range (fixed size {})", k, n)).into()); }
         Ok(0)
     })
+}
+/// Field `name` of an item held as a value, by the interpreter's own lookup.
+extern "C" fn h_field_val(c: *mut Ctx, base: *const CVal, p: *const u8, n: u32, out: *mut CVal) -> i32 {
+    with_run(c, |r| {
+        let name = std::str::from_utf8(bytes(p, n)).unwrap_or("");
+        let v = r.field(to_value(unsafe { &*base }), name, &Cell::new(FieldHit::None))?;
+        if matches!(v, Value::Coll(..) | Value::Part(..) | Value::Plain(..) | Value::ArrField(..)) { return fail(500, "a collection, struct or array field of an item held as a value cannot be read here; name the item's collection"); }
+        put_value(v, out)
+    })
+}
+/// Write field `name` of an item held as a value, as an assignment does.
+extern "C" fn h_store_field(c: *mut Ctx, base: *const CVal, p: *const u8, n: u32, v: *const CVal) -> i32 {
+    with_run(c, |r| {
+        let name = std::str::from_utf8(bytes(p, n)).unwrap_or("");
+        let Value::Item(cid, i) = to_value(unsafe { &*base }) else { return fail(500, "assignment target is not an item or a state struct") };
+        let l = match r.inst.col(cid, name) { Some(ci) => Loc::Field(cid, i, ci), None => r.inst.step_field(Loc::Item(cid, i, String::new()), name)? };
+        r.store(l, to_value(unsafe { &*v }))?;
+        Ok(0)
+    })
+}
+extern "C" fn h_free_val(c: *mut Ctx, v: *const CVal) -> i32 {
+    with_run(c, |r| match to_value(unsafe { &*v }) {
+        Value::Item(cid, i) => { if r.inst.is_list(cid) { return fail(500, "list items are not freed; lists drop their oldest or pop their newest"); } if !r.frees.contains(&(cid, i)) { r.frees.push((cid, i)); } Ok(0) }
+        Value::Null => Ok(0),
+        _ => fail(500, "free needs an item"),
+    })
+}
+/// Inside or() and exists(): the interpreter takes the fallback for a dead reference and for a slot that is not live or
+/// stale; say whether the error just stored is one of those, and if so forget it.
+extern "C" fn h_was_dead(c: *mut Ctx) -> i32 {
+    with_run(c, |r| Ok(match r.cerr { Some(Ctl::Dead) | Some(Ctl::Err(Error::NotLive(_))) | Some(Ctl::Err(Error::Stale(_))) => { r.cerr = None; 1 } _ => 0 }))
 }
 extern "C" fn h_sel_mark(c: *mut Ctx, out: *mut u32) -> i32 { with_run(c, |r| { unsafe { *out = r.sel.len() as u32 }; Ok(0) }) }
 extern "C" fn h_sel_add(c: *mut Ctx, key: f64, idx: u32) -> i32 { with_run(c, |r| { r.sel.push((key, idx)); Ok(0) }) }

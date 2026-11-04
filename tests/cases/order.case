@@ -30,6 +30,13 @@ endpoint POST /boxes {
     respond 201 { "n": count(b.items) };
 }
 endpoint GET /boxes { respond 200 { "x": [each b in boxes { "items": [each i in b.items order by i.score desc i.score] }] }; }
+fn top() { each i in items order by i.score desc { return i.tag; } return "-"; }
+endpoint GET /tops {
+    // a function that returns from inside an ordered loop, called many times: what its loop collected must not pile up
+    var n = 0;
+    each a in items { each b in items { each c in items { if top() != "-" { n = n + 1; } } } }
+    respond 200 { "calls": n, "top": top() };
+}
 --- requests
 GET /asc
 POST /items {"score": 5, "weight": 0.5, "tag": "e"}
@@ -48,6 +55,7 @@ GET /top?n=99
 GET /weight
 GET /sum
 GET /bykey
+GET /tops
 DELETE /items/2
 GET /asc
 POST /items {"score": 2, "weight": 3, "tag": "b3"}

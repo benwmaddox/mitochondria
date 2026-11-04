@@ -51,7 +51,8 @@ pub trait Backend {
     fn notes(&self) -> Vec<String>;
     /// Does this backend promise warm requests without heap allocations?
     fn no_alloc(&self) -> bool;
-    /// Heap allocations made handling requests so far.
+    /// Heap allocations made handling requests so far, counted by the backend itself (the Rust counter does not see
+    /// another runtime's heap: a C backend counts its own calls, or makes none after it starts).
     fn allocs(&self) -> usize;
 }
 

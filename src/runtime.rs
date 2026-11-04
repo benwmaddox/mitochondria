@@ -283,7 +283,6 @@ impl Instance {
                 if *i < lo || *i > hi { return Err(Error::TooLong(format!("{} does not fit {}", i, format!("{:?}", s).to_lowercase()))); }
                 *i as u64
             }
-            (_, Val::Bool(b)) => *b as u64,
             _ => return bad("wrong type for this field"),
         };
         self.wr(a, s.size(), bits); Ok(())

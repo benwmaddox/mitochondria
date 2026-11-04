@@ -56,6 +56,10 @@ struct H {
     int (*sel_sort)(Ctx *, u32, int, int, i64, u32 *);         /* order (if asked, stable; desc) and limit what was collected */
     int (*sel_get)(Ctx *, u32, u32, u32 *);                    /* the k-th collected item */
     int (*sel_end)(Ctx *, u32);                                /* drop what was collected since the mark */
+    int (*field_val)(Ctx *, const Val *, const char *, u32, Val *); /* field `name` of an item held as a value */
+    int (*store_field)(Ctx *, const Val *, const char *, u32, const Val *); /* journaled write of field `name` of such an item */
+    int (*free_val)(Ctx *, const Val *);                       /* free an item held as a value (null: nothing) */
+    int (*was_dead)(Ctx *);                                    /* was the error just returned a dead reference or a slot not live? (clears it) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -77,6 +81,8 @@ struct H {
 #define LD_F32(off, idx) LD_(float, off, idx, 4)
 #define LD_F64(off, idx) LD_(double, off, idx, 8)
 #define CALL(x) do { if ((st = (x)) != 0) return st; } while (0)
+/* inside the first argument of or() and exists(): a dead reference or a slot that is not live takes the fallback */
+#define CALL_OR_DEAD(x, l) do { if ((st = (x)) != 0) { if (st < 0 && c->h->was_dead(c)) goto l; return st; } } while (0)
 #define TAIL(x) return (x)
 #define FAIL(code, msg, n) return c->h->fail(c, (code), (msg), (n))
 #define DEREF(t, s, g, out) c->h->deref(c, (t), (s), (g), (out))
@@ -90,7 +96,8 @@ struct H {
 "#;
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
-pub const BUILTINS: [B; 14] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount];
+/// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
+pub const BUILTINS: [B; 17] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot];
 
 /// Operator codes for the `binop` helper (the interpreter's operator names, in this order).
 pub const OPS: [&str; 11] = ["==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"];
@@ -138,7 +145,7 @@ struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Optio
 
 /// How an argument is passed to a generated C function: a value of a kind, or an instance of a collection.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum PK { V(K), Coll(usize) }
+enum PK { V(K), Coll(usize), Plain(usize, usize) }
 
 /// A C function generated for a recursive function, for one combination of argument kinds. `ret` is the kind it
 /// returns: while its body is being generated, the kind being tried.
@@ -150,7 +157,7 @@ const DEPTH_MSG: &str = "calls nested more than 64 deep";
 
 /// The kind of a value that a `var` or a function's result holds, when it must be the same everywhere.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum K { Null, Int, Flt, Bool, Txt, Any, Item(usize), Ref(usize) }
+enum K { Null, Int, Flt, Bool, Txt, Any, Item(usize), Ref(usize), Coll(usize), Plain(usize, usize) }
 
 /// The smallest kind that holds values of both kinds: null joins strings and references (which have their own empty
 /// value) or becomes a general value; an item and a reference to the same pool join as a reference.
@@ -179,6 +186,7 @@ struct G<'p> {
     specs: &'p std::cell::RefCell<Vec<Spec>>,            // C functions generated for recursive functions
     dep: bool,                                           // generating a C function: its call depth is the parameter `dep`
     inl: u32,                                            // inlined calls the code being generated is nested in
+    or_dead: Option<String>,                             // inside or()/exists(): where a dead reference or slot not live goes
 }
 type R<T> = Result<T, String>;
 fn no<T>(what: impl Into<String>) -> R<T> { Err(what.into()) }
@@ -387,16 +395,18 @@ fn kind(v: &CV) -> Option<K> {
     Some(match v {
         CV::Int(_) => K::Int, CV::Flt(_) => K::Flt, CV::Bool(_) => K::Bool, CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) => K::Txt,
         CV::Any(_) => K::Any, CV::Item(c, _) => K::Item(*c), CV::Ref(c, ..) => K::Ref(*c), CV::Null => K::Null,
-        CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => return None,
+        CV::Coll(c, _) => K::Coll(*c), CV::Plain(s, o) => K::Plain(*s, *o),
+        CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => return None,
     })
 }
-/// Can a value of kind `v` be stored where kind `k` is held?
-fn fits(v: K, k: K) -> bool { k == K::Any || unify(v, k) == k }
+/// Can a value of kind `v` be stored where kind `k` is held? (Collections and structs are places, not values: they fit
+/// only themselves.)
+fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return v == k; } k == K::Any || unify(v, k) == k }
 
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, recursive, specs, dep: false, inl: 0 }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, recursive, specs, dep: false, inl: 0, or_dead: None }
     }
 
     /// A call is about to be made: refuse it, as the interpreter does, if it would nest more than MAX_DEPTH calls deep.
@@ -420,7 +430,8 @@ impl<'p> G<'p> {
                 CV::Item(c, e) => { pks.push(PK::V(K::Item(c))); cargs.push(e); }
                 CV::Ref(c, s, i) => { pks.push(PK::V(K::Ref(c))); cargs.push(s); cargs.push(i); }
                 CV::Null => pks.push(PK::V(K::Null)),
-                _ => return no("passing a struct or array to a recursive function is not compiled yet"),
+                CV::Plain(sd, o) => pks.push(PK::Plain(sd, o)),
+                _ => return no("passing a struct field or array of an item to a recursive function is not compiled yet"),
             }
         }
         let key = format!("{}{:?}", k, pks);
@@ -440,10 +451,12 @@ impl<'p> G<'p> {
             K::Any => (Some(format!("Val {} = {{ 0, 0, 0, 0, 0 }};", r)), CV::Any(r.clone())),
             K::Item(c) => (Some(format!("u32 {} = 0;", r)), CV::Item(c, r.clone())),
             K::Ref(c) => (Some(format!("u32 {}_s = 0, {} = 0;", r, r)), CV::Ref(c, format!("{}_s", r), r.clone())),
+            K::Coll(c) => (Some(format!("u32 {} = 0;", r)), CV::Coll(c, r.clone())),
+            K::Plain(sd, o) => (None, CV::Plain(sd, o)),
         };
         if let Some(d) = decl { self.line(&d); }
         if let K::Ref(_) = ret { a.push(format!("&{}_s", r)); }
-        if ret != K::Null { a.push(format!("&{}", r)); }
+        if !matches!(ret, K::Null | K::Plain(..)) { a.push(format!("&{}", r)); }
         self.call(&format!("{}({})", name, a.join(", ")));
         Ok(out)
     }
@@ -464,7 +477,9 @@ impl<'p> G<'p> {
                 PK::V(K::Bool) => proto += &format!(", int p{}", i),
                 PK::V(K::Txt) => proto += &format!(", Txt p{}", i),
                 PK::V(K::Any) => proto += &format!(", Val p{}", i),
-                PK::V(K::Null) => {}
+                PK::V(K::Null) | PK::Plain(..) => {}
+                PK::V(K::Coll(_)) => proto += &format!(", u32 p{}", i),
+                PK::V(K::Plain(..)) => {}
             }
         }
         self.specs.borrow_mut().push(Spec { key, name, ret: K::Null, proto: String::new(), body: None });
@@ -476,7 +491,7 @@ impl<'p> G<'p> {
             { let mut sp = self.specs.borrow_mut(); sp.truncate(si + 1); sp[si].ret = cand; } // functions generated under an earlier guess go
             match self.spec_body(k, pks, cand) {
                 Ok(body) => {
-                    let rp = match cand { K::Null => "", K::Int => ", i64 *ret_v", K::Flt => ", double *ret_v", K::Bool => ", int *ret_v", K::Txt => ", Txt *ret_v", K::Any => ", Val *ret_v", K::Item(_) => ", u32 *ret_v", K::Ref(_) => ", u32 *ret_s, u32 *ret_v" };
+                    let rp = match cand { K::Null | K::Plain(..) => "", K::Int => ", i64 *ret_v", K::Flt => ", double *ret_v", K::Bool => ", int *ret_v", K::Txt => ", Txt *ret_v", K::Any => ", Val *ret_v", K::Item(_) | K::Coll(_) => ", u32 *ret_v", K::Ref(_) => ", u32 *ret_s, u32 *ret_v" };
                     let mut sp = self.specs.borrow_mut();
                     sp[si].proto = format!("{}{})", proto, rp);
                     sp[si].body = Some(body);
@@ -518,6 +533,8 @@ impl<'p> G<'p> {
                     PK::V(K::Txt) => CV::Txt(format!("p{}", i)),
                     PK::V(K::Any) => CV::Any(format!("p{}", i)),
                     PK::V(K::Null) => CV::Null,
+                    PK::Plain(sd, o) | PK::V(K::Plain(sd, o)) => CV::Plain(*sd, *o),
+                    PK::V(K::Coll(c)) => CV::Coll(*c, format!("p{}", i)),
                 });
             }
             let r = g.block(&f.body, &mut fenv);
@@ -538,7 +555,9 @@ impl<'p> G<'p> {
     fn tmp(&mut self, p: &str) -> String { self.n += 1; format!("{}{}", p, self.n) }
     fn line(&mut self, s: &str) { for _ in 0..self.depth + 1 { self.body.push_str("    "); } self.body.push_str(s); self.body.push('\n'); }
     /// Call a helper that returns 0 or -1.
-    fn call(&mut self, s: &str) { self.line(&format!("CALL({});", s)); }
+    fn call(&mut self, s: &str) {
+        match self.or_dead.clone() { Some(l) => self.line(&format!("CALL_OR_DEAD({}, {});", s, l)), None => self.line(&format!("CALL({});", s)) }
+    }
     fn fail(&mut self, code: u16, m: &str) { self.line(&format!("FAIL({}, {}, {});", code, c_lit(m.as_bytes()), m.len())); }
     fn open(&mut self, head: &str) { self.line(head); self.depth += 1; }
     fn close(&mut self, tail: &str) { self.depth -= 1; self.line(tail); }
@@ -581,7 +600,15 @@ impl<'p> G<'p> {
                         return Ok(());
                     }
                     CV::Null => { self.line("TAIL(c->h->dead(c));"); return Ok(()); }
-                    _ => return no("assignment target not compiled yet"),
+                    CV::Any(x) => {
+                        self.line(&format!("if ({}.tag == 0) TAIL(c->h->dead(c));", x));
+                        self.line(&format!("if ({}.tag != 5) FAIL(500, \"assignment target is not an item or a state struct\", 50);", x));
+                        let v = self.expr(rhs, env, None)?;
+                        let vv = self.val(v)?;
+                        self.call(&format!("c->h->store_field(c, &{}, {}, {}, &{})", x, c_lit(f.as_bytes()), f.len(), vv));
+                        return Ok(());
+                    }
+                    _ => { self.fail(500, "assignment target is not an item or a state struct"); return Ok(()); }
                 };
                 let Some(ci) = self.prog.colls[c].cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_) | CKind::Arr(..))) else { return no(format!("assigning `.{}` not compiled yet", path)) };
                 let v = self.expr(rhs, env, None)?;
@@ -590,8 +617,9 @@ impl<'p> G<'p> {
             }
             Stmt::Assign(Expr::Index(base, k), rhs) => {
                 let bv = self.expr(base, env, None)?;
-                let CV::Int(k) = self.expr(k, env, None)? else { return no("an index that is not an integer") };
-                let k = self.hold_int(k);
+                let kv = self.expr(k, env, None)?;
+                let k = self.int_or(kv, 400, "an index must be an integer");
+                if let CV::Coll(..) | CV::ArrCol(..) | CV::PlainArr(..) = bv {} else { self.fail(500, "only fixed arrays and collections can be assigned by index"); return Ok(()); }
                 match bv {
                     CV::ArrCol(c, idx, ci) => {
                         let CKind::Arr(_, n) = self.prog.colls[c].cols[ci].kind else { unreachable!() };
@@ -638,7 +666,8 @@ impl<'p> G<'p> {
                 CV::Item(c, i) => self.call(&format!("c->h->free_(c, {}, {})", c, i)),
                 CV::Ref(t, s, k) => self.line(&format!("if ({} != 0) {{ CALL(c->h->free_(c, {}, {})); }}", s, t, k)),
                 CV::Null => {}
-                _ => return no("free of this value not compiled yet"),
+                CV::Any(x) => self.call(&format!("c->h->free_val(c, &{})", x)),
+                _ => self.fail(500, "free needs an item"),
             },
             Stmt::Fail(code, m) => self.fail(*code, m),
             Stmt::Respond(code, j) => { self.json(j, env)?; self.line(&format!("return {};", code)); }
@@ -649,8 +678,8 @@ impl<'p> G<'p> {
             }
             Stmt::Forward { kind, key, fields } => {
                 self.call(&format!("c->h->fwd_begin(c, {}, {})", c_lit(kind.as_bytes()), kind.len()));
-                let CV::Int(k) = self.expr(key, env, None)? else { return no("a forward key that is not an integer") };
-                let k = self.hold_int(k);
+                let kv = self.expr(key, env, None)?;
+                let k = self.int_or(kv, 500, "a forward key must be an integer");
                 for (name, e) in fields {
                     let v = self.expr(e, env, None)?;
                     let vv = self.val(v)?;
@@ -686,8 +715,9 @@ impl<'p> G<'p> {
         if self.ret.last().unwrap().func {
             match &v {
                 CV::Int(e) | CV::Flt(e) | CV::Bool(e) | CV::Txt(e) | CV::Any(e) | CV::Item(_, e) => self.line(&format!("*ret_v = {};", e)),
+                CV::Coll(_, e) => self.line(&format!("*ret_v = (u32)({});", e)),
                 CV::Ref(_, s, i) => self.line(&format!("*ret_s = {}; *ret_v = {};", s, i)),
-                CV::Null => {}
+                CV::Null | CV::Plain(..) => {}
                 _ => return no("a function returning this kind of value is not compiled yet"),
             }
             if let Some(h) = self.ret.last().unwrap().sel.clone() { self.call(&format!("c->h->sel_end(c, {})", h)); }
@@ -696,8 +726,9 @@ impl<'p> G<'p> {
         }
         let assign = match &v {
             CV::Int(e) | CV::Flt(e) | CV::Bool(e) | CV::Txt(e) | CV::Any(e) | CV::Item(_, e) => format!("{}_v = {};", var, e),
+            CV::Coll(_, e) => format!("{}_v = (u32)({});", var, e),
             CV::Ref(_, s, k) => format!("{}_s = {}; {}_v = {};", var, s, var, k),
-            CV::Null => String::new(),
+            CV::Null | CV::Plain(..) => String::new(),
             _ => return no("a function returning this kind of value is not compiled yet"),
         };
         if !assign.is_empty() { self.line(&assign); }
@@ -735,6 +766,15 @@ impl<'p> G<'p> {
             CV::Ref(c, s, k) if mutable => { let (s2, k2) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}, {} = {};", s2, s, k2, k)); CV::Ref(c, s2, k2) }
             o => o,
         })
+    }
+    /// An integer where the language requires one: a value of run-time kind is checked; anything else fails the request
+    /// with the interpreter's error (`code`, `msg`).
+    fn int_or(&mut self, v: CV, code: u16, msg: &str) -> String {
+        match v {
+            CV::Int(e) => self.hold_int(e),
+            CV::Any(x) => { self.open(&format!("if ({}.tag != 1) {{", x)); self.fail(code, msg); self.close("}"); format!("{}.i", x) }
+            _ => { self.fail(code, msg); "0LL".into() }
+        }
     }
     fn hold_int(&mut self, e: String) -> String { if is_name(&e) { e } else { let t = self.tmp("v"); self.line(&format!("i64 {} = {};", t, e)); t } }
 
@@ -809,7 +849,8 @@ impl<'p> G<'p> {
             Expr::Field(base, f, _) => { let bv = self.expr(base, env, dead)?; self.field(bv, f, dead) }
             Expr::Index(base, k) => {
                 let bv = self.expr(base, env, dead)?;
-                let CV::Int(k) = self.expr(k, env, dead)? else { return no("an index that is not an integer") };
+                let kv = self.expr(k, env, dead)?;
+                let k = self.int_or(kv, 400, "an index must be an integer");
                 match bv {
                     CV::Coll(c, inst) => {
                         let t = self.tmp("i");
@@ -828,13 +869,26 @@ impl<'p> G<'p> {
                         self.call(&format!("c->h->elem(c, {}, {})", k, n));
                         self.load(&off.to_string(), &k, sc)
                     }
-                    _ => no("indexing this kind of value not compiled yet"),
+                    _ => { self.fail(500, "cannot index this value"); Ok(CV::Null) }
                 }
             }
             Expr::Un(op, x) => {
                 let v = self.expr(x, env, dead)?;
                 if *op == '!' { let c = self.cond(v)?; return Ok(CV::Bool(format!("!({})", c))); }
-                match v { CV::Int(e) => { let e = self.hold_int(e); let r = self.tmp("v"); self.line(&format!("NEG({}, {});", r, e)); Ok(CV::Int(r)) } CV::Flt(e) => Ok(CV::Flt(format!("(-{})", e))), _ => no("negating something other than a number") }
+                match v {
+                    CV::Int(e) => { let e = self.hold_int(e); let r = self.tmp("v"); self.line(&format!("NEG({}, {});", r, e)); Ok(CV::Int(r)) }
+                    CV::Flt(e) => Ok(CV::Flt(format!("(-{})", e))),
+                    CV::Any(x) => {
+                        // as the interpreter: an integer negates with an overflow check, a float as a float, nothing else
+                        let (r, n) = (self.tmp("v"), self.tmp("v"));
+                        self.line(&format!("Val {} = {};", r, x));
+                        self.open(&format!("if ({}.tag == 1) {{", x)); self.line(&format!("NEG({}, {}.i);", n, x)); self.line(&format!("{}.i = {};", r, n)); self.close("}");
+                        self.open(&format!("else if ({}.tag == 2) {{", x)); self.line(&format!("{}.f = -{}.f;", r, x)); self.close("}");
+                        self.open("else {"); self.fail(500, "cannot negate"); self.close("}");
+                        Ok(CV::Any(r))
+                    }
+                    _ => { self.fail(500, "cannot negate"); Ok(CV::Null) }
+                }
             }
             Expr::Bin(op, a, b) => self.bin(op, a, b, env, dead),
             Expr::Call(n, args, res) => self.callx(n, args, *res, env, dead),
@@ -884,7 +938,15 @@ impl<'p> G<'p> {
                 return self.plain(off + sd.offs[k], &ty);
             }
             CV::Null => { match dead { Some(l) => self.line(&format!("goto {};", l)), None => self.line("TAIL(c->h->dead(c));") } return Ok(CV::Null); }
-            _ => return no(format!("`.{}` on this kind of value is not compiled yet", f)),
+            CV::Any(x) => {
+                // an item whose collection is known only at run time: the interpreter's own field lookup
+                if let Some(l) = dead { self.line(&format!("if ({}.tag == 0) goto {};", x, l)); }
+                let r = self.tmp("v");
+                self.line(&format!("Val {};", r));
+                self.call(&format!("c->h->field_val(c, &{}, {}, {}, &{})", x, c_lit(f.as_bytes()), f.len(), r));
+                return Ok(CV::Any(r));
+            }
+            _ => { self.fail(500, &format!("`.{}` needs an item or a state struct", f)); return Ok(CV::Null); }
         };
         let coll = &self.prog.colls[c];
         if let Some(k) = coll.children.iter().find(|x| x.0 == path) { return Ok(CV::Coll(k.1, idx)); }
@@ -996,8 +1058,10 @@ impl<'p> G<'p> {
                         let res = self.tmp("v");
                         self.line(&format!("Val {};", res));
                         self.line("{");
-                        let a = self.expr(&args[0], env, Some(&l))?;
-                        let av = self.val(a)?;
+                        let saved = self.or_dead.replace(l.clone());
+                        let a = self.expr(&args[0], env, Some(&l));
+                        self.or_dead = saved;
+                        let av = self.val(a?)?;
                         self.line(&format!("if ({}.tag == 0) goto {};", av, l)); // null also takes the fallback
                         self.line(&format!("{} = {}; goto {};", res, av, end));
                         self.line("}");
@@ -1013,8 +1077,10 @@ impl<'p> G<'p> {
                         let (l, end, res) = (self.tmp("dead"), self.tmp("done"), self.tmp("v"));
                         self.line(&format!("int {} = 1;", res));
                         self.line("{");
-                        let a = self.expr(&args[0], env, Some(&l))?;
-                        let av = self.val(a)?;
+                        let saved = self.or_dead.replace(l.clone());
+                        let a = self.expr(&args[0], env, Some(&l));
+                        self.or_dead = saved;
+                        let av = self.val(a?)?;
                         self.line(&format!("if ({}.tag == 0) goto {};", av, l));
                         self.line(&format!("goto {};", end));
                         self.line("}");
@@ -1045,7 +1111,12 @@ impl<'p> G<'p> {
     fn builtin(&mut self, bi: B, n: &str, _args: &'p [Expr], a: Vec<CV>, lit: impl Fn(Option<&Expr>) -> Option<String>,
         int_out: impl Fn(&mut Self, String) -> CV, txt_out: impl Fn(&mut Self, String) -> CV, val_out: impl Fn(&mut Self, String) -> CV) -> R<CV> {
         let _ = (&lit, &txt_out, &val_out);
-        if let Some(code) = BUILTINS.iter().position(|x| *x == bi) {
+        let generic = match bi {
+            B::Min | B::Max => !matches!(a.as_slice(), [CV::Int(_), CV::Int(_)]),
+            B::Slot => !matches!(a.first(), Some(CV::Item(..) | CV::Ref(..))),
+            _ => BUILTINS[..14].contains(&bi),
+        };
+        if let (true, Some(code)) = (generic, BUILTINS.iter().position(|x| *x == bi)) {
             // arguments as one Val array; the interpreter's builtin computes the result
             let mut names = Vec::new();
             for v in a { names.push(self.val(v)?); }
@@ -1057,7 +1128,7 @@ impl<'p> G<'p> {
             let _ = n;
             let _ = int_out;
             return Ok(match bi {
-                B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount => CV::Int(format!("{}.i", r)),
+                B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot => CV::Int(format!("{}.i", r)),
                 B::Str | B::Token => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
                 B::Param | B::Query | B::Header => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
                 _ => CV::Any(r),
@@ -1085,7 +1156,8 @@ impl<'p> G<'p> {
             B::Capacity => { let Some(CV::Coll(c, _)) = a.first() else { return no("capacity(collection)") }; CV::Int(format!("{}LL", self.prog.colls[*c].cap)) }
             B::Slot => match a.first() {
                 Some(CV::Item(c, i)) => CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)),
-                _ => return no("slot(item)"),
+                Some(CV::Ref(c, s, i)) => { self.line(&format!("if ({} == 0) FAIL(500, \"slot(item)\", 10);", s)); CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)) }
+                _ => unreachable!("generic above"),
             },
             B::Crash => { self.line("TAIL(c->h->crash(c));"); CV::Null }
             _ => unreachable!("handled above"),
@@ -1099,7 +1171,6 @@ impl<'p> G<'p> {
         for a in args { let v = self.expr(a, env, dead)?; vals.push(self.hold(v, false)?); }
         self.depth_check();
         if self.recursive[k as usize] {
-            if dead.is_some() { return no("a recursive call inside or() or exists() is not compiled yet"); }
             return self.call_spec(k, vals);
         }
         let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
@@ -1147,6 +1218,8 @@ impl<'p> G<'p> {
             K::Any => (format!("Val {}_v = {{ 0, 0, 0, 0, 0 }};", var), CV::Any(format!("{}_v", var))),
             K::Item(c) => (format!("u32 {}_v = 0;", var), CV::Item(c, format!("{}_v", var))),
             K::Ref(c) => (format!("u32 {}_s = 0, {}_v = 0;", var, var), CV::Ref(c, format!("{}_s", var), format!("{}_v", var))),
+            K::Coll(c) => (format!("u32 {}_v = 0;", var), CV::Coll(c, format!("{}_v", var))),
+            K::Plain(sd, o) => (String::new(), CV::Plain(sd, o)),
             K::Null => (String::new(), CV::Null),
         };
         if !decl.is_empty() { self.line(&decl); }
@@ -1165,7 +1238,7 @@ impl<'p> G<'p> {
     fn each(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
         let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
         let coll = self.prog.colls[c].clone();
-        let lim = match &it.limit { Some(e) => match self.expr(e, env, None)? { CV::Int(x) => Some(self.hold_int(x)), _ => return no("limit must be an integer") }, None => None };
+        let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
         let (k, m, hits, h) = (self.tmp("k"), self.tmp("m"), self.tmp("hits"), self.tmp("h"));
         self.open("{");
@@ -1259,7 +1332,10 @@ impl<'p> G<'p> {
                 // or(value that may be a dead reference or null, fallback): write the value, or the fallback
                 let (l, end) = (self.tmp("dead"), self.tmp("done"));
                 self.line("{");
-                let v = self.expr(&args[0], env, Some(&l))?;
+                let saved = self.or_dead.replace(l.clone());
+                let v = self.expr(&args[0], env, Some(&l));
+                self.or_dead = saved;
+                let v = v?;
                 match &v { CV::Txt(t) => self.line(&format!("if (!{}.present) goto {};", t, l)), CV::Any(t) => self.line(&format!("if ({}.tag == 0) goto {};", t, l)), CV::Ref(_, s, _) => self.line(&format!("if ({} == 0) goto {};", s, l)), CV::Null => self.line(&format!("goto {};", l)), _ => {} }
                 self.write(v)?;
                 self.line(&format!("goto {};", end));
@@ -1312,7 +1388,7 @@ impl<'p> G<'p> {
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
     let t = ctoks(body);
-    const CALLS: [&str; 20] = ["if", "for", "CALL", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: [&str; 21] = ["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
@@ -1347,9 +1423,9 @@ pub fn check_profile(body: &str) -> Result<(), String> {
             let member = prev == "->";
             if member {
                 if !(i >= 4 && t[i - 4] == "c" && t[i - 3] == "->" && t[i - 2] == "h") { return err(i, "member call other than c->h->helper"); }
-                if !owners.iter().any(|o| ["CALL", "TAIL", "DEREF"].contains(o)) { return err(i, "helper called without CALL, TAIL or DEREF"); }
+                if !owners.iter().any(|o| ["CALL", "CALL_OR_DEAD", "TAIL", "DEREF"].contains(o)) { return err(i, "helper called without CALL, TAIL or DEREF"); }
             } else if tok.starts_with("fn_") {
-                if owners.last() != Some(&"CALL") { return err(i, "generated function called without CALL"); }
+                if !matches!(owners.last(), Some(&"CALL") | Some(&"CALL_OR_DEAD")) { return err(i, "generated function called without CALL"); }
             } else if !CALLS.contains(&tok) && !MORE_CALLS.contains(&tok) && tok != "return" && !TYPES.contains(&tok) {
                 return err(i, "call of something other than a helper or profile macro");
             }

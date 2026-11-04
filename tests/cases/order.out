@@ -15,6 +15,7 @@ GET /top?n=99 -> 200 {"x":["i","g","e","b","b2"]}
 GET /weight -> 200 {"x":["b2","g","neg","e","i","b"]}
 GET /sum -> 200 {"total":21,"seen":"ige"}
 GET /bykey -> 500 {"error":"order by needs a number"}
+GET /tops -> 200 {"calls":216,"top":"i"}
 DELETE /items/2 -> 200 {}
 GET /asc -> 200 {"x":[{"s":-3,"t":"neg"},{"s":2,"t":"b"},{"s":2,"t":"b2"},{"s":5,"t":"e"},{"s":7,"t":"g"}]}
 POST /items -> 201 {"slot":2}

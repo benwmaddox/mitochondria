@@ -1,0 +1,65 @@
+// values whose kind is only known at run time, used where an integer (or a number) is required
+--- state
+struct T { n: i64; }
+global ts: pool<T, 4>;
+struct Top { r: ref<ts>; }
+global top: Top;
+--- api
+endpoint POST /t { let t = alloc ts; t.n = slot(t) * 10; respond 201 {}; }
+endpoint GET /index { respond 200 { "n": ts[body("k")].n }; }
+endpoint GET /limit { respond 200 { "x": [each t in ts limit body("n") t.n] }; }
+endpoint GET /minmax { respond 200 { "min": min(body("a"), 5), "max": max(3, body("a")) }; }
+endpoint GET /neg { respond 200 { "neg": -body("x") }; }
+endpoint GET /arith { respond 200 { "sum": body("x") + 1, "lt": body("x") < 2 }; }
+endpoint POST /set { let t = ts[0]; t.n = body("x"); respond 200 { "n": t.n }; }
+endpoint GET /ornotlive { respond 200 { "a": or(ts[3].n, -1), "b": exists(ts[9]), "c": or(ts[int(body("k"))].n, 0) }; }
+fn pool_of() { return ts; }
+fn find(k) { if k < 0 { return ts[99]; } if k == 0 { return ts[0]; } return find(k - 1); }
+endpoint GET /anyitem {
+    var x = 5;
+    if body("k") != null { x = ts[int(body("k"))]; }
+    respond 200 { "n": x.n, "slot": slot(x) };
+}
+endpoint POST /anyitem { var x = 5; x = ts[int(body("k"))]; x.n = 77; respond 200 { "n": x.n }; }
+endpoint DELETE /anyitem { var x = "s"; x = ts[int(body("k"))]; free x; respond 200 { "count": count(ts) }; }
+endpoint GET /coll { respond 200 { "n": count(pool_of()), "x": [each t in pool_of() t.n] }; }
+endpoint GET /recor { respond 200 { "a": or(find(int(body("k"))).n, -1) }; }
+endpoint GET /slotnull { respond 200 { "s": slot(top.r) }; }
+endpoint GET /min_int { respond 200 { "neg": -(0 - 9223372036854775807 - 1) }; }
+--- requests
+// the Rust runtime builds the text of a "not live" error before or() discards it
+allocates /ornotlive
+allocates /recor
+*3 POST /t
+GET /index {"k": 1}
+GET /index {"k": "1"}
+GET /index {"k": 1.5}
+GET /index {}
+GET /limit {"n": 2}
+GET /limit {"n": -1}
+GET /limit {"n": "2"}
+GET /minmax {"a": 1}
+GET /minmax {"a": 9}
+GET /minmax {"a": "x"}
+GET /neg {"x": 4}
+GET /neg {"x": 2.5}
+GET /neg {"x": "s"}
+GET /neg {}
+GET /arith {"x": 1}
+GET /arith {"x": 1.5}
+GET /arith {"x": "a"}
+POST /set {"x": 7}
+POST /set {"x": 7.5}
+POST /set {"x": true}
+GET /min_int
+GET /ornotlive {"k": 9}
+GET /ornotlive {"k": 1}
+GET /anyitem {"k": 1}
+GET /anyitem {}
+GET /anyitem {"k": 3}
+POST /anyitem {"k": 2}
+DELETE /anyitem {"k": 2}
+GET /coll
+GET /recor {"k": 3}
+GET /recor {"k": -1}
+GET /slotnull

@@ -492,3 +492,12 @@ Found and fixed on the way: request bodies were parsed leniently (an unterminate
 silently ended parsing); they must now be empty or one valid JSON object, else 400. Query values and path parameters are
 percent-decoded. `try_alloc` on a full collection built an error message it then dropped (3 allocations). Tests went
 from 39 to 22 Rust tests plus the 16 cases, with more scenarios covered than before.
+
+`dynamic.case` checks values whose kind is only known at run time where the language needs an integer (index, `limit`,
+`forward` key, `min`/`max`, negation), items held as such values (field reads, assignment, `free`, `slot`), a recursive
+call inside `or()`, a function returning a collection, and `or()`/`exists()` over slots that are not live. Before it, four
+of these did not compile, and `or(ts[3].n, -1)` answered 404 compiled where the interpreter took the fallback: every
+helper call inside `or()`'s first argument now takes the fallback on a dead reference or a slot that is not live, as the
+interpreter does. The interpreter itself wrapped `-(i64 minimum)` silently (now 500, integer overflow, as compiled) and
+stored `true` into integer fields as 1 (now refused, as a float there is). A program the compiler refuses no longer loads
+at all, so the two modes cannot disagree about which programs run.

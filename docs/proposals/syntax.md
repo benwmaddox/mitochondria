@@ -1,7 +1,10 @@
 # Proposal: syntax review (2026-11-04)
 
-Status: **for review.** Nothing here is built yet. Decided by Ben so far: one file extension for everything, and
-collections used through their own functions (`players.add()` returns the new `Player`), not keywords.
+Status: **for review.** Nothing here is built yet. Decided by Ben so far:
+- one file extension for everything (section 1);
+- collections used through their own functions (`players.add()` returns the new `Player`), not keywords (section 3);
+- request inputs are typed: no untyped strings for path parameters, the query or the body (section 6);
+- C-style braces and semicolons stay.
 
 ## 1. One extension: `.mito`
 
@@ -72,17 +75,37 @@ reference (a field) also has to know which pool it points into, because it is a 
 Optional, and composes with section 3: `players.add { name: name, best: 0 }` adds the item and sets the fields in one
 statement. Fields not named are zero. Without it, `let p = players.add(); p.name = name;` still works.
 
-## 6. Smaller items, each for a decision
+## 6. Typed request inputs (decided)
 
-- **Request inputs as typed parameters**, not lookups by name. `POST /players/{p: players}/games (points: i64)` would
-  resolve `p` to a live player (or 404) and parse `points` (or 400) before the body runs. Then a function such as
-  `player()` no longer reads the running request behind the caller's back: `param()` inside a `fn` goes away.
+An endpoint declares what it takes, with types, and the runtime checks the request against that before the body runs.
+`body("name")`, `param("id")`, `query("top")` and `int(...)` on request text go away.
+
+```
+endpoint POST /players/{p: players}/games (points: i64) { ... }
+endpoint GET /board (top: i64 = 10) { ... }
+endpoint POST /players (name: string<1..24>) { ... }
+```
+
+- **Path parameters** are typed in the path: `{n: i64}`, or `{p: players}`, which gives a live item of that pool, or
+  answers 404 before the body runs. (A path carries only the slot, so for a `checked` pool it cannot catch a slot
+  reused since the client saw it; a `{p: players}` written as `slot.generation` could. To decide.)
+- **The parameter list** `( ... )` is the JSON body for POST, PUT and PATCH, and the query string for GET and DELETE.
+  A missing field is 400 unless it has a default (`= 10`) or is optional (`note: string<200>?`, null when absent).
+  A value of the wrong kind is 400 (`points: expected an integer`), one too long is 413, one outside a range is 400.
+- **Types:** `i8`..`i64`, `u8`..`u64`, `f64`, `bool`, `string<N>`, `string<lo..hi>` (a length range, so "required"
+  is `string<1..N>`), and an integer range `i64 in 0..1000000`.
+- **Unknown fields** are 400, so a misspelt field name is caught, not silently ignored. (To decide: strict or lenient.)
+- **Headers** stay for the runtime's own use (`auth()` reads `X-Session`); typed header parameters can come later.
+- A function can no longer read the running request behind its caller's back: inputs are values passed to it.
+
+## 7. Smaller items, each for a decision
+
 - **Unquoted keys** in `respond`: `respond 200 { best: p.best };`. An item written as a value becomes its id.
 - **Compound assignment**: `games += 1`.
 
 ## The scoreboard in this syntax
 
-With sections 1-5 (option A) and the items in section 6:
+With sections 1-6 (option A in section 4) and the items in section 7:
 
 ```
 // scoreboard.mito
@@ -127,5 +150,6 @@ endpoint DELETE /players/{p: players} {
 
 1. Section 2: one unnamed `state { ... }` block, or one named global (`global game: Game;`) with `game.` in every path?
 2. Section 4: option A or B?
-3. Sections 5 and 6: which of them, if any?
-4. Anything else in the syntax you want changed: braces and semicolons, `let`/`var`, `endpoint`?
+3. Section 5 (making an item with its fields) and section 7 (unquoted keys, `+=`): which of them?
+4. Section 6: a path to a `checked` pool as `slot` or `slot.generation`; unknown body fields strict (400) or ignored?
+5. Anything else: `let`/`var`, `endpoint`, how a system file reads?

@@ -133,7 +133,8 @@ enum CV {
 
 /// Where `return` goes inside an inlined function, and the kind of value it returns (known after the first `return`).
 /// `func`: the return of a generated C function, which writes its result through `ret_v` (and `ret_s`) and returns 0.
-struct Ret { var: String, label: String, kind: Option<K>, func: bool }
+/// `sel`: a mark taken on entry when the function has loops, so items a loop collected are dropped however it returns.
+struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Option<String> }
 
 /// How an argument is passed to a generated C function: a value of a kind, or an instance of a collection.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -244,6 +245,11 @@ fn source_comment(ep: &Endpoint, (name, text): (&str, &str)) -> String {
         o += &format!("//   | {}\n", l);
     }
     o
+}
+
+/// Does a function body contain a loop (which may collect items and be left by `return`)?
+fn has_loop(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s { Stmt::Each(..) => true, Stmt::If(_, t, e) => has_loop(t) || has_loop(e), _ => false })
 }
 
 /// Which functions are part of a cycle of calls (directly or through others).
@@ -497,7 +503,9 @@ impl<'p> G<'p> {
             g.dep = true;
             g.frame = Some(k);
             g.inlining.push(k);
-            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true });
+            let sel = if has_loop(&f.body) { Some("hm".to_string()) } else { None };
+            if sel.is_some() { g.line("u32 hm;"); g.call("c->h->sel_mark(c, &hm)"); }
+            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone() });
             let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
             for (i, pk) in pks.iter().enumerate() {
                 fenv[i] = Some(match pk {
@@ -513,6 +521,7 @@ impl<'p> G<'p> {
                 });
             }
             let r = g.block(&f.body, &mut fenv);
+            if sel.is_some() && r.is_ok() { g.call("c->h->sel_end(c, hm)"); } // falling off the end
             let ends_by_itself = matches!(f.body.last(), Some(Stmt::Return(_)) | Some(Stmt::Fail(..)) | Some(Stmt::Respond(..)) | Some(Stmt::Forward { .. }));
             match (r, g.widen) {
                 (Ok(()), _) if !ends_by_itself && !fits(K::Null, cand) => return Err(SpecErr::Conflict(K::Null)), // falling off the end returns null
@@ -598,7 +607,18 @@ impl<'p> G<'p> {
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, self.prog.plain_size(&e).0, code, cap, vv));
                     }
-                    _ => return no("only fixed arrays can be assigned by index"),
+                    CV::Coll(c, inst) => {
+                        let t = self.tmp("i");
+                        self.line(&format!("u32 {};", t));
+                        self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, k, t));
+                        let coll = &self.prog.colls[c];
+                        let plain = if coll.children.iter().any(|x| x.0.is_empty()) { None } else { coll.cols.iter().position(|x| x.path.is_empty()) };
+                        let Some(ci) = plain else { self.fail(500, "only an item that is a plain value can be assigned; assign its fields"); return Ok(()); };
+                        let v = self.expr(rhs, env, None)?;
+                        let vv = self.val(v)?;
+                        self.call(&format!("c->h->store(c, {}, {}, {}, &{})", c, t, ci, vv));
+                    }
+                    _ => return no("only fixed arrays and collections can be assigned by index"),
                 }
             }
             Stmt::Assign(..) => return no("assignment target not compiled yet"),
@@ -670,6 +690,7 @@ impl<'p> G<'p> {
                 CV::Null => {}
                 _ => return no("a function returning this kind of value is not compiled yet"),
             }
+            if let Some(h) = self.ret.last().unwrap().sel.clone() { self.call(&format!("c->h->sel_end(c, {})", h)); }
             self.line("return 0;");
             return Ok(());
         }
@@ -1101,7 +1122,8 @@ impl<'p> G<'p> {
         let saved = std::mem::take(&mut self.body);
         self.inlining.push(k);
         let forced = self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1);
-        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false });
+        let sel = if has_loop(&f.body) { Some(self.tmp("hm")) } else { None };
+        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone() });
         self.depth += 1;
         let frame = std::mem::replace(&mut self.frame, Some(k));
         let r = self.block(&f.body, fenv);
@@ -1128,10 +1150,12 @@ impl<'p> G<'p> {
             K::Null => (String::new(), CV::Null),
         };
         if !decl.is_empty() { self.line(&decl); }
+        if let Some(h) = &ret.sel { self.line(&format!("u32 {};", h)); self.call(&format!("c->h->sel_mark(c, &{})", h)); }
         self.line("{");
         self.body.push_str(&inner);
         self.line("}");
         self.line(&format!("{}: ;", label));
+        if let Some(h) = &ret.sel { self.call(&format!("c->h->sel_end(c, {})", h)); }
         Ok(out)
     }
 

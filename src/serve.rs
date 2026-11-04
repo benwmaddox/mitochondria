@@ -430,9 +430,12 @@ impl<'a> Run<'a> {
             Expr::Index(b, k) => {
                 let (bv, kv) = (self.eval(b)?, self.eval(k)?);
                 let Value::Int(k) = kv else { return fail(400, "an index must be an integer") };
-                let l = match bv { Value::ArrField(c, i, ci) => Loc::Field(c, i, ci), Value::Plain(off, t) => Loc::Plain(off, t), _ => return fail(500, "only fixed arrays can be assigned by index") };
+                let l = match bv { Value::ArrField(c, i, ci) => Loc::Field(c, i, ci), Value::Plain(off, t) => Loc::Plain(off, t), Value::Coll(c, i) => Loc::Coll(c, i), _ => return fail(500, "only fixed arrays and collections can be assigned by index") };
                 if k < 0 { return Err(Error::NotLive(format!("index {} is negative", k)).into()); }
-                Ok(self.inst.step_index(l, k as usize, None)?)
+                match self.inst.step_index(l, k as usize, None)? {
+                    Loc::Item(..) | Loc::Coll(..) => fail(500, "only an item that is a plain value can be assigned; assign its fields"),
+                    l => Ok(l),
+                }
             }
             _ => fail(500, "cannot assign to this"),
         }
@@ -1054,48 +1057,6 @@ mod tests {
         // shadowing and slot reuse across blocks still work
         let mut s = Server::new(st(), "endpoint GET /a { let x = 1; var t = 0; if true { let x = 10; t = t + x; } each k in [] {} respond 200 { \"x\": x, \"t\": t }; }".replace("each k in [] {} ", "").as_str()).unwrap();
         assert_eq!(s.handle("GET", "/a", &[], ""), (200, "{\"x\":1,\"t\":10}".to_string()));
-    }
-
-    #[test]
-    fn compiled_and_interpreted_servers_answer_alike() {
-        let mut ss = [chat(false), chat(true)];
-        for s in ss.iter_mut() { s.rng.set(0x1234_5678_9abc_def0); }
-        let mut log: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-        for (k, s) in ss.iter_mut().enumerate() {
-            let mut req = |s: &mut Server, m: &str, t: &str, h: &[(String, String)], b: &str| { let (c, r) = s.handle(m, t, h, b); log[k].push(format!("{} {} -> {} {}", m, t, c, r)); r };
-            let ann = token_of(&req(s, "POST", "/sessions", &[], "{\"name\":\"ann\"}"));
-            let bob = token_of(&req(s, "POST", "/sessions", &[], "{\"name\":\"bob \\\"b\\\"\"}"));
-            req(s, "POST", "/sessions", &[], "{}");
-            req(s, "POST", "/sessions", &[], "{\"name\":5}");
-            let (a, b) = (vec![("X-Session".to_string(), ann.clone())], vec![("X-Session".to_string(), bob.clone())]);
-            for body in ["{\"name\":\"lobby\"}", "{\"name\":\"way too long\"}", "{}", "{\"name\":\"r2\"}", "{\"name\":\"r3\"}"] { req(s, "POST", "/rooms", &a, body); }
-            req(s, "GET", "/rooms", &b, "");
-            for i in 0..8 { req(s, "POST", "/rooms/0/messages", if i % 2 == 0 { &a } else { &b }, &format!("{{\"body\":\"m{} \\u00e9\"}}", i)); }
-            req(s, "POST", "/rooms/0/messages", &a, "{}");
-            req(s, "POST", "/rooms/0/messages", &a, &format!("{{\"body\":\"{}\"}}", "x".repeat(2001)));
-            req(s, "POST", "/rooms/9/messages", &a, "{\"body\":\"x\"}");
-            for q in ["", "?limit=3", "?limit=0", "?limit=-1", "?limit=abc", "?limit=1000"] { req(s, "GET", &format!("/rooms/0/messages{}", q), &b, ""); }
-            req(s, "GET", "/rooms/x/messages", &b, "");
-            req(s, "GET", "/rooms/1/messages", &b, "");
-            req(s, "POST", "/rooms/0/typing", &a, ""); req(s, "POST", "/rooms/0/typing", &b, ""); req(s, "POST", "/rooms/0/typing", &a, "");
-            req(s, "GET", "/rooms/0/typing", &b, "");
-            s.clock = Some(1000 + 6000);
-            req(s, "GET", "/rooms/0/typing", &b, "");
-            req(s, "POST", "/rooms/0/typing", &b, "");
-            req(s, "GET", "/rooms/0/typing", &a, "");
-            req(s, "DELETE", "/session", &a, "");
-            req(s, "GET", "/rooms/0/messages", &b, "");
-            req(s, "GET", "/rooms/0/messages", &a, "");
-            req(s, "GET", "/rooms", &[("X-Session".to_string(), "0.9.ffff".to_string())], "");
-            req(s, "GET", "/stats", &[], "");
-            for _ in 0..40 { req(s, "POST", "/rooms/0/messages", &b, "{\"body\":\"flood\"}"); }
-            req(s, "GET", "/nope", &[], "");
-        }
-        for (x, y) in log[0].iter().zip(log[1].iter()) { assert_eq!(x, y, "interpreted vs compiled"); }
-        if std::env::var("MITO_SHOW_LOG").is_ok() { for l in &log[1] { println!("{}", &l[..l.len().min(150)]); } }
-        assert_eq!(log[0].len(), log[1].len());
-        let rows = |s: &Server| s.inst.inspect().into_iter().map(|r| (r.0, r.4)).collect::<Vec<_>>();
-        assert_eq!(rows(&ss[0]), rows(&ss[1]), "final state");
     }
 
     #[test]

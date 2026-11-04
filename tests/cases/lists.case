@@ -23,6 +23,9 @@ endpoint GET /bags/{k} {
     each v in b.nums { sum = sum + v; }
     respond 200 { "sum": sum, "all": [each v in b.nums v], "rev": [each v in b.nums reverse v], "at1": b.nums[1], "flags": [each f in b.flags f] };
 }
+endpoint POST /bags/{k}/set { let b = bags[int(param("k"))]; b.nums[int(body("i"))] = body("v"); respond 200 { "at": b.nums[int(body("i"))] }; }
+endpoint POST /bags/{k}/flag { let b = bags[int(param("k"))]; b.flags[0] = body("on"); respond 200 { "flags": [each f in b.flags f] }; }
+endpoint POST /evs/{k} { evs[int(param("k"))] = 5; respond 200 {}; }
 endpoint POST /bags/{k}/grow {
     let b = bags[int(param("k"))];
     each v in b.nums { let w = alloc b.nums; }
@@ -50,9 +53,14 @@ POST /strict
 POST /strict
 POST /strict/try
 POST /bags
-set bags[0].nums[0] 5
-set bags[0].nums[1] -6
-set bags[0].flags[0] true
+POST /bags/0/set {"i": 0, "v": 5}
+POST /bags/0/set {"i": 1, "v": -6}
+POST /bags/0/set {"i": 2, "v": 1}
+POST /bags/0/set {"i": 1, "v": 3000000000}
+POST /bags/0/set {"i": -1, "v": 1}
+POST /bags/0/flag {"on": true}
+POST /bags/0/flag {"on": 1}
+POST /evs/0
 GET /bags/0
 GET /bags/1
 POST /bags/0/grow

@@ -1,0 +1,94 @@
+// the chat example on small capacities: successes, every failure code, rate limits, typing expiry, deleted authors
+--- state
+struct Meta { next_seq: i64; rate: i64; typing_ttl: i64; }
+struct Session { name: string<32>; secret: i64; window: i64; sent: i64; }
+struct Msg { seq: i64; at: i64; author: ref<sessions>; body: string<2000>; }
+struct Typing { who: ref<sessions>; until: i64; }
+struct Room { name: string<8>; created: i64; messages: list<Msg, 5> drop_oldest; typing: pool<Typing, 4>; }
+global meta: Meta; global sessions: pool<Session, 3> checked; global rooms: pool<Room, 2>;
+--- api
+include examples/chat/chat.api
+--- requests
+// stat("live_kb") walks every live range and allocates in the Rust runtime
+allocates /stats
+POST /sessions {"name":"ann"} => ann
+POST /sessions {"name":"bob \"b\""} => bob
+POST /sessions {}
+POST /sessions {"name":5}
+@X-Session: $ann
+POST /rooms {"name":"lobby"}
+@X-Session: $ann
+POST /rooms {"name":"way too long"}
+@X-Session: $ann
+POST /rooms {}
+@X-Session: $ann
+POST /rooms {"name":"r2"}
+@X-Session: $ann
+POST /rooms {"name":"r3"}
+@X-Session: $bob
+GET /rooms
+@X-Session: $ann
+POST /rooms/0/messages {"body":"m0 é"}
+@X-Session: $bob
+POST /rooms/0/messages {"body":"m1 é"}
+@X-Session: $ann
+POST /rooms/0/messages {"body":"m2 é"}
+@X-Session: $bob
+POST /rooms/0/messages {"body":"m3 é"}
+@X-Session: $ann
+POST /rooms/0/messages {"body":"m4 é"}
+@X-Session: $bob
+POST /rooms/0/messages {"body":"m5 é"}
+@X-Session: $ann
+POST /rooms/0/messages {"body":"m6 é"}
+@X-Session: $bob
+POST /rooms/0/messages {"body":"m7 é"}
+@X-Session: $ann
+POST /rooms/0/messages {}
+@X-Session: $ann
+POST /rooms/0/messages {"body":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+@X-Session: $ann
+POST /rooms/9/messages {"body":"x"}
+@X-Session: $bob
+GET /rooms/0/messages
+@X-Session: $bob
+GET /rooms/0/messages?limit=3
+@X-Session: $bob
+GET /rooms/0/messages?limit=0
+@X-Session: $bob
+GET /rooms/0/messages?limit=-1
+@X-Session: $bob
+GET /rooms/0/messages?limit=abc
+@X-Session: $bob
+GET /rooms/0/messages?limit=1000
+@X-Session: $bob
+GET /rooms/x/messages
+@X-Session: $bob
+GET /rooms/1/messages
+@X-Session: $ann
+POST /rooms/0/typing
+@X-Session: $bob
+POST /rooms/0/typing
+@X-Session: $ann
+POST /rooms/0/typing
+@X-Session: $bob
+GET /rooms/0/typing
+clock 7000
+@X-Session: $bob
+GET /rooms/0/typing
+@X-Session: $bob
+POST /rooms/0/typing
+@X-Session: $ann
+GET /rooms/0/typing
+@X-Session: $ann
+DELETE /session
+@X-Session: $bob
+GET /rooms/0/messages
+@X-Session: $ann
+GET /rooms/0/messages
+@X-Session: 0.9.ffff
+GET /rooms
+GET /stats
+@X-Session: $bob
+*40 POST /rooms/0/messages {"body":"flood"}
+GET /nope

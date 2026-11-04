@@ -19,6 +19,14 @@ POST /strict -> 201 {"n":2}
 POST /strict -> 503 {"error":"capacity: strict is full (2 of 2)"}
 POST /strict/try -> 200 {"got":false}
 POST /bags -> 201 {"n":2,"f":1}
+POST /bags/0/set -> 200 {"at":5}
+POST /bags/0/set -> 200 {"at":-6}
+POST /bags/0/set -> 404 {"error":"position 2 is past the end"}
+POST /bags/0/set -> 413 {"error":"3000000000 does not fit i32"}
+POST /bags/0/set -> 404 {"error":"index -1 is negative"}
+POST /bags/0/flag -> 200 {"flags":[true]}
+POST /bags/0/flag -> 400 {"error":"wrong type for this field"}
+POST /evs/0 -> 500 {"error":"only an item that is a plain value can be assigned; assign its fields"}
 GET /bags/0 -> 200 {"sum":-1,"all":[5,-6],"rev":[-6,5],"at1":-6,"flags":[true]}
 GET /bags/1 -> 404 {"error":"slot 1 is not live"}
 POST /bags/0/grow -> 200 {"n":4}

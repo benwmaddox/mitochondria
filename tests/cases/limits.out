@@ -18,5 +18,5 @@ GET /count -> 200 {"n":70000}
 POST /free/3 -> 200 {}
 GET /count -> 200 {"n":69997}
 state <plain values> 0
-state ts 78768
+state app.ts 78768
 memory reserved=81920 committed=81920 live=78768

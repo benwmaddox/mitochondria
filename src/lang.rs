@@ -291,8 +291,8 @@ impl P {
         loop {
             if self.sym(".") {
                 let f = self.id()?;
-                // `instance.function(args)`: a call of a module instance's function
-                if let (Expr::Var(n, _), true) = (&e, matches!(self.peek(), Some(Tok::Sym(s)) if s == "(")) {
+                // `game.board.add(args)`: a call of a module instance's function, named by the instance's path
+                if let (Some(n), true) = (path_of(&e), matches!(self.peek(), Some(Tok::Sym(s)) if s == "(")) {
                     self.i += 1;
                     let mut a = Vec::new();
                     while !self.sym(")") { a.push(self.expr()?); self.sym(","); }
@@ -328,6 +328,11 @@ impl P {
 }
 
 // ---------------------------------------------------------------- binder
+
+/// `a.b.c` when `e` is a name followed by fields, else None.
+pub fn path_of(e: &Expr) -> Option<String> {
+    match e { Expr::Var(n, _) => Some(n.clone()), Expr::Field(b, f) => path_of(b).map(|p| format!("{}.{}", p, f)), _ => None }
+}
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
 struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String> }
@@ -366,8 +371,7 @@ impl Binder<'_> {
         self.expr(&mut it.coll)?;
         if let Some(h) = &mut it.hi { self.expr(h)?; }
         // a loop over a module instance walks it with the instance's iteration functions
-        if let Expr::Var(n, VarRes::Global(_)) = &it.coll {
-            let n = if n == "self" { self.owner.clone().unwrap_or_default() } else { n.clone() };
+        if let Some(n) = path_of(&it.coll) {
             let f = |x: &str| self.fns.iter().position(|g| g.0 == format!("{}.{}", n, x)).map(|k| k as u32);
             if let (Some(first), Some(next), Some(item)) = (f("iter_first"), f("iter_next"), f("iter_item")) {
                 if it.reverse && (f("iter_last").is_none() || f("iter_prev").is_none()) { return self.err(format!("{} cannot be walked in reverse", n)); }
@@ -414,12 +418,16 @@ impl Binder<'_> {
         }
     }
     fn expr(&mut self, e: &mut Expr) -> R<()> {
+        // in a module instance's function, `self` is the instance, written as its path (`game.board`); never a local,
+        // so nothing shadows it
+        if matches!(e, Expr::Var(n, _) if n == "self") {
+            let Some(o) = self.owner.clone() else { return self.err("`self` is only for module code".into()) };
+            let mut parts = o.split('.');
+            let mut p = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
+            for f in parts { p = Expr::Field(Box::new(p), f.to_string()); }
+            *e = p;
+        }
         match e {
-            Expr::Var(n, res) if n == "self" => {
-                // in a module instance's function, `self` is the instance (never a local, so nothing shadows it)
-                let Some(o) = self.owner.clone() else { return self.err("`self` is only for module code".into()) };
-                *res = match (self.globals)(&o) { Some(g) => VarRes::Global(g as u32), None => return self.err(format!("unknown instance `{}`", o)) };
-            }
             Expr::Var(n, res) => {
                 *res = match self.names.iter().rev().find(|x| x.0 == *n) {
                     Some(x) => VarRes::Local(x.1),

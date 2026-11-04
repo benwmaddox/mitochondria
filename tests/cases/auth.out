@@ -12,9 +12,9 @@ GET /rooms -> 401 {"error":"session ended"}
 GET /rooms -> 200 {"rooms":[]}
 GET /rooms -> 200 {"rooms":[]}
 state <plain values> 136
-state sessions 59
-state rooms.items 16
-state rooms.items.messages 0
-state rooms.items.typing 0
-state rooms.links 16
+state chat.sessions 59
+state chat.rooms.items 16
+state chat.rooms.items.messages 0
+state chat.rooms.items.typing 0
+state chat.rooms.links 16
 memory reserved=40960 committed=16384 live=227

@@ -257,7 +257,7 @@ mod tests {
     /// more digits than needed (where rounding is hardest).
     #[test]
     fn c_floats_match_rust_text_and_parsing() {
-        let prog = Program::parse("struct C { n: i64; } global c: C;").unwrap();
+        let prog = Program::parse("struct C { n: i64; } state c: C;").unwrap();
         let api = crate::lang::parse("").unwrap();
         let mut src = crate::cgen::program_c(&prog, &api, None).unwrap();
         src += "int t_fmt(double f, char *b, u32 cap) { Area a = { (u8 *)b, cap, 0 }; a_float(&a, f); return (int)a.len; }
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn c_system_parts_behave() {
         let one = "worker w { state \"w.mito\"; api \"w.api\"; count 1; mailbox 4; slot 256; }\nentry w;\ninflight 2;\n";
-        let read = |f: &str| Ok(if f == "w.mito" { "struct C { n: i64; } global c: C;".to_string() } else { "endpoint GET /n { respond 200 { \"n\": c.n }; }".to_string() });
+        let read = |f: &str| Ok(if f == "w.mito" { "struct C { n: i64; } state c: C;".to_string() } else { "endpoint GET /n { respond 200 { \"n\": c.n }; }".to_string() });
         let spec = crate::spec::parse_spec_with(one, &read).unwrap();
         let mut units = crate::cgen::system_c(&spec).unwrap();
         *units.last_mut().unwrap() += r#"
@@ -490,7 +490,7 @@ MITO_API int t_reply(void *sp) {
         }
 
         // a forward: the handler's writes are kept only if the request was handed on
-        let case = Case { name: "forward-rollback".into(), state: "struct C { n: i64; } global c: C;".into(),
+        let case = Case { name: "forward-rollback".into(), state: "struct C { n: i64; } state c: C;".into(),
             api: "endpoint POST /f { c.n = c.n + 1; forward next[0] { \"n\": c.n }; }\nendpoint GET /n { respond 200 { \"n\": c.n }; }".into(), requests: String::new(), system: None, files: Vec::new() };
         let mut be = CBackend::start(&case);
         let sym = |n: &str| match &be._code { Code::Tcc(u) => u.symbol(n).unwrap(), Code::Dll(_) => unreachable!() };
@@ -517,12 +517,12 @@ MITO_API int t_reply(void *sp) {
     /// of random adds, key changes and removes, the whole order and walks from random keys checked after every step.
     #[test]
     fn sorted_matches_a_model_under_random_changes() {
-        let (state, api) = crate::modules::expand("struct E { v: i64; id: i64; }\nglobal s: sorted<E, 48, v>;\n",
-            "endpoint POST /add/{v}/{id} { let e = s.add(int(param(\"v\"))); e.id = int(param(\"id\")); respond 201 { \"slot\": slot(e) }; }\n\
-             endpoint POST /set/{k}/{v} { s.set_key(s.get(int(param(\"k\"))), int(param(\"v\"))); respond 200 {}; }\n\
-             endpoint DELETE /x/{k} { s.remove(s.get(int(param(\"k\")))); respond 200 {}; }\n\
-             endpoint GET /all { respond 200 { \"x\": [each e in s e.id] }; }\n\
-             endpoint GET /from/{k} { let k = int(param(\"k\")); respond 200 { \"up\": [each e in s from k e.id], \"down\": [each e in s from k reverse e.id] }; }\n").unwrap();
+        let (state, api) = crate::modules::expand("struct E { v: i64; id: i64; }\nstruct App { s: sorted<E, 48, v>; }\nstate app: App;\n",
+            "endpoint POST /add/{v}/{id} { let e = app.s.add(int(param(\"v\"))); e.id = int(param(\"id\")); respond 201 { \"slot\": slot(e) }; }\n\
+             endpoint POST /set/{k}/{v} { app.s.set_key(app.s.get(int(param(\"k\"))), int(param(\"v\"))); respond 200 {}; }\n\
+             endpoint DELETE /x/{k} { app.s.remove(app.s.get(int(param(\"k\")))); respond 200 {}; }\n\
+             endpoint GET /all { respond 200 { \"x\": [each e in app.s e.id] }; }\n\
+             endpoint GET /from/{k} { let k = int(param(\"k\")); respond 200 { \"up\": [each e in app.s from k e.id], \"down\": [each e in app.s from k reverse e.id] }; }\n").unwrap();
         let case = Case { name: "sorted-model".into(), state, api, requests: String::new(), system: None, files: Vec::new() };
         let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
         if clang().is_some() {

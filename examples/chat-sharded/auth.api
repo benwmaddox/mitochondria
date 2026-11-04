@@ -1,17 +1,17 @@
-fn me() -> ref<sessions> { return auth(sessions); }
+fn me() -> ref<gate.sessions> { return auth(gate.sessions); }
 // "shard.slot": a user id that is unique across auth shards (references do not cross workers)
 fn user_id(who) { return str(worker_index()) + "." + str(slot(who)); }
 fn rate_limited(who) {
     let t = now();
     if t - who.window > 60000 { who.window = t; who.sent = 0; }
-    if who.sent >= max(meta.rate, 30) { fail 429 "slow down"; }
+    if who.sent >= max(gate.meta.rate, 30) { fail 429 "slow down"; }
     who.sent = who.sent + 1;
 }
 
 endpoint POST /sessions {
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
-    let s = alloc sessions;
+    let s = alloc gate.sessions;
     s.name = name;
     s.secret = random();
     s.window = now();
@@ -38,5 +38,5 @@ endpoint GET /rooms/{room}/typing { let who = me(); forward rooms[int(param("roo
 
 // this shard only: one-way forwarding has no fan-out to total the other workers
 endpoint GET /stats {
-    respond 200 { "shard": worker_index(), "sessions": count(sessions), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb") };
+    respond 200 { "shard": worker_index(), "sessions": count(gate.sessions), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb") };
 }

@@ -4,12 +4,15 @@ struct Pos { x: i64; y: i64; }
 struct Box { lo: Pos; hi: Pos; }
 struct Unit { name: string<8>; at: Pos; area: Box; }
 struct World { origin: Pos; size: i64; }
-global world: World;
-global units: pool<Unit, 3>;
+struct App {
+    world: World;
+    units: pool<Unit, 3>;
+}
+state app: App;
 --- api
 fn width(u) { return u.area.hi.x - u.area.lo.x; }
 endpoint POST /units {
-    let u = alloc units;
+    let u = alloc app.units;
     u.name = body("name");
     u.at.x = int(body("x"));
     u.at.y = int(body("y"));
@@ -18,14 +21,14 @@ endpoint POST /units {
     respond 201 { "slot": slot(u), "w": width(u) };
 }
 endpoint POST /units/{k}/move {
-    let u = units[int(param("k"))];
+    let u = app.units[int(param("k"))];
     u.at.x = u.at.x + int(body("dx"));
     u.at.y = u.at.y + int(body("dy"));
     respond 200 { "x": u.at.x, "y": u.at.y };
 }
-endpoint POST /world { world.origin.x = int(body("x")); world.origin.y = int(body("y")); world.size = 3; respond 200 { "x": world.origin.x }; }
+endpoint POST /world { app.world.origin.x = int(body("x")); app.world.origin.y = int(body("y")); app.world.size = 3; respond 200 { "x": app.world.origin.x }; }
 endpoint GET /units {
-    respond 200 { "o": world.origin.x + world.origin.y, "x": [each u in units where u.at.x >= world.origin.x { "name": u.name, "x": u.at.x, "y": u.at.y, "w": width(u) }] };
+    respond 200 { "o": app.world.origin.x + app.world.origin.y, "x": [each u in app.units where u.at.x >= app.world.origin.x { "name": u.name, "x": u.at.x, "y": u.at.y, "w": width(u) }] };
 }
 --- requests
 GET /units

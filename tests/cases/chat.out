@@ -6,7 +6,7 @@ POST /rooms -> 201 {"id":0,"name":"lobby"}
 POST /rooms -> 413 {"error":"string of 12 bytes does not fit string<8>"}
 POST /rooms -> 400 {"error":"name is required"}
 POST /rooms -> 201 {"id":1,"name":"r2"}
-POST /rooms -> 503 {"error":"capacity: rooms.items is full (2 of 2)"}
+POST /rooms -> 503 {"error":"capacity: chat.rooms.items is full (2 of 2)"}
 GET /rooms -> 200 {"rooms":[{"id":0,"name":"lobby"},{"id":1,"name":"r2"}]}
 POST /rooms/0/messages -> 201 {"seq":1}
 POST /rooms/0/messages -> 201 {"seq":2}
@@ -81,9 +81,9 @@ POST /rooms/0/messages -> 429 {"error":"slow down"}
 POST /rooms/0/messages -> 429 {"error":"slow down"}
 GET /nope -> 404 {"error":"no such endpoint"}
 state <plain values> 136
-state sessions 95
-state rooms.items 63
-state rooms.items.messages 181
-state rooms.items.typing 72
-state rooms.links 218
+state chat.sessions 95
+state chat.rooms.items 63
+state chat.rooms.items.messages 181
+state chat.rooms.items.typing 72
+state chat.rooms.links 218
 memory reserved=40960 committed=32768 live=765

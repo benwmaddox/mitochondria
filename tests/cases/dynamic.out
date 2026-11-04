@@ -38,5 +38,5 @@ GET /recor -> 200 {"a":7}
 GET /recor -> 200 {"a":-1}
 GET /slotnull -> 500 {"error":"slot(item)"}
 state <plain values> 8
-state ts 40
+state app.ts 40
 memory reserved=8192 committed=8192 live=48

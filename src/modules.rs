@@ -1,16 +1,17 @@
 //! Modules (docs/proposals/modules.md): a file in `lib/` with parameters, state and functions, instantiated when the
-//! program is compiled, one copy per use. A use in the program's state,
+//! program is compiled, one copy per use. A use is a field of a struct in the program's state,
 //!
 //! ```text
-//! global scores: bag<Score, 8>;
+//! struct Game { scores: bag<Score, 8>; }
+//! state game: Game;
 //! ```
 //!
-//! becomes plain declarations: the module's structs renamed for the instance (`__mito__scores__Counts`: generated
-//! names start with `__mito__`, which programs do not use), its state as the fields
-//! of a struct the instance's global holds (`scores.items`, `scores.counts`), an `instance` line naming the instance, and
-//! its functions, named `scores.add` and so on, appended to the program's api. Parameters are replaced by their
+//! and becomes plain declarations: the module's structs renamed for the instance (`__mito__game__scores__Counts`:
+//! generated names start with `__mito__`, which programs do not use), its state as the fields of a struct the field
+//! now holds (`game.scores.items`, `game.scores.counts`), an `instance` line naming the instance by its path, and its
+//! functions, named `game.scores.add` and so on, appended to the program's api. Parameters are replaced by their
 //! arguments; nothing else is renamed. `self` stays `self`: the binder reads it as the instance whose function it is
-//! in, so no local of the module can shadow it. Every way of loading a program calls `expand`.
+//! in (its path), so no local of the module can shadow it. Every way of loading a program calls `expand`.
 use std::collections::HashMap;
 
 /// The standard library: module name, source.
@@ -69,71 +70,143 @@ fn subst(text: &str, map: &HashMap<String, String>, fn_prefix: Option<&str>) -> 
     o
 }
 
-/// Expand every use of a standard-library module in a program's state, returning the state and api to compile.
-pub fn expand(state: &str, api: &str) -> Result<(String, String), String> {
-    if !state.contains('<') { return Ok((state.to_string(), api.to_string())); }
-    let (mut out_state, mut out_api) = (String::new(), api.to_string());
-    if !out_api.ends_with('\n') { out_api.push('\n'); }
-    // find `global NAME: MODULE<args>;` at the start of a statement
-    let mut rest = state;
-    loop {
-        let Some((pos, inst, module, args, len)) = find_use(rest) else { out_state += rest; break };
-        out_state += &rest[..pos];
-        let Some(src) = STDLIB.iter().find(|m| m.0 == module).map(|m| m.1) else { unreachable!() };
-        let m = parse_module(src).map_err(|e| format!("module {}: {}", module, e))?;
-        if args.len() != m.params.len() { return Err(format!("`{}`: {}<...> takes {} arguments, given {}", inst, m.name, m.params.len(), args.len())); }
-        let mut map: HashMap<String, String> = HashMap::new();
-        let mut key = None;
-        for ((p, k), a) in m.params.iter().zip(&args) {
-            match k {
-                PKind::Count => { a.parse::<u64>().map_err(|_| format!("`{}`: {} must be a number, not `{}`", inst, p, a))?; }
-                PKind::Struct | PKind::Field => { if !a.chars().all(|c| c.is_alphanumeric() || c == '_') || a.is_empty() { return Err(format!("`{}`: {} must be a name, not `{}`", inst, p, a)); } }
-            }
-            if *k == PKind::Field { key = Some(a.clone()); }
-            map.insert(p.clone(), a.clone());
+/// One instance of `module` named `inst`, the path of the struct field holding it (`game.board`). Returns its
+/// declarations (the module's structs renamed for the instance, and the struct holding its state, named by `id`), its
+/// `instance` line, and its functions, named `inst.add` and so on.
+fn instantiate(inst: &str, module: &str, args: &[String]) -> Result<(String, String, String), String> {
+    let Some(src) = STDLIB.iter().find(|m| m.0 == module).map(|m| m.1) else { return Err(format!("no module `{}`", module)) };
+    let m = parse_module(src).map_err(|e| format!("module {}: {}", module, e))?;
+    if args.len() != m.params.len() { return Err(format!("`{}`: {}<...> takes {} arguments, given {}", inst, m.name, m.params.len(), args.len())); }
+    let id = inst.replace('.', "__");
+    let mut map: HashMap<String, String> = HashMap::new();
+    let mut key = None;
+    for ((p, k), a) in m.params.iter().zip(args) {
+        match k {
+            PKind::Count => { a.parse::<u64>().map_err(|_| format!("`{}`: {} must be a number, not `{}`", inst, p, a))?; }
+            PKind::Struct | PKind::Field => { if !a.chars().all(|c| c.is_alphanumeric() || c == '_') || a.is_empty() { return Err(format!("`{}`: {} must be a name, not `{}`", inst, p, a)); } }
         }
-        // the module's own structs are renamed for this instance
-        let st = subst(&m.state, &map, None);
-        let mut names: HashMap<String, String> = HashMap::new();
-        for w in st.split_whitespace().collect::<Vec<_>>().windows(2) { if w[0] == "struct" { let n = w[1].trim_end_matches('{'); names.insert(n.to_string(), format!("__mito__{}__{}", inst, n)); } }
-        let st = subst(&st, &names, None);
-        // its globals become fields of the instance's state struct
-        let (mut decls, mut fields) = (String::new(), String::new());
-        let mut s = st.as_str();
-        while let Some(i) = s.find(|c: char| !c.is_whitespace()) {
-            s = &s[i..];
-            if s.starts_with("//") { s = s.find('\n').map_or("", |e| &s[e..]); continue; }
-            if let Some(r) = s.strip_prefix("struct") { let e = r.find('}').ok_or_else(|| format!("module {}: unclosed struct", module))?; decls += "struct"; decls += &r[..=e]; decls.push('\n'); s = &r[e + 1..]; continue; }
-            if let Some(r) = s.strip_prefix("global") { let e = r.find(';').ok_or_else(|| format!("module {}: expected `;`", module))?; fields += &r[..e]; fields += ";"; s = &r[e + 1..]; continue; }
-            return Err(format!("module {}: its state holds struct and global declarations, found `{}`", module, s.lines().next().unwrap_or("")));
-        }
-        out_state += &format!("{}struct __mito__{}__state {{{} }}\nglobal {}: __mito__{}__state;\ninstance {} of {}{};", decls, inst, fields, inst, inst, inst, module, key.map(|k| format!(" key {}", k)).unwrap_or_default());
-        out_api += &format!("// module {} as `{}`\n", module, inst);
-        out_api += &subst(&m.funcs, &map, Some(&inst));
-        rest = &rest[pos + len..];
+        if *k == PKind::Field { key = Some(a.clone()); }
+        map.insert(p.clone(), a.clone());
     }
-    Ok((out_state, out_api))
+    // the module's own structs are renamed for this instance
+    let st = subst(&m.state, &map, None);
+    let mut names: HashMap<String, String> = HashMap::new();
+    for w in st.split_whitespace().collect::<Vec<_>>().windows(2) { if w[0] == "struct" { let n = w[1].trim_end_matches('{'); names.insert(n.to_string(), format!("__mito__{}__{}", id, n)); } }
+    let st = subst(&st, &names, None);
+    // its globals become fields of the instance's state struct
+    let (mut decls, mut fields) = (String::new(), String::new());
+    let mut s = st.as_str();
+    while let Some(i) = s.find(|c: char| !c.is_whitespace()) {
+        s = &s[i..];
+        if s.starts_with("//") { s = s.find('\n').map_or("", |e| &s[e..]); continue; }
+        if let Some(r) = s.strip_prefix("struct") { let e = r.find('}').ok_or_else(|| format!("module {}: unclosed struct", module))?; decls += "struct"; decls += &r[..=e]; decls.push('\n'); s = &r[e + 1..]; continue; }
+        if let Some(r) = s.strip_prefix("global") { let e = r.find(';').ok_or_else(|| format!("module {}: expected `;`", module))?; fields += &r[..e]; fields += ";"; s = &r[e + 1..]; continue; }
+        return Err(format!("module {}: its state holds struct and global declarations, found `{}`", module, s.lines().next().unwrap_or("")));
+    }
+    decls += &format!("struct __mito__{}__state {{{} }}\n", id, fields);
+    let line = format!("instance {} of {}{};\n", inst, module, key.map(|k| format!(" key {}", k)).unwrap_or_default());
+    let funcs = format!("// module {} as `{}`\n{}", module, inst, subst(&m.funcs, &map, Some(inst)));
+    Ok((decls, line, funcs))
 }
 
-/// The first `global NAME: MODULE<args>;` naming a standard-library module: (offset, name, module, args, length).
-fn find_use(s: &str) -> Option<(usize, String, String, Vec<String>, usize)> {
-    let mut from = 0;
-    while let Some(g) = s[from..].find("global") {
-        let at = from + g;
-        from = at + 6;
-        if at > 0 && s[..at].chars().last().map_or(false, |c| c.is_alphanumeric() || c == '_') { continue; }
-        let Some(semi) = s[at..].find(';') else { return None };
-        let stmt = &s[at + 6..at + semi];
-        let Some((name, ty)) = stmt.split_once(':') else { continue };
-        let ty = ty.trim();
-        let Some((m, args)) = ty.split_once('<') else { continue };
-        let m = m.trim();
-        if !STDLIB.iter().any(|x| x.0 == m) { continue; }
-        let Some(args) = args.trim().strip_suffix('>') else { continue };
-        let args = args.split(',').map(|a| a.trim().to_string()).collect();
-        return Some((at, name.trim().to_string(), m.to_string(), args, semi + 1));
+/// Expand every use of a standard-library module in a program's state, returning the state and api to compile. A use
+/// is a field of a struct (`board: sorted<...>;` in `struct Game`), and a struct holding one must be reached exactly
+/// once, through plain structs from the state, so the instance exists once.
+pub fn expand(state: &str, api: &str) -> Result<(String, String), String> {
+    if !state.contains('<') { return Ok((state.to_string(), api.to_string())); }
+    let mut out_api = api.to_string();
+    if !out_api.ends_with('\n') { out_api.push('\n'); }
+    let (_, states) = decls(state);
+    if let Some((n, t)) = states.iter().find(|g| STDLIB.iter().any(|m| g.1.starts_with(&format!("{}<", m.0)))) {
+        return Err(format!("`state {}: {}`: the state is a struct; make the module instance one of its fields", n, t));
     }
-    None
+    let state = expand_fields(state, &mut out_api)?;
+    Ok((state, out_api))
+}
+
+/// A struct declaration found in the program's state text: its name, and each field's name, type text and where the
+/// type text is.
+struct SDecl { name: String, fields: Vec<(String, String, std::ops::Range<usize>)> }
+
+/// The struct declarations and the `state` declaration of a state text (comments skipped).
+fn decls(state: &str) -> (Vec<SDecl>, Vec<(String, String)>) {
+    let b = state.as_bytes();
+    let (mut structs, mut globals) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    let word = |i: usize, w: &str| state[i..].starts_with(w) && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')) && state[i + w.len()..].starts_with(|c: char| c.is_whitespace());
+    while i < b.len() {
+        if state[i..].starts_with("//") { i = state[i..].find('\n').map_or(b.len(), |e| i + e); continue; }
+        if word(i, "struct") {
+            let Some(open) = state[i..].find('{').map(|e| i + e) else { break };
+            let Some(close) = state[open..].find('}').map(|e| open + e) else { break };
+            let name = state[i + 6..open].trim().to_string();
+            let mut fields = Vec::new();
+            let mut at = open + 1;
+            for part in state[open + 1..close].split(';') {
+                let start = at; at += part.len() + 1;
+                // a field may follow a comment line
+                let mut text = part; let mut off = start;
+                while let Some(k) = text.find("//") { let e = text[k..].find('\n').map_or(text.len(), |e| k + e); off += e; text = &text[e..]; }
+                if let Some((n, t)) = text.split_once(':') {
+                    let tstart = off + n.len() + 1;
+                    let lead = t.len() - t.trim_start().len();
+                    fields.push((n.trim().to_string(), t.trim().to_string(), tstart + lead..tstart + lead + t.trim().len()));
+                }
+            }
+            structs.push(SDecl { name, fields });
+            i = close + 1; continue;
+        }
+        if word(i, "state") {
+            let Some(semi) = state[i..].find(';').map(|e| i + e) else { break };
+            if let Some((n, t)) = state[i + 5..semi].split_once(':') { globals.push((n.trim().to_string(), t.trim().to_string())); }
+            i = semi + 1; continue;
+        }
+        i += 1;
+    }
+    (structs, globals)
+}
+
+/// Expand module instances that are fields of structs: the field's type becomes the instance's state struct, named by
+/// the one path that reaches it (`game.board`).
+fn expand_fields(state: &str, api: &mut String) -> Result<String, String> {
+    let (structs, globals) = decls(state);
+    let is_struct = |t: &str| structs.iter().any(|s| s.name == t);
+    // every path from the state to a struct through plain struct fields, and whether the struct is used any other way
+    fn paths(target: &str, structs: &[SDecl], globals: &[(String, String)], depth: usize) -> Vec<String> {
+        if depth > 64 { return Vec::new(); }
+        let mut v: Vec<String> = globals.iter().filter(|g| g.1 == target).map(|g| g.0.clone()).collect();
+        for s in structs { for f in &s.fields { if f.1 == target { for p in paths(&s.name, structs, globals, depth + 1) { v.push(format!("{}.{}", p, f.0)); } } } }
+        v
+    }
+    let mentions = |t: &str, name: &str| t != name && t.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == name);
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut added = String::new();
+    for s in &structs {
+        for (fname, ty, range) in &s.fields {
+            let Some((m, args)) = ty.split_once('<') else { continue };
+            if !STDLIB.iter().any(|x| x.0 == m.trim()) { continue; }
+            let Some(args) = args.trim().strip_suffix('>') else { continue };
+            let args: Vec<String> = args.split(',').map(|a| a.trim().to_string()).collect();
+            let elsewhere = globals.iter().map(|g| &g.1).chain(structs.iter().flat_map(|x| x.fields.iter().map(|f| &f.1))).any(|t| mentions(t, &s.name));
+            let ps = paths(&s.name, &structs, &globals, 0);
+            if elsewhere || ps.len() != 1 {
+                let how = if elsewhere { "is also used inside a collection or array".to_string() } else if ps.is_empty() { "is not held by the state".to_string() } else { format!("is reached {} ways ({})", ps.len(), ps.join(", ")) };
+                return Err(format!("struct {} holds a module instance (`{}`), so it must exist once, reached through plain structs from the state; it {}", s.name, fname, how.replace("global", "the state")));
+            }
+            let inst = format!("{}.{}", ps[0], fname);
+            let (d, line, funcs) = instantiate(&inst, m.trim(), &args)?;
+            edits.push((range.clone(), format!("__mito__{}__state", inst.replace('.', "__"))));
+            added += &d; added += &line;
+            *api += &funcs;
+        }
+    }
+    let _ = is_struct;
+    if edits.is_empty() { return Ok(state.to_string()); }
+    let mut out = state.to_string();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0.start));
+    for (r, t) in edits { out.replace_range(r, &t); }
+    if !out.ends_with('\n') { out.push('\n'); }
+    Ok(out + &added)
 }
 
 #[cfg(test)]
@@ -141,38 +214,47 @@ mod tests {
     use super::*;
     #[test]
     fn a_use_expands_into_declarations_and_functions() {
-        let (st, api) = expand("struct S { n: i64; }\nglobal b: bag<S, 4>;\n", "").unwrap();
-        assert!(st.contains("struct __mito__b__Counts {") && st.contains("struct __mito__b__state {") && st.contains("items: pool<S, 4> checked;") && st.contains("counts: __mito__b__Counts;"), "{}", st);
-        assert!(st.contains("global b: __mito__b__state;") && st.contains("instance b of bag;"), "{}", st);
-        assert!(api.contains("pub fn b.add()") && api.contains("alloc self.items") && api.contains("return 4 - count(self.items);"), "{}", api);
-        assert!(expand("struct S { n: i64; }\nglobal b: bag<S>;\n", "").unwrap_err().contains("takes 2 arguments"));
+        let (st, api) = expand("struct S { n: i64; }\nstruct App { b: bag<S, 4>; }\nstate app: App;\n", "").unwrap();
+        assert!(st.contains("struct __mito__app__b__Counts {") && st.contains("struct __mito__app__b__state {") && st.contains("items: pool<S, 4> checked;") && st.contains("counts: __mito__app__b__Counts;"), "{}", st);
+        assert!(st.contains("b: __mito__app__b__state;") && st.contains("instance app.b of bag;"), "{}", st);
+        assert!(api.contains("pub fn app.b.add()") && api.contains("alloc self.items") && api.contains("return 4 - count(self.items);"), "{}", api);
+        assert!(expand("struct S { n: i64; }\nstruct App { b: bag<S>; }\nstate app: App;\n", "").unwrap_err().contains("takes 2 arguments"));
+        // an instance exists once: its struct is reached through plain structs from the state, one way only
+        let twice = expand("struct S { n: i64; }\nstruct H { b: bag<S, 4>; }\nstruct App { x: H; y: H; }\nstate app: App;\n", "").unwrap_err();
+        assert!(twice.contains("reached 2 ways (app.x, app.y)"), "{}", twice);
+        let inside = expand("struct S { n: i64; }\nstruct H { b: bag<S, 4>; }\nstruct App { hs: pool<H, 2>; }\nstate app: App;\n", "").unwrap_err();
+        assert!(inside.contains("inside a collection"), "{}", inside);
+        assert!(expand("struct S { n: i64; }\nstate b: bag<S, 4>;\n", "").unwrap_err().contains("make the module instance one of its fields"));
+        // nested a level deeper, the path names it
+        let (st, api) = expand("struct S { n: i64; }\nstruct Inner { b: bag<S, 4>; }\nstruct App { inner: Inner; }\nstate app: App;\n", "").unwrap();
+        assert!(st.contains("instance app.inner.b of bag;") && api.contains("pub fn app.inner.b.add()"), "{}\n{}", st, api);
     }
 
     /// A program that changes a module instance's state other than through its functions does not load.
     #[test]
     fn module_state_changes_only_through_its_functions() {
-        let state = "struct S { n: i64; name: string<8>; }\nglobal b: bag<S, 4>;\n";
+        let state = "struct S { n: i64; name: string<8>; }\nstruct App { b: bag<S, 4>; }\nstate app: App;\n";
         let load = |api: &str| -> Result<(), String> {
             let (st, api) = expand(state, api)?;
             crate::cgen::check(&crate::layout::Program::parse(&st)?, &api).map(|_| ())
         };
-        assert_eq!(load("endpoint POST /ok { let s = b.add(); s.n = 5; s.name = \"x\"; b.remove(s); respond 200 {}; }"), Ok(()));
+        assert_eq!(load("endpoint POST /ok { let s = app.b.add(); s.n = 5; s.name = \"x\"; app.b.remove(s); respond 200 {}; }"), Ok(()));
         for (api, want) in [
-            ("endpoint POST /a { b.counts.added = 9; respond 200 {}; }", "belongs to b (module bag)"),
-            ("endpoint POST /a { let s = alloc b.items; respond 200 {}; }", "add items of b with its functions, not `alloc`"),
-            ("endpoint POST /a { free b.get(0); respond 200 {}; }", "remove items of b with its functions, not `free`"),
-            ("endpoint POST /a { var x = 1; x = b.get(0); free x; respond 200 {}; }", "`free` of a value whose kind is only known at run time"),
-            ("endpoint POST /a { each s in b { b.remove(s); } respond 200 {}; }", "a loop over b calls a function that changes b"),
-            ("endpoint GET /a { respond 200 { \"x\": [each s in b b.add()] }; }", "a loop over b calls a function that changes b"),
-            ("endpoint GET /a { respond 200 { \"x\": [each s in b from 1 order by s.n s.n] }; }", "`order by` was removed"),
+            ("endpoint POST /a { app.b.counts.added = 9; respond 200 {}; }", "belongs to app.b (module bag)"),
+            ("endpoint POST /a { let s = alloc app.b.items; respond 200 {}; }", "add items of app.b with its functions, not `alloc`"),
+            ("endpoint POST /a { free app.b.get(0); respond 200 {}; }", "remove items of app.b with its functions, not `free`"),
+            ("endpoint POST /a { var x = 1; x = app.b.get(0); free x; respond 200 {}; }", "`free` of a value whose kind is only known at run time"),
+            ("endpoint POST /a { each s in app.b { app.b.remove(s); } respond 200 {}; }", "a loop over app.b calls a function that changes app.b"),
+            ("endpoint GET /a { respond 200 { \"x\": [each s in app.b app.b.add()] }; }", "a loop over app.b calls a function that changes app.b"),
+            ("endpoint GET /a { respond 200 { \"x\": [each s in app.b from 1 order by s.n s.n] }; }", "`order by` was removed"),
         ] {
             let e = load(api).err().unwrap_or_default();
             assert!(e.contains(want), "{} -> {}", api, e);
         }
         // a module's private function cannot be called from outside it
-        let (st, mut api) = expand(state, "endpoint GET /a { respond 200 { \"n\": b.secret() }; }").unwrap();
-        api += "fn b.secret() { return 1; }\n";
+        let (st, mut api) = expand(state, "endpoint GET /a { respond 200 { \"n\": app.b.secret() }; }").unwrap();
+        api += "fn app.b.secret() { return 1; }\n";
         let e = crate::cgen::check(&crate::layout::Program::parse(&st).unwrap(), &api).err().unwrap_or_default();
-        assert!(e.contains("`b.secret` is private to b"), "{}", e);
+        assert!(e.contains("`app.b.secret` is private to app.b"), "{}", e);
     }
 }

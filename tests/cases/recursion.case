@@ -1,7 +1,7 @@
 // recursive functions, and the limit on how deep calls nest
 --- state
 struct C { n: i64; }
-global c: C;
+state c: C;
 --- api
 fn sum_to(n) { var t = 0; if n > 0 { t = n + sum_to(n - 1); } return t; }
 fn fib(n) { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }

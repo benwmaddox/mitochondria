@@ -16,5 +16,5 @@ GET /players -> 200 {"x":[{"name":"ann","h0":1,"h1":2,"h2":4}]}
 POST /overflow -> 413 {"error":"40000 does not fit i16"}
 GET /players -> 200 {"x":[{"name":"ann","h0":1,"h1":2,"h2":4}]}
 state <plain values> 24
-state players 37
+state app.players 37
 memory reserved=8192 committed=8192 live=61

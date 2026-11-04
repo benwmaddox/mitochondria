@@ -13,10 +13,10 @@ POST /ms -> 201 {"slot":0}
 POST /ms -> 201 {"slot":1}
 POST /rs -> 201 {"slot":0,"m":1}
 GET /scope -> 200 {"x":1,"t":10}
-state <plain values> 56
-state w0.s 16
-state w1.s 28
-state ms 40
-state rs 24
-state rs.m 12
-memory reserved=4034560 committed=32768 live=176
+state <plain values> 48
+state app.w0.s 16
+state app.w1.s 28
+state app.ms 40
+state app.rs 24
+state app.rs.m 12
+memory reserved=4034560 committed=32768 live=168

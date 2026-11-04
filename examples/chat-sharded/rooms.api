@@ -1,20 +1,20 @@
 fn room(id) {
-    each r in rooms where r.id == id limit 1 { return r; }
+    each r in shard.rooms where r.id == id limit 1 { return r; }
     fail 404 "no such room";
 }
-fn typing_until(t) { return t + max(meta.typing_ttl, 5000); }
+fn typing_until(t) { return t + max(shard.meta.typing_ttl, 5000); }
 
 // rooms[0] assigns the id and records the room in the directory, then forwards to the owning shard (id % count)
 endpoint POST /rooms {
     let name = body("name");
     if fwd("id") == null {
         if len(name) == 0 { fail 400 "name is required"; }
-        meta.next_room = meta.next_room + 1;
-        let d = directory.add(meta.next_room);
+        shard.meta.next_room = shard.meta.next_room + 1;
+        let d = shard.directory.add(shard.meta.next_room);
         d.name = name;
         forward rooms[d.id] { "user": fwd("user"), "name": fwd("name"), "id": d.id };
     }
-    let r = alloc rooms;
+    let r = alloc shard.rooms;
     r.id = int(fwd("id"));
     r.name = name;
     r.created = now();
@@ -22,16 +22,16 @@ endpoint POST /rooms {
 }
 
 endpoint GET /rooms {
-    respond 200 { "rooms": [each d in directory { "id": d.id, "name": d.name }] };
+    respond 200 { "rooms": [each d in shard.directory { "id": d.id, "name": d.name }] };
 }
 
 endpoint POST /rooms/{room}/messages {
     let r = room(int(param("room")));
     let text = body("body");
     if len(text) == 0 { fail 400 "body is required"; }
-    meta.next_seq = meta.next_seq + 1;
+    shard.meta.next_seq = shard.meta.next_seq + 1;
     let m = alloc r.messages;
-    m.seq = meta.next_seq;
+    m.seq = shard.meta.next_seq;
     m.at = now();
     m.user = fwd("user");
     m.author = fwd("name");

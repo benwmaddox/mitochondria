@@ -7,7 +7,7 @@ inflight 16;
 budget 1024;
 --- file front.mito
 struct M { n: i64; }
-global m: M;
+state m: M;
 --- file front.api
 endpoint POST /inc/{k} { m.n = m.n + 1; forward count[int(param("k"))] { "from": worker_index(), "seen": m.n }; }
 endpoint POST /bad { forward nowhere[0] { "x": 1 }; }
@@ -15,7 +15,7 @@ endpoint POST /odd/{k} { forward count[int(param("k"))] {}; }
 endpoint GET /front { respond 200 { "n": m.n, "me": worker_index(), "of": worker_count() }; }
 --- file count.mito
 struct C { n: i64; }
-global c: C;
+state c: C;
 --- file count.api
 endpoint POST /inc/{k} { c.n = c.n + 1; respond 200 { "shard": worker_index(), "n": c.n, "from": int(fwd("from")), "seen": int(fwd("seen")) }; }
 endpoint POST /odd/{k} { fail 409 "the shard said no"; }

@@ -9,9 +9,9 @@ stats refusing=true full_trims=1
 POST /rooms/0/messages -> 201 {"seq":2}
 stats refusing=false full_trims=0
 state <plain values> 136
-state sessions 59
-state rooms.items 41
-state rooms.items.messages 66
-state rooms.items.typing 16
-state rooms.links 121
+state chat.sessions 59
+state chat.rooms.items 41
+state chat.rooms.items.messages 66
+state chat.rooms.items.typing 16
+state chat.rooms.links 121
 memory reserved=40960 committed=24576 live=439

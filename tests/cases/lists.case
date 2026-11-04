@@ -2,32 +2,35 @@
 --- state
 struct Ev { n: i64; who: string<8>; }
 struct Bag { nums: list<i32, 4> drop_oldest; flags: pool<bool, 4>; }
-global evs: list<Ev, 3> drop_oldest;
-global strict: list<Ev, 2>;
-global bags: pool<Bag, 2>;
+struct App {
+    evs: list<Ev, 3> drop_oldest;
+    strict: list<Ev, 2>;
+    bags: pool<Bag, 2>;
+}
+state app: App;
 --- api
-endpoint POST /evs { let e = alloc evs; e.n = int(body("n")); e.who = body("who"); respond 201 { "count": count(evs) }; }
-endpoint GET /evs/{k} { let e = evs[int(param("k"))]; respond 200 { "n": e.n, "who": e.who }; }
-endpoint GET /evs { respond 200 { "x": [each e in evs e.n], "r": [each e in evs reverse e.n], "first": evs[0].n }; }
-endpoint POST /strict { let e = alloc strict; e.n = count(strict); respond 201 { "n": e.n }; }
-endpoint POST /strict/try { let e = try_alloc strict; respond 200 { "got": exists(e) }; }
+endpoint POST /evs { let e = alloc app.evs; e.n = int(body("n")); e.who = body("who"); respond 201 { "count": count(app.evs) }; }
+endpoint GET /evs/{k} { let e = app.evs[int(param("k"))]; respond 200 { "n": e.n, "who": e.who }; }
+endpoint GET /evs { respond 200 { "x": [each e in app.evs e.n], "r": [each e in app.evs reverse e.n], "first": app.evs[0].n }; }
+endpoint POST /strict { let e = alloc app.strict; e.n = count(app.strict); respond 201 { "n": e.n }; }
+endpoint POST /strict/try { let e = try_alloc app.strict; respond 200 { "got": exists(e) }; }
 endpoint POST /copy {
     // the loop sees the items there were when it started, not the ones it adds
-    each e in evs { let f = alloc evs; f.n = e.n + 100; f.who = e.who; }
-    respond 200 { "x": [each e in evs e.n] };
+    each e in app.evs { let f = alloc app.evs; f.n = e.n + 100; f.who = e.who; }
+    respond 200 { "x": [each e in app.evs e.n] };
 }
-endpoint POST /bags { let b = alloc bags; let x = alloc b.nums; let y = alloc b.nums; let f = alloc b.flags; respond 201 { "n": count(b.nums), "f": count(b.flags) }; }
+endpoint POST /bags { let b = alloc app.bags; let x = alloc b.nums; let y = alloc b.nums; let f = alloc b.flags; respond 201 { "n": count(b.nums), "f": count(b.flags) }; }
 endpoint GET /bags/{k} {
-    let b = bags[int(param("k"))];
+    let b = app.bags[int(param("k"))];
     var sum = 0;
     each v in b.nums { sum = sum + v; }
     respond 200 { "sum": sum, "all": [each v in b.nums v], "rev": [each v in b.nums reverse v], "at1": b.nums[1], "flags": [each f in b.flags f] };
 }
-endpoint POST /bags/{k}/set { let b = bags[int(param("k"))]; b.nums[int(body("i"))] = body("v"); respond 200 { "at": b.nums[int(body("i"))] }; }
-endpoint POST /bags/{k}/flag { let b = bags[int(param("k"))]; b.flags[0] = body("on"); respond 200 { "flags": [each f in b.flags f] }; }
-endpoint POST /evs/{k} { evs[int(param("k"))] = 5; respond 200 {}; }
+endpoint POST /bags/{k}/set { let b = app.bags[int(param("k"))]; b.nums[int(body("i"))] = body("v"); respond 200 { "at": b.nums[int(body("i"))] }; }
+endpoint POST /bags/{k}/flag { let b = app.bags[int(param("k"))]; b.flags[0] = body("on"); respond 200 { "flags": [each f in b.flags f] }; }
+endpoint POST /evs/{k} { app.evs[int(param("k"))] = 5; respond 200 {}; }
 endpoint POST /bags/{k}/grow {
-    let b = bags[int(param("k"))];
+    let b = app.bags[int(param("k"))];
     each v in b.nums { let w = alloc b.nums; }
     respond 200 { "n": count(b.nums) };
 }

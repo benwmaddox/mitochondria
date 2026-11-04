@@ -2,23 +2,26 @@
 --- state
 struct Grid { cells: i32[4]; total: i64; }
 struct Player { hits: i16[3]; name: string<8>; }
-global grid: Grid;
-global players: pool<Player, 2>;
+struct App {
+    grid: Grid;
+    players: pool<Player, 2>;
+}
+state app: App;
 --- api
-endpoint POST /grid/{k} { grid.cells[int(param("k"))] = int(body("v")); grid.total = grid.total + int(body("v")); respond 200 { "cell": grid.cells[int(param("k"))] }; }
-endpoint GET /grid { respond 200 { "c0": grid.cells[0], "c3": grid.cells[3], "total": grid.total }; }
-endpoint GET /grid/{k} { respond 200 { "v": grid.cells[int(param("k"))] }; }
-endpoint POST /players { let p = alloc players; p.name = body("name"); p.hits[0] = 1; p.hits[2] = 3; respond 201 { "slot": slot(p) }; }
+endpoint POST /grid/{k} { app.grid.cells[int(param("k"))] = int(body("v")); app.grid.total = app.grid.total + int(body("v")); respond 200 { "cell": app.grid.cells[int(param("k"))] }; }
+endpoint GET /grid { respond 200 { "c0": app.grid.cells[0], "c3": app.grid.cells[3], "total": app.grid.total }; }
+endpoint GET /grid/{k} { respond 200 { "v": app.grid.cells[int(param("k"))] }; }
+endpoint POST /players { let p = alloc app.players; p.name = body("name"); p.hits[0] = 1; p.hits[2] = 3; respond 201 { "slot": slot(p) }; }
 endpoint POST /players/{p}/hit/{k} {
-    let p = players[int(param("p"))];
+    let p = app.players[int(param("p"))];
     let k = int(param("k"));
     p.hits[k] = p.hits[k] + 1;
     respond 200 { "hits": p.hits[k] };
 }
 endpoint GET /players {
-    respond 200 { "x": [each p in players { "name": p.name, "h0": p.hits[0], "h1": p.hits[1], "h2": p.hits[2] }] };
+    respond 200 { "x": [each p in app.players { "name": p.name, "h0": p.hits[0], "h1": p.hits[1], "h2": p.hits[2] }] };
 }
-endpoint POST /overflow { let p = players[0]; p.hits[1] = 40000; respond 200 {}; }
+endpoint POST /overflow { let p = app.players[0]; p.hits[1] = 40000; respond 200 {}; }
 --- requests
 GET /grid
 POST /grid/1 {"v": 7}

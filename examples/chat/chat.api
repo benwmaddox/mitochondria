@@ -1,11 +1,11 @@
-fn me() -> ref<sessions> { return auth(sessions); }
-fn room_param() -> ref<rooms> { return rooms.get(int(param("room"))); }
-fn typing_until(t: i64) -> i64 { return t + max(meta.typing_ttl, 5000); }
+fn me() -> ref<chat.sessions> { return auth(chat.sessions); }
+fn room_param() -> ref<chat.rooms> { return chat.rooms.get(int(param("room"))); }
+fn typing_until(t: i64) -> i64 { return t + max(chat.meta.typing_ttl, 5000); }
 
 endpoint POST /sessions {
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
-    let s = alloc sessions;
+    let s = alloc chat.sessions;
     s.name = name;
     s.secret = random();
     s.window = now();
@@ -21,14 +21,14 @@ endpoint POST /rooms {
     let who = me();
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
-    let r = rooms.add(now());
+    let r = chat.rooms.add(now());
     r.name = name;
     respond 201 { "id": slot(r), "name": r.name };
 }
 
 endpoint GET /rooms {
     let who = me();
-    respond 200 { "rooms": [each r in rooms { "id": slot(r), "name": r.name }] };
+    respond 200 { "rooms": [each r in chat.rooms { "id": slot(r), "name": r.name }] };
 }
 
 endpoint POST /rooms/{room}/messages {
@@ -38,11 +38,11 @@ endpoint POST /rooms/{room}/messages {
     if len(text) == 0 { fail 400 "body is required"; }
     let t = now();
     if t - who.window > 60000 { who.window = t; who.sent = 0; }
-    if who.sent >= max(meta.rate, 30) { fail 429 "slow down"; }
+    if who.sent >= max(chat.meta.rate, 30) { fail 429 "slow down"; }
     who.sent = who.sent + 1;
-    meta.next_seq = meta.next_seq + 1;
+    chat.meta.next_seq = chat.meta.next_seq + 1;
     let m = alloc room.messages;
-    m.seq = meta.next_seq;
+    m.seq = chat.meta.next_seq;
     m.at = t;
     m.author = who;
     m.body = text;
@@ -87,9 +87,9 @@ endpoint GET /rooms/{room}/typing {
 
 endpoint GET /stats {
     var messages = 0;
-    each r in rooms { messages = messages + count(r.messages); }
+    each r in chat.rooms { messages = messages + count(r.messages); }
     respond 200 {
-        "sessions": count(sessions), "rooms": rooms.size(), "messages": messages, "next_seq": meta.next_seq,
+        "sessions": count(chat.sessions), "rooms": chat.rooms.size(), "messages": messages, "next_seq": chat.meta.next_seq,
         "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb"), "reserved_kb": stat("reserved_kb")
     };
 }

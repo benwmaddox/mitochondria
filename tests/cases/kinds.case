@@ -1,25 +1,29 @@
 // values whose kind changes: a var holding a reference, a var given another kind, functions returning different kinds
 --- state
-struct Node { name: string<8>; next: ref<nodes>; }
-global nodes: pool<Node, 4> checked;
-struct Top { head: ref<nodes>; }
-global top: Top;
+struct Node { name: string<8>; next: ref<app.nodes>; }
+struct App {
+    nodes: pool<Node, 4> checked;
+    top: Top;
+}
+state app: App;
+struct Top { head: ref<app.nodes>; }
+
 --- api
-fn find(name) { each n in nodes { if n.name == name { return n; } } return null; }
+fn find(name) { each n in app.nodes { if n.name == name { return n; } } return null; }
 fn describe(k) { if k == 0 { return "zero"; } if k < 0 { return null; } return k; }
 endpoint POST /nodes {
-    let n = alloc nodes;
+    let n = alloc app.nodes;
     n.name = body("name");
-    n.next = top.head;
-    top.head = n;
+    n.next = app.top.head;
+    app.top.head = n;
     respond 201 { "slot": slot(n) };
 }
 endpoint DELETE /nodes/{name} { let n = find(param("name")); if n == null { fail 404 "no such node"; } free n; respond 200 {}; }
 endpoint GET /walk {
-    var cur = top.head;
+    var cur = app.top.head;
     var names = "";
     var steps = 0;
-    each n in nodes {
+    each n in app.nodes {
         if exists(cur) { names = names + cur.name + ","; cur = cur.next; steps = steps + 1; }
     }
     respond 200 { "names": names, "steps": steps };

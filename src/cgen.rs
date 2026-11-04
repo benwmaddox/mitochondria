@@ -593,9 +593,8 @@ impl<'p> G<'p> {
     /// Writing the plain value at `off` from here: an instance's plain state is its own.
     fn may_write_plain(&self, off: usize) -> R<()> {
         for m in &self.prog.instances {
-            let Some(g) = self.prog.global(&m.name) else { continue };
-            let gl = &self.prog.globals[g];
-            if off >= gl.off && off < gl.off + self.prog.plain_size(&gl.ty).0 && self.module_code().as_deref() != Some(m.name.as_str()) { return Err(self.module_err(m, &format!("the state of {}", m.name))); }
+            let Some((start, size)) = self.prog.plain_path(&m.name) else { continue };
+            if off >= start && off < start + size && self.module_code().as_deref() != Some(m.name.as_str()) { return Err(self.module_err(m, &format!("the state of {}", m.name))); }
         }
         Ok(())
     }
@@ -885,8 +884,8 @@ impl<'p> G<'p> {
                 if !e.is_empty() { self.open("else {"); self.block(e, env)?; self.close("}"); }
             }
             Stmt::Each(it, body) => {
-                if let (Some(_), Expr::Var(_, VarRes::Global(g))) = (&it.via, &it.coll) {
-                    let n = &self.prog.globals[*g as usize].name;
+                if let (Some(_), Some(n)) = (&it.via, crate::lang::path_of(&it.coll)) {
+                    let n = &n;
                     if changes_instance(self.api, n, body) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
                 let collect = allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
@@ -1533,8 +1532,7 @@ impl<'p> G<'p> {
     /// capacity of steps, stopping at a null cursor or the limit. Order of evaluation as in the interpreter: `from`,
     /// `limit`, then the first cursor.
     fn walk(&mut self, it: &'p Iter, v: crate::lang::Via, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
-        let Expr::Var(_, VarRes::Global(g)) = &it.coll else { return no("walking something other than a module instance") };
-        let n = &self.prog.globals[*g as usize].name;
+        let Some(n) = crate::lang::path_of(&it.coll) else { return no("walking something other than a module instance") };
         let steps = self.prog.colls.iter().find(|c| c.name == format!("{}.items", n)).map_or(0, |c| c.cap);
         let from = match &it.from { Some(e) => { let x = self.expr(e, env, None)?; self.hold(x, false)? } None => CV::Null };
         let lim = match &it.limit { Some(e) => { let x = self.expr(e, env, None)?; Some(self.int_or(x, 400, "bad limit")) } None => None };
@@ -1617,8 +1615,8 @@ impl<'p> G<'p> {
             }
             Json::Arr(it, inner) => {
                 self.out("[");
-                if let (Some(_), Expr::Var(_, VarRes::Global(g))) = (&it.via, &it.coll) {
-                    let n = &self.prog.globals[*g as usize].name;
+                if let (Some(_), Some(n)) = (&it.via, crate::lang::path_of(&it.coll)) {
+                    let n = &n;
                     if changes_instance(self.api, n, &[Stmt::Respond(200, (**inner).clone())]) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
                 self.each(it, env, false, |g, env, hits| {
@@ -1833,7 +1831,7 @@ mod profile_tests {
 
     #[test]
     fn the_binder_rejects_bad_names_and_calls_at_load() {
-        let prog = Program::parse("struct C { n: i64; } global c: C;").unwrap();
+        let prog = Program::parse("struct C { n: i64; } state c: C;").unwrap();
         for (api, want) in [
             ("endpoint GET /a { respond 200 { \"x\": nope }; }", "unknown name `nope`"),
             ("endpoint GET /a { respond 200 { \"x\": frob(1) }; }", "unknown function `frob`"),

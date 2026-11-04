@@ -32,7 +32,7 @@ pub enum Ty {
     Arr(Box<Ty>, usize),        // T[N]: exactly N elements
     List(Box<Ty>, usize, Full), // list<T, N> [drop_oldest]
     Pool(Box<Ty>, usize, bool), // pool<T, N> [checked]
-    Ref(String),                // ref<pool>: a slot of a top-level pool
+    Ref(String),                // ref<path>: a slot of a pool that exists once (`ref<game.players>`)
     Struct(usize),
     Named(String),              // only before resolution
 }
@@ -120,11 +120,26 @@ impl Program {
         }
     }
     pub fn global(&self, name: &str) -> Option<usize> { self.globals.iter().position(|g| g.name == name) }
-    pub fn coll_of(&self, name: &str) -> Option<usize> { self.global(name).and_then(|g| self.globals[g].coll) }
-    /// The pool `ref<name>` points into: a top-level pool, or a module instance's items.
-    pub fn ref_pool(&self, name: &str) -> Option<usize> {
-        let c = self.coll_of(name).or_else(|| self.instances.iter().find(|m| m.name == name).and_then(|m| self.colls.iter().position(|c| c.name == format!("{}.items", m.name))));
+    /// The pool `ref<path>` points into: a pool that exists once (reached from the state through plain structs, not
+    /// inside another collection's items), or a module instance's items.
+    pub fn ref_pool(&self, path: &str) -> Option<usize> {
+        let once = |n: &str| self.colls.iter().position(|c| c.name == n && c.parent.is_none());
+        let c = once(path).or_else(|| self.instances.iter().find(|m| m.name == path).and_then(|m| once(&format!("{}.items", m.name))));
         c.filter(|c| matches!(self.colls[*c].kind, Kind::Pool(_)))
+    }
+    /// Where a path of plain structs from the state starts and how many bytes it covers (`game.board`, a module
+    /// instance's state).
+    pub fn plain_path(&self, path: &str) -> Option<(usize, usize)> {
+        let mut parts = path.split('.');
+        let g = &self.globals[self.global(parts.next()?)?];
+        let (mut off, mut ty) = (g.off, g.ty.clone());
+        for f in parts {
+            let Ty::Struct(s) = ty else { return None };
+            let k = self.structs[s].fields.iter().position(|x| x.0 == f)?;
+            off += self.structs[s].offs[k];
+            ty = self.structs[s].fields[k].1.clone();
+        }
+        Some((off, self.plain_size(&ty).0))
     }
     pub fn plain_coll(&self, off: usize, sid: usize, field: &str) -> Option<usize> { self.plain_colls.iter().find(|p| p.0 == off && p.1 == sid && p.2 == field).map(|p| p.3) }
 
@@ -143,17 +158,23 @@ impl Program {
                     p.eat("}")?;
                     structs.push(StructDef { name, fields, offs: Vec::new(), size: 0, align: 1, state: 0 });
                 }
-                "global" => { let n = p.ident()?; p.eat(":")?; let ty = p.ty()?; p.eat(";")?; globals.push((n, ty)); }
-                // written by module expansion: `instance scores of sorted key points;`
+                "state" => {
+                    let n = p.ident()?; p.eat(":")?; let ty = p.ty()?; p.eat(";")?;
+                    if let Some(g) = globals.first() { return Err(format!("a program has one state; `{}` is the second (the first is `{}`): put everything in one struct", n, g.0)); }
+                    globals.push((n, ty));
+                }
+                "global" => return Err("`global` was replaced by `state`: a program has one state, a struct holding everything (`state game: Game;`)".into()),
+                // written by module expansion: `instance game.board of sorted key points;`
                 "instance" => {
-                    let name = p.ident()?; p.eat("of")?; let module = p.ident()?;
+                    let name = p.path()?; p.eat("of")?; let module = p.ident()?;
                     let key = if p.word("key") { Some(p.ident()?) } else { None };
                     p.eat(";")?;
                     instances.push(ModInst { name, module, key });
                 }
-                o => return Err(format!("expected `struct` or `global`, found `{}`", o)),
+                o => return Err(format!("expected `struct` or `state`, found `{}`", o)),
             }
         }
+        if globals.is_empty() { return Err("a program has one state (`state game: Game;`), and this one has none".into()); }
         let mut prog = Program { instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
@@ -166,7 +187,8 @@ impl Program {
         let mut off = 0;
         for (n, ty) in globals {
             let ty = resolve(ty, &names)?;
-            let (s, a) = prog.plain_size(&ty);
+            // a state holding nothing but collections takes no plain bytes (its inner structs still get distinct offsets)
+            let (s, a) = if prog.has_plain(&ty) { prog.plain_size(&ty) } else { (0, 1) };
             off = up(off, a.max(8));
             prog.globals.push(Global { name: n, ty, off, coll: None });
             off += s;
@@ -189,12 +211,17 @@ impl Program {
             }
         }
         for (cid, ci, name) in refs {
-            let Some(t) = prog.ref_pool(&name) else { return Err(format!("ref<{}>: `{}` is not a top-level pool", name, name)) };
+            let Some(t) = prog.ref_pool(&name) else { return Err(not_a_target(&name)) };
             prog.colls[cid].cols[ci].kind = CKind::Ref(t);
         }
         for g in &prog.globals { check_plain_refs(&prog, &g.ty)?; }
         prog.total = cur;
         Ok(prog)
+    }
+
+    /// Does a value of this type hold any bytes outside collections?
+    fn has_plain(&self, t: &Ty) -> bool {
+        match t { Ty::Struct(s) => self.structs[*s].fields.iter().any(|f| self.has_plain(&f.1)), t if t.is_coll() => false, _ => true }
     }
 
     fn layout_struct(&mut self, i: usize) -> Result<(), String> {
@@ -287,9 +314,10 @@ impl Program {
 fn contains_coll(p: &Program, t: &Ty) -> bool {
     match t { Ty::List(..) | Ty::Pool(..) => true, Ty::Arr(e, _) => contains_coll(p, e), Ty::Struct(i) => p.structs[*i].fields.iter().any(|f| contains_coll(p, &f.1)), _ => false }
 }
+fn not_a_target(n: &str) -> String { format!("ref<{}>: `{}` is not a pool that exists once (one reached from the state through plain structs, not inside another collection's items)", n, n) }
 fn check_plain_refs(p: &Program, t: &Ty) -> Result<(), String> {
     match t {
-        Ty::Ref(n) => if p.ref_pool(n).is_some() { Ok(()) } else { Err(format!("ref<{}>: `{}` is not a top-level pool", n, n)) },
+        Ty::Ref(n) => if p.ref_pool(n).is_some() { Ok(()) } else { Err(not_a_target(n)) },
         Ty::Arr(e, _) => check_plain_refs(p, e),
         Ty::Struct(i) => { for f in &p.structs[*i].fields { if !f.1.is_coll() { check_plain_refs(p, &f.1)?; } } Ok(()) }
         _ => Ok(()),
@@ -325,6 +353,8 @@ impl P {
     fn ident(&mut self) -> Result<String, String> { let s = self.peek().ok_or("unexpected end of file")?.to_string(); self.i += 1; Ok(s) }
     fn num(&mut self) -> Result<usize, String> { let s = self.ident()?; s.parse().map_err(|_| format!("expected a number, found `{}`", s)) }
     fn word(&mut self, w: &str) -> bool { if self.peek() == Some(w) { self.i += 1; true } else { false } }
+    /// `a.b.c`
+    fn path(&mut self) -> Result<String, String> { let mut s = self.ident()?; while self.word(".") { s.push('.'); s += &self.ident()?; } Ok(s) }
     /// A size known when the program is compiled: a number, or + - * / ( ) of them (modules size state from parameters).
     fn count(&mut self) -> Result<usize, String> {
         let mut v = self.term()?;
@@ -343,7 +373,7 @@ impl P {
         let n = self.ident()?;
         let mut t = if let Some(s) = Scalar::parse(&n) { Ty::Scalar(s) }
         else if n == "string" { self.eat("<")?; let k = self.count()?; self.eat(">")?; Ty::Str(k) }
-        else if n == "ref" { self.eat("<")?; let p = self.ident()?; self.eat(">")?; Ty::Ref(p) }
+        else if n == "ref" { self.eat("<")?; let p = self.path()?; self.eat(">")?; Ty::Ref(p) }
         else if n == "list" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let f = if self.word("drop_oldest") { Full::DropOldest } else { Full::Fail }; Ty::List(Box::new(e), k, f) }
         else if n == "pool" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let c = self.word("checked"); Ty::Pool(Box::new(e), k, c) }
         else { Ty::Named(n) };
@@ -358,11 +388,18 @@ mod tests {
 
     #[test]
     fn layout_rejects_what_it_cannot_bound() {
-        assert!(Program::parse("struct A { b: B; } struct B { a: A; } global g: A;").is_err());
-        assert!(Program::parse("struct N { kids: list<N, 2>; } global g: pool<N, 2>;").is_err()); // nests forever
-        assert!(Program::parse("struct M { t: list<i32, 2>; } global g: list<M, 2> drop_oldest;").is_err());
-        assert!(Program::parse("struct M { who: ref<nope>; } global g: list<M, 2>;").is_err());
-        let p = Program::parse("struct M { t: i32; } struct R { m: list<M, 1000>; } global rooms: pool<R, 64>;").unwrap();
+        assert!(Program::parse("struct A { b: B; } struct B { a: A; } state g: A;").is_err());
+        assert!(Program::parse("struct N { kids: list<N, 2>; } state g: pool<N, 2>;").is_err()); // nests forever
+        assert!(Program::parse("struct M { t: list<i32, 2>; } state g: list<M, 2> drop_oldest;").is_err());
+        assert!(Program::parse("struct M { who: ref<nope>; } state g: list<M, 2>;").is_err());
+        let p = Program::parse("struct M { t: i32; } struct R { m: list<M, 1000>; } state rooms: pool<R, 64>;").unwrap();
         assert_eq!(p.colls[1].mult, 64);
+        // one state: none, two, or the old `global`, do not load
+        assert!(Program::parse("struct M { t: i32; }").err().unwrap_or_default().contains("has none"));
+        assert!(Program::parse("struct M { t: i32; } state a: M; state b: M;").err().unwrap_or_default().contains("one state"));
+        assert!(Program::parse("struct M { t: i32; } global a: M;").err().unwrap_or_default().contains("replaced by `state`"));
+        // a reference reaches a pool that exists once, through plain structs, not one inside another collection's items
+        assert!(Program::parse("struct P { n: i32; } struct Q { who: ref<g.ps>; } struct G { ps: pool<P, 4>; qs: list<Q, 4>; } state g: G;").is_ok());
+        assert!(Program::parse("struct P { n: i32; } struct R { ps: pool<P, 4>; } struct Q { who: ref<g.rs.ps>; } struct G { rs: pool<R, 2>; qs: list<Q, 4>; } state g: G;").err().unwrap_or_default().contains("exists once"));
     }
 }

@@ -10,6 +10,9 @@ struct Room {
     messages: list<Msg, 1000> drop_oldest;
     typing: pool<Typing, 256>;
 }
-global meta: Meta;
-global directory: sorted<Dir, 256, id>;   // in order of id; used on rooms[0] only
-global rooms: pool<Room, 32>;       // the rooms this shard owns
+struct Shard {
+    meta: Meta;
+    directory: sorted<Dir, 256, id>;   // in order of id; used on rooms[0] only
+    rooms: pool<Room, 32>;   // the rooms this shard owns
+}
+state shard: Shard;

@@ -27,7 +27,7 @@ DELETE /x/3 -> 200 {"size":5}
 GET /asc -> 200 {"x":["cy:5","bob:10","eve:10","ann:20"]}
 POST /add -> 201 {"slot":3,"size":5}
 POST /add -> 201 {"slot":5,"size":6}
-POST /add -> 503 {"error":"capacity: board.items is full (6 of 6)"}
+POST /add -> 503 {"error":"capacity: app.board.items is full (6 of 6)"}
 GET /asc -> 200 {"x":["cy:5","bob:10","eve:10","fay:15","ann:20","gus:40"]}
 GET /ends -> 200 {"first":"cy","last":"gus","room":0}
 DELETE /x/2 -> 200 {"size":6}
@@ -72,7 +72,7 @@ POST /churn/1 -> 200 {"size":6}
 POST /churn/1 -> 200 {"size":6}
 POST /churn/1 -> 200 {"size":6}
 POST /churn/1 -> 200 {"size":6}
-POST /churn/2 -> 503 {"error":"capacity: board.items is full (6 of 6)"}
+POST /churn/2 -> 503 {"error":"capacity: app.board.items is full (6 of 6)"}
 GET /asc -> 200 {"x":["bob:10","eve:10","fay:15","ann:20","gus:40"]}
 DELETE /x/9 -> 404 {"error":"slot 9 is not live"}
 POST /set/9 -> 404 {"error":"slot 9 is not live"}
@@ -84,8 +84,8 @@ POST /words -> 201 {}
 GET /words/g -> 200 {"all":["apple","apple","fig","pear","plum"],"from":["pear","plum"],"back":["fig","apple","apple"]}
 GET /words/plum -> 200 {"all":["apple","apple","fig","pear","plum"],"from":["plum"],"back":["plum","pear","fig","apple","apple"]}
 state <plain values> 232
-state board.items 135
-state board.links 606
-state words.items 125
-state words.links 509
+state app.board.items 135
+state app.board.links 606
+state app.words.items 125
+state app.words.links 509
 memory reserved=20480 committed=20480 live=1607

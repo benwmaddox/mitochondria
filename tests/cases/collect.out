@@ -10,7 +10,7 @@ POST /zero -> 200 {"visited":8}
 GET /list -> 200 {"x":["a:0","b:0","c:0","a2:0","b2:0","c2:0","a2:0","b2:0","c2:0","a22:0","b22:0","c22:0"]}
 GET /firsts -> 200 {"calls":0,"first":"-"}
 state <plain values> 0
-state items 192
-state boxes 24
-state boxes.items 64
+state app.items 192
+state app.boxes 24
+state app.boxes.items 64
 memory reserved=12288 committed=12288 live=280

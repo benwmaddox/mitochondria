@@ -1,7 +1,7 @@
 // floats: literals, fields, mixed arithmetic, comparisons, conversions, and how they are written
 --- state
 struct Acc { total: f64; small: f32; n: i64; }
-global acc: Acc;
+state acc: Acc;
 --- api
 endpoint POST /add { acc.total = acc.total + body("x"); acc.n = acc.n + 1; respond 200 { "total": acc.total }; }
 endpoint POST /small { acc.small = body("x"); respond 200 { "small": acc.small }; }

@@ -1,33 +1,37 @@
 // values whose kind is only known at run time, used where an integer (or a number) is required
 --- state
 struct T { n: i64; }
-global ts: pool<T, 4>;
-struct Top { r: ref<ts>; }
-global top: Top;
+struct App {
+    ts: pool<T, 4>;
+    top: Top;
+}
+state app: App;
+struct Top { r: ref<app.ts>; }
+
 --- api
-endpoint POST /t { let t = alloc ts; t.n = slot(t) * 10; respond 201 {}; }
-endpoint GET /index { respond 200 { "n": ts[body("k")].n }; }
-endpoint GET /limit { respond 200 { "x": [each t in ts limit body("n") t.n] }; }
+endpoint POST /t { let t = alloc app.ts; t.n = slot(t) * 10; respond 201 {}; }
+endpoint GET /index { respond 200 { "n": app.ts[body("k")].n }; }
+endpoint GET /limit { respond 200 { "x": [each t in app.ts limit body("n") t.n] }; }
 endpoint GET /minmax { respond 200 { "min": min(body("a"), 5), "max": max(3, body("a")) }; }
 endpoint GET /neg { respond 200 { "neg": -body("x") }; }
 endpoint GET /arith { respond 200 { "sum": body("x") + 1, "lt": body("x") < 2 }; }
-endpoint POST /set { let t = ts[0]; t.n = body("x"); respond 200 { "n": t.n }; }
-endpoint GET /ornotlive { respond 200 { "a": or(ts[3].n, -1), "b": exists(ts[9]), "c": or(ts[int(body("k"))].n, 0) }; }
-fn pool_of() { return ts; }
-fn find(k) { if k < 0 { return ts[99]; } if k == 0 { return ts[0]; } return find(k - 1); }
+endpoint POST /set { let t = app.ts[0]; t.n = body("x"); respond 200 { "n": t.n }; }
+endpoint GET /ornotlive { respond 200 { "a": or(app.ts[3].n, -1), "b": exists(app.ts[9]), "c": or(app.ts[int(body("k"))].n, 0) }; }
+fn pool_of() { return app.ts; }
+fn find(k) { if k < 0 { return app.ts[99]; } if k == 0 { return app.ts[0]; } return find(k - 1); }
 endpoint GET /anyitem {
     var x = 5;
-    if body("k") != null { x = ts[int(body("k"))]; }
+    if body("k") != null { x = app.ts[int(body("k"))]; }
     respond 200 { "n": x.n, "slot": slot(x) };
 }
-endpoint POST /anyitem { var x = 5; x = ts[int(body("k"))]; x.n = 77; respond 200 { "n": x.n }; }
-endpoint DELETE /anyitem { var x = "s"; x = ts[int(body("k"))]; free x; respond 200 { "count": count(ts) }; }
+endpoint POST /anyitem { var x = 5; x = app.ts[int(body("k"))]; x.n = 77; respond 200 { "n": x.n }; }
+endpoint DELETE /anyitem { var x = "s"; x = app.ts[int(body("k"))]; free x; respond 200 { "count": count(app.ts) }; }
 endpoint GET /coll { respond 200 { "n": count(pool_of()), "x": [each t in pool_of() t.n] }; }
 endpoint GET /recor { respond 200 { "a": or(find(int(body("k"))).n, -1) }; }
-endpoint GET /slotnull { respond 200 { "s": slot(top.r) }; }
+endpoint GET /slotnull { respond 200 { "s": slot(app.top.r) }; }
 endpoint GET /divmin { respond 200 { "d": (0 - 9223372036854775807 - 1) / int(body("d")) }; }
 endpoint GET /modmin { respond 200 { "m": (0 - 9223372036854775807 - 1) % int(body("d")) }; }
-endpoint POST /setstr { let t = ts[0]; t.n = "text"; respond 200 {}; }
+endpoint POST /setstr { let t = app.ts[0]; t.n = "text"; respond 200 {}; }
 endpoint GET /min_int { respond 200 { "neg": -(0 - 9223372036854775807 - 1) }; }
 --- requests
 // the Rust runtime builds the text of a "not live" error before or() discards it

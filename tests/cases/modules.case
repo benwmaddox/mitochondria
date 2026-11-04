@@ -1,36 +1,39 @@
 // a module instance (lib/bag.mito): its functions, its state read from outside, and references to its items
 --- state
 struct Score { name: string<16>; points: i64; }
-struct Fav { s: ref<scores>; }
-global scores: bag<Score, 3>;
-global others: bag<Score, 2>;
-global fav: Fav;
+struct Fav { s: ref<app.scores>; }
+struct App {
+    scores: bag<Score, 3>;
+    others: bag<Score, 2>;
+    fav: Fav;
+}
+state app: App;
 --- api
 endpoint POST /scores {
-    let s = scores.add();
+    let s = app.scores.add();
     s.name = body("name");
     s.points = int(body("points"));
-    respond 201 { "slot": slot(s), "size": scores.size(), "room": scores.room() };
+    respond 201 { "slot": slot(s), "size": app.scores.size(), "room": app.scores.room() };
 }
-endpoint GET /scores/{k} { let s = scores.get(int(param("k"))); respond 200 { "name": s.name, "points": s.points }; }
-endpoint DELETE /scores/{k} { scores.remove(scores.get(int(param("k")))); respond 200 { "size": scores.size() }; }
-endpoint POST /fav/{k} { fav.s = scores.get(int(param("k"))); respond 200 {}; }
-endpoint GET /fav { respond 200 { "fav": or(fav.s.name, "-") }; }
+endpoint GET /scores/{k} { let s = app.scores.get(int(param("k"))); respond 200 { "name": s.name, "points": s.points }; }
+endpoint DELETE /scores/{k} { app.scores.remove(app.scores.get(int(param("k")))); respond 200 { "size": app.scores.size() }; }
+endpoint POST /fav/{k} { app.fav.s = app.scores.get(int(param("k"))); respond 200 {}; }
+endpoint GET /fav { respond 200 { "fav": or(app.fav.s.name, "-") }; }
 endpoint GET /stats {
     respond 200 {
-        "added": scores.added(), "removed": scores.removed(), "count": count(scores.items),
-        "others": others.size(), "names": [each s in scores.items s.name]
+        "added": app.scores.added(), "removed": app.scores.removed(), "count": count(app.scores.items),
+        "others": app.others.size(), "names": [each s in app.scores.items s.name]
     };
 }
 endpoint GET /walk {
     var total = 0;
-    each s in scores where s.points > 15 { total = total + s.points; }
+    each s in app.scores where s.points > 15 { total = total + s.points; }
     respond 200 {
-        "all": [each s in scores s.name], "back": [each s in scores reverse s.name], "from1": [each s in scores from 1 s.name],
-        "back_from1": [each s in scores from 1 reverse s.name], "first": [each s in scores limit 1 s.name], "total": total
+        "all": [each s in app.scores s.name], "back": [each s in app.scores reverse s.name], "from1": [each s in app.scores from 1 s.name],
+        "back_from1": [each s in app.scores from 1 reverse s.name], "first": [each s in app.scores limit 1 s.name], "total": total
     };
 }
-endpoint POST /others { let o = others.add(); o.points = 1; respond 201 { "size": others.size() }; }
+endpoint POST /others { let o = app.others.add(); o.points = 1; respond 201 { "size": app.others.size() }; }
 --- requests
 GET /walk
 GET /stats

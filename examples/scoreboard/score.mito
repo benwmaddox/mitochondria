@@ -1,11 +1,14 @@
 // A game scoreboard: players, each player's best score kept in order, and the last 20 games played.
 // (The tutorial, docs/tutorial.md, builds this program step by step.)
-struct Player { name: string<24>; best: i64; entry: ref<board>; }
-struct Entry  { who: ref<players>; points: i64; }
-struct Game   { who: ref<players>; points: i64; at: i64; }
+struct Player { name: string<24>; best: i64; entry: ref<game.board>; }
+struct Entry  { who: ref<game.players>; points: i64; }
+struct Played { who: ref<game.players>; points: i64; at: i64; }
 struct Totals { games: i64; }
 
-global totals: Totals;
-global players: pool<Player, 1000> checked;
-global board: sorted<Entry, 1000, points>;     // one entry per player, in order of points (lib/sorted.mito)
-global recent: list<Game, 20> drop_oldest;     // the last 20 games; the 21st overwrites the oldest
+struct Game {
+    totals: Totals;
+    players: pool<Player, 1000> checked;
+    board: sorted<Entry, 1000, points>;   // one entry per player, in order of points (lib/sorted.mito)
+    recent: list<Played, 20> drop_oldest;   // the last 20 games; the 21st overwrites the oldest
+}
+state game: Game;

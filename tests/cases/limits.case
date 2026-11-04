@@ -2,14 +2,17 @@
 // much of a value an error message quotes (64 bytes, invalid UTF-8 shown as U+FFFD); what int() trims
 --- state
 struct T { n: u8; }
-global ts: pool<T, 70000>;
+struct App {
+    ts: pool<T, 70000>;
+}
+state app: App;
 --- api
 endpoint GET /q { respond 200 { "q0": query("q0"), "q63": query("q63") }; }
 endpoint POST /f { respond 200 { "f0": body("f0"), "f255": body("f255") }; }
 endpoint GET /n/{x} { respond 200 { "n": int(param("x")) }; }
-endpoint POST /fill { each i in count(ts)..70000 { let t = alloc ts; } respond 200 { "n": count(ts) }; }
-endpoint POST /free/{n} { let n = int(param("n")); each t in ts limit n { free t; } respond 200 {}; }
-endpoint GET /count { respond 200 { "n": count(ts) }; }
+endpoint POST /fill { each i in count(app.ts)..70000 { let t = alloc app.ts; } respond 200 { "n": count(app.ts) }; }
+endpoint POST /free/{n} { let n = int(param("n")); each t in app.ts limit n { free t; } respond 200 {}; }
+endpoint GET /count { respond 200 { "n": count(app.ts) }; }
 --- requests
 GET /q?q0=0&q1=1&q2=2&q3=3&q4=4&q5=5&q6=6&q7=7&q8=8&q9=9&q10=10&q11=11&q12=12&q13=13&q14=14&q15=15&q16=16&q17=17&q18=18&q19=19&q20=20&q21=21&q22=22&q23=23&q24=24&q25=25&q26=26&q27=27&q28=28&q29=29&q30=30&q31=31&q32=32&q33=33&q34=34&q35=35&q36=36&q37=37&q38=38&q39=39&q40=40&q41=41&q42=42&q43=43&q44=44&q45=45&q46=46&q47=47&q48=48&q49=49&q50=50&q51=51&q52=52&q53=53&q54=54&q55=55&q56=56&q57=57&q58=58&q59=59&q60=60&q61=61&q62=62&q63=63
 GET /q?q0=0&q1=1&q2=2&q3=3&q4=4&q5=5&q6=6&q7=7&q8=8&q9=9&q10=10&q11=11&q12=12&q13=13&q14=14&q15=15&q16=16&q17=17&q18=18&q19=19&q20=20&q21=21&q22=22&q23=23&q24=24&q25=25&q26=26&q27=27&q28=28&q29=29&q30=30&q31=31&q32=32&q33=33&q34=34&q35=35&q36=36&q37=37&q38=38&q39=39&q40=40&q41=41&q42=42&q43=43&q44=44&q45=45&q46=46&q47=47&q48=48&q49=49&q50=50&q51=51&q52=52&q53=53&q54=54&q55=55&q56=56&q57=57&q58=58&q59=59&q60=60&q61=61&q62=62&q63=63&q64=64

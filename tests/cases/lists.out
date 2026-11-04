@@ -16,7 +16,7 @@ POST /copy -> 200 {"x":[100,100,100]}
 GET /evs -> 200 {"x":[100,100,100],"r":[100,100,100],"first":100}
 POST /strict -> 201 {"n":1}
 POST /strict -> 201 {"n":2}
-POST /strict -> 503 {"error":"capacity: strict is full (2 of 2)"}
+POST /strict -> 503 {"error":"capacity: app.strict is full (2 of 2)"}
 POST /strict/try -> 200 {"got":false}
 POST /bags -> 201 {"n":2,"f":1}
 POST /bags/0/set -> 200 {"at":5}
@@ -34,9 +34,9 @@ GET /bags/0 -> 200 {"sum":-1,"all":[5,-6,0,0],"rev":[0,0,-6,5],"at1":-6,"flags":
 POST /bags/0/grow -> 200 {"n":4}
 GET /bags/0 -> 200 {"sum":0,"all":[0,0,0,0],"rev":[0,0,0,0],"at1":0,"flags":[true]}
 state <plain values> 0
-state evs 44
-state strict 32
-state bags 24
-state bags.nums 24
-state bags.flags 25
+state app.evs 44
+state app.strict 32
+state app.bags 24
+state app.bags.nums 24
+state app.bags.flags 25
 memory reserved=20480 committed=20480 live=149

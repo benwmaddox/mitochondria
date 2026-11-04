@@ -6,7 +6,7 @@ inflight 4;
 budget 1024;
 --- file w.mito
 struct C { n: i64; }
-global c: C;
+state c: C;
 --- file w.api
 endpoint POST /inc { c.n = c.n + 1; respond 200 { "n": c.n }; }
 endpoint POST /crash { c.n = 99; __crash(); }

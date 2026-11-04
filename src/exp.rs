@@ -204,3 +204,36 @@ pub fn chat_scan() {
     black_box(total);
     println!("native scan + sort + top 50 over {} messages (columns, no interpreter): {:.1} us per request", N, t.elapsed().as_nanos() as f64 / reps as f64 / 1000.0);
 }
+
+/// Pressure policy on bursty work: jobs arrive in bursts of different sizes and are all freed after each burst.
+pub fn pressure() {
+    use crate::layout::Program;
+    use crate::runtime::{Instance, Pressure, Val};
+    const SRC: &str = "struct J { id: i32; name: string<64>; } global jobs: pool<J, 400000>; global keep: pool<J, 1000>;";
+    println!("bursts of 50k-140k jobs (72 bytes each), all freed after each burst; epoch boundary every 1000 operations");
+    for policy in [false, true] {
+        let mut i = Instance::start(Program::parse(SRC).unwrap(), 1 << 30).unwrap();
+        let mut p = Pressure::new(&i, 4 << 20, 64 << 20);
+        let cj = i.prog.coll_of("jobs").unwrap();
+        let cn = i.col(cj, "name").unwrap();
+        let (mut peak, mut relieve_ns, mut calls) = (0usize, 0u128, 0usize);
+        let mut after = Vec::new();
+        let mut idxs = Vec::with_capacity(140_000);
+        for burst in 0..8 {
+            let n = 50_000 + 30_000 * (burst % 4);
+            idxs.clear();
+            for k in 0..n {
+                let idx = i.push_item(cj, 0).unwrap();
+                i.field_set(cj, idx, cn, &Val::Str(format!("job {} of burst {}", k, burst))).unwrap();
+                idxs.push(idx);
+                if policy && k % 1000 == 999 { let t = Instant::now(); i.relieve(&mut p); relieve_ns += t.elapsed().as_nanos(); calls += 1; }
+            }
+            peak = peak.max(i.committed());
+            for &idx in &idxs { i.free_item(cj, idx).unwrap(); }
+            if policy { let t = Instant::now(); i.relieve(&mut p); i.idle(&mut p); relieve_ns += t.elapsed().as_nanos(); calls += 2; }
+            after.push(i.committed() as f64 / MB as f64);
+        }
+        println!("  policy {:<5} peak {:>6.2} MB | committed after each burst: {}", if policy { "on" } else { "off" }, peak as f64 / MB as f64, after.iter().map(|m| format!("{:.2}", m)).collect::<Vec<_>>().join(" "));
+        if policy { println!("               {} policy calls, {:.2} ms total ({:.1} us each), {} scoped trims, {:.1} MB released", calls, relieve_ns as f64 / 1e6, relieve_ns as f64 / 1e3 / calls as f64, p.trims, p.freed as f64 / MB as f64); }
+    }
+}

@@ -76,19 +76,24 @@ so one room's messages are adjacent in memory and a partly used room leaves whol
 Nesting replaces an index for "items grouped by parent": a room's newest 50 messages are the last 50 of its list, with no scan.
 
 The declared worst case multiplies: 64 rooms x 1000 messages. That product is what the budget check counts.
+A nested collection's header (its length, or a pool's high-water mark and counts) is committed when its parent item is created,
+so a parent that does not exist costs nothing. Freeing or dropping a parent empties what it holds.
 
 ### 7. Epochs
 State lives as long as the program. Each request (or tick) gets a scratch region with a declared size that is reset when the request
-ends: locals, strings built while handling, and the response. Temporaries therefore need no per-value maximum, only the epoch total.
-Running out of scratch is a `Full` failure for that request.
+ends: a text area for every string the handler reads or builds (strings are copied in, so values never alias state) and a response
+area. Temporaries therefore need no per-value maximum, only the epoch total. Running out of either area fails that request (507,
+or 413 if the request itself does not fit). Locals, call arguments and item lists use buffers sized at startup and reused, so a
+warm request makes no heap allocation; tests check this. The HTTP layer outside the handler (reading the socket) still allocates.
 
 ### 8. Handlers and functions
 - `fn name(params) -> type { ... }` plain functions. Parameters are values or references. No closures, no captures.
 - `let` binds a value; `var` binds a mutable local.
 - `endpoint METHOD /path/{param} { ... }` is a handler: an entry point that reads the request and ends in `respond` or `fail`.
 - State (the global tree) is read and written directly, as in Stasis.
-- **Every handler is atomic.** If it fails, its writes are undone, its allocations are released, and its frees never happen
-  (a slot freed during a request becomes reusable only after the request succeeds). An item dropped by `drop_oldest` is restored.
+- **Every handler is atomic.** The runtime records the old bytes of every write during a request. If the request fails, they are
+  written back: allocations, list drops, counters and string bytes all return to where they were. `free` is deferred: the item stays
+  visible until the request ends and is freed only if the request succeeds.
 
 Iteration: `each x in collection where cond order by key [desc] limit n { ... }`, and `each x in list reverse limit n` for the
 newest items of a list. The same clause works inside a JSON array in `respond`.
@@ -100,11 +105,13 @@ costing only that part) and driven by pressure, not by schedule:
 | Committed memory | Behavior |
 |---|---|
 | below the soft mark | never trim; reuse stays a plain write |
-| above the soft mark | trim the region with the most dead bytes, at an epoch boundary, until under the mark |
-| above the hard mark | trim everything, drop all slack, refuse new work with `Full` |
-| quiet after a burst | slowly release slack so a one-off spike does not pin memory |
+| above the soft mark | at each epoch boundary, trim the top-level collection with the most committed memory (one per boundary) |
+| above the hard mark | trim everything once; refuse new writes (503) while still above it; reads continue |
+| quiet (no request for a second) | trim the largest collection even below the soft mark, so a past burst does not stay committed |
 
-Marks are fractions of the declared budget and also consider machine-level free memory.
+A collection whose trim released nothing is skipped until 256 of its items have been freed, popped or cleared since: growth adds
+live pages, only shrinking creates dead ones, so this keeps a steady state from rescanning. Marks are given in megabytes
+(`--soft`, `--hard`). Not done: marks as fractions of the budget, and machine-level free memory as an input.
 
 ## Failures
 | Failure | Meaning | Default HTTP status |
@@ -148,29 +155,21 @@ is the layer above it. Details and the comparison with arenas, garbage collectio
   for 3.1 MB live, and trim could release none of it. Accepted for now; nesting improves locality but not this.
 - **Workers and mailboxes.** A later layer: a mailbox is a `list` with a full policy (adding `block` and `drop_newest`), each worker owns
   a region and trims it when its mailbox empties. Supervision, scheduling and cross-thread commit are undesigned.
-- **Compilation.** Endpoints are interpreted. The interpreter is ~470x a native loop on a 20,000-row scan. A compiler would bind columns
-  once and turn `each ... where` into a column loop.
+- **Compilation.** Endpoints are interpreted. Reading a room's newest 50 messages and writing them as JSON takes 18.5 us; a scan of
+  20,000 rows through the interpreter was ~470x a native loop. A compiler would bind columns once and turn `each ... where` into a column loop.
 - **Keyed indexes** for lookups that are not by parent. Not planned until nesting proves insufficient.
 - **Debug-only orphan report** (rows nothing refers to) and **FIFO slot reuse** for pools.
 
-## Status: prototype vs this design
-| Concept | Prototype today |
-|---|---|
-| 1 State tree, budget check | built |
-| 2 Bounded values | built; `capacity` only for collections, no `maxlen` |
-| 3 `list` | built with record storage, `fail` only; no `drop_oldest`, no `reverse`, no columns |
-| 4 `pool`, `checked` | built, column storage |
-| — `table` | built; to be removed |
-| 5 `ref<pool>` | not built (slots stored as `i32`) |
-| 6 Nesting | only `list<scalar>` and strings inside table/pool rows |
-| 7 Epochs | response buffer only; interpreter temporaries use the Rust heap |
-| 8 Handlers | endpoints, `let`, `each`, atomic writes and allocations; no `fn`, no `var`, frees not deferred |
-| 9 Trim | manual and scoped trim built; pressure policy not built |
+## Status: prototype vs this design (2026-11-03)
+Every concept above is built and tested (20 tests). Known differences:
+- Types in `fn` signatures are parsed but not checked; the interpreter is dynamically typed.
+- `ref<...>` targets top-level pools only. Nested-struct fields inside items (`m.pos.x`) take a slower path that allocates.
+- The pressure policy's marks are absolute, not fractions of the budget; machine free memory is not consulted.
+- One thread. The worker/mailbox layer is not built.
 
-## Plan, in order
-1. Lists stored as columns with `drop_oldest` and `reverse`; remove `table` (port its tests to pool and list).
-2. Nesting: lists and pools of structs inside pool rows, per-parent contiguous columns, budget counts the product.
-3. `ref<pool>` fields and locals, `or()` over dead references.
-4. `fn` and `var`; deferred frees so handlers are fully atomic.
-5. Port the chat example to this design and re-run `bench` against the numbers in docs/chat-api-findings.md.
-6. Request epoch for interpreter temporaries; then the pressure-driven trim policy.
+Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat-api-findings.md.
+
+## Next
+1. Long uneven text (the deferred 92% waste): a per-collection text area with a declared total, compacted during trim.
+2. Workers and mailboxes on top of `list` full policies and per-worker regions.
+3. A compiler for endpoints (bind columns, compile `each ... where` to column loops), measured against the native baselines.

@@ -10,6 +10,10 @@ pub struct Instance {
     committed: Vec<bool>, // one flag per page
     pub last_trim: TrimStats,
     journal: Journal,
+    shrinks: Vec<u64>, // per top-level collection: bumped whenever something in it is freed, popped or cleared
+    committed_pages: usize,
+    ranges_buf: Vec<(usize, usize)>, // reused by trims
+    live_buf: Vec<bool>,
 }
 
 /// Old bytes of every write made while `on`, replayed backwards by `rollback`. Buffers are kept between requests.
@@ -47,7 +51,8 @@ impl Instance {
     pub fn start(prog: Program, budget: usize) -> Result<Instance, String> {
         if prog.total > budget { return Err(format!("over budget: layout needs {} bytes, budget is {}", prog.total, budget)); }
         let reserved = up(prog.total.max(1), PAGE);
-        let mut inst = Instance { base: os::reserve(reserved), reserved, committed: vec![false; reserved / PAGE], prog, last_trim: TrimStats::default(), journal: Journal::default() };
+        let mut inst = Instance { base: os::reserve(reserved), reserved, committed: vec![false; reserved / PAGE], prog, last_trim: TrimStats::default(), journal: Journal { on: false, entries: Vec::with_capacity(1024), bytes: Vec::with_capacity(64 * 1024) }, shrinks: Vec::new(), committed_pages: 0, ranges_buf: Vec::new(), live_buf: Vec::new() }; // sized at startup
+        inst.shrinks = vec![0; inst.prog.colls.len()];
         let mut r = vec![(0, inst.prog.plain_end)];
         for c in inst.prog.colls.iter().filter(|c| c.parent.is_none()) { r.push((c.hdr, c.hdr + c.hdr_fields() * 4)); } // nested headers commit with their parent item
         for (a, b) in r { inst.ensure(a, b); }
@@ -55,7 +60,7 @@ impl Instance {
     }
 
     pub fn reserved(&self) -> usize { self.reserved }
-    pub fn committed(&self) -> usize { self.committed.iter().filter(|c| **c).count() * PAGE }
+    pub fn committed(&self) -> usize { self.committed_pages * PAGE }
 
     /// Commit every page touching bytes a..b.
     fn ensure(&mut self, a: usize, b: usize) {
@@ -67,6 +72,7 @@ impl Instance {
                 while p <= last && !self.committed[p] { p += 1; }
                 assert!(os::commit(unsafe { self.base.add(s * PAGE) }, (p - s) * PAGE), "commit failed");
                 for q in s..p { self.committed[q] = true; }
+                self.committed_pages += p - s;
             } else { p += 1; }
         }
     }
@@ -116,13 +122,16 @@ impl Instance {
         else { s < self.hget(cid, HW, inst) && self.bit(cid, inst, s) }
     }
     /// Live items of one instance as item indexes: lists oldest to newest, pools in slot order.
-    pub fn items(&self, cid: usize, inst: usize) -> Vec<usize> {
+    pub fn items(&self, cid: usize, inst: usize) -> Vec<usize> { let mut v = Vec::new(); self.items_into(cid, inst, &mut v); v }
+    /// Same as `items`, into a buffer the caller reuses (no allocation once it is large enough).
+    pub fn items_into(&self, cid: usize, inst: usize, out: &mut Vec<usize>) {
+        out.clear();
         let cap = self.cap(cid);
         if self.is_list(cid) {
             let (len, head) = (self.hget(cid, LEN, inst), self.hget(cid, HEAD, inst));
-            (0..len).map(|p| inst * cap + (head + p) % cap).collect()
+            out.extend((0..len).map(|p| inst * cap + (head + p) % cap));
         } else {
-            (0..self.hget(cid, HW, inst)).filter(|&s| self.bit(cid, inst, s)).map(|s| inst * cap + s).collect()
+            out.extend((0..self.hget(cid, HW, inst)).filter(|&s| self.bit(cid, inst, s)).map(|s| inst * cap + s));
         }
     }
     /// Item at position `pos` of a list instance (0 = oldest).
@@ -133,7 +142,8 @@ impl Instance {
 
     /// Append to a list (dropping the oldest if declared) or take the lowest free slot of a pool. Returns the new item.
     pub fn push_item(&mut self, cid: usize, inst: usize) -> Result<usize, Error> {
-        let (cap, kind, name) = { let c = &self.prog.colls[cid]; (c.cap, c.kind, c.name.clone()) };
+        let (cap, kind) = { let c = &self.prog.colls[cid]; (c.cap, c.kind) };
+        let full = |me: &Self, n: usize| Error::Full(format!("{} is full ({} of {})", me.prog.colls[cid].name, n, cap)); // built only on failure
         match kind {
             Kind::List(policy) => {
                 let (len, head) = (self.hget(cid, LEN, inst), self.hget(cid, HEAD, inst));
@@ -143,7 +153,7 @@ impl Instance {
                 } else if policy == Full::DropOldest {
                     let idx = inst * cap + head;
                     self.zero_item(cid, idx); self.hset(cid, HEAD, inst, (head + 1) % cap); Ok(idx)
-                } else { Err(Error::Full(format!("{} is full ({} of {})", name, len, cap))) }
+                } else { Err(full(self, len)) }
             }
             Kind::Pool(checked) => {
                 let (hw, count, hint) = (self.hget(cid, HW, inst), self.hget(cid, COUNT, inst), self.hget(cid, HINT, inst));
@@ -156,7 +166,7 @@ impl Instance {
                     if free != 0 { slot = Some(w * 64 + free.trailing_zeros() as usize); break; }
                     w += 1;
                 }
-                let s = match slot { Some(s) => s, None => { if hw == cap { return Err(Error::Full(format!("{} is full ({} of {})", name, count, cap))); } hw } };
+                let s = match slot { Some(s) => s, None => { if hw == cap { return Err(full(self, count)); } hw } };
                 let wa = self.waddr(cid, inst, s / 64);
                 let word = if (s / 64) * 64 < hw { self.rd(wa, 8) } else { 0 }; // words wholly above hw may be uncommitted; their bits are zero
                 self.wr(wa, 8, word | (1u64 << (s % 64)));
@@ -173,16 +183,20 @@ impl Instance {
 
     /// Zero an item's fixed columns and empty its nested collections. String bytes are left; their length is now 0.
     fn zero_item(&mut self, cid: usize, idx: usize) {
-        let cols: Vec<(usize, usize)> = self.prog.colls[cid].cols.iter().filter(|c| !matches!(c.kind, CKind::StrBytes(_))).map(|c| (c.off + idx * c.kind.size(), c.kind.size())).collect();
-        for (a, n) in cols { self.zero(a, n); }
+        for k in 0..self.prog.colls[cid].cols.len() {
+            let (a, n, bytes) = { let c = &self.prog.colls[cid].cols[k]; (c.off + idx * c.kind.size(), c.kind.size(), matches!(c.kind, CKind::StrBytes(_))) };
+            if !bytes { self.zero(a, n); }
+        }
         self.reset_children(cid, idx);
     }
     fn reset_children(&mut self, cid: usize, idx: usize) {
-        let kids: Vec<usize> = self.prog.colls[cid].children.iter().map(|k| k.1).collect();
-        for k in kids { self.reset_instance(k, idx); }
+        for k in 0..self.prog.colls[cid].children.len() { let child = self.prog.colls[cid].children[k].1; self.reset_instance(child, idx); }
     }
     /// Empty one instance of a collection, including what its items hold.
+    fn root(&self, mut cid: usize) -> usize { while let Some(p) = self.prog.colls[cid].parent { cid = p; } cid }
+    fn shrank(&mut self, cid: usize) { let r = self.root(cid); self.shrinks[r] += 1; }
     fn reset_instance(&mut self, cid: usize, inst: usize) {
+        self.shrank(cid);
         for f in 0..self.prog.colls[cid].hdr_fields() { let h = self.haddr(cid, f, inst); self.ensure(h, h + 4); } // a new parent's header may not be committed yet
         if !self.prog.colls[cid].children.is_empty() { for it in self.items(cid, inst) { self.reset_children(cid, it); } }
         if self.is_list(cid) { self.hset(cid, LEN, inst, 0); self.hset(cid, HEAD, inst, 0); return; }
@@ -198,6 +212,7 @@ impl Instance {
         let len = self.hget(cid, LEN, inst);
         if len == 0 { return bad("list is already empty"); }
         let idx = self.list_at(cid, inst, len - 1).unwrap();
+        self.shrank(cid);
         self.reset_children(cid, idx);
         self.hset(cid, LEN, inst, len - 1); Ok(())
     }
@@ -209,6 +224,7 @@ impl Instance {
         if !self.item_live(cid, idx) { return Err(Error::NotLive(format!("slot {} is not live", idx % self.cap(cid)))); }
         let cap = self.cap(cid);
         let (inst, s) = (idx / cap, idx % cap);
+        self.shrank(cid);
         self.reset_children(cid, idx);
         let wa = self.waddr(cid, inst, s / 64);
         let word = self.rd(wa, 8);
@@ -261,9 +277,37 @@ impl Instance {
     }
     fn store_str(&mut self, len_at: usize, bytes_at: usize, cap: usize, v: &Val) -> Result<(), Error> {
         let Val::Str(s) = v else { return bad("expected a string") };
-        if s.len() > cap { return Err(Error::TooLong(format!("string of {} bytes does not fit string<{}>", s.len(), cap))); }
-        self.put(bytes_at, s.as_bytes()); self.wr(len_at, 4, s.len() as u64); Ok(())
+        self.store_bytes_at(len_at, bytes_at, cap, s.as_bytes())
     }
+    fn store_bytes_at(&mut self, len_at: usize, bytes_at: usize, cap: usize, b: &[u8]) -> Result<(), Error> {
+        if b.len() > cap { return Err(Error::TooLong(format!("string of {} bytes does not fit string<{}>", b.len(), cap))); }
+        self.put(bytes_at, b); self.wr(len_at, 4, b.len() as u64); Ok(())
+    }
+    /// The bytes of a string field, read in place (no copy).
+    pub fn str_bytes(&self, l: &Loc) -> Option<&[u8]> {
+        match l {
+            Loc::Field(cid, idx, ci) if matches!(self.col_kind(*cid, *ci), CKind::StrLen) => { let a = self.caddr(*cid, *idx, *ci); let b = self.caddr(*cid, *idx, ci + 1); Some(self.bytes(b, self.rd(a, 4) as usize)) }
+            Loc::Plain(off, Ty::Str(_)) => Some(self.bytes(off + 4, self.rd(*off, 4) as usize)),
+            _ => None,
+        }
+    }
+    /// Store bytes into a string field or plain string.
+    pub fn store_str_bytes(&mut self, l: &Loc, b: &[u8]) -> Result<(), Error> {
+        match l {
+            Loc::Field(cid, idx, ci) => { let CKind::StrBytes(m) = *self.col_kind(*cid, ci + 1) else { return bad("not a string field") }; let (a, bb) = (self.caddr(*cid, *idx, *ci), self.caddr(*cid, *idx, ci + 1)); self.store_bytes_at(a, bb, m, b) }
+            Loc::Plain(off, Ty::Str(n)) => { let (off, n) = (*off, *n); self.store_bytes_at(off, off + 4, n, b) }
+            _ => bad("not a string"),
+        }
+    }
+    /// Follow a reference without building an error: `None` if the slot is not live or was reused.
+    pub fn deref_quiet(&self, target: usize, r: (usize, u32)) -> Option<usize> {
+        let (slot, g) = r;
+        let c = &self.prog.colls[target];
+        if slot >= c.cap || !self.item_live(target, slot) { return None; }
+        if c.checked() && self.rd(self.gaddr(target, slot), 4) as u32 != g { return None; }
+        Some(slot)
+    }
+    pub fn is_str(&self, l: &Loc) -> bool { matches!(l, Loc::Plain(_, Ty::Str(_))) || matches!(l, Loc::Field(c, _, ci) if matches!(self.col_kind(*c, *ci), CKind::StrLen)) }
     fn read_ref(&self, a: usize) -> Val { let slot1 = self.rd(a, 4) as usize; Val::Ref(if slot1 == 0 { None } else { Some((slot1 - 1, self.rd(a + 4, 4) as u32)) }) }
     fn store_ref(&mut self, a: usize, v: &Val) -> Result<(), Error> {
         match v { Val::Ref(None) => { self.wr(a, 8, 0); Ok(()) } Val::Ref(Some((s, g))) => { self.wr(a, 4, *s as u64 + 1); self.wr(a + 4, 4, *g as u64); Ok(()) } _ => bad("expected a reference") }
@@ -451,35 +495,36 @@ impl Instance {
     fn coll_ranges(&self, cid: usize, out: &mut Vec<(usize, usize)>) {
         let c = &self.prog.colls[cid];
         let cap = c.cap;
-        let mut runs: Vec<(usize, usize)> = Vec::with_capacity(2);
-        for inst in self.instances(cid) {
+        let insts = if c.parent.is_none() { None } else { Some(self.instances(cid)) }; // a top-level collection has one instance
+        for &inst in insts.as_deref().unwrap_or(&[0]) {
             for f in 0..c.hdr_fields() { let a = self.haddr(cid, f, inst); out.push((a, a + 4)); }
-            runs.clear();
+            let mut runs = [(0usize, 0usize); 2];
+            let mut nr = 0;
             let pool = !c.is_list();
             if pool {
                 let hw = self.hget(cid, HW, inst);
                 if c.checked() { let ever = self.hget(cid, EVER, inst); out.push((c.gen + 4 * inst * cap, c.gen + 4 * (inst * cap + ever))); }
                 if hw == 0 { continue; }
                 out.push((self.waddr(cid, inst, 0), self.waddr(cid, inst, 0) + hw.div_ceil(64) * 8));
-                runs.push((0, hw));
+                runs[0] = (0, hw); nr = 1;
             } else {
                 let (len, head) = (self.hget(cid, LEN, inst), self.hget(cid, HEAD, inst));
                 if len == 0 { continue; }
-                runs.push((head, (head + len).min(cap)));
-                if head + len > cap { runs.push((0, head + len - cap)); }
+                runs[0] = (head, (head + len).min(cap)); nr = 1;
+                if head + len > cap { runs[1] = (0, head + len - cap); nr = 2; }
             }
             for (ci, col) in c.cols.iter().enumerate() {
                 let sz = col.kind.size();
                 if let CKind::StrBytes(m) = col.kind {
                     let lc = &c.cols[ci - 1];
-                    for &(a, b) in &runs { for s in a..b {
+                    for &(a, b) in &runs[..nr] { for s in a..b {
                         if pool && !self.bit(cid, inst, s) { continue; }
                         let idx = inst * cap + s;
                         let l = self.rd(lc.off + 4 * idx, 4) as usize;
                         if l > 0 { out.push((col.off + idx * m, col.off + idx * m + l)); }
                     } }
                 } else {
-                    for &(a, b) in &runs { out.push((col.off + (inst * cap + a) * sz, col.off + (inst * cap + b) * sz)); }
+                    for &(a, b) in &runs[..nr] { out.push((col.off + (inst * cap + a) * sz, col.off + (inst * cap + b) * sz)); }
                 }
             }
         }
@@ -488,7 +533,7 @@ impl Instance {
     pub fn instances(&self, cid: usize) -> Vec<usize> {
         match self.prog.colls[cid].parent { None => vec![0], Some(p) => self.instances(p).into_iter().flat_map(|i| self.items(p, i)).collect() }
     }
-    fn descendants(&self, cid: usize, out: &mut Vec<usize>) { out.push(cid); for k in &self.prog.colls[cid].children { self.descendants(k.1, out); } }
+    fn coll_ranges_deep(&self, cid: usize, out: &mut Vec<(usize, usize)>) { self.coll_ranges(cid, out); for k in &self.prog.colls[cid].children { self.coll_ranges_deep(k.1, out); } }
     fn all_ranges(&self) -> Vec<(usize, usize)> {
         let mut r = vec![(0, self.prog.plain_end)];
         for cid in 0..self.prog.colls.len() { self.coll_ranges(cid, &mut r); }
@@ -502,16 +547,17 @@ impl Instance {
     /// Return pages that hold no live byte to the OS. Returns bytes released.
     pub fn trim(&mut self) -> usize {
         let t0 = std::time::Instant::now();
-        let r = self.all_ranges();
+        let mut r = std::mem::take(&mut self.ranges_buf);
+        r.push((0, self.prog.plain_end));
+        for cid in 0..self.prog.colls.len() { self.coll_ranges(cid, &mut r); }
         let pages = self.committed.len();
         self.release_dead(r, 0, pages, t0)
     }
     /// Trim one collection and its nested collections; cost follows their size, not the program's.
     pub fn trim_coll(&mut self, cid: usize) -> usize {
         let t0 = std::time::Instant::now();
-        let mut ids = Vec::new(); self.descendants(cid, &mut ids);
-        let mut r = Vec::new();
-        for k in ids { self.coll_ranges(k, &mut r); }
+        let mut r = std::mem::take(&mut self.ranges_buf);
+        self.coll_ranges_deep(cid, &mut r);
         let c = &self.prog.colls[cid];
         let (lo, hi) = (c.start / PAGE, up(c.end, PAGE) / PAGE);
         self.release_dead(r, lo, hi, t0)
@@ -519,9 +565,10 @@ impl Instance {
     pub fn trim_path(&mut self, path: &str) -> Result<usize, Error> { let (cid, _) = self.coll_at(path)?; Ok(self.trim_coll(cid)) }
 
     fn release_dead(&mut self, ranges: Vec<(usize, usize)>, lo: usize, hi: usize, t0: std::time::Instant) -> usize {
-        let mut live = vec![false; self.committed.len()];
+        let mut live = std::mem::take(&mut self.live_buf);
+        live.clear(); live.resize(self.committed.len(), false);
         let mut st = TrimStats { ranges: ranges.len(), ..Default::default() };
-        for (a, b) in ranges { if b > a { for p in a / PAGE..=(b - 1) / PAGE { live[p] = true; } } }
+        for &(a, b) in &ranges { if b > a { for p in a / PAGE..=(b - 1) / PAGE { live[p] = true; } } }
         st.scan_ns = t0.elapsed().as_nanos();
         let t1 = std::time::Instant::now();
         let (mut freed, mut p) = (0, lo);
@@ -532,11 +579,14 @@ impl Instance {
                 os::decommit(unsafe { self.base.add(s * PAGE) }, (p - s) * PAGE);
                 st.os_calls += 1;
                 for q in s..p { self.committed[q] = false; }
+                self.committed_pages -= p - s;
                 freed += (p - s) * PAGE;
             } else { p += 1; }
         }
         st.os_ns = t1.elapsed().as_nanos();
         self.last_trim = st;
+        self.live_buf = live;
+        let mut r = ranges; r.clear(); self.ranges_buf = r;
         freed
     }
 
@@ -551,6 +601,53 @@ impl Instance {
         }
         rows
     }
+}
+
+/// A collection whose trim released nothing is tried again only after this many frees, pops or clears in it.
+pub const RETRY_AFTER_SHRINKS: u64 = 256;
+
+/// Memory-pressure policy (DESIGN.md concept 9). Marks are committed bytes.
+pub struct Pressure {
+    pub soft: usize,
+    pub hard: usize,
+    pub refusing: bool,
+    stuck: Vec<u64>, // per collection: its shrink count when a trim released nothing (skip until something shrinks)
+    pub trims: usize,
+    pub full_trims: usize,
+    pub freed: usize,
+}
+impl Pressure {
+    pub fn new(inst: &Instance, soft: usize, hard: usize) -> Pressure { Pressure { soft, hard, refusing: false, stuck: vec![u64::MAX; inst.prog.colls.len()], trims: 0, full_trims: 0, freed: 0 } }
+}
+
+impl Instance {
+    /// Top-level collection with the most committed memory that is worth trying: never trimmed without result,
+    /// or shrunk enough since. The counter check comes first so a steady state costs no page counting.
+    fn trim_candidate(&self, p: &Pressure) -> Option<usize> {
+        let mut best: Option<(usize, usize)> = None;
+        for (cid, c) in self.prog.colls.iter().enumerate() {
+            if c.parent.is_some() { continue; }
+            let worth = p.stuck[cid] == u64::MAX || self.shrinks[cid] >= p.stuck[cid] + RETRY_AFTER_SHRINKS;
+            if !worth { continue; }
+            let cc = self.coll_committed(cid);
+            if cc > 0 && best.map_or(true, |b| cc > b.1) { best = Some((cid, cc)); }
+        }
+        best.map(|b| b.0)
+    }
+    fn trim_one(&mut self, p: &mut Pressure, cid: usize) {
+        let freed = self.trim_coll(cid);
+        p.trims += 1; p.freed += freed;
+        p.stuck[cid] = if freed == 0 { self.shrinks[cid] } else { u64::MAX };
+    }
+    /// Call at an epoch boundary (end of a request or tick). Below the soft mark: nothing. Above it: trim the largest
+    /// collection once. Above the hard mark: trim everything, and refuse new work while still above it.
+    pub fn relieve(&mut self, p: &mut Pressure) {
+        if self.committed() > p.soft { if let Some(cid) = self.trim_candidate(p) { self.trim_one(p, cid); } }
+        if self.committed() > p.hard && !p.refusing { p.freed += self.trim(); p.full_trims += 1; }
+        p.refusing = self.committed() > p.hard;
+    }
+    /// Quiet time: release slack from the largest collection even below the soft mark, so a past burst does not stay committed.
+    pub fn idle(&mut self, p: &mut Pressure) { if let Some(cid) = self.trim_candidate(p) { self.trim_one(p, cid); } p.refusing = self.committed() > p.hard; }
 }
 
 impl Drop for Instance { fn drop(&mut self) { os::release(self.base); } }
@@ -684,5 +781,19 @@ mod tests {
         i.push("rs[0].m").unwrap();
         assert_eq!(i.get("rs[0].m").unwrap(), "len 1");
         assert!(i.committed() <= 8 * PAGE);
+    }
+
+    #[test]
+    fn pressure_returns_burst_memory_and_does_not_rescan_without_new_frees() {
+        let mut i = inst("struct J { name: string<64>; } global jobs: pool<J, 100000>;");
+        let mut p = Pressure::new(&i, 64 * 1024, 1 << 30);
+        let c = i.prog.coll_of("jobs").unwrap();
+        let n = i.col(c, "name").unwrap();
+        let idxs: Vec<usize> = (0..50_000).map(|k| { let x = i.push_item(c, 0).unwrap(); i.field_set(c, x, n, &Val::Str(format!("job {}", k))).unwrap(); x }).collect();
+        i.relieve(&mut p); i.relieve(&mut p); i.relieve(&mut p);
+        assert_eq!(p.trims, 1, "nothing was freed, so only the first relieve scans");
+        for x in idxs { i.free_item(c, x).unwrap(); }
+        i.relieve(&mut p);
+        assert!(i.committed() <= 3 * PAGE, "burst memory came back: {}", i.committed());
     }
 }

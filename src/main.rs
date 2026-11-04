@@ -1,3 +1,4 @@
+mod alloc_count;
 mod exp;
 mod lang;
 mod layout;
@@ -9,15 +10,19 @@ use runtime::{Error, Instance};
 
 const MB: usize = 1 << 20;
 
+#[global_allocator]
+static ALLOC: alloc_count::Counting = alloc_count::Counting;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(|s| s.as_str()) == Some("exp") { return if args.get(1).map(|s| s.as_str()) == Some("chat") { exp::chat_scan() } else if args.get(1).map(|s| s.as_str()) == Some("access") { exp::access_cost() } else if args.get(1).map(|s| s.as_str()) == Some("trim") { { exp::trim_cost(); exp::scoped_cost() } } else { exp::run() }; }
+    if args.first().map(|s| s.as_str()) == Some("exp") { return if args.get(1).map(|s| s.as_str()) == Some("pressure") { exp::pressure() } else if args.get(1).map(|s| s.as_str()) == Some("chat") { exp::chat_scan() } else if args.get(1).map(|s| s.as_str()) == Some("access") { exp::access_cost() } else if args.get(1).map(|s| s.as_str()) == Some("trim") { { exp::trim_cost(); exp::scoped_cost() } } else { exp::run() }; }
     if matches!(args.first().map(|s| s.as_str()), Some("serve") | Some("bench")) {
         let (state, api) = (args.get(1).expect("state file"), args.get(2).expect("api file"));
         let prog = layout::Program::parse(&std::fs::read_to_string(state).expect("read state")).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
         let inst = Instance::start(prog, 1024 * MB).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
         let mut server = serve::Server::new(inst, &std::fs::read_to_string(api).expect("read api")).unwrap_or_else(|e| { eprintln!("error in api file: {}", e); std::process::exit(1) });
         let opt = |name: &str, d: usize| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(d);
+        if args.iter().any(|a| a == "--soft") { let p = runtime::Pressure::new(&server.inst, opt("--soft", 0) * MB, opt("--hard", usize::MAX / MB) * MB); server.pressure = Some(p); }
         if args[0] == "bench" { serve::bench(&mut server, opt("--n", 2000)); } else { serve::serve(&mut server, opt("--port", 8080) as u16).expect("serve"); }
         return;
     }

@@ -1,169 +1,266 @@
 //! Runs endpoints against declared state: an interpreter, a small HTTP/1.1 server, and an in-process benchmark.
-//! Each request is atomic: the runtime records every write, and a failed request is rolled back. Frees happen only
-//! when the request succeeds.
+//!
+//! Each request is atomic: the runtime records every write, and a failed request is rolled back; frees happen only when
+//! the request succeeds. Each request also has an epoch: its strings live in a fixed text area and its response in a
+//! fixed output area, both carved from a declared reservation and emptied per request. Locals, arguments and item
+//! lists use buffers kept from earlier requests, so a warm request does no heap allocation.
 use crate::lang::*;
 use crate::layout::{CKind, Ty};
 use crate::os;
 use crate::region::{Scratch, Space};
-use crate::runtime::{Error, Instance, Loc, Val};
+use crate::runtime::{Error, Instance, Loc, Pressure, Val};
+use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::time::Instant;
 
+/// A string in the request's text area.
+#[derive(Clone, Copy, Debug)]
+struct Txt { off: u32, len: u32 }
+
 #[derive(Clone, Debug)]
 enum Value {
-    Null, Int(i64), Float(f64), Bool(bool), Str(String),
+    Null, Int(i64), Float(f64), Bool(bool), Str(Txt),
     Item(usize, usize),            // collection, item index
     Coll(usize, usize),            // collection, instance
-    Part(usize, usize, String),    // part of an item: a nested struct's field path prefix
+    Part(usize, usize, Txt),       // part of an item: a nested struct's field path prefix
     ArrField(usize, usize, usize), // an array column of an item
     Plain(usize, Ty),              // a plain struct or fixed array at an offset
 }
 
-enum Ctl { Done(u16), Fail(u16, String), Return(Value), Err(Error) }
-impl From<Error> for Ctl { fn from(e: Error) -> Ctl { Ctl::Err(e) } }
-type R<T> = Result<T, Ctl>;
-fn fail<T>(code: u16, m: impl Into<String>) -> R<T> { Err(Ctl::Fail(code, m.into())) }
+enum Ctl<'a> { Done(u16), Fail(u16, Cow<'a, str>), Return(Value), Err(Error), Dead }
+impl<'a> From<Error> for Ctl<'a> { fn from(e: Error) -> Self { Ctl::Err(e) } }
+type R<'a, T> = Result<T, Ctl<'a>>;
+fn fail<'a, T>(code: u16, m: impl Into<Cow<'a, str>>) -> R<'a, T> { Err(Ctl::Fail(code, m.into())) }
 
-/// Response bytes live in a fixed block inside a declared reservation, reused by every request.
-struct Buf { ptr: *mut u8, cap: usize, len: usize }
-impl Buf {
-    fn push(&mut self, s: &[u8]) -> bool {
-        if self.len + s.len() > self.cap { return false; }
-        unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), self.ptr.add(self.len), s.len()) };
-        self.len += s.len(); true
+/// A fixed block from the declared request epoch, filled from the start and emptied per request.
+struct Area { ptr: *mut u8, cap: usize, len: usize }
+impl Area {
+    fn push(&mut self, b: &[u8]) -> Option<Txt> {
+        if self.len + b.len() > self.cap { return None; }
+        unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), self.ptr.add(self.len), b.len()) };
+        let t = Txt { off: self.len as u32, len: b.len() as u32 };
+        self.len += b.len(); Some(t)
     }
-    fn text(&self) -> String { String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(self.ptr, self.len) }).into_owned() }
+    /// Copy an earlier string to the end (for concatenation).
+    fn dup(&mut self, t: Txt) -> Option<()> {
+        if self.len + t.len as usize > self.cap { return None; }
+        unsafe { std::ptr::copy_nonoverlapping(self.ptr.add(t.off as usize), self.ptr.add(self.len), t.len as usize) };
+        self.len += t.len as usize; Some(())
+    }
+    fn get(&self, t: Txt) -> &[u8] { unsafe { std::slice::from_raw_parts(self.ptr.add(t.off as usize), t.len as usize) } }
+    fn all(&self) -> &[u8] { unsafe { std::slice::from_raw_parts(self.ptr, self.len) } }
+    fn since(&self, start: usize) -> Txt { Txt { off: start as u32, len: (self.len - start) as u32 } }
+}
+impl std::fmt::Write for Area { fn write_str(&mut self, s: &str) -> std::fmt::Result { self.push(s.as_bytes()).map(|_| ()).ok_or(std::fmt::Error) } }
+
+/// Write `s` as a JSON string.
+fn escaped(out: &mut Area, s: &[u8]) -> bool {
+    if out.push(b"\"").is_none() { return false; }
+    let mut start = 0;
+    for (i, &c) in s.iter().enumerate() {
+        let esc: &[u8] = match c { b'"' => b"\\\"", b'\\' => b"\\\\", b'\n' => b"\\n", b'\r' => b"\\r", b'\t' => b"\\t", c if c < 0x20 => b"", _ => continue };
+        if out.push(&s[start..i]).is_none() { return false; }
+        if esc.is_empty() { const HEX: &[u8] = b"0123456789abcdef"; if out.push(&[b'\\', b'u', b'0', b'0', HEX[(c >> 4) as usize], HEX[(c & 15) as usize]]).is_none() { return false; } }
+        else if out.push(esc).is_none() { return false; }
+        start = i + 1;
+    }
+    out.push(&s[start..]).is_some() && out.push(b"\"").is_some()
 }
 
-struct Req { params: Vec<(String, String)>, query: Vec<(String, String)>, headers: Vec<(String, String)>, json: Vec<(String, Value)> }
+/// Flat JSON object of strings, numbers, booleans and null, with strings copied into the text area. Nested values end parsing.
+fn parse_json(s: &[u8], text: &mut Area, out: &mut Vec<(Txt, Value)>) -> bool {
+    out.clear();
+    let mut i = 0;
+    let ws = |i: &mut usize| while *i < s.len() && s[*i].is_ascii_whitespace() { *i += 1; };
+    ws(&mut i);
+    if s.get(i) != Some(&b'{') { return true; }
+    i += 1;
+    let string = |i: &mut usize, text: &mut Area| -> Option<Txt> {
+        if s.get(*i) != Some(&b'"') { return None; }
+        *i += 1;
+        let start = text.len;
+        while *i < s.len() && s[*i] != b'"' {
+            if s[*i] == b'\\' && *i + 1 < s.len() {
+                *i += 1;
+                if s[*i] == b'u' {
+                    let hex = |at: usize| s.get(at..at + 4).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u32::from_str_radix(h, 16).ok());
+                    let mut cp = hex(*i + 1)?; *i += 4;
+                    if (0xD800..0xDC00).contains(&cp) && s.get(*i + 1..*i + 3) == Some(b"\\u".as_slice()) { // surrogate pair
+                        if let Some(lo) = hex(*i + 3).filter(|lo| (0xDC00..0xE000).contains(lo)) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); *i += 6; }
+                    }
+                    let mut b = [0u8; 4];
+                    text.push(char::from_u32(cp).unwrap_or('\u{FFFD}').encode_utf8(&mut b).as_bytes())?;
+                } else {
+                    let c = match s[*i] { b'n' => b'\n', b't' => b'\t', b'r' => b'\r', b'b' => 8, b'f' => 12, c => c };
+                    text.push(&[c])?;
+                }
+            } else {
+                let run = *i; while *i < s.len() && s[*i] != b'"' && s[*i] != b'\\' { *i += 1; }
+                text.push(&s[run..*i])?; continue;
+            }
+            *i += 1;
+        }
+        *i += 1;
+        Some(text.since(start))
+    };
+    loop {
+        ws(&mut i);
+        let Some(k) = string(&mut i, text) else { break };
+        ws(&mut i); if s.get(i) != Some(&b':') { break; } i += 1; ws(&mut i);
+        let v = match s.get(i) {
+            Some(b'"') => match string(&mut i, text) { Some(t) => Value::Str(t), None => return false },
+            Some(c) if c.is_ascii_digit() || *c == b'-' => {
+                let st = i; i += 1; while i < s.len() && (s[i].is_ascii_digit() || s[i] == b'.') { i += 1; }
+                let t = std::str::from_utf8(&s[st..i]).unwrap_or("");
+                match t.parse::<i64>() { Ok(n) => Value::Int(n), Err(_) => t.parse::<f64>().map(Value::Float).unwrap_or(Value::Null) }
+            }
+            Some(b't') => { i += 4; Value::Bool(true) }
+            Some(b'f') => { i += 5; Value::Bool(false) }
+            Some(b'n') => { i += 4; Value::Null }
+            _ => break,
+        };
+        out.push((k, v));
+        ws(&mut i);
+        if s.get(i) == Some(&b',') { i += 1; } else { break; }
+    }
+    true
+}
+
+/// Buffers reused by every request (allocated at startup, grown only if a request needs more).
+struct Bufs { vars: Vec<(&'static str, Value, bool)>, args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>, params: Vec<(usize, Txt)>, query: Vec<(Txt, Txt)>, json: Vec<(Txt, Value)> }
+impl Bufs {
+    /// Placeholder while a request holds the real buffers (allocates nothing).
+    fn empty() -> Bufs { Bufs { vars: Vec::new(), args: Vec::new(), frees: Vec::new(), idx: Vec::new(), keyed: Vec::new(), params: Vec::new(), query: Vec::new(), json: Vec::new() } }
+    fn startup() -> Bufs {
+        Bufs { vars: Vec::with_capacity(256), args: Vec::with_capacity(64), frees: Vec::with_capacity(64), idx: (0..8).map(|_| Vec::with_capacity(1024)).collect(),
+            keyed: (0..4).map(|_| Vec::with_capacity(1024)).collect(), params: Vec::with_capacity(8), query: Vec::with_capacity(16), json: Vec::with_capacity(32) }
+    }
+}
+/// The locals list holds names borrowed from the endpoint code; it is emptied before its lifetime changes.
+fn recycle<'x, 'y>(mut v: Vec<(&'x str, Value, bool)>) -> Vec<(&'y str, Value, bool)> { v.clear(); unsafe { std::mem::transmute(v) } }
 
 pub struct Server {
     pub inst: Instance,
     pub api: Api,
-    buf: Buf,
+    out: Area,
+    text: Area,
+    bufs: Bufs,
     pub clock: Option<i64>, // fixed time in ms, for tests and benchmarks; otherwise the system clock
+    pub pressure: Option<Pressure>,
     _scratch: Scratch,
     _space: Space,
 }
 
 pub const RESPONSE_CAP: usize = 256 * 1024;
+pub const TEXT_CAP: usize = 256 * 1024;
 
 impl Server {
     pub fn new(inst: Instance, api_src: &str) -> Result<Server, String> {
         let api = parse(api_src)?;
-        let mut space = Space::new(2 * RESPONSE_CAP);
-        let region = space.region(RESPONSE_CAP + 4096, 64 * 1024).map_err(|_| "response region".to_string())?;
+        let mut space = Space::new(RESPONSE_CAP + TEXT_CAP + 8192);
+        let region = space.region(RESPONSE_CAP + TEXT_CAP + 4096, 64 * 1024).map_err(|_| "request epoch region".to_string())?;
         let mut scratch = Scratch::new(region);
-        let ptr = scratch.alloc(RESPONSE_CAP).map_err(|_| "response buffer".to_string())?;
-        Ok(Server { inst, api, buf: Buf { ptr, cap: RESPONSE_CAP, len: 0 }, clock: None, _scratch: scratch, _space: space })
+        let out = scratch.alloc(RESPONSE_CAP).map_err(|_| "response area".to_string())?;
+        let text = scratch.alloc(TEXT_CAP).map_err(|_| "text area".to_string())?;
+        Ok(Server { inst, api, out: Area { ptr: out, cap: RESPONSE_CAP, len: 0 }, text: Area { ptr: text, cap: TEXT_CAP, len: 0 }, bufs: Bufs::startup(), clock: None, pressure: None, _scratch: scratch, _space: space })
     }
 
-    /// Handle one request. `target` is the path plus optional `?query`.
+    /// The last response body.
+    pub fn response(&self) -> &str { std::str::from_utf8(self.out.all()).unwrap_or("") }
+
+    /// Handle one request and return its status and body.
     pub fn handle(&mut self, method: &str, target: &str, headers: &[(String, String)], body: &str) -> (u16, String) {
-        let (path, qs) = target.split_once('?').unwrap_or((target, ""));
-        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut hit = None;
-        'eps: for (i, e) in self.api.eps.iter().enumerate() {
-            if e.method != method || e.segs.len() != parts.len() { continue; }
-            let mut params = Vec::new();
-            for (s, p) in e.segs.iter().zip(&parts) {
-                match s { Seg::Lit(l) => if l != p { continue 'eps; }, Seg::Param(n) => params.push((n.clone(), p.to_string())) }
-            }
-            hit = Some((i, params)); break;
-        }
-        let Some((ei, params)) = hit else { return (404, "{\"error\":\"no such endpoint\"}".into()) };
-        let query = qs.split('&').filter(|s| !s.is_empty()).map(|kv| { let (k, v) = kv.split_once('=').unwrap_or((kv, "")); (k.to_string(), v.to_string()) }).collect();
-        let req = Req { params, query, headers: headers.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect(), json: parse_json(body) };
-        self.buf.len = 0; // the request's response space starts empty
-        let now = self.clock.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0));
-        let Server { inst, api, buf, .. } = self;
-        inst.begin();
-        let mut run = Run { inst, api, req: &req, vars: Vec::new(), frame: 0, depth: 0, buf, now, frees: Vec::new() };
-        let res = run.exec(&api.eps[ei].body);
-        let frees = std::mem::take(&mut run.frees);
-        let ok = matches!(res, Ok(()) | Err(Ctl::Done(_)) | Err(Ctl::Return(_)));
-        let out = match res {
-            Ok(()) | Err(Ctl::Return(_)) => (204, String::new()),
-            Err(Ctl::Done(code)) => (code, run.buf.text()),
-            Err(Ctl::Fail(code, m)) => (code, err_json(&m)),
-            Err(Ctl::Err(Error::Full(m))) => (503, err_json(&format!("capacity: {}", m))),
-            Err(Ctl::Err(Error::TooLong(m))) => (413, err_json(&m)),
-            Err(Ctl::Err(Error::NotLive(m))) | Err(Ctl::Err(Error::Stale(m))) => (404, err_json(&m)),
-            Err(Ctl::Err(Error::Bad(m))) => (400, err_json(&m)),
-        };
-        if ok {
-            for (c, i) in frees { let _ = self.inst.free_item(c, i); }
-            self.inst.commit_changes();
-        } else {
-            self.inst.rollback();
-        }
-        out
+        let c = self.handle_raw(method, target, headers, body);
+        (c, self.response().to_string())
     }
-}
 
-fn err_json(m: &str) -> String { format!("{{\"error\":{}}}", quote(m)) }
+    fn route(&self, method: &str, path: &str) -> Option<usize> {
+        let n = path.split('/').filter(|s| !s.is_empty()).count();
+        'eps: for (i, e) in self.api.eps.iter().enumerate() {
+            if e.method != method || e.segs.len() != n { continue; }
+            for (s, p) in e.segs.iter().zip(path.split('/').filter(|s| !s.is_empty())) { if let Seg::Lit(l) = s { if l != p { continue 'eps; } } }
+            return Some(i);
+        }
+        None
+    }
+    fn out_err(out: &mut Area, m: &str) { out.len = 0; let _ = out.push(b"{\"error\":"); let _ = escaped(out, m.as_bytes()); let _ = out.push(b"}"); }
+
+    /// Handle one request; the body is left in the response area (see `response`).
+    pub fn handle_raw(&mut self, method: &str, target: &str, headers: &[(String, String)], body: &str) -> u16 {
+        self.out.len = 0; self.text.len = 0; // the request epoch starts empty
+        let (path, qs) = target.split_once('?').unwrap_or((target, ""));
+        let Some(ei) = self.route(method, path) else { Self::out_err(&mut self.out, "no such endpoint"); return 404 };
+        if self.pressure.as_ref().map_or(false, |p| p.refusing) && method != "GET" && method != "DELETE" { Self::out_err(&mut self.out, "memory pressure: try again later"); return 503; }
+        let mut b = std::mem::replace(&mut self.bufs, Bufs::empty());
+        let Server { inst, api, out, text, clock, .. } = self;
+        let ep = &api.eps[ei];
+        b.params.clear(); b.query.clear();
+        let mut fits = true;
+        for (k, (s, p)) in ep.segs.iter().zip(path.split('/').filter(|s| !s.is_empty())).enumerate() {
+            if let Seg::Param(_) = s { match text.push(p.as_bytes()) { Some(t) => b.params.push((k, t)), None => fits = false } }
+        }
+        for kv in qs.split('&').filter(|s| !s.is_empty()) {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            match (text.push(k.as_bytes()), text.push(v.as_bytes())) { (Some(k), Some(v)) => b.query.push((k, v)), _ => fits = false }
+        }
+        fits &= parse_json(body.as_bytes(), text, &mut b.json);
+        if !fits { Self::out_err(out, "request too large for the request text area"); self.bufs = b; return 413; }
+        let now = clock.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0));
+        inst.begin();
+        let mut run = Run {
+            inst, api, ep, headers, params: &b.params, query: &b.query, json: &b.json, text, out, now,
+            vars: recycle(std::mem::take(&mut b.vars)), frame: 0, depth: 0,
+            args: std::mem::take(&mut b.args), frees: std::mem::take(&mut b.frees), idx: std::mem::take(&mut b.idx), keyed: std::mem::take(&mut b.keyed),
+        };
+        let res = run.exec(&ep.body);
+        let (code, ok) = match res {
+            Ok(()) | Err(Ctl::Return(_)) => { run.out.len = 0; (204, true) }
+            Err(Ctl::Done(code)) => (code, true),
+            Err(Ctl::Fail(code, m)) => { Self::out_err(run.out, &m); (code, false) }
+            Err(Ctl::Err(Error::Full(m))) => { Self::out_err(run.out, &format!("capacity: {}", m)); (503, false) }
+            Err(Ctl::Err(Error::TooLong(m))) => { Self::out_err(run.out, &m); (413, false) }
+            Err(Ctl::Err(Error::NotLive(m))) | Err(Ctl::Err(Error::Stale(m))) => { Self::out_err(run.out, &m); (404, false) }
+            Err(Ctl::Err(Error::Bad(m))) => { Self::out_err(run.out, &m); (400, false) }
+            Err(Ctl::Dead) => { Self::out_err(run.out, "reference is not live"); (404, false) }
+        };
+        let Run { vars, args, mut frees, idx, keyed, .. } = run;
+        b.vars = recycle(vars); b.args = args; b.args.clear(); b.idx = idx; b.keyed = keyed; // ends the borrow of the endpoint code
+        if ok { for &(c, i) in &frees { let _ = self.inst.free_item(c, i); } self.inst.commit_changes(); } else { self.inst.rollback(); }
+        frees.clear(); b.frees = frees;
+        self.bufs = b;
+        if let Some(p) = self.pressure.as_mut() { self.inst.relieve(p); }
+        code
+    }
+
+    /// Quiet time: release slack (see `Instance::idle`).
+    pub fn idle(&mut self) { if let Some(p) = self.pressure.as_mut() { self.inst.idle(p); } }
+}
 
 struct Run<'a> {
-    inst: &'a mut Instance, api: &'a Api, req: &'a Req,
+    inst: &'a mut Instance, api: &'a Api, ep: &'a Endpoint, headers: &'a [(String, String)],
+    params: &'a [(usize, Txt)], query: &'a [(Txt, Txt)], json: &'a [(Txt, Value)],
+    text: &'a mut Area, out: &'a mut Area, now: i64,
     vars: Vec<(&'a str, Value, bool)>, // name, value, mutable
     frame: usize, depth: usize,
-    buf: &'a mut Buf, now: i64,
-    frees: Vec<(usize, usize)>,
+    args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>,
 }
 
-fn quote(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
-    o.push('"');
-    for c in s.chars() { match c { '"' => o.push_str("\\\""), '\\' => o.push_str("\\\\"), '\n' => o.push_str("\\n"), '\r' => o.push_str("\\r"), '\t' => o.push_str("\\t"), c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)), c => o.push(c) } }
-    o.push('"'); o
-}
-
-/// Flat JSON object of strings, numbers, booleans and null. Nested values are ignored.
-fn parse_json(s: &str) -> Vec<(String, Value)> {
-    let b: Vec<char> = s.chars().collect();
-    let (mut i, mut out) = (0, Vec::new());
-    let ws = |i: &mut usize| while *i < b.len() && b[*i].is_whitespace() { *i += 1; };
-    ws(&mut i);
-    if b.get(i) != Some(&'{') { return out; }
-    i += 1;
-    let string = |i: &mut usize| -> Option<String> {
-        if b.get(*i) != Some(&'"') { return None; }
-        *i += 1; let mut o = String::new();
-        while *i < b.len() && b[*i] != '"' {
-            if b[*i] == '\\' && *i + 1 < b.len() { *i += 1; o.push(match b[*i] { 'n' => '\n', 't' => '\t', 'r' => '\r', c => c }); } else { o.push(b[*i]); }
-            *i += 1;
-        }
-        *i += 1; Some(o)
-    };
-    loop {
-        ws(&mut i);
-        let Some(k) = string(&mut i) else { break };
-        ws(&mut i); if b.get(i) != Some(&':') { break; } i += 1; ws(&mut i);
-        let v = match b.get(i) {
-            Some('"') => match string(&mut i) { Some(s) => Value::Str(s), None => break },
-            Some(c) if c.is_ascii_digit() || *c == '-' => { let st = i; i += 1; while i < b.len() && (b[i].is_ascii_digit() || b[i] == '.') { i += 1; } let t: String = b[st..i].iter().collect(); match t.parse::<i64>() { Ok(n) => Value::Int(n), Err(_) => t.parse::<f64>().map(Value::Float).unwrap_or(Value::Null) } }
-            Some('t') => { i += 4; Value::Bool(true) }
-            Some('f') => { i += 5; Value::Bool(false) }
-            Some('n') => { i += 4; Value::Null }
-            _ => break,
-        };
-        out.push((k, v));
-        ws(&mut i);
-        if b.get(i) == Some(&',') { i += 1; } else { break; }
-    }
-    out
-}
+fn from_scalar(v: Val) -> Value { match v { Val::Int(i) => Value::Int(i), Val::Float(f) => Value::Float(f), Val::Bool(b) => Value::Bool(b), _ => Value::Null } }
 
 impl<'a> Run<'a> {
+    fn txt(&mut self, b: &[u8]) -> R<'a, Txt> { self.text.push(b).ok_or(Ctl::Fail(507, Cow::Borrowed("request text area is full"))) }
     fn lookup(&self, n: &str) -> Option<Value> { self.vars[self.frame..].iter().rev().find(|v| v.0 == n).map(|v| v.1.clone()) }
+    fn arg(&self, base: usize, i: usize) -> Value { self.args.get(base + i).cloned().unwrap_or(Value::Null) }
+    fn arg_txt(&self, base: usize, i: usize) -> R<'a, Txt> { match self.args.get(base + i) { Some(Value::Str(t)) => Ok(*t), _ => fail(500, "expected a string argument") } }
 
-    /// A value read from state. References are followed: a dead one is a `NotLive`/`Stale` error, a null one is `Null`.
-    fn from_val(&self, v: Val, target: Option<usize>) -> R<Value> {
-        Ok(match v {
-            Val::Int(i) => Value::Int(i), Val::Float(f) => Value::Float(f), Val::Bool(b) => Value::Bool(b), Val::Str(s) => Value::Str(s),
-            Val::Ref(None) => Value::Null,
-            Val::Ref(Some(r)) => { let t = target.expect("reference target"); Value::Item(t, self.inst.deref(t, r)?) }
-        })
+    /// A string location's bytes, copied into the text area (values have value semantics).
+    fn read_str(&mut self, l: &Loc) -> R<'a, Value> {
+        let b = self.inst.str_bytes(l).unwrap_or(&[]);
+        self.text.push(b).map(Value::Str).ok_or(Ctl::Fail(507, Cow::Borrowed("request text area is full")))
+    }
+    fn follow(&self, v: Val, target: usize) -> R<'a, Value> {
+        match v { Val::Ref(None) => Ok(Value::Null), Val::Ref(Some(r)) => self.inst.deref_quiet(target, r).map(|i| Value::Item(target, i)).ok_or(Ctl::Dead), o => Ok(from_scalar(o)) }
     }
     fn ref_target(&self, l: &Loc) -> Option<usize> {
         match l {
@@ -172,35 +269,40 @@ impl<'a> Run<'a> {
             _ => None,
         }
     }
-    /// Turn a location into a value: read scalars and strings, keep structs, collections and arrays as places.
-    fn loc_value(&self, l: Loc) -> R<Value> {
+    /// Turn a location into a value: read scalars and strings, follow references, keep structs, collections and arrays as places.
+    fn loc_value(&mut self, l: Loc) -> R<'a, Value> {
         match l {
             Loc::Coll(c, i) => Ok(Value::Coll(c, i)),
-            Loc::Item(c, i, p) => Ok(if p.is_empty() { Value::Item(c, i) } else { Value::Part(c, i, p) }),
+            Loc::Item(c, i, p) => if p.is_empty() { Ok(Value::Item(c, i)) } else { let t = self.txt(p.as_bytes())?; Ok(Value::Part(c, i, t)) },
             Loc::Field(c, i, ci) if matches!(self.inst.col_kind(c, ci), CKind::Arr(..)) => Ok(Value::ArrField(c, i, ci)),
             Loc::Plain(off, t @ (Ty::Struct(_) | Ty::Arr(..))) => Ok(Value::Plain(off, t)),
-            l => { let t = self.ref_target(&l); let v = self.inst.loc_get(&l)?; self.from_val(v, t) }
+            l if self.inst.is_str(&l) => self.read_str(&l),
+            l => { let t = self.ref_target(&l); let v = self.inst.loc_get(&l)?; match t { Some(t) => self.follow(v, t), None => Ok(from_scalar(v)) } }
         }
     }
-    fn field(&self, base: Value, f: &str) -> R<Value> {
+    fn part_loc(&self, c: usize, i: usize, p: Txt) -> Loc { Loc::Item(c, i, String::from_utf8_lossy(self.text.get(p)).into_owned()) }
+    fn field(&mut self, base: Value, f: &str) -> R<'a, Value> {
         match base {
             Value::Item(c, i) => {
                 if let Some(ci) = self.inst.col(c, f) { // the common case: one column, no path building
                     return match self.inst.col_kind(c, ci) {
                         CKind::Arr(..) => Ok(Value::ArrField(c, i, ci)),
-                        CKind::Ref(t) => { let t = *t; let v = self.inst.field_get(c, i, ci)?; self.from_val(v, Some(t)) }
-                        _ => Ok(self.from_val(self.inst.field_get(c, i, ci)?, None)?),
+                        CKind::StrLen => self.read_str(&Loc::Field(c, i, ci)),
+                        CKind::Ref(t) => { let t = *t; let v = self.inst.field_get(c, i, ci)?; self.follow(v, t) }
+                        _ => Ok(from_scalar(self.inst.field_get(c, i, ci)?)),
                     };
                 }
-                self.loc_value(self.inst.step_field(Loc::Item(c, i, String::new()), f)?)
+                if let Some(k) = self.inst.child(c, f) { return Ok(Value::Coll(k, i)); } // a nested collection of this item
+                let l = self.inst.step_field(Loc::Item(c, i, String::new()), f)?;
+                self.loc_value(l)
             }
-            Value::Part(c, i, p) => self.loc_value(self.inst.step_field(Loc::Item(c, i, p), f)?),
-            Value::Plain(off, t) => self.loc_value(self.inst.step_field(Loc::Plain(off, t), f)?),
-            Value::Null => Err(Error::NotLive(format!("`.{}` of a null reference", f)).into()),
+            Value::Part(c, i, p) => { let l = self.inst.step_field(self.part_loc(c, i, p), f)?; self.loc_value(l) }
+            Value::Plain(off, t) => { let l = self.inst.step_field(Loc::Plain(off, t), f)?; self.loc_value(l) }
+            Value::Null => Err(Ctl::Dead),
             _ => fail(500, format!("`.{}` needs an item or a state struct", f)),
         }
     }
-    fn index(&self, base: Value, k: Value) -> R<Value> {
+    fn index(&mut self, base: Value, k: Value) -> R<'a, Value> {
         let Value::Int(k) = k else { return fail(400, "an index must be an integer") };
         if k < 0 { return Err(Error::NotLive(format!("index {} is negative", k)).into()); }
         let l = match base {
@@ -209,15 +311,17 @@ impl<'a> Run<'a> {
             Value::ArrField(c, i, ci) => Loc::Field(c, i, ci),
             _ => return fail(500, "cannot index this value"),
         };
-        self.loc_value(self.inst.step_index(l, k as usize, None)?)
+        let l = self.inst.step_index(l, k as usize, None)?;
+        self.loc_value(l)
     }
     /// The place an assignment writes to.
-    fn place(&mut self, e: &Expr) -> R<Loc> {
+    fn place(&mut self, e: &'a Expr) -> R<'a, Loc> {
         match e {
             Expr::Field(b, f) => match self.eval(b)? {
                 Value::Item(c, i) => Ok(match self.inst.col(c, f) { Some(ci) => Loc::Field(c, i, ci), None => self.inst.step_field(Loc::Item(c, i, String::new()), f)? }),
-                Value::Part(c, i, p) => Ok(self.inst.step_field(Loc::Item(c, i, p), f)?),
+                Value::Part(c, i, p) => Ok(self.inst.step_field(self.part_loc(c, i, p), f)?),
                 Value::Plain(off, t) => Ok(self.inst.step_field(Loc::Plain(off, t), f)?),
+                Value::Null => Err(Ctl::Dead),
                 _ => fail(500, "assignment target is not an item or a state struct"),
             },
             Expr::Index(b, k) => {
@@ -229,32 +333,34 @@ impl<'a> Run<'a> {
             _ => fail(500, "cannot assign to this"),
         }
     }
-    fn store(&mut self, l: Loc, v: Value) -> R<()> {
+    fn store(&mut self, l: Loc, v: Value) -> R<'a, ()> {
         let val = match (self.ref_target(&l), v) {
+            (None, Value::Str(t)) => { let b = self.text.get(t); return Ok(self.inst.store_str_bytes(&l, b)?); }
             (Some(_), Value::Null) => Val::Ref(None),
             (Some(t), Value::Item(c, i)) if c == t => Val::Ref(Some((i, self.inst.gen(c, i).unwrap_or(0)))),
             (Some(_), _) => return fail(500, "this field holds a reference to a different pool"),
-            (None, Value::Int(i)) => Val::Int(i), (None, Value::Float(f)) => Val::Float(f), (None, Value::Bool(b)) => Val::Bool(b), (None, Value::Str(s)) => Val::Str(s),
+            (None, Value::Int(i)) => Val::Int(i), (None, Value::Float(f)) => Val::Float(f), (None, Value::Bool(b)) => Val::Bool(b),
             (None, _) => return fail(500, "cannot store this value in state"),
         };
         Ok(self.inst.loc_set(&l, &val)?)
     }
 
-    fn truthy(&self, v: &Value) -> R<bool> { match v { Value::Bool(b) => Ok(*b), Value::Null => Ok(false), _ => fail(500, "condition is not a boolean") } }
+    fn truthy(&self, v: &Value) -> R<'a, bool> { match v { Value::Bool(b) => Ok(*b), Value::Null => Ok(false), _ => fail(500, "condition is not a boolean") } }
     fn num(v: &Value) -> Option<f64> { match v { Value::Int(i) => Some(*i as f64), Value::Float(f) => Some(*f), _ => None } }
 
-    fn eval(&mut self, e: &Expr) -> R<Value> {
+    fn eval(&mut self, e: &'a Expr) -> R<'a, Value> {
         match e {
             Expr::Int(n) => Ok(Value::Int(*n)),
             Expr::Float(f) => Ok(Value::Float(*f)),
-            Expr::Str(s) => Ok(Value::Str(s.clone())),
+            Expr::Str(s) => Ok(Value::Str(self.txt(s.as_bytes())?)),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
             Expr::Var(n) => {
                 if let Some(v) = self.lookup(n) { return Ok(v); }
                 let Some(g) = self.inst.prog.global(n) else { return fail(500, format!("unknown name `{}`", n)) };
-                let g = &self.inst.prog.globals[g];
-                match g.coll { Some(c) => Ok(Value::Coll(c, 0)), None => { let l = Loc::Plain(g.off, g.ty.clone()); self.loc_value(l) } }
+                if let Some(c) = self.inst.prog.globals[g].coll { return Ok(Value::Coll(c, 0)); } // no type clone: a pool's type owns a Box
+                let (off, ty) = { let g = &self.inst.prog.globals[g]; (g.off, g.ty.clone()) };
+                self.loc_value(Loc::Plain(off, ty))
             }
             Expr::Field(b, f) => { let bv = self.eval(b)?; self.field(bv, f) }
             Expr::Index(b, i) => { let (bv, iv) = (self.eval(b)?, self.eval(i)?); self.index(bv, iv) }
@@ -273,11 +379,17 @@ impl<'a> Run<'a> {
         }
     }
 
-    fn binop(&self, op: &str, l: Value, r: Value) -> R<Value> {
+    /// Append a value's text to the text area.
+    fn show_into(&mut self, v: &Value) -> R<'a, ()> {
+        let ok = match v { Value::Str(t) => self.text.dup(*t).is_some(), Value::Int(i) => write!(self.text, "{}", i).is_ok(), Value::Float(f) => write!(self.text, "{}", f).is_ok(), Value::Bool(b) => write!(self.text, "{}", b).is_ok(), Value::Null => self.text.push(b"null").is_some(), _ => return fail(500, "cannot show this value") };
+        if ok { Ok(()) } else { fail(507, "request text area is full") }
+    }
+
+    fn binop(&mut self, op: &str, l: Value, r: Value) -> R<'a, Value> {
         if op == "==" || op == "!=" {
             let eq = match (&l, &r) {
                 (Value::Null, Value::Null) => true, (Value::Null, _) | (_, Value::Null) => false,
-                (Value::Str(a), Value::Str(b)) => a == b, (Value::Bool(a), Value::Bool(b)) => a == b,
+                (Value::Str(a), Value::Str(b)) => self.text.get(*a) == self.text.get(*b), (Value::Bool(a), Value::Bool(b)) => a == b,
                 (Value::Item(a, b), Value::Item(c, d)) => a == c && b == d,
                 _ => match (Self::num(&l), Self::num(&r)) { (Some(a), Some(b)) => a == b, _ => return fail(500, "cannot compare these values") },
             };
@@ -294,30 +406,29 @@ impl<'a> Run<'a> {
                 _ => fail(500, "bad operator"),
             };
         }
-        if op == "+" { if let Value::Str(a) = &l { return Ok(Value::Str(format!("{}{}", a, self.show(&r)?))); } }
+        if op == "+" { if let Value::Str(_) = &l { let start = self.text.len; self.show_into(&l)?; self.show_into(&r)?; return Ok(Value::Str(self.text.since(start))); } }
         if let (Some(a), Some(b)) = (Self::num(&l), Self::num(&r)) {
             return Ok(match op { "+" => Value::Float(a + b), "-" => Value::Float(a - b), "*" => Value::Float(a * b), "/" => Value::Float(a / b),
                 "<" => Value::Bool(a < b), "<=" => Value::Bool(a <= b), ">" => Value::Bool(a > b), ">=" => Value::Bool(a >= b), _ => return fail(500, "bad operator") });
         }
-        if let (Value::Str(a), Value::Str(b)) = (&l, &r) { return Ok(Value::Bool(match op { "<" => a < b, "<=" => a <= b, ">" => a > b, ">=" => a >= b, _ => return fail(500, "bad operator") })); }
+        if let (Value::Str(a), Value::Str(b)) = (&l, &r) { let (a, b) = (self.text.get(*a), self.text.get(*b)); return Ok(Value::Bool(match op { "<" => a < b, "<=" => a <= b, ">" => a > b, ">=" => a >= b, _ => return fail(500, "bad operator") })); }
         fail(500, "operator does not fit these values")
     }
 
-    fn show(&self, v: &Value) -> R<String> {
-        Ok(match v { Value::Int(i) => i.to_string(), Value::Float(f) => f.to_string(), Value::Bool(b) => b.to_string(), Value::Str(s) => s.clone(), Value::Null => "null".into(), _ => return fail(500, "cannot show this value") })
-    }
-
-    fn call(&mut self, n: &str, args: &[Expr]) -> R<Value> {
+    fn call(&mut self, n: &'a str, args: &'a [Expr]) -> R<'a, Value> {
         // forms that look at their arguments before (or instead of) evaluating them
         match n {
             "or" => {
                 let first = match args.first() { Some(e) => self.eval(e), None => return fail(500, "or(a, b)") };
                 return match first {
-                    Ok(Value::Null) | Err(Ctl::Err(Error::NotLive(_))) | Err(Ctl::Err(Error::Stale(_))) => match args.get(1) { Some(e) => self.eval(e), None => Ok(Value::Null) },
+                    Ok(Value::Null) | Err(Ctl::Dead) | Err(Ctl::Err(Error::NotLive(_))) | Err(Ctl::Err(Error::Stale(_))) => match args.get(1) { Some(e) => self.eval(e), None => Ok(Value::Null) },
                     other => other,
                 };
             }
-            "exists" => return match args.first().map(|e| self.eval(e)) { Some(Ok(Value::Null)) | Some(Err(Ctl::Err(Error::NotLive(_)))) | Some(Err(Ctl::Err(Error::Stale(_)))) => Ok(Value::Bool(false)), Some(Ok(_)) => Ok(Value::Bool(true)), Some(Err(e)) => Err(e), None => fail(500, "exists(x)") },
+            "exists" => return match args.first().map(|e| self.eval(e)) {
+                Some(Ok(Value::Null)) | Some(Err(Ctl::Dead)) | Some(Err(Ctl::Err(Error::NotLive(_)))) | Some(Err(Ctl::Err(Error::Stale(_)))) => Ok(Value::Bool(false)),
+                Some(Ok(_)) => Ok(Value::Bool(true)), Some(Err(e)) => Err(e), None => fail(500, "exists(x)"),
+            },
             "maxlen" => {
                 let Some(Expr::Field(b, f)) = args.first() else { return fail(500, "maxlen(item.field)") };
                 return match self.eval(b)? {
@@ -328,45 +439,64 @@ impl<'a> Run<'a> {
             }
             _ => {}
         }
-        let mut a = Vec::with_capacity(args.len());
-        for x in args { a.push(self.eval(x)?); }
-        if let Some(f) = self.api.fns.iter().find(|f| f.name == n) { return self.call_fn(f, a); }
-        let arg = |i: usize| a.get(i).cloned().unwrap_or(Value::Null);
-        let text = |i: usize| -> R<String> { match a.get(i) { Some(Value::Str(s)) => Ok(s.clone()), _ => fail(500, format!("{}(...) needs a string argument", n)) } };
+        let base = self.args.len();
+        let r = self.call_with(n, args, base);
+        self.args.truncate(base);
+        r
+    }
+
+    fn call_with(&mut self, n: &'a str, args: &'a [Expr], base: usize) -> R<'a, Value> {
+        for x in args { let v = self.eval(x)?; self.args.push(v); }
+        if let Some(f) = self.api.fns.iter().find(|f| f.name == n) { return self.call_fn(f, base); }
+        let key = |me: &Self| -> R<'a, Txt> { me.arg_txt(base, 0) };
         Ok(match n {
-            "body" => { let k = text(0)?; self.req.json.iter().find(|x| x.0 == k).map(|x| x.1.clone()).unwrap_or(Value::Null) }
-            "param" => { let k = text(0)?; self.req.params.iter().find(|x| x.0 == k).map(|x| Value::Str(x.1.clone())).unwrap_or(Value::Null) }
-            "query" => { let k = text(0)?; self.req.query.iter().find(|x| x.0 == k).map(|x| Value::Str(x.1.clone())).unwrap_or(Value::Null) }
-            "header" => { let k = text(0)?.to_lowercase(); self.req.headers.iter().find(|x| x.0 == k).map(|x| Value::Str(x.1.clone())).unwrap_or(Value::Null) }
-            "int" => match arg(0) {
+            "body" => { let k = key(self)?; let k = self.text.get(k); self.json.iter().find(|x| self.text.get(x.0) == k).map(|x| x.1.clone()).unwrap_or(Value::Null) }
+            "param" => {
+                let k = key(self)?; let k = self.text.get(k);
+                let seg = self.ep.segs.iter().position(|s| matches!(s, Seg::Param(p) if p.as_bytes() == k));
+                seg.and_then(|si| self.params.iter().find(|p| p.0 == si)).map(|p| Value::Str(p.1)).unwrap_or(Value::Null)
+            }
+            "query" => { let k = key(self)?; let k = self.text.get(k); self.query.iter().find(|x| self.text.get(x.0) == k).map(|x| Value::Str(x.1)).unwrap_or(Value::Null) }
+            "header" => {
+                let k = key(self)?;
+                let found = { let k = self.text.get(k); self.headers.iter().find(|h| h.0.as_bytes().eq_ignore_ascii_case(k)) };
+                match found { Some(h) => Value::Str(self.txt(h.1.as_bytes())?), None => Value::Null }
+            }
+            "int" => match self.arg(base, 0) {
                 Value::Int(i) => Value::Int(i), Value::Float(f) => Value::Int(f as i64),
-                Value::Str(s) => match s.trim().parse::<i64>() { Ok(i) => Value::Int(i), Err(_) => return fail(400, format!("`{}` is not a number", s)) },
+                Value::Str(t) => match std::str::from_utf8(self.text.get(t)).ok().and_then(|s| s.trim().parse::<i64>().ok()) { Some(i) => Value::Int(i), None => return fail(400, format!("`{}` is not a number", String::from_utf8_lossy(self.text.get(t)))) },
                 Value::Null => return fail(400, "missing number"), _ => return fail(500, "int(x)"),
             },
-            "str" => Value::Str(self.show(&arg(0))?),
-            "len" => match arg(0) { Value::Str(s) => Value::Int(s.len() as i64), Value::Null => Value::Int(0), _ => return fail(500, "len(text)") },
+            "str" => { let v = self.arg(base, 0); let start = self.text.len; self.show_into(&v)?; Value::Str(self.text.since(start)) }
+            "len" => match self.arg(base, 0) { Value::Str(t) => Value::Int(t.len as i64), Value::Null => Value::Int(0), _ => return fail(500, "len(text)") },
             "now" => Value::Int(self.now),
             "random" => Value::Int(os::random_u64() as i64),
-            "min" | "max" => match (arg(0), arg(1)) { (Value::Int(p), Value::Int(q)) => Value::Int(if n == "min" { p.min(q) } else { p.max(q) }), _ => return fail(500, "min/max need integers") },
-            "count" => match arg(0) { Value::Coll(c, i) => Value::Int(self.inst.count(c, i) as i64), _ => return fail(500, "count(collection)") },
-            "capacity" => match arg(0) { Value::Coll(c, _) => Value::Int(self.inst.cap(c) as i64), _ => return fail(500, "capacity(collection)") },
-            "slot" => match arg(0) { Value::Item(c, i) => Value::Int((i % self.inst.cap(c)) as i64), _ => return fail(500, "slot(item)") },
-            "stat" => Value::Int(match text(0)?.as_str() { "committed_kb" => self.inst.committed() / 1024, "live_kb" => self.inst.live_total() / 1024, "reserved_kb" => self.inst.reserved() / 1024, _ => return fail(500, "unknown stat") } as i64),
-            "token" => match arg(0) {
+            "min" | "max" => match (self.arg(base, 0), self.arg(base, 1)) { (Value::Int(p), Value::Int(q)) => Value::Int(if n == "min" { p.min(q) } else { p.max(q) }), _ => return fail(500, "min/max need integers") },
+            "count" => match self.arg(base, 0) { Value::Coll(c, i) => Value::Int(self.inst.count(c, i) as i64), _ => return fail(500, "count(collection)") },
+            "capacity" => match self.arg(base, 0) { Value::Coll(c, _) => Value::Int(self.inst.cap(c) as i64), _ => return fail(500, "capacity(collection)") },
+            "slot" => match self.arg(base, 0) { Value::Item(c, i) => Value::Int((i % self.inst.cap(c)) as i64), _ => return fail(500, "slot(item)") },
+            "stat" => {
+                let k = key(self)?;
+                let v = match self.text.get(k) { b"committed_kb" => self.inst.committed() / 1024, b"live_kb" => self.inst.live_total() / 1024, b"reserved_kb" => self.inst.reserved() / 1024, _ => return fail(500, "unknown stat") };
+                Value::Int(v as i64)
+            }
+            "token" => match self.arg(base, 0) {
                 Value::Item(c, i) => {
-                    let ci = self.inst.col(c, "secret").ok_or_else(|| Ctl::Fail(500, "token needs a `secret` field".into()))?;
+                    let Some(ci) = self.inst.col(c, "secret") else { return fail(500, "token needs a `secret` field") };
                     let Val::Int(sec) = self.inst.field_get(c, i, ci)? else { return fail(500, "`secret` must be an integer") };
-                    Value::Str(format!("{}.{}.{:x}", i, self.inst.gen(c, i).unwrap_or(0), sec as u64))
+                    let start = self.text.len;
+                    if write!(self.text, "{}.{}.{:x}", i, self.inst.gen(c, i).unwrap_or(0), sec as u64).is_err() { return fail(507, "request text area is full"); }
+                    Value::Str(self.text.since(start))
                 }
                 _ => return fail(500, "token(item)"),
             },
             "auth" => {
-                let Value::Coll(c, 0) = arg(0) else { return fail(500, "auth(pool)") };
-                let Some(tok) = self.req.headers.iter().find(|x| x.0 == "x-session").map(|x| x.1.clone()) else { return fail(401, "missing X-Session header") };
+                let Value::Coll(c, 0) = self.arg(base, 0) else { return fail(500, "auth(pool)") };
+                let Some(tok) = self.headers.iter().find(|h| h.0.eq_ignore_ascii_case("x-session")).map(|h| h.1.as_str()) else { return fail(401, "missing X-Session header") };
                 let mut it = tok.split('.');
                 let (Some(Ok(slot)), Some(Ok(gen)), Some(Ok(sec))) = (it.next().map(str::parse::<usize>), it.next().map(str::parse::<u32>), it.next().map(|h| u64::from_str_radix(h, 16))) else { return fail(401, "malformed session token") };
-                let Ok(idx) = self.inst.deref(c, (slot, gen)) else { return fail(401, "session ended") };
-                let ci = self.inst.col(c, "secret").ok_or_else(|| Ctl::Fail(500, "auth needs a `secret` field".into()))?;
+                let Some(idx) = self.inst.deref_quiet(c, (slot, gen)) else { return fail(401, "session ended") };
+                let Some(ci) = self.inst.col(c, "secret") else { return fail(500, "auth needs a `secret` field") };
                 let Val::Int(real) = self.inst.field_get(c, idx, ci)? else { return fail(500, "`secret` must be an integer") };
                 if real as u64 != sec { return fail(403, "bad session secret"); }
                 Value::Item(c, idx)
@@ -376,40 +506,44 @@ impl<'a> Run<'a> {
     }
 
     /// Call a declared function in a fresh frame: it sees its parameters and the state, not the caller's locals.
-    fn call_fn(&mut self, f: &'a Func, args: Vec<Value>) -> R<Value> {
-        if args.len() != f.params.len() { return fail(500, format!("{} takes {} arguments", f.name, f.params.len())); }
+    fn call_fn(&mut self, f: &'a Func, base: usize) -> R<'a, Value> {
+        if self.args.len() - base != f.params.len() { return fail(500, format!("{} takes {} arguments", f.name, f.params.len())); }
         if self.depth >= 64 { return fail(500, "calls nested more than 64 deep"); }
-        let (saved, base) = (self.frame, self.vars.len());
-        self.frame = base; self.depth += 1;
-        for (p, v) in f.params.iter().zip(args) { self.vars.push((p.as_str(), v, false)); }
+        let (saved, vbase) = (self.frame, self.vars.len());
+        self.frame = vbase; self.depth += 1;
+        for (k, p) in f.params.iter().enumerate() { let v = self.args[base + k].clone(); self.vars.push((p.as_str(), v, false)); }
         let r = self.exec(&f.body);
-        self.vars.truncate(base); self.frame = saved; self.depth -= 1;
+        self.vars.truncate(vbase); self.frame = saved; self.depth -= 1;
         match r { Ok(()) => Ok(Value::Null), Err(Ctl::Return(v)) => Ok(v), Err(e) => Err(e) }
     }
 
-    /// Items of `it.coll` passing `where`, in order (reversed if asked), ordered and limited.
-    fn select(&mut self, it: &'a Iter) -> R<(usize, Vec<usize>)> {
+    /// Items of `it.coll` passing `where`, in order (reversed if asked), ordered and limited. Give the vector back with `self.idx.push`.
+    fn select(&mut self, it: &'a Iter) -> R<'a, (usize, Vec<usize>)> {
         let Value::Coll(c, inst) = self.eval(&it.coll)? else { return fail(500, "each needs a list or pool") };
         let limit = match &it.limit { Some(e) => match self.eval(e)? { Value::Int(n) if n >= 0 => Some(n as usize), _ => return fail(400, "bad limit") }, None => None };
-        let mut items = self.inst.items(c, inst);
+        let mut items = self.idx.pop().unwrap_or_default();
+        self.inst.items_into(c, inst, &mut items);
         if it.reverse { items.reverse(); }
         if it.wher.is_none() && it.order.is_none() { if let Some(l) = limit { items.truncate(l); } return Ok((c, items)); }
-        let mut hits: Vec<(f64, usize)> = Vec::new();
-        for idx in items {
+        let mut hits = self.keyed.pop().unwrap_or_default();
+        hits.clear();
+        let mut res = Ok(());
+        for &idx in items.iter() {
             self.vars.push((it.var.as_str(), Value::Item(c, idx), false));
             let keep = match &it.wher { Some(w) => self.eval(w).and_then(|v| self.truthy(&v)), None => Ok(true) };
             let key = match (&keep, &it.order) { (Ok(true), Some((k, _))) => match self.eval(k) { Ok(Value::Int(i)) => Ok(i as f64), Ok(Value::Float(f)) => Ok(f), Ok(_) => fail(500, "order by needs a number"), Err(e) => Err(e) }, _ => Ok(0.0) };
             self.vars.pop();
-            if !keep? { continue; }
-            hits.push((key?, idx));
+            match (keep, key) { (Ok(true), Ok(k)) => hits.push((k, idx)), (Ok(false), _) => continue, (Err(e), _) | (_, Err(e)) => { res = Err(e); break; } }
             if it.order.is_none() && limit.map_or(false, |l| hits.len() >= l) { break; }
         }
         if let Some((_, desc)) = &it.order { hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)); if *desc { hits.reverse(); } }
         if let Some(l) = limit { hits.truncate(l); }
-        Ok((c, hits.into_iter().map(|h| h.1).collect()))
+        items.clear(); items.extend(hits.iter().map(|h| h.1));
+        self.keyed.push(hits);
+        match res { Ok(()) => Ok((c, items)), Err(e) => { self.idx.push(items); Err(e) } }
     }
 
-    fn exec(&mut self, stmts: &'a [Stmt]) -> R<()> {
+    fn exec(&mut self, stmts: &'a [Stmt]) -> R<'a, ()> {
         let mark = self.vars.len();
         for s in stmts {
             let r = self.stmt(s);
@@ -419,7 +553,7 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    fn stmt(&mut self, s: &'a Stmt) -> R<()> {
+    fn stmt(&mut self, s: &'a Stmt) -> R<'a, ()> {
         match s {
             Stmt::Let(n, e) => { let v = self.eval(e)?; self.vars.push((n.as_str(), v, false)); }
             Stmt::Var(n, e) => { let v = self.eval(e)?; self.vars.push((n.as_str(), v, true)); }
@@ -444,19 +578,22 @@ impl<'a> Run<'a> {
             Stmt::If(c, t, e) => { let v = self.eval(c)?; if self.truthy(&v)? { self.exec(t)?; } else { self.exec(e)?; } }
             Stmt::Each(it, body) => {
                 let (c, items) = self.select(it)?;
-                for idx in items {
+                let mut res = Ok(());
+                for &idx in items.iter() {
                     self.vars.push((it.var.as_str(), Value::Item(c, idx), false));
                     let r = self.exec(body);
                     self.vars.pop();
-                    r?;
+                    if r.is_err() { res = r; break; }
                 }
+                self.idx.push(items);
+                res?;
             }
             Stmt::Free(e) => match self.eval(e)? {
                 Value::Item(c, i) => { if self.inst.is_list(c) { return fail(500, "list items are not freed; lists drop their oldest or pop their newest"); } if !self.frees.contains(&(c, i)) { self.frees.push((c, i)); } }
                 Value::Null => {}
                 _ => return fail(500, "free needs an item"),
             },
-            Stmt::Fail(code, m) => return fail(*code, m.clone()),
+            Stmt::Fail(code, m) => return Err(Ctl::Fail(*code, Cow::Borrowed(m.as_str()))),
             Stmt::Respond(code, j) => { self.json(j)?; return Err(Ctl::Done(*code)); }
             Stmt::Return(e) => { let v = match e { Some(e) => self.eval(e)?, None => Value::Null }; return Err(Ctl::Return(v)); }
             Stmt::Do(e) => { self.eval(e)?; }
@@ -464,30 +601,43 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    fn out(&mut self, s: &str) -> R<()> { if self.buf.push(s.as_bytes()) { Ok(()) } else { fail(507, "response too large") } }
+    fn out(&mut self, b: &[u8]) -> R<'a, ()> { if self.out.push(b).is_some() { Ok(()) } else { fail(507, "response too large") } }
 
-    fn json(&mut self, j: &'a Json) -> R<()> {
+    fn json(&mut self, j: &'a Json) -> R<'a, ()> {
         match j {
             Json::Obj(fields) => {
-                self.out("{")?;
-                for (i, (k, v)) in fields.iter().enumerate() { if i > 0 { self.out(",")?; } self.out(&quote(k))?; self.out(":")?; self.json(v)?; }
-                self.out("}")
+                self.out(b"{")?;
+                for (i, (k, v)) in fields.iter().enumerate() {
+                    if i > 0 { self.out(b",")?; }
+                    if !escaped(self.out, k.as_bytes()) { return fail(507, "response too large"); }
+                    self.out(b":")?; self.json(v)?;
+                }
+                self.out(b"}")
             }
             Json::Arr(it, inner) => {
                 let (c, items) = self.select(it)?;
-                self.out("[")?;
-                for (n, idx) in items.into_iter().enumerate() {
-                    if n > 0 { self.out(",")?; }
+                let mut res = self.out(b"[");
+                for (n, &idx) in items.iter().enumerate() {
+                    if res.is_err() { break; }
+                    if n > 0 { if let Err(e) = self.out(b",") { res = Err(e); break; } }
                     self.vars.push((it.var.as_str(), Value::Item(c, idx), false));
-                    let r = self.json(inner);
+                    res = self.json(inner);
                     self.vars.pop();
-                    r?;
                 }
-                self.out("]")
+                self.idx.push(items);
+                res?;
+                self.out(b"]")
             }
             Json::E(e) => {
-                let t = match self.eval(e)? { Value::Int(i) => i.to_string(), Value::Float(f) => f.to_string(), Value::Bool(b) => b.to_string(), Value::Str(s) => quote(&s), Value::Null => "null".into(), _ => return fail(500, "cannot write this value as JSON") };
-                self.out(&t)
+                let ok = match self.eval(e)? {
+                    Value::Int(i) => write!(self.out, "{}", i).is_ok(),
+                    Value::Float(f) => write!(self.out, "{}", f).is_ok(),
+                    Value::Bool(b) => write!(self.out, "{}", b).is_ok(),
+                    Value::Str(t) => escaped(self.out, self.text.get(t)),
+                    Value::Null => self.out.push(b"null").is_some(),
+                    _ => return fail(500, "cannot write this value as JSON"),
+                };
+                if ok { Ok(()) } else { fail(507, "response too large") }
             }
         }
     }
@@ -497,9 +647,21 @@ impl<'a> Run<'a> {
 
 pub fn serve(server: &mut Server, port: u16) -> std::io::Result<()> {
     let l = std::net::TcpListener::bind(("127.0.0.1", port))?;
+    l.set_nonblocking(true)?;
     println!("listening on http://127.0.0.1:{} (single-threaded; Ctrl-C to stop)", port);
-    for conn in l.incoming() {
-        let Ok(mut c) = conn else { continue };
+    let mut quiet_ms = 0;
+    loop {
+        let mut c = match l.accept() {
+            Ok((c, _)) => { quiet_ms = 0; c }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                quiet_ms += 20;
+                if quiet_ms >= 1000 { server.idle(); quiet_ms = 0; } // a quiet second: release slack from the largest collection
+                continue;
+            }
+            Err(_) => continue,
+        };
+        let _ = c.set_nonblocking(false);
         let _ = c.set_read_timeout(Some(std::time::Duration::from_secs(5)));
         let mut data = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -517,28 +679,37 @@ pub fn serve(server: &mut Server, port: u16) -> std::io::Result<()> {
         let want: usize = headers.iter().find(|h| h.0.eq_ignore_ascii_case("content-length")).and_then(|h| h.1.parse().ok()).unwrap_or(0).min(1 << 20);
         while data.len() < he + 4 + want { match c.read(&mut chunk) { Ok(0) | Err(_) => break, Ok(n) => data.extend_from_slice(&chunk[..n]) } }
         let body = String::from_utf8_lossy(&data[(he + 4).min(data.len())..]).into_owned();
-        let (code, out) = server.handle(&method, &target, &headers, &body);
+        let code = server.handle_raw(&method, &target, &headers, &body);
         let reason = match code { 200 => "OK", 201 => "Created", 204 => "No Content", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found", 413 => "Payload Too Large", 429 => "Too Many Requests", 503 => "Service Unavailable", 507 => "Insufficient Storage", _ => "Error" };
-        let _ = c.write_all(format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", code, reason, out.len(), out).as_bytes());
+        let out = server.response();
+        let _ = c.write_all(format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", code, reason, out.len()).as_bytes());
+        let _ = c.write_all(out.as_bytes());
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------- benchmark
 
 fn token_of(body: &str) -> String { body.split("\"token\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap_or("").to_string() }
 
-struct Stat { name: &'static str, ns: Vec<u128>, codes: std::collections::BTreeMap<u16, usize> }
+struct Stat { name: &'static str, ns: Vec<u128>, codes: std::collections::BTreeMap<u16, usize>, allocs: usize }
 impl Stat {
-    fn new(name: &'static str) -> Stat { Stat { name, ns: Vec::new(), codes: Default::default() } }
-    fn add(&mut self, t: Instant, code: u16) { self.ns.push(t.elapsed().as_nanos()); *self.codes.entry(code).or_default() += 1; }
+    fn new(name: &'static str) -> Stat { Stat { name, ns: Vec::with_capacity(32768), codes: Default::default(), allocs: 0 } }
     fn row(&mut self) {
         if self.ns.is_empty() { return; }
         self.ns.sort_unstable();
         let n = self.ns.len();
         let mean = self.ns.iter().sum::<u128>() as f64 / n as f64 / 1000.0;
-        println!("  {:<34} {:>7} {:>10.1} {:>10.1} {:>10.1}   {:?}", self.name, n, mean, self.ns[n / 2] as f64 / 1000.0, self.ns[(n * 99 / 100).min(n - 1)] as f64 / 1000.0, self.codes);
+        println!("  {:<34} {:>7} {:>10.1} {:>10.1} {:>10.1} {:>9.2}   {:?}", self.name, n, mean, self.ns[n / 2] as f64 / 1000.0, self.ns[(n * 99 / 100).min(n - 1)] as f64 / 1000.0, self.allocs as f64 / n as f64, self.codes);
     }
+}
+/// Time one request; inputs are built beforehand so only the handler's own allocations are counted.
+fn timed(s: &mut Server, st: &mut Stat, method: &str, target: &str, h: &[(String, String)], body: &str) -> u16 {
+    let (a0, t) = (crate::alloc_count::allocs(), Instant::now());
+    let c = s.handle_raw(method, target, h, body);
+    st.ns.push(t.elapsed().as_nanos());
+    st.allocs += crate::alloc_count::allocs() - a0;
+    *st.codes.entry(c).or_default() += 1;
+    c
 }
 
 pub fn bench(s: &mut Server, mixed: usize) {
@@ -548,50 +719,50 @@ pub fn bench(s: &mut Server, mixed: usize) {
     let mut rnd = move |n: usize| { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; (rng % n as u64) as usize };
     s.clock = Some(1_000_000);
     let _ = s.inst.resolve("meta.rate").and_then(|l| s.inst.loc_set(&l, &Val::Int(1_000_000))); // lift the per-session rate limit for load
-    println!("in-process benchmark: handler calls only, no sockets. Times in microseconds (interpreter-bound).");
-    println!("  {:<34} {:>7} {:>10} {:>10} {:>10}", "endpoint", "calls", "mean us", "p50 us", "p99 us");
+    println!("in-process benchmark: handler calls only, no sockets. Times in microseconds (interpreter-bound); allocs = heap allocations per request.");
+    println!("  {:<34} {:>7} {:>10} {:>10} {:>10} {:>9}", "endpoint", "calls", "mean us", "p50 us", "p99 us", "allocs");
     snap(s, "start");
-
+    let names: Vec<String> = (0..1000).map(|i| format!("{{\"name\":\"user{}\"}}", i)).collect();
     let mut st = Stat::new("POST /sessions");
-    let mut tokens = Vec::new();
-    for i in 0..1000 { let t = Instant::now(); let (c, b) = s.handle("POST", "/sessions", &[], &format!("{{\"name\":\"user{}\"}}", i)); st.add(t, c); tokens.push(token_of(&b)); }
+    let mut auths: Vec<Vec<(String, String)>> = Vec::new();
+    for n in &names { timed(s, &mut st, "POST", "/sessions", &[], n); auths.push(vec![("X-Session".to_string(), token_of(s.response()))]); }
     st.row();
-    let auth = |t: &str| vec![("X-Session".to_string(), t.to_string())];
     let mut st = Stat::new("POST /rooms");
-    for i in 0..20 { let t = Instant::now(); let (c, _) = s.handle("POST", "/rooms", &auth(&tokens[0]), &format!("{{\"name\":\"room{}\"}}", i)); st.add(t, c); }
+    for i in 0..20 { let b = format!("{{\"name\":\"room{}\"}}", i); timed(s, &mut st, "POST", "/rooms", &auths[0], &b); }
     st.row();
     snap(s, "1000 sessions, 20 rooms");
 
-    let body = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
-    let post = |s: &mut Server, u: &str, r: usize| s.handle("POST", &format!("/rooms/{}/messages", r), &auth(u), &format!("{{\"body\":\"{}\"}}", body)).0;
+    let body = "{\"body\":\"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\"}";
+    let posts: Vec<String> = (0..20).map(|r| format!("/rooms/{}/messages", r)).collect();
+    let gets: Vec<String> = (0..20).map(|r| format!("/rooms/{}/messages?limit=50", r)).collect();
+    let typing: Vec<String> = (0..20).map(|r| format!("/rooms/{}/typing", r)).collect();
     let mut st = Stat::new("POST messages (lists filling)");
-    for _ in 0..20_000 { let (u, r) = (rnd(1000), rnd(20)); let t = Instant::now(); let c = post(s, &tokens[u], r); st.add(t, c); }
+    for _ in 0..20_000 { let (u, r) = (rnd(1000), rnd(20)); timed(s, &mut st, "POST", &posts[r], &auths[u], body); }
     st.row();
     snap(s, "~20000 messages");
     let mut st = Stat::new("POST messages (full: drop oldest)");
-    for _ in 0..2000 { let (u, r) = (rnd(1000), rnd(20)); let t = Instant::now(); let c = post(s, &tokens[u], r); st.add(t, c); }
+    for _ in 0..2000 { let (u, r) = (rnd(1000), rnd(20)); timed(s, &mut st, "POST", &posts[r], &auths[u], body); }
     st.row();
 
     let (mut st_get, mut st_post, mut st_tping, mut st_tlist) = (Stat::new("GET messages (limit 50)"), Stat::new("POST messages (mixed)"), Stat::new("POST typing"), Stat::new("GET typing"));
     for i in 0..mixed {
-        let (u, r) = (rnd(1000), rnd(20));
+        let (u, r, k) = (rnd(1000), rnd(20), rnd(100));
         s.clock = Some(1_000_000 + i as i64 * 5);
-        let k = rnd(100);
-        let t = Instant::now();
-        if k < 70 { let c = s.handle("GET", &format!("/rooms/{}/messages?limit=50", r), &auth(&tokens[u]), "").0; st_get.add(t, c); }
-        else if k < 90 { let c = post(s, &tokens[u], r); st_post.add(t, c); }
-        else if k < 95 { let c = s.handle("POST", &format!("/rooms/{}/typing", r), &auth(&tokens[u]), "").0; st_tping.add(t, c); }
-        else { let c = s.handle("GET", &format!("/rooms/{}/typing", r), &auth(&tokens[u]), "").0; st_tlist.add(t, c); }
+        if k < 70 { timed(s, &mut st_get, "GET", &gets[r], &auths[u], ""); }
+        else if k < 90 { timed(s, &mut st_post, "POST", &posts[r], &auths[u], body); }
+        else if k < 95 { timed(s, &mut st_tping, "POST", &typing[r], &auths[u], ""); }
+        else { timed(s, &mut st_tlist, "GET", &typing[r], &auths[u], ""); }
     }
     for st in [&mut st_get, &mut st_post, &mut st_tping, &mut st_tlist] { st.row(); }
     snap(s, "after mixed load");
 
     let mut st = Stat::new("DELETE /session");
-    for tk in tokens.iter() { let t = Instant::now(); let (c, _) = s.handle("DELETE", "/session", &auth(tk), ""); st.add(t, c); }
+    for a in &auths { timed(s, &mut st, "DELETE", "/session", a, ""); }
     st.row();
     let (c, b) = s.handle("GET", "/stats", &[], "");
     println!("  GET /stats -> {} {}", c, b);
     snap(s, "sessions deleted");
+    if let Some(p) = &s.pressure { println!("  pressure policy: soft {:.0} MB, hard {:.0} MB: {} scoped trims, {} full trims, {:.2} MB released, refusing writes now: {}", mb(p.soft), mb(p.hard), p.trims, p.full_trims, mb(p.freed), p.refusing); }
     let freed = s.inst.trim();
     let t = s.inst.last_trim;
     println!("  trim released {:.2} MB (scan {:.1} ms over {} ranges, {} OS calls)", mb(freed), t.scan_ns as f64 / 1e6, t.ranges, t.os_calls);
@@ -700,11 +871,49 @@ mod tests {
     fn functions_and_vars() {
         let inst = Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap();
         let api = "fn double(x: i64) -> i64 { return x * 2; }
-            fn sum_to(n) { var t = 0; var i = 1; if n > 0 { t = n + sum_to(n - 1); } return t; }
-            endpoint GET /t { var a = double(21); a = a + 1; c.n = sum_to(10); respond 200 { \"a\": a, \"s\": c.n }; }
+            fn sum_to(n) { var t = 0; if n > 0 { t = n + sum_to(n - 1); } return t; }
+            endpoint GET /t { var a = double(21); a = a + 1; c.n = sum_to(10); respond 200 { \"a\": a, \"s\": c.n, \"j\": \"x\" + a }; }
             endpoint GET /bad { let x = 1; x = 2; respond 200 { \"x\": x }; }";
         let mut s = Server::new(inst, api).unwrap();
-        assert_eq!(s.handle("GET", "/t", &[], ""), (200, "{\"a\":43,\"s\":55}".to_string()));
+        assert_eq!(s.handle("GET", "/t", &[], ""), (200, "{\"a\":43,\"s\":55,\"j\":\"x43\"}".to_string()));
         assert_eq!(s.handle("GET", "/bad", &[], "").0, 500);
+    }
+
+    #[test]
+    fn warm_requests_do_not_allocate() {
+        let mut s = server();
+        let h = login(&mut s, "ann");
+        s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
+        let post = "{\"body\":\"hello \\\"there\\\"\"}";
+        for _ in 0..10 { s.handle_raw("POST", "/rooms/0/messages", &h, post); s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""); s.handle_raw("POST", "/rooms/0/typing", &h, ""); }
+        let a0 = crate::alloc_count::allocs();
+        assert_eq!(s.handle_raw("POST", "/rooms/0/messages", &h, post), 201);
+        assert_eq!(s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""), 200);
+        assert_eq!(s.handle_raw("POST", "/rooms/0/typing", &h, ""), 200);
+        assert_eq!(s.handle_raw("GET", "/rooms/0/typing", &h, ""), 200);
+        assert_eq!(crate::alloc_count::allocs() - a0, 0, "heap allocations in warm requests");
+        assert!(s.response().contains("ann"));
+    }
+
+    #[test]
+    fn pressure_refuses_writes_above_the_hard_mark_and_still_serves_reads() {
+        let mut s = server();
+        let h = login(&mut s, "ann");
+        s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
+        s.pressure = Some(Pressure::new(&s.inst, 0, 0)); // every committed byte is over the marks
+        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201); // decided after this request
+        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"y\"}").0, 503);
+        assert_eq!(s.handle("GET", "/rooms/0/messages", &h, "").0, 200);
+        assert!(s.pressure.as_ref().unwrap().full_trims >= 1);
+    }
+
+    #[test]
+    fn json_input_escapes_and_unicode() {
+        let mut s = server();
+        let h = login(&mut s, "ann");
+        s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
+        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, r#"{"body":"café 😀 tab\t \"q\""}"#).0, 201);
+        let (_, b) = s.handle("GET", "/rooms/0/messages", &h, "");
+        assert!(b.contains(r#"café 😀 tab\t \"q\""#), "{}", b);
     }
 }

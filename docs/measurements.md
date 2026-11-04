@@ -284,3 +284,46 @@ Erlang is the reference point for message-passing concurrency. The two models di
 2. Links and monitors: tell the holder of a handle when the worker or item dies. A checked pool's generation is the passive version.
 3. A declared overflow policy per mailbox: block, drop oldest, drop newest, or fail the sender.
 4. No mailbox scan for matches. Selective receive is O(n) per message; a bounded ring makes that cost visible and capped, and the design should not offer it.
+
+## Round 3 (2026-11-03): the coherent design, built
+`table` is gone; lists and pools both store struct items as columns; lists have `drop_oldest`; collections nest with per-parent
+segments; `ref<pool>` follows checked generations; handlers have `fn`/`var` and are journaled (exact rollback, deferred frees);
+requests run in a declared epoch; a pressure policy trims at epoch boundaries. 20 tests.
+
+**Chat benchmark** (`bench examples/chat/chat.mito examples/chat/chat.api --n 20000`, microseconds; heap allocations per request):
+
+| Endpoint | Round 1 | Round 2 | Round 3 | Allocs (round 3) |
+|---|---|---|---|---|
+| GET messages, limit 50 | 2,880 | 52 | **18.5** | 0 |
+| POST message, store full | 951 | 4.3 | **1.6** | 0 |
+| POST message, mixed | 1,124 | 4.6 | **1.8** | 0 |
+| POST typing | 20.9 | 3.6 | 1.8 | 0 |
+| GET typing | 10.7 | 2.9 | 1.1 | 0 |
+| POST /sessions | 3.5 | 2.0 | 0.8 | 0 |
+| DELETE /session | 3.1 | 1.1 | 0.3 | 0 |
+
+Before the epoch work, requests made 13 to 537 heap allocations each (49 for a post, 537 for a 50-message listing, partly from the
+benchmark harness itself). The handler's own sources were: replacing the per-request buffers with fresh ones (22 per request),
+cloning a pool global's type (it owns a `Box`), building a field-path string to reach a nested collection, and cloning a
+collection's name in case `alloc` failed. `GET /stats` still allocates (21): computing live bytes walks every range; it is a
+maintenance read.
+
+**Pressure policy, bursty pool** (`exp pressure`: 8 bursts of 50k-140k 72-byte jobs, all freed after each burst; soft 4 MB):
+
+| | Peak | Committed after each burst (MB) |
+|---|---|---|
+| no policy | 9.64 MB | 3.46 5.52 7.59 9.64 9.64 9.64 9.64 9.64 |
+| policy | 9.64 MB | 0.01 after every burst |
+
+776 policy calls cost 4.0 ms in total (5.1 us each); 17 scoped trims released 52.4 MB. The first version keyed its "nothing to trim
+here" memo on committed size, which does not change when items are freed, so only the first burst came back; the memo is now keyed on
+a per-collection shrink counter.
+
+**Pressure policy, chat** (soft 16 MB, hard 32 MB): committed stops at 32.00 MB; from there writes are refused with 503 (3,572 of
+the 20,000 filling posts, then all later posts and typing pings) while reads keep working (GET messages 18.4 us, 0 allocations).
+8 scoped trims and 1 full trim in the whole run. Two fixes were needed: `committed()` counted the whole page bitmap (31,000 pages,
+about 10 us per request) and is now a running counter; and a collection that yielded nothing was rescanned after every single free
+(1,003 trims), now only after 256 frees.
+
+**A debugging note.** A segfault after the nested-header change was not undefined behaviour: `cargo test` rebuilt only the test
+binary, and the server being run was the stale build from before the fix. Rebuild the binary before running it.

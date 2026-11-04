@@ -4,26 +4,30 @@ Codename for an experimental language whose memory is a **declared tree of fixed
 up front, with the runtime tracking what is actually in use.
 
 ```
-struct Item  { id: i32; hp: f32; name: string<16>; tags: list<i32, 8>; }
-struct World { title: string<40>; scores: i32[8]; items: list<Item, 500000>; }
-global world: World;
+struct Msg     { seq: i64; author: ref<sessions>; body: string<2000>; }
+struct Room    { name: string<48>; messages: list<Msg, 1000> drop_oldest; }
+struct Session { name: string<32>; secret: i64; }
+global sessions: pool<Session, 2000> checked;
+global rooms: pool<Room, 64>;
 ```
 
-- `list<T, N>`: a list with a maximum size (length + N slots). `T[N]`: exactly N elements. `string<N>`: a string of at most N bytes.
-- `table<T, N>` (column storage, dense rows) exists in the prototype but is being folded into `pool` and column-stored `list`; see DESIGN.md.
-- `pool<T, N>` gives stable slots, a live bit per slot, and reuse of the lowest free slot; `pool<T, N> checked` adds a generation so stale handles are rejected. Plain indexes cost the same as a table row index plus one bit test.
-- Layout is exact and computed at startup. The program refuses to start if it is over `--budget`.
-- One reservation holds everything; pages are committed only where bytes are live; `trim` returns the rest.
-- Growing past a maximum is a typed `FULL` result, never a crash or out-of-memory kill.
+- `list<T, N>` is ordered, with a declared full policy (`fail`, or `drop_oldest` for a ring). `pool<T, N>` has stable slots and a
+  live bit; `checked` adds generations. Items of struct type are stored as columns. Collections nest, with a capacity per parent.
+- `ref<pool>` references check liveness (and generation); `string<N>` and `T[N]` are bounded values.
+- The layout is exact and computed at startup; the program refuses to start over `--budget`. One reservation holds everything;
+  pages are committed where bytes are live; trims are scoped and can be driven by a pressure policy (`--soft`, `--hard`).
+- Endpoints (`fn`, `endpoint`, `let`/`var`, `each ... where ... reverse ... limit`) are atomic: a failed request is rolled back
+  exactly. Requests run in a declared epoch and make no heap allocations once warm.
+- Growing past a maximum is a typed failure (503, 413), never a crash or out-of-memory kill.
 
 ```
-cargo run --release -- examples/world.mito examples/world.script
-cargo run --release -- examples/world.mito --budget 16     # refused: over budget
-cargo run --release -- exp                                  # the earlier region experiments
+cargo run --release -- serve examples/chat/chat.mito examples/chat/chat.api --port 8080
+cargo run --release -- bench examples/chat/chat.mito examples/chat/chat.api [--soft 16 --hard 32]
+cargo run --release -- examples/world.mito examples/world.script    # state scripts
+cargo run --release -- exp pressure | trim | access | chat           # experiments
 ```
 
-Endpoints: `mitochondria serve examples/chat/chat.mito examples/chat/chat.api --port 8080` runs a chat server's hot state and API;
-`mitochondria bench ...` runs it in-process. See [docs/chat-api-findings.md](docs/chat-api-findings.md) for what worked and what did not.
+See [docs/chat-api-findings.md](docs/chat-api-findings.md) for what worked and what did not in the chat API.
 
 Windows only for now. Design: [DESIGN.md](DESIGN.md). Measurements: [docs/measurements.md](docs/measurements.md).
 

@@ -1,0 +1,74 @@
+// typed stores of integers, bools and floats: plain state, plain arrays and item columns; a value that does not fit is
+// refused with the same error whichever way it is stored; an integer stored in a float column; undone when the request fails
+--- program
+struct Cell { n: i16; ok: bool; f: f64; u: u8; }
+struct App {
+    a: i8; b: u8; c: i16; d: u16; e: i32; g: u32; h: i64; k: u64;
+    r: f64; flag: bool;
+    arr: u8[3];
+    cells: pool<Cell, 2>;
+}
+state app: App;
+
+@post("/plain/{which}/{v}")
+fn post_plain(which: i64, v: i64) -> Response<{}> {
+    if which == 0 { app.a = v; } else if which == 1 { app.b = v; } else if which == 2 { app.c = v; } else if which == 3 { app.d = v; }
+    else if which == 4 { app.e = v; } else if which == 5 { app.g = v; } else if which == 6 { app.h = v; } else { app.k = v; }
+    return ok({});
+}
+@post("/float/{x}")
+fn post_float(x: f64) -> Response<{}> { app.r = x; return ok({}); }
+@post("/int-to-float/{v}")
+fn post_int_to_float(v: i64) -> Response<{}> { app.r = v; return ok({}); }
+@post("/flag/{v}")
+fn post_flag(v: i64) -> Response<{}> { app.flag = v > 0; return ok({}); }
+@post("/arr/{i}/{v}")
+fn post_arr(i: i64, v: i64) -> Response<{}> { app.arr[i] = v; return ok({}); }
+@get("/plain")
+fn get_plain() -> Response<{ a: i64, b: i64, c: i64, d: i64, e: i64, g: i64, h: i64, k: i64, r: f64, flag: bool, x0: i64, x1: i64, x2: i64 }> {
+    return ok({ "a": app.a, "b": app.b, "c": app.c, "d": app.d, "e": app.e, "g": app.g, "h": app.h, "k": app.k, "r": app.r, "flag": app.flag, "x0": app.arr[0], "x1": app.arr[1], "x2": app.arr[2] });
+}
+@post("/cells")
+fn post_cells() -> Response<{ slot: i64 }> { let c = app.cells.add(); return created({ "slot": slot(c) }); }
+@post("/cells/{s}/{n}/{x}/{u}")
+fn post_cell(s: i64, n: i64, x: f64, u: i64) -> Response<{}> { let c = app.cells[s]; c.n = n; c.ok = n > 0; c.f = x; c.u = u; return ok({}); }
+@get("/cells/{s}")
+fn get_cell(s: i64) -> Response<{ n: i64, ok: bool, f: f64, u: i64 }> { let c = app.cells[s]; return ok({ "n": c.n, "ok": c.ok, "f": c.f, "u": c.u }); }
+@post("/store-then-fail")
+fn post_fail() -> Response<{}> { app.h = 999; app.r = 9.5; app.flag = true; app.arr[0] = 7; fail 422 "no"; }
+--- requests
+POST /plain/0/127
+POST /plain/0/128
+POST /plain/0/-128
+POST /plain/0/-129
+POST /plain/1/255
+POST /plain/1/256
+POST /plain/1/-1
+POST /plain/2/-32768
+POST /plain/2/32768
+POST /plain/3/65535
+POST /plain/3/65536
+POST /plain/4/2147483647
+POST /plain/4/2147483648
+POST /plain/5/4294967295
+POST /plain/5/4294967296
+POST /plain/6/9223372036854775807
+POST /plain/7/5
+POST /plain/7/-5
+POST /float/2.5
+POST /int-to-float/7
+POST /flag/1
+POST /arr/0/200
+POST /arr/1/255
+POST /arr/2/256
+POST /arr/3/1
+POST /arr/-1/1
+GET /plain
+POST /cells
+POST /cells/0/-300/1.25/255
+GET /cells/0
+POST /cells/0/40000/1.25/1
+POST /cells/0/5/2.75/256
+GET /cells/0
+POST /store-then-fail
+GET /plain

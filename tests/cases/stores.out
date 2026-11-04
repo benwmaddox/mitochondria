@@ -1,0 +1,38 @@
+POST /plain/0/127 -> 200 {}
+POST /plain/0/128 -> 413 {"error":"128 does not fit i8"}
+POST /plain/0/-128 -> 200 {}
+POST /plain/0/-129 -> 413 {"error":"-129 does not fit i8"}
+POST /plain/1/255 -> 200 {}
+POST /plain/1/256 -> 413 {"error":"256 does not fit u8"}
+POST /plain/1/-1 -> 413 {"error":"-1 does not fit u8"}
+POST /plain/2/-32768 -> 200 {}
+POST /plain/2/32768 -> 413 {"error":"32768 does not fit i16"}
+POST /plain/3/65535 -> 200 {}
+POST /plain/3/65536 -> 413 {"error":"65536 does not fit u16"}
+POST /plain/4/2147483647 -> 200 {}
+POST /plain/4/2147483648 -> 413 {"error":"2147483648 does not fit i32"}
+POST /plain/5/4294967295 -> 200 {}
+POST /plain/5/4294967296 -> 413 {"error":"4294967296 does not fit u32"}
+POST /plain/6/9223372036854775807 -> 200 {}
+POST /plain/7/5 -> 200 {}
+POST /plain/7/-5 -> 413 {"error":"-5 does not fit u64"}
+POST /float/2.5 -> 200 {}
+POST /int-to-float/7 -> 200 {}
+POST /flag/1 -> 200 {}
+POST /arr/0/200 -> 200 {}
+POST /arr/1/255 -> 200 {}
+POST /arr/2/256 -> 413 {"error":"256 does not fit u8"}
+POST /arr/3/1 -> 400 {"error":"index 3 out of range (fixed size 3)"}
+POST /arr/-1/1 -> 404 {"error":"index -1 is negative"}
+GET /plain -> 200 {"a":-128,"b":255,"c":-32768,"d":65535,"e":2147483647,"g":4294967295,"h":9223372036854775807,"k":5,"r":7,"flag":true,"x0":200,"x1":255,"x2":0}
+POST /cells -> 201 {"slot":0}
+POST /cells/0/-300/1.25/255 -> 200 {}
+GET /cells/0 -> 200 {"n":-300,"ok":false,"f":1.25,"u":255}
+POST /cells/0/40000/1.25/1 -> 413 {"error":"40000 does not fit i16"}
+POST /cells/0/5/2.75/256 -> 413 {"error":"256 does not fit u8"}
+GET /cells/0 -> 200 {"n":-300,"ok":false,"f":1.25,"u":255}
+POST /store-then-fail -> 422 {"error":"no"}
+GET /plain -> 200 {"a":-128,"b":255,"c":-32768,"d":65535,"e":2147483647,"g":4294967295,"h":9223372036854775807,"k":5,"r":7,"flag":true,"x0":200,"x1":255,"x2":0}
+state <plain values> 48
+state app.cells 36
+memory reserved=8192 committed=8192 live=84

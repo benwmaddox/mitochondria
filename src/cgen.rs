@@ -95,8 +95,10 @@ struct H {
 #define OVERFLOW_ FAIL(500, "integer overflow", 16)
 #ifdef __clang__
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define BITS_F64(x) ({ double d_ = (x); i64 u_; __builtin_memcpy(&u_, &d_, 8); u_; })
 #else
 #define UNLIKELY(x) (x)
+#define BITS_F64(x) (*(i64 *)&(double){ (x) })
 #endif
 #ifdef __clang__
 #define ADD(r, x, y) i64 r; if (UNLIKELY(__builtin_add_overflow((x), (y), &r))) OVERFLOW_
@@ -120,6 +122,9 @@ pub const BUILTINS: [B; 17] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B
 pub const OPS: [&str; 11] = ["==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"];
 
 /// Plain (record-style) scalar and string kinds for `store_plain`.
+/// Bytes in a scalar of kind `code` (see `plain_code`; 9 is f32, which has no typed store).
+fn scalar_bytes(code: u32) -> u64 { match code { 1 | 5 | 11 => 1, 2 | 6 => 2, 3 | 7 | 9 => 4, _ => 8 } }
+
 /// The offset of a string literal in the text area's fixed prefix (added once).
 fn intern_lit(b: &[u8]) -> u32 {
     LITS.with(|l| {
@@ -1002,45 +1007,57 @@ impl<'p> G<'p> {
         self.depth -= 1;
         self.line("}");
     }
-    /// Store the integer `v` in an integer column of item `idx` (element `k` of an array column when `k` is given): a
-    /// typed store in line when the value is known to be an integer, with the generic helper only for a value that does
-    /// not fit the column (which makes the error). Returns false when it does not apply.
+    /// Store `v` in a scalar column of item `idx` (element `k` of an array column when `k` is given) as a typed store in
+    /// line, when its kind is known here: see `scalar_store`. Returns false when it does not apply.
     fn int_store(&mut self, c: usize, idx: &str, ci: usize, k: Option<&str>, v: &CV, slow: &str) -> R<bool> {
-        let CV::Int(e) = v else { return Ok(false) };
         let col = &self.prog.colls[c].cols[ci];
         let s = match &col.kind { CKind::Scalar(s) => *s, CKind::Arr(s, _) => *s, _ => return Ok(false) };
         let code = plain_code(&Ty::Scalar(s)).map_or(0, |x| x.0);
-        if !(1..=8).contains(&code) { return Ok(false); }
-        let (size, lo, hi): (u64, Option<&str>, Option<&str>) = match code {
-            1 => (1, Some("-128"), Some("127")), 2 => (2, Some("-32768"), Some("32767")), 3 => (4, Some("(-2147483647LL - 1)"), Some("2147483647")),
-            4 => (8, None, None), 5 => (1, Some("0"), Some("255")), 6 => (2, Some("0"), Some("65535")), 7 => (4, Some("0"), Some("4294967295LL")), _ => (8, Some("0"), None),
-        };
         let (off, whole) = (col.off, col.kind.size());
-        let w = self.tmp("w");
-        self.open("{");
-        self.line(&format!("i64 {} = {};", w, e));
+        let size = scalar_bytes(code);
         let addr = match k { Some(k) => format!("{}ULL + (u64)({}) * {}ULL + (u64)({}) * {}ULL", off, idx, whole, k, size), None => format!("{}ULL + (u64)({}) * {}ULL", off, idx, whole) };
-        let cond = match (lo, hi) {
-            (Some(l), Some(h)) => Some(format!("{w} < {l} || {w} > {h}")),
-            (Some(l), None) => Some(format!("{w} < {l}")),
-            _ => None,
-        };
-        match cond {
-            Some(cond) => {
-                self.line(&format!("if (UNLIKELY({})) {{", cond));
-                self.depth += 1;
-                let vv = self.val(CV::Int(w.clone()))?;
-                self.call(&slow.replace("@VAL", &vv));
-                self.depth -= 1;
-                self.line("} else {");
-                self.depth += 1;
-                self.call(&format!("c->h->wr_int(c, {}, {}, {})", addr, size, w));
-                self.depth -= 1;
-                self.line("}");
+        self.scalar_store(code, addr, v, slow)
+    }
+    /// A typed store in line of an integer, bool or f64 `v` into a scalar of kind `code` (see `plain_code`) at byte
+    /// offset `addr`: the generated code checks the value fits (an integer in a narrower column), and the generic helper
+    /// (`slow`, with `@VAL` for the value) runs only for one that does not, to make the error. False if it does not apply.
+    fn scalar_store(&mut self, code: u32, addr: String, v: &CV, slow: &str) -> R<bool> {
+        let w = self.tmp("w");
+        let size = scalar_bytes(code);
+        match (code, v) {
+            (1..=8, CV::Int(e)) => {
+                let (lo, hi): (Option<&str>, Option<&str>) = match code {
+                    1 => (Some("-128"), Some("127")), 2 => (Some("-32768"), Some("32767")), 3 => (Some("(-2147483647LL - 1)"), Some("2147483647")),
+                    4 => (None, None), 5 => (Some("0"), Some("255")), 6 => (Some("0"), Some("65535")), 7 => (Some("0"), Some("4294967295LL")), _ => (Some("0"), None),
+                };
+                self.open("{");
+                self.line(&format!("i64 {} = {};", w, e));
+                let cond = match (lo, hi) {
+                    (Some(l), Some(h)) => Some(format!("{w} < {l} || {w} > {h}")),
+                    (Some(l), None) => Some(format!("{w} < {l}")),
+                    _ => None,
+                };
+                match cond {
+                    Some(cond) => {
+                        self.line(&format!("if (UNLIKELY({})) {{", cond));
+                        self.depth += 1;
+                        let vv = self.val(CV::Int(w.clone()))?;
+                        self.call(&slow.replace("@VAL", &vv));
+                        self.depth -= 1;
+                        self.line("} else {");
+                        self.depth += 1;
+                        self.call(&format!("c->h->wr_int(c, {}, {}, {})", addr, size, w));
+                        self.depth -= 1;
+                        self.line("}");
+                    }
+                    None => self.call(&format!("c->h->wr_int(c, {}, {}, {})", addr, size, w)),
+                }
+                self.close("}");
             }
-            None => self.call(&format!("c->h->wr_int(c, {}, {}, {})", addr, size, w)),
+            (11, CV::Bool(e)) => self.call(&format!("c->h->wr_int(c, {}, 1, ({}) ? 1 : 0)", addr, e)),
+            (10, CV::Flt(e)) => self.call(&format!("c->h->wr_int(c, {}, 8, BITS_F64({}))", addr, e)),
+            _ => return Ok(false),
         }
-        self.close("}");
         Ok(true)
     }
     /// The item index of position `k` in collection `c`, instance `inst`, in a new `u32` (its name is returned). A pool
@@ -1112,6 +1129,7 @@ impl<'p> G<'p> {
                         let at = off + sd.offs[k];
                         self.may_write_plain(at)?;
                         let v = self.expr(rhs, env, None)?;
+                        if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap))? { return Ok(()); }
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, {}, {}, {}, &{})", at, code, cap, vv));
                         return Ok(());
@@ -1161,8 +1179,10 @@ impl<'p> G<'p> {
                         let Some((code, cap)) = plain_code(&e) else { return no("assigning an element of this array not compiled yet") };
                         self.elem_check(&k, n as u64);
                         let v = self.expr(rhs, env, None)?;
+                        let esz = self.prog.plain_size(&e).0;
+                        if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap))? { return Ok(()); }
                         let vv = self.val(v)?;
-                        self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, self.prog.plain_size(&e).0, code, cap, vv));
+                        self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, esz, code, cap, vv));
                     }
                     CV::Coll(c, inst) => {
                         self.may_write_col(c, "")?;
@@ -2068,7 +2088,7 @@ impl<'p> G<'p> {
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
     let t = ctoks(body);
-    const CALLS: [&str; 22] = ["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: [&str; 23] = ["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];

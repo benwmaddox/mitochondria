@@ -1,6 +1,6 @@
-//! Cases (`tests/cases/*.case`): a state, an api and a request script each. Every case runs on every backend; the logs
-//! must match each other and the recorded `.out` file, and every endpoint must compile. Warm successful requests must
-//! make no heap allocations on a compiled backend. `MITO_BLESS=1 cargo test cases` records the reference backend's log.
+//! Cases (`tests/cases/*.case`): a state, an api and a request script each. Every case runs on every backend (the C
+//! runtime built by TinyCC, by clang, and by clang with undefined-behaviour checks); the logs must match each other and
+//! the recorded `.out` file. `MITO_BLESS=1 cargo test cases` records the TinyCC build's log.
 //!
 //! A case is one program (`--- state`, `--- api`) or a system of workers (`--- system` holding a `.system` file, whose
 //! programs are `--- file name` sections). In any section, `include path` takes a file (relative to the repository).
@@ -9,11 +9,8 @@
 //! `*N` before a request repeats it N times; `@Header: value` adds a header to the next request; `clock ms` sets the
 //! request clock; `marks soft hard` sets the memory pressure marks (bytes); `stats` logs the pressure counters (for a
 //! system: what each worker handled, forwarded and how often it was restarted).
-//! `$name` is replaced anywhere in a line. `allocates target` exempts requests to that target from the allocation
-//! check (a known limit of the current runtime, to be removed with it).
+//! `$name` is replaced anywhere in a line.
 use crate::layout::Program;
-use crate::runtime::{Instance, Pressure};
-use crate::serve::Server;
 
 pub struct Case { pub name: String, pub state: String, pub api: String, pub requests: String, pub system: Option<String>, pub files: Vec<(String, String)> }
 
@@ -41,7 +38,7 @@ pub fn load(path: &std::path::Path) -> Case {
 /// records check each one.
 pub trait Backend {
     fn handle(&mut self, method: &str, target: &str, headers: &[(String, String)], body: &str) -> (u16, String);
-    /// Status only; the response stays in the backend (no copy, so allocations can be counted).
+    /// Status only; the response stays in the backend (no copy, for timing).
     fn handle_quiet(&mut self, method: &str, target: &str, headers: &[(String, String)], body: &str) -> u16;
     fn set_clock(&mut self, ms: i64);
     fn set_marks(&mut self, soft: usize, hard: usize);
@@ -49,42 +46,6 @@ pub trait Backend {
     fn state(&self) -> Vec<String>;
     /// Pressure counters, as one log line.
     fn stats(&self) -> String;
-    /// One line per endpoint saying whether it compiled.
-    fn notes(&self) -> Vec<String>;
-    /// Does this backend promise warm requests without heap allocations?
-    fn no_alloc(&self) -> bool;
-    /// Heap allocations made handling requests so far, counted by the backend itself (the Rust counter does not see
-    /// another runtime's heap: a C backend counts its own calls, or makes none after it starts).
-    fn allocs(&self) -> usize;
-}
-
-/// The Rust runtime, with endpoints interpreted or compiled.
-pub struct RustBackend { s: Server, notes: Vec<String>, compiled: bool }
-impl RustBackend {
-    pub fn start(case: &Case, compiled: bool) -> RustBackend {
-        let inst = Instance::start(Program::parse(&case.state).unwrap_or_else(|e| panic!("{}: state: {}", case.name, e)), 1 << 30).unwrap();
-        let mut s = Server::new(inst, &case.api).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
-        s.clock = Some(1000);
-        s.rng.set(0x1234_5678_9abc_def0);
-        let notes = if compiled { s.compile().unwrap_or_else(|e| panic!("{}: compile: {}", case.name, e)).0 } else { Vec::new() };
-        RustBackend { s, notes, compiled }
-    }
-}
-impl Backend for RustBackend {
-    fn handle(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> (u16, String) { self.s.handle(m, t, h, b) }
-    fn handle_quiet(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> u16 { self.s.handle_raw(m, t, h, b) }
-    fn set_clock(&mut self, ms: i64) { self.s.clock = Some(ms); }
-    fn set_marks(&mut self, soft: usize, hard: usize) { self.s.pressure = Some(Pressure::new(&self.s.inst, soft, hard)); }
-    fn state(&self) -> Vec<String> {
-        let i = &self.s.inst;
-        let mut v: Vec<String> = i.inspect().into_iter().map(|r| format!("state {} {}", r.0, r.4)).collect();
-        v.push(format!("memory reserved={} committed={} live={}", i.reserved(), i.committed(), i.live_total()));
-        v
-    }
-    fn stats(&self) -> String { match &self.s.pressure { Some(p) => format!("stats refusing={} full_trims={}", p.refusing, p.full_trims), None => "stats no marks".into() } }
-    fn notes(&self) -> Vec<String> { self.notes.clone() }
-    fn no_alloc(&self) -> bool { self.compiled }
-    fn allocs(&self) -> usize { crate::alloc_count::allocs() }
 }
 
 /// The C runtime (runtime/mito.c) and the program's generated C compiled together, driven through `mito_*`: in memory
@@ -183,10 +144,6 @@ impl Backend for CBackend {
     fn set_marks(&mut self, soft: usize, hard: usize) { unsafe { (self.f.set_marks)(self.m, soft as u64, hard as u64) } }
     fn state(&self) -> Vec<String> { self.text(self.f.state).lines().map(str::to_string).collect() }
     fn stats(&self) -> String { self.text(self.f.stats) }
-    fn notes(&self) -> Vec<String> { Vec::new() } // program_c fails unless every endpoint compiles
-    fn no_alloc(&self) -> bool { true }
-    /// The C runtime has no allocator at all: it declares no malloc, and every buffer is a reservation made at start.
-    fn allocs(&self) -> usize { 0 }
 }
 
 /// A system of worker threads in C (runtime/system.c with each kind's program), built by TinyCC or clang.
@@ -236,53 +193,13 @@ impl Backend for CSystemBackend {
         let n = unsafe { (self.f.report)(self.s, b.as_mut_ptr(), b.len() as u32) } as usize;
         String::from_utf8_lossy(&b[..n]).lines().map(|l| { let p: Vec<&str> = l.split(' ').collect(); format!("{}{} handled={} forwarded={} restarts={}", p[0], p[1], p[2], p[3], p[4]) }).collect::<Vec<_>>().join(" | ")
     }
-    fn notes(&self) -> Vec<String> { Vec::new() }
-    fn no_alloc(&self) -> bool { true }
-    fn allocs(&self) -> usize { 0 }
 }
 
-/// A system of worker threads, from the Rust runtime.
-pub struct SystemBackend { sys: Option<crate::system::System>, notes: Vec<String>, compiled: bool }
-impl SystemBackend {
-    pub fn start(case: &Case, compiled: bool) -> SystemBackend {
-        let read = |f: &str| case.files.iter().find(|x| x.0 == f).map(|x| x.1.clone()).ok_or_else(|| format!("no `--- file {}` section", f));
-        let mut spec = crate::system::parse_spec_with(case.system.as_deref().unwrap(), &read).unwrap_or_else(|e| panic!("{}: system: {}", case.name, e));
-        spec.compile = compiled;
-        spec.seed = Some(0x1234_5678_9abc_def0);
-        let notes = if compiled { spec.kinds.iter().map(|k| format!("{}: compiled", k.name)).collect() } else { Vec::new() }; // start fails unless every endpoint compiles
-        let sys = crate::system::System::start(spec).unwrap_or_else(|e| panic!("{}: {}", case.name, e));
-        sys.set_clock(Some(1000));
-        SystemBackend { sys: Some(sys), notes, compiled }
-    }
-    fn sys(&self) -> &crate::system::System { self.sys.as_ref().unwrap() }
-}
-impl Drop for SystemBackend { fn drop(&mut self) { if let Some(s) = self.sys.take() { s.shutdown(); } } }
-impl Backend for SystemBackend {
-    fn handle(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> (u16, String) {
-        let hv: Vec<(&str, &str)> = h.iter().map(|x| (x.0.as_str(), x.1.as_str())).collect();
-        let (code, out) = self.sys().request(m, t, &hv, b, std::time::Duration::from_secs(10));
-        (code, String::from_utf8_lossy(&out).into_owned())
-    }
-    fn handle_quiet(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> u16 { self.handle(m, t, h, b).0 }
-    fn set_clock(&mut self, ms: i64) { self.sys().set_clock(Some(ms)); }
-    fn set_marks(&mut self, _: usize, _: usize) { panic!("marks are set per worker kind in the system file"); }
-    fn state(&self) -> Vec<String> { Vec::new() }
-    fn stats(&self) -> String {
-        self.sys().report().iter().map(|w| format!("{}{} handled={} forwarded={} restarts={}", w.name, w.index, w.handled, w.forwarded, w.restarts)).collect::<Vec<_>>().join(" | ")
-    }
-    fn notes(&self) -> Vec<String> { self.notes.clone() }
-    fn no_alloc(&self) -> bool { self.compiled }
-    fn allocs(&self) -> usize { self.sys().report().iter().map(|w| w.allocs as usize).sum() } // counted inside the workers, before each answer
-}
-
-/// Run a case's script; returns the log, and the heap allocations made by warm successful requests (every successful
-/// request of the script replayed twice after it, the second time counted).
-pub fn run(case: &Case, be: &mut dyn Backend) -> (Vec<String>, usize) {
+/// Run a case's script; returns the log.
+pub fn run(case: &Case, be: &mut dyn Backend) -> Vec<String> {
     let mut log = Vec::new();
     let mut headers: Vec<(String, String)> = Vec::new();
-    let mut ok: Vec<(String, String, Vec<(String, String)>, String)> = Vec::new();
     let mut vars: Vec<(String, String)> = Vec::new();
-    let mut exempt: Vec<String> = Vec::new();
     for line in case.requests.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("//")) {
         let mut line = line.to_string();
         for (k, v) in vars.iter().rev() { line = line.replace(&format!("${}", k), v); } // later names first, so $a does not eat $ab
@@ -290,7 +207,6 @@ pub fn run(case: &Case, be: &mut dyn Backend) -> (Vec<String>, usize) {
         if let Some(t) = line.strip_prefix("clock ") { be.set_clock(t.trim().parse().unwrap()); continue; }
         if let Some(t) = line.strip_prefix("marks ") { let (a, b) = t.trim().split_once(' ').unwrap(); be.set_marks(a.parse().unwrap(), b.parse().unwrap()); continue; }
         if line == "stats" { log.push(be.stats()); continue; }
-        if let Some(t) = line.strip_prefix("allocates ") { exempt.push(t.trim().to_string()); continue; }
         let (times, line) = match line.strip_prefix('*') { Some(r) => { let (n, rest) = r.split_once(' ').unwrap(); (n.parse::<usize>().unwrap(), rest.to_string()) } None => (1, line) };
         let (line, capture) = match line.rsplit_once(" => ") { Some((l, n)) => (l.to_string(), Some(n.trim().to_string())), None => (line, None) };
         let (m, rest) = line.split_once(' ').unwrap();
@@ -298,7 +214,6 @@ pub fn run(case: &Case, be: &mut dyn Backend) -> (Vec<String>, usize) {
         for _ in 0..times {
             let (code, out) = be.handle(m, target, &headers, body);
             log.push(format!("{} {} -> {} {}", m, target, code, out));
-            if (200..300).contains(&code) && !exempt.iter().any(|e| e == target) { ok.push((m.into(), target.into(), headers.clone(), body.into())); }
             if let Some(n) = &capture {
                 let tok = out.split("\"token\":\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or_else(|| panic!("{}: no token in {}", case.name, out));
                 vars.push((n.clone(), tok.to_string()));
@@ -307,22 +222,36 @@ pub fn run(case: &Case, be: &mut dyn Backend) -> (Vec<String>, usize) {
         headers.clear();
     }
     log.extend(be.state());
-    // allocations: state has moved on, so only replays that succeed again are counted (failures build error text)
-    for (m, t, h, b) in &ok { be.handle_quiet(m, t, h, b); }
-    let mut allocs = 0;
-    for (m, t, h, b) in &ok {
-        let a0 = be.allocs();
-        let code = be.handle_quiet(m, t, h, b);
-        let n = be.allocs() - a0;
-        if (200..300).contains(&code) { allocs += n; }
-        if n > 0 && std::env::var("MITO_SHOW_ALLOCS").is_ok() { eprintln!("{}: {} {} {} -> {}: {} allocations", case.name, m, t, b, code, n); }
-    }
-    (log, allocs)
+    log
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A float as text, as JavaScript writes numbers, built on Rust's `{:e}` (the shortest digits that read back as the
+    /// same number): positional from 1e-6 up to (not including) 1e21, otherwise with an exponent (`1e+21`, `1.5e-7`).
+    /// The oracle the C runtime's float text is checked against.
+    fn float_text(f: f64) -> String {
+        if f == 0.0 { return "0".into(); }
+        let t = format!("{:e}", f.abs());
+        let (mant, exp) = t.split_once('e').unwrap();
+        let n = exp.parse::<i32>().unwrap() + 1; // the value is 0.digits * 10^n
+        let digits: String = mant.chars().filter(|c| c.is_ascii_digit()).collect();
+        let k = digits.len() as i32;
+        let body = if k <= n && n <= 21 { format!("{}{}", digits, "0".repeat((n - k) as usize)) }
+            else if 0 < n && n <= 21 { format!("{}.{}", &digits[..n as usize], &digits[n as usize..]) }
+            else if -6 < n && n <= 0 { format!("0.{}{}", "0".repeat(-n as usize), digits) }
+            else { format!("{}{}e{}{}", &digits[..1], if k > 1 { format!(".{}", &digits[1..]) } else { String::new() }, if n - 1 >= 0 { "+" } else { "-" }, (n - 1).abs()) };
+        if f < 0.0 { format!("-{}", body) } else { body }
+    }
+
+    #[test]
+    fn the_float_oracle_writes_as_javascript_does() {
+        for (f, t) in [(0.0, "0"), (-0.0, "0"), (1.0, "1"), (-1.5, "-1.5"), (0.1, "0.1"), (1e21, "1e+21"), (1e20, "100000000000000000000"), (1.5e-7, "1.5e-7"), (0.000001, "0.000001"), (123.456, "123.456"), (5e-324, "5e-324")] {
+            assert_eq!(float_text(f), t);
+        }
+    }
 
     /// The C runtime's float text and float parsing against Rust's, on random bit patterns and on numbers written with
     /// more digits than needed (where rounding is hardest).
@@ -335,9 +264,35 @@ mod tests {
 ";
         src += "double t_parse(const char *s, u32 n) { return parse_json_double((const u8 *)s, n); }
 ";
+        src += "int t_esc(const u8 *s, u32 n, char *b, u32 cap) { Area a = { (u8 *)b, cap, 0 }; if (!a_json_str(&a, s, n)) return -1; return (int)a.len; }
+";
         let unit = crate::tcc::Unit::compile(&src, &[]).unwrap();
         let fmt: unsafe extern "C" fn(f64, *mut u8, u32) -> i32 = unsafe { std::mem::transmute(unit.symbol("t_fmt").unwrap()) };
         let parse: unsafe extern "C" fn(*const u8, u32) -> f64 = unsafe { std::mem::transmute(unit.symbol("t_parse").unwrap()) };
+        let esc: unsafe extern "C" fn(*const u8, u32, *mut u8, u32) -> i32 = unsafe { std::mem::transmute(unit.symbol("t_esc").unwrap()) };
+        let text = |f: f64, buf: &mut [u8; 64]| { let n = unsafe { fmt(f, buf.as_mut_ptr(), 64) } as usize; String::from_utf8(buf[..n].to_vec()).unwrap() };
+        // expected texts are JavaScript's String(x)
+        for (x, want) in [(0.0, "0"), (-0.0, "0"), (1.0, "1"), (-1.5, "-1.5"), (0.1 + 0.2, "0.30000000000000004"), (123456789.0, "123456789"),
+            (1e20, "100000000000000000000"), (1e21, "1e+21"), (1.5e21, "1.5e+21"), (0.000001, "0.000001"), (0.0000001, "1e-7"), (1.25e-7, "1.25e-7"),
+            (5e-324, "5e-324"), (1.7976931348623157e308, "1.7976931348623157e+308"), (2.0f64.powi(53), "9007199254740992"), (0.1f32 as f64, "0.10000000149011612"),
+            (100.0, "100"), (1.0e-6 * 1.5, "0.0000015"), (12.5, "12.5")] {
+            assert_eq!(text(x, &mut [0; 64]), want, "{:e}", x);
+        }
+        // JSON string escaping against a byte-by-byte reference
+        fn reference(s: &[u8]) -> Vec<u8> {
+            let mut o = vec![b'"'];
+            for &c in s { match c { b'"' => o.extend_from_slice(b"\\\""), b'\\' => o.extend_from_slice(b"\\\\"), b'\n' => o.extend_from_slice(b"\\n"), b'\r' => o.extend_from_slice(b"\\r"), b'\t' => o.extend_from_slice(b"\\t"), c if c < 0x20 => o.extend_from_slice(format!("\\u{:04x}", c).as_bytes()), c => o.push(c) } }
+            o.push(b'"'); o
+        }
+        let alphabet: &[u8] = b"ab\"\\\n\t\x01\x1f \x7f\xc3\xa9z0";
+        let mut r = 12345u64;
+        let mut eb = vec![0u8; 1 << 12];
+        for n in 0..2000 {
+            let s: Vec<u8> = (0..n % 70).map(|_| { r ^= r << 13; r ^= r >> 7; r ^= r << 17; if r % 3 == 0 { alphabet[(r >> 8) as usize % alphabet.len()] } else { b'a' + (r >> 16) as u8 % 26 } }).collect();
+            let k = unsafe { esc(s.as_ptr(), s.len() as u32, eb.as_mut_ptr(), eb.len() as u32) };
+            assert!(k >= 0);
+            assert_eq!(&eb[..k as usize], reference(&s).as_slice(), "input {:?}", s);
+        }
         let mut x = 0x9E37_79B9_7F4A_7C15u64;
         let mut buf = [0u8; 64];
         let mut checked = 0;
@@ -345,8 +300,7 @@ mod tests {
             x ^= x << 13; x ^= x >> 7; x ^= x << 17;
             let f = match i % 4 { 0 => f64::from_bits(x), 1 => (x >> 11) as f64 / (1u64 << 53) as f64 * 10f64.powi((x % 40) as i32 - 20), 2 => f64::from_bits(x & 0x000F_FFFF_FFFF_FFFF), _ => (x % 1_000_000) as f64 / 1000.0 };
             if !f.is_finite() { continue; }
-            let mut want = String::new();
-            crate::serve::float_text(&mut want, f).unwrap();
+            let want = float_text(f);
             let n = unsafe { fmt(f, buf.as_mut_ptr(), 64) } as usize;
             assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), want, "text of {:e} ({:016x})", f, f.to_bits());
             // parsing: the shortest text, and the exact value with 25 significant digits
@@ -445,19 +399,16 @@ mod tests {
         fn set_marks(&mut self, _: usize, _: usize) {}
         fn state(&self) -> Vec<String> { Vec::new() }
         fn stats(&self) -> String { String::new() }
-        fn notes(&self) -> Vec<String> { Vec::new() }
-        fn no_alloc(&self) -> bool { false }
-        fn allocs(&self) -> usize { crate::alloc_count::allocs() }
     }
 
     /// `cargo test --release c_runtime_speed -- --ignored --nocapture`: the chat example's GET messages (50 of 1000
-    /// messages) and POST message, Rust runtime with compiled endpoints against the C runtime, alternating rounds.
+    /// messages) and POST message on the C runtime's builds, and the same requests written directly in Rust.
     #[test]
     #[ignore]
     fn c_runtime_speed() {
         let (state, api) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
         let case = Case { name: "speed".into(), state, api, requests: String::new(), system: None, files: Vec::new() };
-        let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("Rust runtime", Box::new(RustBackend::start(&case, true))), ("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
+        let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
         if clang().is_some() {
             bes.push(("C runtime, clang -O2", Box::new(CBackend::start_with(&case, true))));
             bes.push(("C runtime, clang -O2, journal off (measurement only: no rollback)", Box::new(CBackend::start_flags(&case, true, &["-DMITO_MEASURE_NO_JOURNAL"]))));
@@ -497,7 +448,7 @@ mod tests {
              endpoint GET /all { respond 200 { \"x\": [each e in s e.id] }; }\n\
              endpoint GET /from/{k} { let k = int(param(\"k\")); respond 200 { \"up\": [each e in s from k e.id], \"down\": [each e in s from k reverse e.id] }; }\n").unwrap();
         let case = Case { name: "sorted-model".into(), state, api, requests: String::new(), system: None, files: Vec::new() };
-        let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("compiled", Box::new(RustBackend::start(&case, true)))];
+        let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
         if clang().is_some() {
             bes.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true))));
             bes.push(("C runtime, clang, undefined-behaviour checks", Box::new(CBackend::start_flags(&case, true, UBSAN))));
@@ -552,7 +503,7 @@ mod tests {
         let med = |mut v: Vec<f64>| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] };
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
         for (name, state, api, raw) in progs {
-            let (mut front, mut gen, mut whole, mut check, mut tcc_ep, mut tcc_all, mut clang_o0, mut clang_o2) = (vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![]);
+            let (mut front, mut gen, mut whole, mut check, mut tcc_all, mut clang_o0, mut clang_o2) = (vec![], vec![], vec![], vec![], vec![], vec![], vec![]);
             let (mut ep_lines, mut all_lines) = (0, 0);
             for _ in 0..5 {
                 let t = std::time::Instant::now();
@@ -573,9 +524,6 @@ mod tests {
                 crate::tcc::Unit::check(&src).unwrap();
                 check.push(ms(t));
                 let t = std::time::Instant::now();
-                let _u = crate::tcc::Unit::compile(&g.src, &[]).unwrap();
-                tcc_ep.push(ms(t));
-                let t = std::time::Instant::now();
                 let _u = crate::tcc::Unit::compile(&src, &[]).unwrap();
                 tcc_all.push(ms(t));
                 if clang().is_some() {
@@ -592,7 +540,6 @@ mod tests {
             println!("  generate endpoint C                          {:8.2} ms", med(gen));
             println!("  whole program C (runtime + layout tables)    {:8.2} ms", med(whole));
             println!("  tcc.exe check (child process)                {:8.2} ms", med(check.clone()));
-            println!("  TinyCC, endpoints only (Rust runtime)        {:8.2} ms  (check included)", med(tcc_ep));
             println!("  TinyCC, whole program (C runtime)            {:8.2} ms  (check included)", med(tcc_all));
             if !clang_o0.is_empty() {
                 println!("  clang -O0, whole program, to a DLL           {:8.2} ms", med(clang_o0));
@@ -612,16 +559,16 @@ mod tests {
         for f in files {
             let case = load(&f);
             if only.as_ref().map_or(false, |o| *o != case.name) { continue; }
-            // the interpreter is the reference while it exists
+            // the TinyCC build is the reference
             let mut backends: Vec<(&str, Box<dyn Backend>)> = if case.system.is_some() {
-                let mut v: Vec<(&str, Box<dyn Backend>)> = vec![("interpreted", Box::new(SystemBackend::start(&case, false))), ("compiled", Box::new(SystemBackend::start(&case, true))), ("C system", Box::new(CSystemBackend::start(&case, false, &[])))];
+                let mut v: Vec<(&str, Box<dyn Backend>)> = vec![("C system", Box::new(CSystemBackend::start(&case, false, &[])))];
                 if clang().is_some() {
                     v.push(("C system, clang", Box::new(CSystemBackend::start(&case, true, &[]))));
                     if std::env::var("MITO_SKIP_UBSAN").is_err() { v.push(("C system, clang, undefined-behaviour checks", Box::new(CSystemBackend::start(&case, true, UBSAN)))); }
                 }
                 v
             } else {
-                vec![("interpreted", Box::new(RustBackend::start(&case, false))), ("compiled", Box::new(RustBackend::start(&case, true))), ("C runtime", Box::new(CBackend::start(&case)))]
+                vec![("C runtime", Box::new(CBackend::start(&case)))]
             };
             if case.system.is_none() && clang().is_some() {
                 backends.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true))));
@@ -629,9 +576,7 @@ mod tests {
             }
             let mut logs = Vec::new();
             for (name, be) in backends.iter_mut() {
-                for n in be.notes().iter().filter(|n| !n.ends_with(": compiled")) { problems.push(format!("{} ({}): {}", case.name, name, n)); }
-                let (log, allocs) = run(&case, be.as_mut());
-                if be.no_alloc() && allocs != 0 { problems.push(format!("{} ({}): {} heap allocations in warm requests", case.name, name, allocs)); }
+                let log = run(&case, be.as_mut());
                 if std::env::var("MITO_SHOW_LOG").map_or(false, |v| v == *name) { for l in &log { eprintln!("{}", &l[..l.len().min(200)]); } }
                 logs.push((*name, log));
             }

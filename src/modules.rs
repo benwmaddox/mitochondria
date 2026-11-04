@@ -148,15 +148,13 @@ mod tests {
         assert!(expand("struct S { n: i64; }\nglobal b: bag<S>;\n", "").unwrap_err().contains("takes 2 arguments"));
     }
 
-    /// A program that changes a module instance's state other than through its functions does not load (interpreted
-    /// or compiled: the compiler decides what loads).
+    /// A program that changes a module instance's state other than through its functions does not load.
     #[test]
     fn module_state_changes_only_through_its_functions() {
         let state = "struct S { n: i64; name: string<8>; }\nglobal b: bag<S, 4>;\n";
         let load = |api: &str| -> Result<(), String> {
             let (st, api) = expand(state, api)?;
-            let inst = crate::runtime::Instance::start(crate::layout::Program::parse(&st)?, 1 << 20)?;
-            crate::serve::Server::new(inst, &api).map(|_| ())
+            crate::cgen::check(&crate::layout::Program::parse(&st)?, &api).map(|_| ())
         };
         assert_eq!(load("endpoint POST /ok { let s = b.add(); s.n = 5; s.name = \"x\"; b.remove(s); respond 200 {}; }"), Ok(()));
         for (api, want) in [
@@ -174,8 +172,7 @@ mod tests {
         // a module's private function cannot be called from outside it
         let (st, mut api) = expand(state, "endpoint GET /a { respond 200 { \"n\": b.secret() }; }").unwrap();
         api += "fn b.secret() { return 1; }\n";
-        let inst = crate::runtime::Instance::start(crate::layout::Program::parse(&st).unwrap(), 1 << 20).unwrap();
-        let e = crate::serve::Server::new(inst, &api).err().unwrap_or_default();
+        let e = crate::cgen::check(&crate::layout::Program::parse(&st).unwrap(), &api).err().unwrap_or_default();
         assert!(e.contains("`b.secret` is private to b"), "{}", e);
     }
 }

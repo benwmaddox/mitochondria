@@ -1,6 +1,7 @@
 //! The HTTP front end, end to end: raw requests over real sockets, one connection each, to every server that serves
 //! examples/chat (one program) and examples/chat-sharded (a system). Each must answer exactly as `tests/http.record`
-//! says, byte for byte. `MITO_BLESS=1` records the Rust servers' answers.
+//! says, byte for byte. `MITO_BLESS=1` records the TinyCC build's answers. (The record was first made by the Rust
+//! servers this front end replaced; the C executables matched it before those were removed.)
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::time::Duration;
@@ -119,28 +120,10 @@ fn start_exe(path: &std::path::Path, port: u16) -> Exe {
     Exe(c)
 }
 
-fn rust_single(port: u16) {
-    std::thread::spawn(move || {
-        let (s, a) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
-        let inst = crate::runtime::Instance::start(crate::layout::Program::parse(&s).unwrap(), 1024 << 20).unwrap();
-        let mut server = crate::serve::Server::new(inst, &a).unwrap();
-        server.clock = Some(1000);
-        server.rng.set(SEED);
-        let _ = crate::serve::serve(&mut server, port);
-    });
-}
 fn sharded_spec() -> crate::system::Spec {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/chat-sharded");
     crate::system::parse_spec(&std::fs::read_to_string(dir.join("chat.system")).unwrap(), &dir).unwrap()
 }
-fn rust_system(port: u16) {
-    let mut spec = sharded_spec();
-    spec.seed = Some(SEED);
-    let sys = crate::system::System::start(spec).unwrap();
-    sys.set_clock(Some(1000));
-    std::thread::spawn(move || { let _ = crate::system::serve(std::sync::Arc::new(sys), port, 4); });
-}
-
 #[test]
 fn http_servers_match_their_record() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/http.record");
@@ -155,9 +138,6 @@ fn http_servers_match_their_record() {
     let dir = std::env::temp_dir().join(format!("mito-http-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for (target, units) in [("chat", chat()), ("chat-sharded", crate::cgen::system_exe(&sharded_spec()).unwrap())] {
-        let p = free_port();
-        if target == "chat" { rust_single(p) } else { rust_system(p) }
-        logs.push((format!("{}, Rust", target), run(p)));
         let mut builds = vec![("TinyCC", true)];
         if crate::build::clang().is_some() { builds.push(("clang", false)); }
         for (name, tcc) in builds {
@@ -170,7 +150,7 @@ fn http_servers_match_their_record() {
     }
     let record = |target: &str| -> String {
         let mut o = String::new();
-        for (name, log) in &logs { if name.split(", ").next() == Some(target) && name.ends_with("Rust") { o += &format!("=== {}\n", target); for l in log { o += l; o.push('\n'); } } }
+        for (name, log) in &logs { if name.split(", ").next() == Some(target) && name.ends_with("(TinyCC)") { o += &format!("=== {}\n", target); for l in log { o += l; o.push('\n'); } } }
         o
     };
     if std::env::var("MITO_BLESS").is_ok() {

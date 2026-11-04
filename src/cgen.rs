@@ -214,6 +214,14 @@ fn json_lit(s: &str) -> String {
 
 pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, api, None, "") }
 
+/// Does a program load? Its api parses, every name binds, and every endpoint compiles; the error is the first problem.
+pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
+    let mut api = parse(api_src)?;
+    bind(&mut api, &|n| prog.global(n))?;
+    if let Some(n) = generate(prog, &api).notes.first() { return Err(n.replace(": interpreted (", ": ").trim_end_matches(')').to_string()); }
+    Ok(api)
+}
+
 /// The C runtime (runtime/*.c), compiled in the same translation unit as a program.
 pub const RUNTIME: &str = include_str!("../runtime/mito.c");
 /// The runtime's types for the layout tables, ahead of them.
@@ -1819,6 +1827,25 @@ mod profile_tests {
         assert!(c.contains("rooms.items.messages: list cap 1000 drop_oldest"), "{}", &c[..1500]);
         for ep in &a.eps { assert!(c.contains(&format!("// chat.api:{}-{}", ep.lines.0, ep.lines.1))); }
         assert!(c.contains("//   | endpoint DELETE /session {"));
+    }
+
+    #[test]
+    fn the_binder_rejects_bad_names_and_calls_at_load() {
+        let prog = Program::parse("struct C { n: i64; } global c: C;").unwrap();
+        for (api, want) in [
+            ("endpoint GET /a { respond 200 { \"x\": nope }; }", "unknown name `nope`"),
+            ("endpoint GET /a { respond 200 { \"x\": frob(1) }; }", "unknown function `frob`"),
+            ("fn f(a, b) { return a; } endpoint GET /a { respond 200 { \"x\": f(1) }; }", "`f` takes 2 arguments, given 1"),
+            ("endpoint GET /a { x = 1; respond 200 {}; }", "unknown variable `x`"),
+            ("endpoint GET /a { if true { let y = 1; } respond 200 { \"y\": y }; }", "unknown name `y`"), // block scope
+            ("fn len(s) { return 1; }", "name of a builtin"),
+            (&format!("endpoint GET {} {{ respond 200 {{}}; }}", "/a".repeat(33)), "at most 32 parts"),
+            (&format!("endpoint GET /a {{ let {} = 1; respond 200 {{}}; }}", "n".repeat(129)), "a name longer than 128 bytes"),
+            (&format!("endpoint GET /a {{ fail 400 \"{}\"; }}", "m".repeat(1025)), "a fail message longer than 1024 bytes"),
+        ] {
+            let e = super::check(&prog, api).err().unwrap_or_default();
+            assert!(e.contains(want), "{} -> {}", api, e);
+        }
     }
 
     #[test]

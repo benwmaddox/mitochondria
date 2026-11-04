@@ -1,0 +1,22 @@
+POST /w1 -> 201 {"slot":0}
+GET /w -> 200 {"w0":0,"w1":1}
+POST /t -> 409 {"error":"rolled back"}
+GET /t -> 200 {"a":0,"b":0,"name":"","ms":0}
+POST /t -> 200 {"a":1}
+GET /t -> 200 {"a":1,"b":2,"name":"changed","ms":1}
+POST /ms -> 201 {"slot":1}
+POST /ms -> 201 {"slot":2}
+POST /ms -> 201 {"slot":3}
+DELETE /ms/1 -> 200 {}
+DELETE /ms/0 -> 200 {}
+POST /ms -> 201 {"slot":0}
+POST /ms -> 201 {"slot":1}
+POST /rs -> 201 {"slot":0,"m":1}
+GET /scope -> 200 {"x":1,"t":10}
+state <plain values> 56
+state w0.s 16
+state w1.s 28
+state ms 40
+state rs 24
+state rs.m 12
+memory reserved=4034560 committed=32768 live=176

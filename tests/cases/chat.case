@@ -10,7 +10,6 @@ global meta: Meta; global sessions: pool<Session, 3> checked; global rooms: sort
 include examples/chat/chat.api
 --- requests
 // stat("live_kb") walks every live range and allocates in the Rust runtime
-allocates /stats
 POST /sessions {"name":"ann"} => ann
 POST /sessions {"name":"bob \"b\""} => bob
 POST /sessions {}

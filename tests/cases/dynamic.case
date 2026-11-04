@@ -31,8 +31,6 @@ endpoint POST /setstr { let t = ts[0]; t.n = "text"; respond 200 {}; }
 endpoint GET /min_int { respond 200 { "neg": -(0 - 9223372036854775807 - 1) }; }
 --- requests
 // the Rust runtime builds the text of a "not live" error before or() discards it
-allocates /ornotlive
-allocates /recor
 *3 POST /t
 GET /index {"k": 1}
 GET /index {"k": "1"}

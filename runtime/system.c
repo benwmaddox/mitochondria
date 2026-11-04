@@ -245,7 +245,7 @@ MITO_API int mito_system_request(void *sp, const char *m, u32 mn, const char *t,
         for (; j < 9; j++) { char c = k[j]; if (c >= 'A' && c <= 'Z') c += 32; if (c != x[j]) break; }
         if (j < 9) continue;
         u32 dots = 0, first = 0; for (u32 q = 0; q < h[i].vn; q++) if (h[i].v[q] == '.') { if (!dots) first = q; dots++; }
-        if (dots == 3) { u64 v = 0; int ok = first > 0; for (u32 q = 0; q < first && ok; q++) { char c = h[i].v[q]; if (c == '+' && q == 0 && first > 1) continue; if (c < '0' || c > '9' || v > (~0ULL - 9) / 10) ok = 0; else v = v * 10 + (u64)(c - '0'); } if (ok) shard = v; }
+        if (dots == 3) { u64 v = 0; int ok = first > 0; for (u32 q = 0; q < first && ok; q++) { char c = h[i].v[q]; if (c == '+' && q == 0 && first > 1) continue; if (c < '0' || c > '9' || v > (~0ULL - (u64)(c - '0')) / 10) ok = 0; else v = v * 10 + (u64)(c - '0'); } if (ok) shard = v; }
         break;
     }
     if (shard == ~0ULL) { lk_on(&s->lk); shard = s->rr++; lk_off(&s->lk); }

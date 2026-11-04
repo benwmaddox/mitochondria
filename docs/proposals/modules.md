@@ -1,92 +1,35 @@
-# Proposal: modules with compile-time parameters, and a standard library
+# Modules and a standard library (decided and built, 2026-11-04)
 
-> The syntax below is as of the proposal. Current syntax (one state, collection functions, endpoints as attribute
-> functions, an integer walk cursor that is -1 for none): docs/proposals/syntax.md and DESIGN.md.
+**Why.** Ordered data should be a collection written in the language, in a standard library, not a new built-in; the
+same mechanism should carry later structures (priority queues, keyed indexes) without growing the core.
 
-Status: decided and built (2026-11-04); see DESIGN.md, "Modules and the standard library". Built differently from
-the sketch below: `sorted` is a skip list, not a B-tree (a B-tree's inner nodes need copies of keys, which items of
-string keys cannot hold, and separators would point at removed items); `self` is resolved by the binder rather than
-replaced by text (so no local of the module can shadow it); loops gained `while` for walks that stop early. Ben's decisions: one file per module; compile-time copies, one per use;
-keys read-only outside the module (changed with `set_key`); changing an instance inside a loop over it is a compile
-error; `order by` is removed once `sorted` exists, and the chat's rooms become a `sorted` instance.
-
-## Why
-Ordered data (`sorted`, a B-tree) should be a collection written in the language, in a standard library, not a new
-built-in. The same mechanism should carry later structures (priority queues, keyed indexes, interval maps) without
-growing the core, which stays: plain values, `list`, `pool`, `ref`, structs, functions, endpoints.
-
-## What a module is
-A module is one file in `lib/` with **parameters**, a **state** part and **functions**:
+**What a module is.** One `.mito` file in `lib/`: compile-time parameters, structs, a `state { ... }` block (what an
+instance holds) and functions.
 
 ```
-// lib/sorted.mito
+// lib/sorted.mito (abridged)
 module sorted<T: struct, N: count, key: field of T>
-
---- state
-struct Node { n: u16; leaf: bool; keys: key[15]; kids: u32[16]; slots: u32[15]; }
-global items: pool<T, N> checked;
-global nodes: pool<Node, N / 7 + 2>;
-global top: Top;            // root node, height
---- functions
-pub fn add() { ... }        // a new item, placed by its key (alloc + insert)
-pub fn set_key(it, k) { ... }
-pub fn remove(it) { ... }
-pub fn first_at_least(k) { ... }
-iter fn start(from) { ... } // the iteration protocol, below
-iter fn step(cur) { ... }
+struct Link { level: u8; next: u32[12]; prev: u32[12]; }
+state {
+    items: pool<T, N> checked;
+    links: pool<Link, N>;
+    head: Head;
+}
+pub fn add(kv) { let it = self.items.add(); ... }
+fn iter_first(from) { ... }   // the walk protocol: a cursor is an integer, -1 for none
 ```
 
-A program uses it in its state with concrete arguments:
+A program uses it as a field of its state, `board: sorted<Entry, 1000, points>;`, and calls it by path:
+`game.board.add(0)`, `game.board.set_key(e, 120)`, `each e in game.board reverse limit 10`.
 
-```
-global scores: sorted<Score, 10000, points>;
-```
+**Decisions (Ben):**
+- **One file per module.**
+- **Compile-time copies, one per use.** The memory model is unchanged: an instance's pools are reserved, committed,
+  trimmed and rolled back like any others, and nothing exists at run time that the layout did not declare.
+- **Keys are read-only outside the module**, changed with `set_key`, so the order can never be wrong.
+- **Changing an instance inside a loop over it does not load.**
+- **`order by` is removed**; order is kept in the data.
 
-That is **compile-time instantiation**: the compiler substitutes `Score`, `10000` and `points` and lays out the module's
-state under the name `scores` (`scores.items`, `scores.nodes`, ...). Each use is its own copy, with its own layout,
-so the memory model is unchanged: the instance's pools are reserved, committed and trimmed like any others, writes go
-through the journal (rollback works), and `inspect` shows them. Nothing exists at run time that the layout did not
-declare.
-
-## Using an instance
-- **Functions** by instance name: `let s = scores.add(); s.name = "ann"; scores.set_key(s, 120);`
-- **Items** are ordinary items of `scores.items`: fields read and written as usual, `ref<scores>` refers to them (the
-  module's item pool counts as a top-level pool), generations check stale references.
-- **Loops**: `each s in scores where s.name != "" limit 10 { ... }` walks in key order (`reverse` for descending), and
-  `each s in scores from 100 ...` starts at the first key at least 100.
-
-## The iteration protocol
-No closures and no unbounded loops, so a module that can be iterated declares two functions:
-
-- `iter fn start(from)`: a cursor (an integer, or null when there is nothing) for the first item at or after `from`
-  (null `from`: the first item).
-- `iter fn step(cur)`: the cursor after `cur`, or null.
-
-plus `iter fn item(cur)` giving the item at a cursor. The compiler turns `each s in scores ...` into
-`start`, then `step` until null, binding `s` to `item(cur)`, with `where`, `limit` and `reverse` (`iter fn start_rev`,
-`step_rev`) as for other loops. A loop takes at most `N` steps (the instance's capacity), so it always ends.
-
-## Encapsulation
-Outside the module, its state is read-only: only its `pub` functions change `nodes` and `top`. Item fields are
-writable, except the parameter marked `key`, which only the module writes (`set_key`). This is what keeps the index
-right; it is checked when the program is compiled.
-
-## Parameters
-Kinds, checked at instantiation: `struct` (a struct type), `count` (an integer known at compile time; arithmetic on
-it is allowed in capacities), `field of T` (a field of a struct parameter, with its type usable as a type, as in
-`keys: key[15]`). Errors are reported at the use, naming the module line.
-
-## What this needs from the compiler
-1. Parameterised parsing and substitution of a module's state and functions (both parsers already exist).
-2. Instance-qualified names (`scores.add`, `scores.items`) in the binder.
-3. The read-only rule for module state and key fields.
-4. The iteration protocol in the interpreter and the generator (calls to generated functions, as for recursion).
-Counted loops (built) cover the search inside a node.
-
-## Decisions (2026-11-04)
-1. One file per module, holding its parameters, state and functions.
-2. Compile-time instantiation: one copy of the code per use, specialised (constant offsets, the key's own comparison).
-   No run-time generics.
-3. The key field is read-only outside the module; `instance.set_key(item, k)` moves the item. No assignment hooks.
-4. Changing a module instance inside a loop over it is a compile error.
-5. `order by` is removed once `sorted` exists; `GET /rooms` uses `global rooms: sorted<Room, 64, created>`.
+**Built differently from the first sketch.** `sorted` is a skip list, not a B-tree: inner B-tree nodes need copies of
+keys, which string keys cannot have. `self` is resolved by the binder, so no local of the module can shadow it. Loops
+gained `while`, for walks that stop early.

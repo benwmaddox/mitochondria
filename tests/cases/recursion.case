@@ -9,6 +9,7 @@ fn even(n) { if n == 0 { return true; } return odd(n - 1); }
 fn odd(n) { if n == 0 { return false; } return even(n - 1); }
 fn count_down(n) { if n > 0 { c.n = c.n + 1; count_down(n - 1); } }
 endpoint GET /sum/{n} { respond 200 { "s": sum_to(int(param("n"))) }; }
+endpoint GET /sum2/{n} { respond 200 { "s": sum_to(int(param("n"))) + fib(5) }; }
 endpoint GET /fib/{n} { respond 200 { "f": fib(int(param("n"))) }; }
 endpoint GET /even/{n} { respond 200 { "e": even(int(param("n"))) }; }
 endpoint POST /down/{n} { count_down(int(param("n"))); respond 200 { "n": c.n }; }
@@ -19,6 +20,7 @@ GET /sum/63
 GET /sum/64
 GET /sum/1000
 GET /fib/15
+GET /sum2/4
 GET /even/7
 GET /even/30
 POST /down/5

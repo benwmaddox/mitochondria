@@ -4,6 +4,7 @@ GET /sum/63 -> 200 {"s":2016}
 GET /sum/64 -> 500 {"error":"calls nested more than 64 deep"}
 GET /sum/1000 -> 500 {"error":"calls nested more than 64 deep"}
 GET /fib/15 -> 200 {"f":610}
+GET /sum2/4 -> 200 {"s":15}
 GET /even/7 -> 200 {"e":false}
 GET /even/30 -> 200 {"e":true}
 POST /down/5 -> 200 {"n":5}

@@ -102,6 +102,8 @@ impl CBackend {
         let mut api = crate::lang::parse(&case.api).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
         crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
         let src = crate::cgen::program_c(&prog, &api, None).unwrap_or_else(|e| panic!("{}: {}", case.name, e));
+        // the C runtime makes no heap allocations because it has no allocator: check the program names none
+        for w in ["malloc", "calloc", "realloc", "HeapAlloc", "LocalAlloc", "GlobalAlloc", "_alloca"] { assert!(!src.contains(w), "{}: the C program uses {}", case.name, w); }
         let unit = crate::tcc::Unit::compile(&src, &[]).unwrap_or_else(|e| { let _ = std::fs::write(std::env::temp_dir().join(format!("mito-{}.c", case.name)), &src); panic!("{}: C runtime: {}", case.name, e) });
         let sym = |n: &str| unit.symbol(n).unwrap_or_else(|| panic!("no {}", n));
         unsafe {

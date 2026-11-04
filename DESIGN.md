@@ -78,3 +78,50 @@ Logic tests (`cargo test --release`): table/list agree, typed Full and not-live 
 2. Measure re-fault cost after trim and pick default slack policy.
 3. Tiny frontend: parse a `state { ... }` tree with capacities, compute layout, fail over budget, print `inspect`.
 4. Suspend points: compute record layout per `await` in a toy job language, then rerun the 10,000-waiter test with real sizes.
+
+## How it compares, and which programs fit (draft)
+
+Mitochondria is not a garbage collector (GC) and not a plain arena. Liveness is **declared**: a row is live because it is inside its table's `len`, a string is live up to its own length, and the program's own `push`/`pop`/`remove` calls maintain that. Nothing is traced. `trim` is the only GC-like step: it scans the declared structure (no pointer chasing) and returns pages that hold no live byte to the OS, when the program asks.
+
+| | Arena | GC | Mitochondria |
+|---|---|---|---|
+| Who decides live | one bump pointer | tracing reachability | length/occupancy in the declared structure |
+| Free one item | no | yes, eventually | yes (swap-remove) |
+| Memory returns | at reset | at some collection | at `trim`, chosen by the program |
+| Pauses | none | yes, or concurrent overhead | none; `trim` runs only when called |
+| Peak memory knowable | yes | no | yes: the declared total |
+| Access cost | pointer | pointer, maybe barriers | constant offset plus a `len` compare |
+| Arbitrary object graphs | awkward | natural | no: use ids |
+| Dangling references | caller's problem | impossible | detected by generation check |
+
+### Good fit: the shape and bounds are known, data is mostly flat
+- **Games and simulations** (the Stasis home turf): entities, particles, projectiles, inventory. Fixed caps, per-tick work over all live rows, replay and determinism matter. Columns make per-field passes (physics, culling) fast.
+- **Servers with bounded concurrency:** sessions, connections, rooms, queues, rate-limit tables, with a declared maximum per kind. Overload becomes a typed `FULL` and a 503, and the memory budget is the capacity plan. This is the 10,000-waiting-jobs case.
+- **Embedded and real-time:** no allocator, no pause, a known worst-case footprint, a build that fails when the budget is exceeded.
+- **Data pipelines and analytics over batches:** read a bounded batch into tables, do column scans, reset the scratch epoch. Columns are the right layout and the epoch is the lifetime.
+- **Compilers and tools with phases:** token and node arrays plus per-phase scratch, reset per file or per request (this is the next-lang selfhost shape).
+- **Financial or monitoring state machines:** order books, per-account records, metrics ring buffers, anything where "how much memory at peak" must be answerable before launch.
+
+What they share: items are mostly **identified by an index or id**, the **maximum is known or choosable**, lifetimes are **per tick, per request, or per collection membership**, and most work is **loops over many similar records**.
+
+### Poor fit: irregular, unbounded, or pointer-rich data
+- **Programs with large irregular object graphs:** DOM trees, ASTs with shared and rewritten subtrees, scene graphs with arbitrary reparenting, symbolic algebra, Prolog or Lisp style data. Everything becomes ids into tables, and every traversal pays an extra lookup plus bookkeeping a GC language gets free.
+- **Unbounded or heavy-tailed sizes:** a text editor on arbitrary files, a browser, a general document store, a web crawler. A single declared maximum is either too small (visible `FULL` on real input) or wastefully large. Page reclaim helps only when whole pages are dead.
+- **Highly dynamic shapes:** plugin systems, scripting hosts, JSON of unknown schema, anything that builds types or structures from input at run time.
+- **Long-running programs with many mixed lifetimes and heavy sharing:** where "who owns this" is a real question and nobody wants to answer it by hand (large application frameworks, many-library glue code).
+- **Exploratory scripting and quick prototypes:** declaring maxima up front is friction when the data shape is still being discovered.
+- **Caches with no natural eviction rule:** the bound exists but the policy (what to drop) must be written by the program; a GC cache with weak references is easier to start.
+
+### Middle ground: works with a deliberate pattern
+- **Graphs and trees:** store nodes in a `table`, edges as ids (parent id, first child id, or an edge table). Good when the graph is large and traversed in bulk; awkward when it is small and edited by hand.
+- **Variable-length data:** fixed-capacity strings and lists, or a `text` arena region for long text with a declared total. A larger typed `Full` budget is the price.
+- **Shared state across jobs:** tables passed to jobs by explicit view, per the next-lang model; no hidden sharing.
+
+### Cost the language is choosing to pay
+- **Declare maxima everywhere.** The benefit is a known worst case and typed exhaustion.
+- **Remove things yourself.** A forgotten removal is a leak, but a bounded one that shows up as `FULL`; in a GC language the same bug hides until the process is huge.
+- **Ids instead of references.** The benefit is a generation check instead of a dangling pointer.
+- **Fixed per-slot capacity.** The benefit is constant-time exact addressing; the cost is dead space inside slots, partly recovered by columns and `trim`.
+
+### Possible later: debug-only reachability check
+A development mode that reports rows no id field in the program refers to (orphans), the way a leak detector would, without changing how release builds run. Not a collector: it only reports. Useful because the only real hazard of declared liveness is forgetting to remove.

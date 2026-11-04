@@ -1003,6 +1003,40 @@ static int bytes_cmp(const u8 *a, u64 an, const u8 *b, u64 bn) { u64 n = an < bn
 static void col_view(Mito *m, u32 cid, u64 idx, u32 ci, const u8 **p, u32 *n) { *n = (u32)rd(&m->mem, caddr(m, cid, idx, ci), 4); *p = m->mem.base + caddr(m, cid, idx, ci + 1); }
 static int cmp_res(int op, int c) { switch (op) { case 0: return c == 0; case 1: return c != 0; case 2: return c < 0; case 3: return c <= 0; case 4: return c > 0; default: return c >= 0; } }
 /* A string column against a literal, or against another column, compared where they are (op in OPS order). */
+/* How many of the first n elements of an integer array (kind code 1..8, at byte offset base) are below target (at most it when
+   inclusive). For a sorted array that is the position where target belongs. AVX2 (when the build enables it) compares four
+   64-bit keys at a time. */
+#ifdef __clang__
+__attribute__((always_inline))
+#endif
+static inline int h_count_below(Ctx *c, u64 base, u32 code, i64 n, i64 target, int inclusive, i64 *out) {
+    const u8 *p = M_(c)->mem.base + base; i64 r = 0, i = 0;
+#if defined(__AVX2__)
+    if (code == 4) {
+        __m256i t = _mm256_set1_epi64x(target);
+        for (; i + 4 <= n; i += 4) {
+            __m256i v = _mm256_loadu_si256((const __m256i *)(p + i * 8));
+            int below = _mm256_movemask_pd(_mm256_castsi256_pd(inclusive ? _mm256_cmpgt_epi64(v, t) : _mm256_cmpgt_epi64(t, v)));
+            r += inclusive ? 4 - __builtin_popcount((unsigned)below) : __builtin_popcount((unsigned)below);
+        }
+    }
+#endif
+    for (; i < n; i++) {
+        i64 v;
+        switch (code) {
+            case 1: { signed char x; memcpy(&x, p + i, 1); v = x; break; }
+            case 2: { short x; memcpy(&x, p + i * 2, 2); v = x; break; }
+            case 3: { int x; memcpy(&x, p + i * 4, 4); v = x; break; }
+            case 5: { u8 x; memcpy(&x, p + i, 1); v = x; break; }
+            case 6: { unsigned short x; memcpy(&x, p + i * 2, 2); v = x; break; }
+            case 7: { u32 x; memcpy(&x, p + i * 4, 4); v = x; break; }
+            case 8: { u64 x; memcpy(&x, p + i * 8, 8); if (x > (u64)I64MAX) { r += 0; continue; } v = (i64)x; break; }
+            default: memcpy(&v, p + i * 8, 8); break;
+        }
+        r += inclusive ? v <= target : v < target;
+    }
+    *out = r; return 0;
+}
 static int h_str_cmp_lit(Ctx *c, int op, u32 cid, u32 idx, u32 ci, u32 off, u32 len, int *out) {
     Mito *m = M_(c); const u8 *p; u32 n; col_view(m, cid, idx, ci, &p, &n);
     *out = cmp_res(op, bytes_cmp(p, n, t_ptr(m, (T){ off, len }), len)); return 0;
@@ -1267,7 +1301,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_int, h_move_elems, h_str_cmp_lit, h_str_cmp_col,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_int, h_move_elems, h_count_below, h_str_cmp_lit, h_str_cmp_col,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

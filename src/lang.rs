@@ -14,7 +14,7 @@ pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen }
+pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -574,7 +574,7 @@ impl Binder<'_> {
         let Expr::Call(n, args, _) = e else { return };
         if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
         let Some((recv, op)) = n.rsplit_once('.') else { return };
-        if !matches!(op, "add" | "try_add" | "remove" | "move" | "count" | "capacity") { return; }
+        if !matches!(op, "add" | "try_add" | "remove" | "move" | "count_below" | "count" | "capacity") { return; }
         let mut parts = recv.split('.');
         let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
         for f in parts { r = Expr::Field(Box::new(r), f.to_string()); }
@@ -664,6 +664,8 @@ impl Binder<'_> {
                     (".remove", 2) => return self.err("`remove(item)` is a statement: `coll.remove(item);`".into()),
                     (".count" | ".capacity" | ".add" | ".try_add", k) => return self.err(format!("`{}()` takes no arguments, given {}", &n[1..], k - 1)),
                     (".remove", k) => return self.err(format!("`remove` takes one item, given {}", k - 1)),
+                    (".count_below", 4) => CallRes::Builtin(B::CountBelow),
+                    (".count_below", k) => return self.err(format!("`array.count_below(n, target, inclusive)` takes three arguments, given {}", k - 1)),
                     (".move", _) => return self.err("`array.move(from, to, count)` is a statement".into()),
                     _ => return self.err(format!("unknown function `{}`", &n[1..])),
                 };

@@ -64,6 +64,7 @@ struct H {
     int (*json_id)(Ctx *, u32, u32);                           /* an item written as its id: "slot.generation" or the slot */
     int (*wr_int)(Ctx *, u64, u32, i64);                       /* an integer of `size` bytes at a byte offset (the value already known to fit) */
     int (*move_elems)(Ctx *, u64, u32, i64, i64, i64);        /* move `count` elements of `esize` bytes within an array at byte offset `base`: from, to, count (already in range) */
+    int (*count_below)(Ctx *, u64, u32, i64, i64, int, i64 *);      /* how many of the first n elements of an array (kind code, at a byte offset) are below a target (at most it when inclusive) */
     int (*str_cmp_lit)(Ctx *, int, u32, u32, u32, u32, u32, int *); /* a string column against a literal (op in OPS order), compared where they are: no copy */
     int (*str_cmp_col)(Ctx *, int, u32, u32, u32, u32, u32, u32, int *); /* a string column against another */
 };
@@ -388,7 +389,11 @@ pub fn program_c_named(prog: &Program, api: &Api, source: Option<(&str, &str)>, 
     // The profile was checked on `c->h->helper`; in the unit itself the helper table is the runtime's own constant
     // `mito_h`, so the optimizer sees the calls go straight to the helpers and can inline them.
     let direct = |s: &str| s.replace("c->h->", "mito_h.");
-    let mut o = direct(PRELUDE);
+    let mut o = String::from("#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+"); // vector compares, only when the build enables AVX2 (`--cflag -mavx2`)
+    o += &direct(PRELUDE);
     o += RUNTIME_TYPES;
     o += &format!("#define MITO(x) {}##x\n", prefix);
     o += &layout_c(prog, api);
@@ -1765,6 +1770,30 @@ impl<'p> G<'p> {
                 let col = &self.prog.colls[*c];
                 let f = if col.is_list() { 0 } else { 1 };
                 CV::Int(format!("(i64)LD_U32({}, {})", col.hdr + 4 * f * col.mult, inst))
+            }
+            B::CountBelow => {
+                // a null argument comes from a copy of a function made for a null argument, in a branch that cannot run with it
+                // (a walk with no `from`): it fails if reached, as an operator on null does
+                if a.iter().any(|v| matches!(v, CV::Null)) { self.fail(500, "operator does not fit these values"); return Ok(CV::Int("0LL".into())); }
+                let mut it = a.into_iter();
+                let (Some(arr), Some(CV::Int(n)), Some(CV::Int(target)), Some(incl)) = (it.next(), it.next(), it.next(), it.next()) else { return no("`count_below(n, target, inclusive)`: n and target are integers, inclusive a bool") };
+                let incl = match incl { CV::Bool(e) => format!("(({}) ? 1 : 0)", e), CV::Int(e) => format!("(({}) != 0)", e), _ => return no("`count_below`: inclusive is a bool") };
+                let (base, code, len) = match arr {
+                    CV::ArrCol(c, idx, ci) => {
+                        let col = &self.prog.colls[c].cols[ci];
+                        let CKind::Arr(s, len) = col.kind else { unreachable!() };
+                        (format!("{}ULL + (u64)({}) * {}ULL", col.off, idx, col.kind.size()), plain_code(&Ty::Scalar(s)).map_or(0, |x| x.0), len)
+                    }
+                    CV::PlainArr(off, e, len) => (format!("{}ULL", off), plain_code(&e).map_or(0, |x| x.0), len),
+                    _ => return no("`count_below` works on a fixed array"),
+                };
+                if !(1..=8).contains(&code) { return no("`count_below` works on an array of integers"); }
+                let (n, target) = (self.hold_int(n), self.hold_int(target));
+                self.line(&format!("if (UNLIKELY({n} < 0 || {n} > {len}LL)) FAIL(400, \"count_below out of range\", 24);"));
+                let r = self.tmp("r");
+                self.line(&format!("i64 {};", r));
+                self.call(&format!("c->h->count_below(c, {}, {}, {}, {}, {}, &{})", base, code, n, target, incl, r));
+                CV::Int(r)
             }
             B::Capacity => { let Some(CV::Coll(c, _)) = a.first() else { return no("`capacity()` is a function of a collection") }; CV::Int(format!("{}LL", self.prog.colls[*c].cap)) }
             B::Slot => match a.first() {

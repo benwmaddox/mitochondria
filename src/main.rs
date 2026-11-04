@@ -74,7 +74,10 @@ fn build_exe(args: &[String]) {
     let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1)).cloned();
     let (units, name) = program(&inputs(args));
     let out = std::path::PathBuf::from(out.unwrap_or_else(|| format!("{}.exe", name)));
-    build::exe(&units, &out, args.iter().any(|a| a == "--tcc"), &[]).unwrap_or_else(|e| die(e));
+    // `--cflag X` (repeatable) hands X to clang in place of the default `-O2`, e.g. `--cflag -O2 --cflag -mavx2`
+    let cflags: Vec<String> = args.windows(2).filter(|w| w[0] == "--cflag").map(|w| w[1].clone()).collect();
+    let cflags: Vec<&str> = cflags.iter().map(|s| s.as_str()).collect();
+    build::exe(&units, &out, args.iter().any(|a| a == "--tcc"), &cflags).unwrap_or_else(|e| die(e));
     println!("built {}", out.display());
 }
 

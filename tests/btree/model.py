@@ -27,6 +27,11 @@ def check(full):
         up = [kk * 100000 + s for kk, _, s in model if kk >= k][:40]
         down = [kk * 100000 + s for kk, _, s in model if kk <= k][::-1][:40]
         assert a["up"] == up, ("from", k, a["up"], up); assert a["down"] == down, ("from rev", k, a["down"], down)
+def check_find():
+    for k in [rnd.randint(-2, span + 2) for _ in range(8)]:
+        st, a = call("GET", f"/find/{k}")
+        first = next((s for kk, _, s in model if kk == k), -1)
+        assert a["slot"] == first, ("find", k, a, first)
 try:
     for i in range(ops):
         r = rnd.random()
@@ -36,11 +41,16 @@ try:
             order += 1; model.append((k, order, a["slot"])); model.sort(key=lambda x: (x[0], x[1]))
         elif r < 0.85 and model:
             j = rnd.randrange(len(model)); _, _, s = model.pop(j); st, a = call("POST", f"/del/{s}"); assert st == 200, (st, a)
+        elif r < 0.90 and model:
+            k = rnd.choice(model)[0] if rnd.random() < 0.8 else rnd.randint(-2, span + 2)
+            st, a = call("POST", f"/delkey/{k}"); assert st == 200, (st, a)
+            j = next((j for j, x in enumerate(model) if x[0] == k), None)
+            if j is not None: model.pop(j)
         elif model:
             j = rnd.randrange(len(model)); k0, _, s = model.pop(j); k = rnd.randint(0, span)
             st, a = call("POST", f"/set/{s}/{k}"); assert st == 200, (st, a)
             order += 1; model.append((k, order, s)); model.sort(key=lambda x: (x[0], x[1]))
-        if i % 500 == 499: check(False); print(i + 1, "ops ok, size", len(model), flush=True)
+        if i % 500 == 499: check_find(); check(False); print(i + 1, "ops ok, size", len(model), flush=True)
     check(True); print("PASS", ops, "ops, final size", len(model))
 finally:
     p.kill()

@@ -64,6 +64,32 @@ pub fn last() {
     return self.items[self.leaves[leaf - 1].slots[self.leaves[leaf - 1].count - 1]];
 }
 
+// ---- finding by key
+// The first item (in order) whose key is target, or null.
+pub fn find(target) {
+    if self.head.root == 0 { return null; }
+    var leaf = self.descend(target, false);
+    var pos = self.leaf_pos(leaf, target, false);
+    if pos == self.leaves[leaf - 1].count {
+        // every key in this leaf is below target: the next leaf's first key is the one to look at
+        leaf = self.leaves[leaf - 1].next;
+        pos = 0;
+        if leaf == 0 { return null; }
+    }
+    let node = self.leaves[leaf - 1];
+    if node.keys[pos] == target { return self.items[node.slots[pos]]; }
+    return null;
+}
+// Remove the first item whose key is target, if there is one.
+pub fn remove_key(target) {
+    let found = self.find(target);
+    if found != null {
+        self.unplace(slot(found));
+        self.locs.remove(self.locs[slot(found)]);
+        self.items.remove(found);
+    }
+}
+
 // ---- searching
 // In leaf `leaf` (its id): the first position whose key is above target (`above`) or at least target (not `above`), 0..count.
 fn leaf_pos(leaf, target, above) {

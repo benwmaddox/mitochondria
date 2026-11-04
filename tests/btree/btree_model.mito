@@ -16,3 +16,7 @@ fn rev() -> Response<{ x: [i64] }> { return ok({ "x": [each e in bt.t reverse e.
 fn from(k: i64) -> Response<{ up: [i64], down: [i64] }> { return ok({ "up": [each e in bt.t from k limit 40 e.k * 100000 + slot(e)], "down": [each e in bt.t from k reverse limit 40 e.k * 100000 + slot(e)] }); }
 @get("/ends")
 fn ends() -> Response<{ first: i64, last: i64, size: i64 }> { return ok({ "first": or(bt.t.first().k, -1), "last": or(bt.t.last().k, -1), "size": bt.t.size() }); }
+@get("/find/{k}")
+fn find(k: i64) -> Response<{ slot: i64 }> { let e = bt.t.find(k); if e == null { return ok({ "slot": -1 }); } return ok({ "slot": slot(e) }); }
+@post("/delkey/{k}")
+fn delkey(k: i64) -> Response<{ size: i64 }> { bt.t.remove_key(k); return ok({ "size": bt.t.size() }); }

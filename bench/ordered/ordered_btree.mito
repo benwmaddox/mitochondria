@@ -18,7 +18,8 @@ fn hit(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }>
     each j in 0..ops {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
-        each e in b.m from x * 2 limit 1 { if e.k == x * 2 { s = s + e.v; } }
+        let e = b.m.find(x * 2);
+        if e != null { s = s + e.v; }
     }
     return ok({ "sum": s });
 }
@@ -28,7 +29,8 @@ fn miss(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }
     each j in 0..ops {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
-        each e in b.m from x * 2 + 1 limit 1 { if e.k == x * 2 + 1 { s = s + e.v; } }
+        let e = b.m.find(x * 2 + 1);
+        if e != null { s = s + e.v; }
     }
     return ok({ "sum": s });
 }
@@ -38,8 +40,8 @@ fn mixed(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 
     each j in 0..ops {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
-        let q = x * 2 + j % 2;
-        each e in b.m from q limit 1 { if e.k == q { s = s + e.v; } }
+        let e = b.m.find(x * 2 + j % 2);
+        if e != null { s = s + e.v; }
     }
     return ok({ "sum": s });
 }
@@ -49,7 +51,8 @@ fn increment(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: 
     each j in 0..ops {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
-        each e in b.m from x * 2 limit 1 { if e.k == x * 2 { e.v = e.v + 1; } }
+        let e = b.m.find(x * 2);
+        if e != null { e.v = e.v + 1; }
     }
     return ok({ "sum": 0 });
 }
@@ -66,13 +69,11 @@ fn range(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 
 // a request may free at most 65536 slots and a remove frees two, so delete runs in batches: `x` is the sequence's state
 // where the last batch stopped (the first batch starts at 20261104), and the answer is where this one stopped
 @delete("/delete/{x}/{count}")
-fn delete(x: i64, count: i64 in 1..32768) -> Response<{ x: i64, size: i64 }> {
+fn delete(x: i64, count: i64 in 1..16384) -> Response<{ x: i64, size: i64 }> {
     var y = x;
     each i in 0..count {
         y = y * 48271 % 2147483647;
-        var hit = -1;
-        each e in b.m from y * 2 limit 1 { if e.k == y * 2 { hit = slot(e); } }
-        if hit >= 0 { b.m.remove(b.m.get(hit)); }
+        b.m.remove_key(y * 2);
     }
     return ok({ "x": y, "size": b.m.size() });
 }

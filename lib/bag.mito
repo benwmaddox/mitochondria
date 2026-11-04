@@ -22,9 +22,9 @@ pub fn room() { return N - self.items.count(); }
 pub fn get(k) { return self.items[k]; }
 pub fn added() { return self.counts.added; }
 pub fn removed() { return self.counts.removed; }
-// iteration (each s in bag [from slot] [reverse] ...): slot order; a cursor is a slot number
-fn iter_first(from) { each i in or(from, 0)..N where exists(self.items[i]) limit 1 { return i; } return null; }
-fn iter_next(cur) { each i in cur + 1..N where exists(self.items[i]) limit 1 { return i; } return null; }
-fn iter_last(from) { each i in 0..or(from, N - 1) + 1 reverse where exists(self.items[i]) limit 1 { return i; } return null; }
-fn iter_prev(cur) { each i in 0..cur reverse where exists(self.items[i]) limit 1 { return i; } return null; }
+// iteration (each s in bag [from slot] [reverse] ...): slot order; a cursor is a slot number, -1 for none
+fn iter_first(from) { each i in or(from, 0)..N where exists(self.items[i]) limit 1 { return i; } return -1; }
+fn iter_next(cur) { each i in cur + 1..N where exists(self.items[i]) limit 1 { return i; } return -1; }
+fn iter_last(from) { each i in 0..or(from, N - 1) + 1 reverse where exists(self.items[i]) limit 1 { return i; } return -1; }
+fn iter_prev(cur) { each i in 0..cur reverse where exists(self.items[i]) limit 1 { return i; } return -1; }
 fn iter_item(cur) { return self.items[cur]; }

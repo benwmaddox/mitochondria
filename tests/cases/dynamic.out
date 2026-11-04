@@ -28,15 +28,10 @@ GET /modmin -> 500 {"error":"integer overflow"}
 POST /setstr -> 400 {"error":"wrong type for this field"}
 GET /ornotlive -> 200 {"a":-1,"b":false,"c":0}
 GET /ornotlive -> 200 {"a":-1,"b":false,"c":10}
-GET /anyitem -> 200 {"n":10,"slot":1}
-GET /anyitem -> 500 {"error":"`.n` needs an item or a state struct"}
-GET /anyitem -> 404 {"error":"slot 3 is not live"}
-POST /anyitem -> 200 {"n":77}
-DELETE /anyitem -> 200 {"count":3}
-GET /coll -> 200 {"n":2,"x":[7,10]}
+GET /coll -> 200 {"n":3,"x":[7,10,20]}
 GET /recor -> 200 {"a":7}
 GET /recor -> 200 {"a":-1}
 GET /slotnull -> 500 {"error":"slot(item)"}
 state <plain values> 8
-state app.ts 40
-memory reserved=8192 committed=8192 live=48
+state app.ts 48
+memory reserved=8192 committed=8192 live=56

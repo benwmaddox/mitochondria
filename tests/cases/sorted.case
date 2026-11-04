@@ -18,7 +18,7 @@ fn post_set_k(k: i64, points: i64) -> Response<{}> { app.board.set_key(app.board
 @delete("/x/{k}")
 fn delete_x_k(k: i64) -> Response<{ size: i64 }> { app.board.remove(app.board.get(k)); return ok({ "size": app.board.size() }); }
 @get("/asc")
-fn get_asc() -> Response<{ x: [any] }> { return ok({ "x": [each s in app.board s.name + ":" + s.points] }); }
+fn get_asc() -> Response<{ x: [string] }> { return ok({ "x": [each s in app.board s.name + ":" + s.points] }); }
 @get("/top")
 fn get_top(n: i64 = 3) -> Response<{ x: [string] }> { return ok({ "x": [each s in app.board reverse limit n s.name] }); }
 @get("/from/{k}")

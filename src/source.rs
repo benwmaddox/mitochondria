@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn a_program_splits_into_state_and_code_with_lines_kept() {
-        let src = "// a counter\nstruct C { n: i64; }\nstate c: C;\n\nfn bump() { c.n = c.n + 1; }\n@post(\"/n/{k}\") fn post_n_k() -> Response<any> { bump(); return ok({ \"n\": c.n, \"s\": \"}\" }); }\n";
+        let src = "// a counter\nstruct C { n: i64; }\nstate c: C;\n\nfn bump() { c.n = c.n + 1; }\n@post(\"/n/{k}\") fn post_n_k() -> Response<{}> { bump(); return ok({ \"n\": c.n, \"s\": \"}\" }); }\n";
         let (st, code) = split(src).unwrap();
         assert_eq!(st.lines().count(), src.lines().count());
         assert_eq!(code.lines().count(), src.lines().count());

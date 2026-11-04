@@ -9,12 +9,6 @@ DELETE /nodes/b -> 200 {}
 GET /walk -> 404 {"error":"reference is not live"}
 GET /find/b -> 200 {"found":false,"name":"-"}
 DELETE /nodes/zz -> 404 {"error":"no such node"}
-GET /describe/0 -> 200 {"d":"zero"}
-GET /describe/-4 -> 200 {"d":null}
-GET /describe/12 -> 200 {"d":12}
-GET /mixed/1 -> 200 {"v":1}
-GET /mixed/7 -> 200 {"v":"big"}
-GET /mixed/11 -> 200 {"v":null}
 state <plain values> 8
 state app.nodes 74
 memory reserved=8192 committed=8192 live=82

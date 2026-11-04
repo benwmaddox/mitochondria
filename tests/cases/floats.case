@@ -10,7 +10,7 @@ fn post_small(x: f64) -> Response<{ small: f64 }> { acc.small = x; return ok({ "
 @get("/mean")
 fn get_mean() -> Response<{ mean: f64 }> { if acc.n == 0 { fail 409 "no values"; } return ok({ "mean": acc.total / acc.n }); }
 @get("/math")
-fn get_math() -> Response<{ sum: f64, diff: f64, prod: f64, quot: f64, neg: f64, tenth: f64, lt: bool, eq: bool, ne: bool, int: i64, nint: i64, str: any, whole: f64, big: f64, tiny: f64, inf: f64 }> {
+fn get_math() -> Response<{ sum: f64, diff: f64, prod: f64, quot: f64, neg: f64, tenth: f64, lt: bool, eq: bool, ne: bool, int: i64, nint: i64, str: string, whole: f64, big: f64, tiny: f64, inf: f64 }> {
     let a = 1.5;
     let b = 2;
     return ok({
@@ -20,7 +20,7 @@ fn get_math() -> Response<{ sum: f64, diff: f64, prod: f64, quot: f64, neg: f64,
     });
 }
 @get("/text")
-fn get_text() -> Response<{ s: any, n: f64, e: f64 }> { return ok({ "s": str(0.0000001) + " " + str(1.0 / 0.0) + " " + str(0.0 - 1.0 / 0.0) + " " + str(0.0 / 0.0) + " " + str(123456789012345680000.0 * 10.0) + " " + str(0.0 - 0.0), "n": 0.0000001 * 3.0, "e": 0.0000015 }); }
+fn get_text() -> Response<{ s: string, n: f64, e: f64 }> { return ok({ "s": str(0.0000001) + " " + str(1.0 / 0.0) + " " + str(0.0 - 1.0 / 0.0) + " " + str(0.0 / 0.0) + " " + str(123456789012345680000.0 * 10.0) + " " + str(0.0 - 0.0), "n": 0.0000001 * 3.0, "e": 0.0000015 }); }
 @get("/cmp/{x}")
 fn get_cmp_x(x: i64) -> Response<{ gt: bool, max: bool }> { let x = x + 0.5; return ok({ "gt": x > 2, "max": x >= 10.5 }); }
 --- requests

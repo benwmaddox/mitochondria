@@ -59,7 +59,7 @@ pub struct Via { pub first: u32, pub next: u32, pub item: u32, pub last: Option<
 pub enum Json { Obj(Vec<(String, Json)>), Arr(Iter, Box<Json>), E(Expr), Empty }
 
 /// The `T` of an endpoint's `Response<T>`: the shape of every answer it gives. `Name` is a scalar (`i64`, `bool`,
-/// `string`, ...), `any` (a value whose kind is known only at run time), `none` (no body), or a declared struct.
+/// `string`, ...), `none` (no body), a declared struct (an object with its fields), or an item type (written as an id).
 #[derive(Debug, Clone, PartialEq)]
 pub enum RType { Name(String), Opt(Box<RType>), Arr(Box<RType>), Obj(Vec<(String, RType)>) }
 
@@ -281,7 +281,7 @@ impl P {
     }
     fn signed(&mut self) -> R<i64> { if self.sym("-") { Ok(-self.int()?) } else { self.int() } }
 
-    /// The `T` of `Response<T>`: `{ name: T, ... }`, `[T]`, `T?`, or a name (`i64`, `string<24>`, `Row`, `any`, `none`).
+    /// The `T` of `Response<T>`: `{ name: T, ... }`, `[T]`, `T?`, or a name (`i64`, `string<24>`, `Row`, `Player`, `none`).
     fn rtype(&mut self) -> R<RType> {
         let t = if self.sym("{") {
             let mut f = Vec::new();

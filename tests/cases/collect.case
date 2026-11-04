@@ -30,7 +30,7 @@ fn get_firsts() -> Response<{ calls: i64, first: string }> {
     return ok({ "calls": n, "first": first_positive() });
 }
 @get("/list")
-fn get_list() -> Response<{ x: [any] }> { return ok({ "x": [each i in app.items i.tag + ":" + i.score] }); }
+fn get_list() -> Response<{ x: [string] }> { return ok({ "x": [each i in app.items i.tag + ":" + i.score] }); }
 --- requests
 POST /items {"score": 3, "tag": "a"}
 POST /items {"score": 0, "tag": "b"}

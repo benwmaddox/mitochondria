@@ -90,8 +90,8 @@ fn unlink(s) {
     self.links[s].level = 0;
 }
 // iteration: a cursor is a slot
-fn iter_first(from) { var x = 0; if from != null { x = self.below(from, true, false); } let n = self.nxt(x, 0); if n == 0 { return null; } return n - 1; }
-fn iter_next(cur) { let n = self.links[cur].next[0]; if n == 0 { return null; } return n - 1; }
-fn iter_last(from) { var x = self.head.last; if from != null { x = self.below(from, false, false); } if x == 0 { return null; } return x - 1; }
-fn iter_prev(cur) { let p = self.links[cur].prev[0]; if p == 0 { return null; } return p - 1; }
+fn iter_first(from) { var x = 0; if from != null { x = self.below(from, true, false); } let n = self.nxt(x, 0); if n == 0 { return -1; } return n - 1; }
+fn iter_next(cur) { let n = self.links[cur].next[0]; if n == 0 { return -1; } return n - 1; }
+fn iter_last(from) { var x = self.head.last; if from != null { x = self.below(from, false, false); } if x == 0 { return -1; } return x - 1; }
+fn iter_prev(cur) { let p = self.links[cur].prev[0]; if p == 0 { return -1; } return p - 1; }
 fn iter_item(cur) { return self.items[cur]; }

@@ -1,4 +1,4 @@
-// values whose kind is only known at run time, used where an integer (or a number) is required
+// inputs of the wrong kind stop at the edge; or() of a dead reference; a collection returned by a function; integer limits
 --- program
 struct T { n: i64; }
 struct App {
@@ -26,16 +26,6 @@ fn post_set(x: i64) -> Response<{ n: i64 }> { let t = app.ts[0]; t.n = x; return
 fn get_ornotlive(k: i64 from body) -> Response<{ a: i64, b: bool, c: i64 }> { return ok({ "a": or(app.ts[3].n, -1), "b": exists(app.ts[9]), "c": or(app.ts[k].n, 0) }); }
 fn pool_of() { return app.ts; }
 fn find(k) { if k < 0 { return app.ts[99]; } if k == 0 { return app.ts[0]; } return find(k - 1); }
-@get("/anyitem")
-fn get_anyitem(k: i64 = -1 from body) -> Response<{ n: any, slot: i64 }> {
-    var x = 5;
-    if k != -1 { x = app.ts[k]; }
-    return ok({ "n": x.n, "slot": slot(x) });
-}
-@post("/anyitem")
-fn post_anyitem(k: i64) -> Response<{ n: any }> { var x = 5; x = app.ts[k]; x.n = 77; return ok({ "n": x.n }); }
-@delete("/anyitem")
-fn delete_anyitem(k: i64 from body) -> Response<{ count: i64 }> { var x = "s"; x = app.ts[k]; app.ts.remove(x); return ok({ "count": app.ts.count() }); }
 @get("/coll")
 fn get_coll() -> Response<{ n: i64, x: [i64] }> { return ok({ "n": pool_of().count(), "x": [each t in pool_of() t.n] }); }
 @get("/recor")
@@ -80,11 +70,6 @@ GET /modmin {"d": -1}
 POST /setstr
 GET /ornotlive {"k": 9}
 GET /ornotlive {"k": 1}
-GET /anyitem {"k": 1}
-GET /anyitem {}
-GET /anyitem {"k": 3}
-POST /anyitem {"k": 2}
-DELETE /anyitem {"k": 2}
 GET /coll
 GET /recor {"k": 3}
 GET /recor {"k": -1}

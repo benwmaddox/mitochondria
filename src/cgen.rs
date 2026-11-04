@@ -138,6 +138,7 @@ impl std::fmt::Display for Shape {
             Shape::Null => write!(f, "null"), Shape::Any => write!(f, "any"), Shape::Nothing => write!(f, "none"),
             Shape::Opt(s) => write!(f, "{}?", s), Shape::Arr(s) => write!(f, "[{}]", s),
             Shape::Id(_, n) => write!(f, "{}", if n.is_empty() { "an item" } else { n }),
+            Shape::Obj(fs) if fs.is_empty() => write!(f, "{{}}"),
             Shape::Obj(fs) => {
                 write!(f, "{{ ")?;
                 for (i, (k, v)) in fs.iter().enumerate() {
@@ -158,17 +159,18 @@ fn i64_lit(v: i64) -> String { if v == i64::MIN { "I64MIN".into() } else { forma
 fn show_rtype(t: &RType) -> String {
     match t {
         RType::Name(n) => n.clone(), RType::Opt(t) => format!("{}?", show_rtype(t)), RType::Arr(t) => format!("[{}]", show_rtype(t)),
+        RType::Obj(f) if f.is_empty() => "{}".into(),
         RType::Obj(f) => format!("{{ {} }}", f.iter().map(|(k, v)| format!("{}: {}", k, show_rtype(v))).collect::<Vec<_>>().join(", ")),
     }
 }
-/// Does an answer of `shape` fit `Response<want>`? A value whose kind is known only at run time (`any`) fits anything:
-/// it is not checked when the program is compiled.
+/// Does an answer of `shape` fit `Response<want>`? Every value's kind is known when the program is compiled; one known
+/// only at run time does not fit.
 fn fits_shape(prog: &Program, shape: &Shape, want: &RType, at: &str) -> Result<(), String> {
     let here = || if at.is_empty() { "the answer".to_string() } else { format!("`{}`", at) };
     let bad = || Err(format!("{} is {}, declared {}", here(), shape, show_rtype(want)));
-    if *shape == Shape::Any { return Ok(()); }
+    if *shape == Shape::Any { return Err(format!("{}'s kind is known only at run time", here())); }
     match want {
-        RType::Name(n) if n == "any" => Ok(()),
+        RType::Name(n) if n == "any" => Err("`any` is not a type: every value's kind is known when the program is compiled".into()),
         RType::Opt(t) => if matches!(shape, Shape::Null) { Ok(()) } else if let Shape::Opt(s) = shape { fits_shape(prog, s, t, at) } else { fits_shape(prog, shape, t, at) },
         RType::Arr(t) => match shape { Shape::Arr(e) => fits_shape(prog, e, t, &format!("{}[]", at)), _ => bad() },
         RType::Obj(fields) => match shape {
@@ -268,6 +270,21 @@ fn unify(a: K, b: K) -> K {
         (Null, Item(c) | Ref(c)) | (Item(c) | Ref(c), Null) => Ref(c),
         (Item(c), Ref(d)) | (Ref(c), Item(d)) | (Ref(c), Ref(d)) if c == d => Ref(c),
         _ => Any,
+    }
+}
+
+thread_local! {
+    /// Why a kind was widened to one known only at run time, while the kinds of an endpoint are being worked out.
+    static WHY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+fn why(m: String) { WHY.with(|w| { let mut w = w.borrow_mut(); if !w.contains(&m) { w.push(m); } }) }
+
+/// A kind as the language names it, for errors.
+fn kname(prog: &Program, k: K) -> String {
+    match k {
+        K::Int => "an integer".into(), K::Flt => "a number".into(), K::Bool => "a bool".into(), K::Txt => "a string".into(), K::Null => "null".into(),
+        K::Item(c) | K::Ref(c) => format!("an item of {}", prog.colls[c].name), K::Any => "a value of any kind".into(),
+        _ => "a collection or struct".into(),
     }
 }
 
@@ -588,6 +605,13 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 (r, _) => break (r, body, specs.into_inner()),
             }
         };
+        // every value's kind is known when the program is compiled: one widened to a run-time kind does not load
+        let res = res.and_then(|_| {
+            let run_time = slot_kinds.iter().any(|x| x.1 == K::Any) || ret_kinds.iter().any(|x| x.1 == K::Any) || specs[done.len()..].iter().any(|sp| sp.ret == K::Any || sp.proto.contains("Val p"));
+            if !run_time { return Ok(()); }
+            no(WHY.with(|w| w.borrow().first().cloned()).unwrap_or_else(|| "a value whose kind is known only at run time".into()))
+        });
+        WHY.with(|w| w.borrow_mut().clear());
         match res.and_then(|_| check_profile(&body).map_err(|e| format!("C safety profile: {}", e))) {
             Ok(()) => {
                 let name = format!("ep{}", k);
@@ -948,7 +972,10 @@ impl<'p> G<'p> {
                 let cur = env[*slot as usize].clone().ok_or_else(|| format!("`{}` has no compiled value", n))?;
                 let v = self.expr(rhs, env, None)?;
                 if let Err(e) = self.assign_var(&cur, v.clone()) {
-                    if let (Some(a), Some(b)) = (kind(&cur), kind(&v)) { self.widen = Some(Widen::Slot(self.frame, *slot, unify(a, b))); }
+                    if let (Some(a), Some(b)) = (kind(&cur), kind(&v)) {
+                        if unify(a, b) == K::Any { why(format!("`{}` holds {} and then {}: a var keeps the kind of its first value", n, kname(self.prog, a), kname(self.prog, b))); }
+                        self.widen = Some(Widen::Slot(self.frame, *slot, unify(a, b)));
+                    }
                     return Err(e);
                 }
             }
@@ -1108,7 +1135,10 @@ impl<'p> G<'p> {
         let r = self.ret.last().unwrap();
         let (var, label, f) = (r.var.clone(), r.label.clone(), *self.inlining.last().unwrap());
         let k = match r.kind { None => { self.ret.last_mut().unwrap().kind = Some(kv); kv } Some(k) => k };
-        if !fits(kv, k) { self.widen = Some(Widen::Ret(f, unify(k, kv))); return no("a function returns values of different kinds"); }
+        if !fits(kv, k) {
+            if unify(k, kv) == K::Any { why(format!("`{}` returns {} and {}: a function returns one kind", self.api.fns[f as usize].name, kname(self.prog, k), kname(self.prog, kv))); }
+            self.widen = Some(Widen::Ret(f, unify(k, kv))); return no("a function returns values of different kinds");
+        }
         let v = self.coerce(v, k, false)?;
         if self.ret.last().unwrap().func {
             match &v {
@@ -1623,7 +1653,10 @@ impl<'p> G<'p> {
         let kind = ret.kind.unwrap_or(K::Null);
         if !ends_by_itself && kind != K::Null {
             // falling off the end returns null, as in the interpreter
-            if !fits(K::Null, kind) { self.widen = Some(Widen::Ret(k, unify(kind, K::Null))); return no("a function that can end without returning its value"); }
+            if !fits(K::Null, kind) {
+            if unify(kind, K::Null) == K::Any { why(format!("`{}` returns {} on one path and nothing on another: return a value on every path", self.api.fns[k as usize].name, kname(self.prog, kind))); }
+            self.widen = Some(Widen::Ret(k, unify(kind, K::Null))); return no("a function that can end without returning its value");
+        }
         }
         let (decl, out) = match kind {
             K::Int => (format!("i64 {}_v = 0;", var), CV::Int(format!("{}_v", var))),
@@ -1718,16 +1751,17 @@ impl<'p> G<'p> {
         let lim = match &it.limit { Some(e) => { let x = self.expr(e, env, None)?; Some(self.int_or(x, 400, "bad limit")) } None => None };
         let lim = lim.map(|l| self.hold_int(l));
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
+        // a cursor is an integer, -1 when there is none
         let c0 = self.call_values(if it.reverse { v.last.ok_or("no reverse walk")? } else { v.first }, vec![from], None)?;
-        let c0 = self.val(c0)?;
+        let c0 = self.int_or(c0, 500, "a walk's cursor is an integer (-1 for none)");
         let (cur, k, hits) = (self.tmp("cur"), self.tmp("k"), self.tmp("hits"));
         self.open("{");
-        self.line(&format!("Val {} = {};", cur, c0));
+        self.line(&format!("i64 {} = {};", cur, c0));
         self.line(&format!("i64 {} = 0;", hits));
         self.open(&format!("for (u32 {} = 0; {} < {}; {}++) {{", k, k, steps, k));
-        self.line(&format!("if ({}.tag == 0) break;", cur));
+        self.line(&format!("if ({} < 0) break;", cur));
         if let Some(l) = &lim { self.line(&format!("if ({} >= {}) break;", hits, l)); }
-        let item = self.call_values(v.item, vec![CV::Any(cur.clone())], None)?;
+        let item = self.call_values(v.item, vec![CV::Int(cur.clone())], None)?;
         let item = self.hold(item, false)?;
         env[it.slot as usize] = Some(item);
         if let Some(w) = &it.whil { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) break;", wc)); }
@@ -1735,8 +1769,8 @@ impl<'p> G<'p> {
         self.line(&format!("{}++;", hits));
         body(self, env, &hits)?;
         if filtered { self.close("}"); }
-        let nx = self.call_values(if it.reverse { v.prev.ok_or("no reverse walk")? } else { v.next }, vec![CV::Any(cur.clone())], None)?;
-        let nx = self.val(nx)?;
+        let nx = self.call_values(if it.reverse { v.prev.ok_or("no reverse walk")? } else { v.next }, vec![CV::Int(cur.clone())], None)?;
+        let nx = self.int_or(nx, 500, "a walk's cursor is an integer (-1 for none)");
         self.line(&format!("{} = {};", cur, nx));
         self.close("}");
         self.close("}");
@@ -2023,15 +2057,15 @@ mod profile_tests {
     fn the_binder_rejects_bad_names_and_calls_at_load() {
         let prog = Program::parse("struct C { n: i64; } state c: C;").unwrap();
         for (api, want) in [
-            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ \"x\": nope }); }", "unknown name `nope`"),
-            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ \"x\": frob(1) }); }", "unknown function `frob`"),
-            ("fn f(a, b) { return a; } @get(\"/a\") fn get_a() -> Response<any> { return ok({ \"x\": f(1) }); }", "`f` takes 2 arguments, given 1"),
-            ("@get(\"/a\") fn get_a() -> Response<any> { x = 1; return ok({}); }", "unknown variable `x`"),
-            ("@get(\"/a\") fn get_a() -> Response<any> { if true { let y = 1; } return ok({ \"y\": y }); }", "unknown name `y`"), // block scope
+            ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": nope }); }", "unknown name `nope`"),
+            ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": frob(1) }); }", "unknown function `frob`"),
+            ("fn f(a, b) { return a; } @get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": f(1) }); }", "`f` takes 2 arguments, given 1"),
+            ("@get(\"/a\") fn get_a() -> Response<{}> { x = 1; return ok({}); }", "unknown variable `x`"),
+            ("@get(\"/a\") fn get_a() -> Response<{}> { if true { let y = 1; } return ok({ \"y\": y }); }", "unknown name `y`"), // block scope
             ("fn len(s) { return 1; }", "name of a builtin"),
-            (&format!("@get(\"{}\") fn a() -> Response<any> {{ return ok({{}}); }}", "/a".repeat(33)), "at most 32 parts"),
-            (&format!("@get(\"/a\") fn a() -> Response<any> {{ let {} = 1; return ok({{}}); }}", "n".repeat(129)), "a name longer than 128 bytes"),
-            (&format!("@get(\"/a\") fn a() -> Response<any> {{ fail 400 \"{}\"; }}", "m".repeat(1025)), "a fail message longer than 1024 bytes"),
+            (&format!("@get(\"{}\") fn a() -> Response<{{}}> {{ return ok({{}}); }}", "/a".repeat(33)), "at most 32 parts"),
+            (&format!("@get(\"/a\") fn a() -> Response<{{}}> {{ let {} = 1; return ok({{}}); }}", "n".repeat(129)), "a name longer than 128 bytes"),
+            (&format!("@get(\"/a\") fn a() -> Response<{{}}> {{ fail 400 \"{}\"; }}", "m".repeat(1025)), "a fail message longer than 1024 bytes"),
         ] {
             let e = super::check(&prog, api).err().unwrap_or_default();
             assert!(e.contains(want), "{} -> {}", api, e);
@@ -2048,20 +2082,20 @@ mod profile_tests {
             super::check(&Program::parse(&st).unwrap(), &api).err().unwrap_or_default()
         };
         for (api, want) in [
-            ("@post(\"/a\") fn post_a() -> Response<any> { let p = alloc app.items; return ok({}); }", "replaced by collection functions"),
-            ("@post(\"/a\") fn post_a() -> Response<any> { let p = app.items[0]; free p; return ok({}); }", "replaced by the collection's function"),
-            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ n: count(app.items) }); }", "`count(x)` was replaced by `x.count()`"),
-            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ n: capacity(app.items) }); }", "`capacity(x)` was replaced by `x.capacity()`"),
-            ("@post(\"/a\") fn post_a() -> Response<any> { return ok({ n: slot(app.items.add()) }); }", "makes an item"),
-            ("@post(\"/a\") fn post_a() -> Response<any> { let p = app.items[0]; app.board.items.remove(p); return ok({}); }", "cannot be removed from"),
-            ("@post(\"/a\") fn post_a() -> Response<any> { let p = app.items[0]; let n = app.items.remove(p); return ok({}); }", "is a statement"),
-            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ n: app.items.count(1) }); }", "takes no arguments, given 1"),
-            ("@post(\"/a\") fn post_a() -> Response<any> { if app.items.add { n: 1 } { } return ok({}); }", "expected"),
+            ("@post(\"/a\") fn post_a() -> Response<{}> { let p = alloc app.items; return ok({}); }", "replaced by collection functions"),
+            ("@post(\"/a\") fn post_a() -> Response<{}> { let p = app.items[0]; free p; return ok({}); }", "replaced by the collection's function"),
+            ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ n: count(app.items) }); }", "`count(x)` was replaced by `x.count()`"),
+            ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ n: capacity(app.items) }); }", "`capacity(x)` was replaced by `x.capacity()`"),
+            ("@post(\"/a\") fn post_a() -> Response<{}> { return ok({ n: slot(app.items.add()) }); }", "makes an item"),
+            ("@post(\"/a\") fn post_a() -> Response<{}> { let p = app.items[0]; app.board.items.remove(p); return ok({}); }", "cannot be removed from"),
+            ("@post(\"/a\") fn post_a() -> Response<{}> { let p = app.items[0]; let n = app.items.remove(p); return ok({}); }", "is a statement"),
+            ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ n: app.items.count(1) }); }", "takes no arguments, given 1"),
+            ("@post(\"/a\") fn post_a() -> Response<{}> { if app.items.add { n: 1 } { } return ok({}); }", "expected"),
         ] {
             let e = load(api);
             assert!(e.contains(want), "{} -> {}", api, e);
         }
-        assert_eq!(load("@post(\"/a\") fn post_a() -> Response<any> { let p = app.items.add { n: 2 }; p.n += 1; app.items.remove(p); return ok({ n: p.n, c: app.items.count() }); }"), "");
+        assert_eq!(load("@post(\"/a\") fn post_a() -> Response<{ n: i64, c: i64 }> { let p = app.items.add { n: 2 }; p.n += 1; app.items.remove(p); return ok({ n: p.n, c: app.items.count() }); }"), "");
     }
 
     /// Every answer is checked against the endpoint's `Response<T>` when the program is compiled.
@@ -2083,6 +2117,11 @@ mod profile_tests {
             ("@get(\"/a\") fn a() { return ok({}); }", "returns a `Response<T>`"),
             ("@fetch(\"/a\") fn a() -> Response<{}> { return ok({}); }", "`@fetch`"),
             ("@get(\"/a\") fn a() -> Response<{}> { if app.total > 1 { return ok({}); } }", "can finish without an answer"),
+            // every value's kind is known when the program is compiled
+            ("@get(\"/a\") fn a() -> Response<{ n: i64 }> { var v = 1; v = \"x\"; return ok({ n: 1 }); }", "`v` holds an integer and then a string: a var keeps the kind of its first value"),
+            ("fn f(k: i64) { if k > 0 { return 1; } return \"x\"; } @get(\"/a\") fn a() -> Response<{}> { let x = f(1); return ok({}); }", "`f` returns an integer and a string: a function returns one kind"),
+            ("fn f(k: i64) { if k > 0 { return 1; } } @get(\"/a\") fn a() -> Response<{}> { let x = f(1); return ok({}); }", "returns an integer on one path and nothing on another"),
+            ("@get(\"/a\") fn a() -> Response<{ n: string }> { return ok({ n: \"x\" - 1 }); }", "operator `-` does not fit string and i64"),
         ] {
             let e = load(api);
             assert!(e.contains(want), "{} -> {}", api, e);
@@ -2091,7 +2130,6 @@ mod profile_tests {
         for api in [
             "@get(\"/a\") fn a() -> Response<[Row]> { return ok([each it in app.items { name: it.name, n: it.n }]); }",
             "@get(\"/a\") fn a(x: string<8>?) -> Response<{ n: string? }> { return ok({ n: or(x, null) }); }",
-            "@get(\"/a\") fn a() -> Response<{ n: any }> { var v = 1; v = \"x\"; return ok({ n: v }); }",
             "@delete(\"/a\") fn a() -> Response<none> { return no_content(); }",
             "@post(\"/a\") fn a() -> Response<{ total: i64 }> { app.total += 1; if app.total > 2 { return status(202, { total: app.total }); } return created({ total: app.total }); }",
         ] {

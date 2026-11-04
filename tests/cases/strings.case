@@ -19,13 +19,13 @@ fn post_notes(t: string<4096>?) -> Response<{ text: string }> {
     return created({ "text": n.text });
 }
 @get("/notes")
-fn get_notes(q: string<4096>?, x_name: string<4096>? from header("X-Name")) -> Response<{ all: any, first: string, eq: any, lt: any, hdr: string, q: string }> {
+fn get_notes(q: string<4096>?, x_name: string<4096>? from header("X-Name")) -> Response<{ all: string, first: string, eq: bool, lt: bool, hdr: string, q: string }> {
     var all = "";
     each n in app.notes { all = all + n.text; }
     return ok({ "all": all, "first": app.notes[0].text, "eq": app.notes[0].text == "[a]", "lt": "abc" < "abd", "hdr": or(x_name, "none"), "q": q });
 }
 @get("/concat")
-fn get_concat() -> Response<{ a: any, b: any, c: any, d: any }> { return ok({ "a": "n=" + 5, "b": "t=" + true, "c": "x" + null, "d": str(12) + str(false) }); }
+fn get_concat() -> Response<{ a: string, b: string, c: string, d: string }> { return ok({ "a": "n=" + 5, "b": "t=" + true, "c": "x" + null, "d": str(12) + str(false) }); }
 --- requests
 POST /motd {"m": "hello"}
 POST /motd {"m": "this is far too long"}

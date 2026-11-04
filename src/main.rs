@@ -9,7 +9,7 @@ const MB: usize = 1 << 20;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(|s| s.as_str()) == Some("exp") { return if args.get(1).map(|s| s.as_str()) == Some("trim") { { exp::trim_cost(); exp::scoped_cost() } } else { exp::run() }; }
+    if args.first().map(|s| s.as_str()) == Some("exp") { return if args.get(1).map(|s| s.as_str()) == Some("access") { exp::access_cost() } else if args.get(1).map(|s| s.as_str()) == Some("trim") { { exp::trim_cost(); exp::scoped_cost() } } else { exp::run() }; }
     let mut budget = 1024 * MB;
     let mut files = Vec::new();
     let mut it = args.iter();

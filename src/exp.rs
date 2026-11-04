@@ -112,3 +112,64 @@ pub fn scoped_cost() {
     }
     println!("  big untouched by scoped trim: {}", i.get("big[999999].name").unwrap());
 }
+
+/// Data access patterns: pointers vs row index vs id-with-generation, native Rust loops over the layouts.
+pub fn access_cost() {
+    use std::hint::black_box;
+    #[derive(Clone, Copy)]
+    struct Item { id: i32, hp: f32, x: f32, y: f32, _pad: [u8; 48] }
+    const N: usize = 1 << 20; // 1M items, 64 MB as records
+    const OPS: usize = 4 << 20;
+    let mut seed = 0x9E3779B97F4A7C15u64;
+    let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+    let perm = |rnd: &mut dyn FnMut() -> u64| { let mut v: Vec<u32> = (0..N as u32).collect(); for i in (1..N).rev() { v.swap(i, (rnd() % (i as u64 + 1)) as usize); } v };
+    let time = |f: &mut dyn FnMut() -> f64| { f(); let t = Instant::now(); let r = f(); black_box(r); t.elapsed().as_nanos() as f64 / OPS as f64 };
+
+    let aos: Vec<Item> = (0..N).map(|i| Item { id: i as i32, hp: 1.0, x: 2.0, y: 3.0, _pad: [0; 48] }).collect();
+    let order = perm(&mut rnd);
+    let mut boxed_seq: Vec<Box<Item>> = (0..N).map(|i| Box::new(aos[i])).collect();      // heap in allocation order
+    let mut boxed_aged: Vec<Option<Box<Item>>> = (0..N).map(|_| None).collect();          // heap allocated in shuffled order
+    for &k in &order { boxed_aged[k as usize] = Some(Box::new(aos[k as usize])); }
+    let boxed_aged: Vec<Box<Item>> = boxed_aged.into_iter().map(|b| b.unwrap()).collect();
+    let (id_c, hp_c, x_c, y_c): (Vec<i32>, Vec<f32>, Vec<f32>, Vec<f32>) = (aos.iter().map(|a| a.id).collect(), aos.iter().map(|a| a.hp).collect(), aos.iter().map(|a| a.x).collect(), aos.iter().map(|a| a.y).collect());
+    let slot_of = perm(&mut rnd);                  // id -> row (rows were reshuffled by removals)
+    let gen: Vec<u32> = vec![1; N];
+    let q: Vec<u32> = (0..OPS).map(|_| (rnd() % N as u64) as u32).collect();
+
+    println!("\nmemory access, 1M items (64 B as records), {} random operations; ns per operation (lower is better)", OPS);
+    println!("  random read of 3 fields of one object (hp + x + y):");
+    let r = time(&mut || q.iter().map(|&k| { let a = &aos[k as usize]; (a.hp + a.x + a.y) as f64 }).sum());
+    println!("    {:<46} {:>7.1}", "records, row index (list<T>)", r);
+    let r = time(&mut || q.iter().map(|&k| { let a = &boxed_seq[k as usize]; (a.hp + a.x + a.y) as f64 }).sum());
+    println!("    {:<46} {:>7.1}", "pointer, heap allocated in order", r);
+    let r = time(&mut || q.iter().map(|&k| { let a = &boxed_aged[k as usize]; (a.hp + a.x + a.y) as f64 }).sum());
+    println!("    {:<46} {:>7.1}", "pointer, aged heap (scattered)", r);
+    let r = time(&mut || q.iter().map(|&k| (hp_c[k as usize] + x_c[k as usize] + y_c[k as usize]) as f64).sum());
+    println!("    {:<46} {:>7.1}", "columns, row index (table<T>)", r);
+    let r = time(&mut || q.iter().map(|&k| { let s = slot_of[k as usize] as usize; if gen[k as usize] != 1 { return 0.0; } (hp_c[s] + x_c[s] + y_c[s]) as f64 }).sum());
+    println!("    {:<46} {:>7.1}", "columns, id -> slot with generation check", r);
+
+    println!("  read ONE field of one random object (hp):");
+    let r = time(&mut || q.iter().map(|&k| aos[k as usize].hp as f64).sum());
+    println!("    {:<46} {:>7.1}", "records, row index", r);
+    let r = time(&mut || q.iter().map(|&k| hp_c[k as usize] as f64).sum());
+    println!("    {:<46} {:>7.1}", "columns, row index", r);
+    let r = time(&mut || q.iter().map(|&k| { let s = slot_of[k as usize] as usize; if gen[k as usize] != 1 { return 0.0; } hp_c[s] as f64 }).sum());
+    println!("    {:<46} {:>7.1}", "columns, id with generation check", r);
+
+    println!("  follow links (linked structure, random cycle through all 1M):");
+    let cyc = { let p = perm(&mut rnd); let mut next = vec![0u32; N]; for i in 0..N { next[p[i] as usize] = p[(i + 1) % N]; } next };
+    struct Node { next: *const Node, _p: [u8; 56] }
+    let mut nodes: Vec<Box<Node>> = Vec::with_capacity(N);
+    let mut at: Vec<Option<Box<Node>>> = (0..N).map(|_| None).collect();
+    for &k in &order { at[k as usize] = Some(Box::new(Node { next: std::ptr::null(), _p: [0; 56] })); }
+    for i in 0..N { nodes.push(at[i].take().unwrap()); }
+    for i in 0..N { let t: *const Node = &*nodes[cyc[i] as usize]; nodes[i].next = t; }
+    let r = time(&mut || { let mut p: *const Node = &*nodes[0]; for _ in 0..OPS { p = unsafe { (*p).next }; } p as usize as f64 });
+    println!("    {:<46} {:>7.1}", "pointers (64 B nodes, aged heap)", r);
+    let r = time(&mut || { let mut i = 0u32; for _ in 0..OPS { i = cyc[i as usize]; } i as f64 });
+    println!("    {:<46} {:>7.1}", "ids into a column (4 B per link)", r);
+    let handles: Vec<(u32, u32)> = cyc.iter().map(|&n| (n, 1)).collect();
+    let r = time(&mut || { let mut h = handles[0]; let mut dead = 0u32; for _ in 0..OPS { if gen[h.0 as usize] != h.1 { dead += 1; } h = handles[h.0 as usize]; } (h.0 + dead) as f64 });
+    println!("    {:<46} {:>7.1}", "ids + generation check (8 B handles)", r);
+}

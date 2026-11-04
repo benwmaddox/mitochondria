@@ -166,3 +166,28 @@ Whole-program trim pays for rescanning every live string in regions that did not
 - **Admission, not growth:** a full mailbox is a typed `FULL` the sender sees (retry, drop, or backpressure), and the sum of all mailboxes plus worker regions is the static budget.
 - **Commit state per region:** the prototype's page bitmap is one array and is single-threaded. Real workers need it split per region (each owner updates only its own), so scoped trim needs no lock. Decommit still makes other cores flush translation caches; that cost is not measured here.
 - **Whole-program trim becomes a rare maintenance operation** (shutdown, memory-pressure signal), not the routine path.
+
+## Data access in practice: columns and ids vs pointers (measured: `cargo run --release -- exp access`)
+Native Rust loops over the same 1M items (64-byte records), 4M random operations, ns per operation. The pointer cases are `Vec<Box<Item>>` (an array of heap pointers), with the heap either allocated in order or "aged" (allocated in shuffled order, as after churn). Three runs; random-read numbers varied by under 10%.
+
+| Access pattern | Records, row index | Pointer | Columns, row index | Columns, id + generation |
+|---|---|---|---|---|
+| Random read of 3 fields of one object | 12 | 21 | 10 | 30 |
+| Random read of 1 field | 11 | n/a | 3 | 11-15 |
+| Scan one field over all rows (earlier test) | 3.6-4.1 | n/a | 0.6-0.7 | n/a |
+| Follow links through 1M objects | n/a | 182 | 29-82 (4 B ids) | 45-61 (8 B handles) |
+
+**Reading it**
+- **Row index beats pointer.** The pointer case pays an extra dependent load (fetch the pointer, then the object). Row index into a dense array has one.
+- **Columns are not worse for random multi-field reads here** (10 vs 12): the three field loads are independent so the CPU overlaps their cache misses. This would change if each load depended on the previous one.
+- **Scans are where columns win**: ~6x, because each cache line carries 16 useful values instead of 1.
+- **The id + generation lookup is the real cost:** `id -> slot -> column` is two dependent loads plus the generation compare, so 3x slower than a row index for a 3-field read (30 vs 10) and 4-5x for a single field (11-15 vs 3). Each id lookup is about one extra cache miss.
+- **Following links is faster with ids (2-6x), but partly for a layout reason:** the link column is 4-8 MB and stays in cache, while pointers jump among 64 MB of 64-byte nodes in a scattered heap. If the pointer nodes were allocated in traversal order or kept small, the gap would shrink. This number is noisy (29-82 ns across runs; other jobs share this machine).
+
+**Practical rules this suggests**
+1. Inside a tick, loops go over **row indices** (`0..len`), with no ids and no generation checks. This is the fast path and covers most work.
+2. Resolve an **id to a row once** at the start of a function or message handler, then use the row for every field read. That amortizes the lookup to about one extra miss per object per handler.
+3. Rows are stable until a `remove`, so do not cache a row across a removal; cache the id and resolve it again.
+4. Keep ids for references that cross ticks or workers (owners, targets, mailbox contents). A per-access generation check there is the price of detecting a stale reference.
+5. Per-object work that touches many fields of a few objects is the case where columns give no gain over records, and a pointer is the slowest of the three.
+6. Native loops here measure layout cost only. A compiled Mitochondria program would add whatever its code generator adds, so treat these as the best case.

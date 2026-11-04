@@ -759,7 +759,7 @@ Target from Ben: Mitochondria at 0.9x of Rust's time on every workload. What was
 - Rows count as 0.9x only when best-of and median are both at or under it.
 
 Ratios to Rust (Mitochondria / Rust; `btree` = items in their own pool with stable slots, merged; `ordmap` = values inside the
-leaves, an unmerged prototype on branch `ordmap`):
+leaves, i64 keys to i64 values, merged on Ben's decision):
 | workload | btree 10k | ordmap 10k | btree 1M | ordmap 1M |
 |---|---|---|---|---|
 | Insert new keys | 2.60x | 1.57x | 1.89x | 1.27x |

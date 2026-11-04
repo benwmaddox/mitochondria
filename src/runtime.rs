@@ -345,13 +345,14 @@ impl Instance {
         match t { Ty::Scalar(s) => self.store_scalar(off, *s, v), Ty::Str(n) => self.store_str(off, off + 4, *n, v), Ty::Ref(_) => self.store_ref(off, v), _ => bad("not a scalar, string or reference") }
     }
 
-    /// Follow a reference into its pool. A freed slot is `NotLive`; a freed and reused slot of a checked pool is `Stale`.
+    /// Follow a reference into its pool. In a checked pool a reference whose generation has moved on (the slot was freed,
+    /// whether or not it was reused since) is `Stale`; otherwise a slot that is not live is `NotLive`.
     pub fn deref(&self, target: usize, r: (usize, u32)) -> Result<usize, Error> {
         let (slot, g) = r;
         let c = &self.prog.colls[target];
         if slot >= c.cap { return Err(Error::NotLive(format!("{} slot {} does not exist", c.name, slot))); }
-        let reused = c.checked() && slot < self.hget(target, EVER, 0) && self.rd(self.gaddr(target, slot), 4) as u32 != g;
-        if reused { return Err(Error::Stale(format!("{} slot {} was freed and reused", c.name, slot))); }
+        let moved_on = c.checked() && slot < self.hget(target, EVER, 0) && self.rd(self.gaddr(target, slot), 4) as u32 != g;
+        if moved_on { return Err(Error::Stale(format!("{} slot {} was freed since this reference was made", c.name, slot))); }
         if !self.item_live(target, slot) { return Err(Error::NotLive(format!("{} slot {} is not live", c.name, slot))); }
         Ok(slot)
     }
@@ -400,16 +401,22 @@ impl Instance {
             _ => bad(format!("`.{}` needs a struct or an item", name)),
         }
     }
+    /// An item, or for a collection of non-struct values (`list<i32, 8>`), the value itself.
+    pub fn item_loc(&self, cid: usize, idx: usize) -> Loc {
+        if let Some(ci) = self.col(cid, "") { return Loc::Field(cid, idx, ci); }
+        if let Some(k) = self.child(cid, "") { return Loc::Coll(k, idx); }
+        Loc::Item(cid, idx, String::new())
+    }
     pub fn step_index(&self, l: Loc, k: usize, g: Option<u32>) -> Result<Loc, Error> {
         if g.is_some() && !matches!(&l, Loc::Coll(c, _) if self.prog.colls[*c].checked()) { return bad("`[k@generation]` needs a checked pool"); }
         match l {
             Loc::Coll(cid, inst) => {
                 let cap = self.cap(cid);
-                if self.is_list(cid) { return self.list_at(cid, inst, k).map(|i| Loc::Item(cid, i, String::new())).ok_or_else(|| Error::NotLive(format!("position {} is past the end", k))); }
+                if self.is_list(cid) { return self.list_at(cid, inst, k).map(|i| self.item_loc(cid, i)).ok_or_else(|| Error::NotLive(format!("position {} is past the end", k))); }
                 let idx = inst * cap + k;
                 if k < cap { if let Some(g) = g { let cur = self.gen(cid, idx).unwrap(); if k < self.hget(cid, EVER, inst) && cur != g { return Err(Error::Stale(format!("slot {} is now generation {}, not {}", k, cur, g))); } } }
                 if k >= cap || !self.item_live(cid, idx) { return Err(Error::NotLive(format!("slot {} is not live", k))); }
-                Ok(Loc::Item(cid, idx, String::new()))
+                Ok(self.item_loc(cid, idx))
             }
             Loc::Plain(off, Ty::Arr(e, n)) => { if k >= n { return bad(format!("index {} out of range (fixed size {})", k, n)); } let s = self.prog.plain_size(&e).0; Ok(Loc::Plain(off + k * s, *e)) }
             Loc::Field(cid, idx, ci) => match *self.col_kind(cid, ci) { CKind::Arr(_, n) if k < n => Ok(Loc::Elem(cid, idx, ci, k)), CKind::Arr(_, n) => bad(format!("index {} out of range (fixed size {})", k, n)), _ => bad("not an array") },

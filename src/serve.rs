@@ -280,6 +280,8 @@ impl<'a> Run<'a> {
             l => { let t = self.ref_target(&l); let v = self.inst.loc_get(&l)?; match t { Some(t) => self.follow(v, t), None => Ok(from_scalar(v)) } }
         }
     }
+    /// What a loop variable holds: the item, or for a collection of plain values, the value.
+    fn item_value(&mut self, c: usize, idx: usize) -> R<'a, Value> { if self.inst.prog.colls[c].cols.len() == 1 && self.inst.col(c, "").is_some() || self.inst.child(c, "").is_some() { let l = self.inst.item_loc(c, idx); self.loc_value(l) } else { Ok(Value::Item(c, idx)) } }
     fn part_loc(&self, c: usize, i: usize, p: Txt) -> Loc { Loc::Item(c, i, String::from_utf8_lossy(self.text.get(p)).into_owned()) }
     fn field(&mut self, base: Value, f: &str) -> R<'a, Value> {
         match base {
@@ -529,7 +531,7 @@ impl<'a> Run<'a> {
         hits.clear();
         let mut res = Ok(());
         for &idx in items.iter() {
-            self.vars.push((it.var.as_str(), Value::Item(c, idx), false));
+            let v = self.item_value(c, idx)?; self.vars.push((it.var.as_str(), v, false));
             let keep = match &it.wher { Some(w) => self.eval(w).and_then(|v| self.truthy(&v)), None => Ok(true) };
             let key = match (&keep, &it.order) { (Ok(true), Some((k, _))) => match self.eval(k) { Ok(Value::Int(i)) => Ok(i as f64), Ok(Value::Float(f)) => Ok(f), Ok(_) => fail(500, "order by needs a number"), Err(e) => Err(e) }, _ => Ok(0.0) };
             self.vars.pop();
@@ -580,7 +582,7 @@ impl<'a> Run<'a> {
                 let (c, items) = self.select(it)?;
                 let mut res = Ok(());
                 for &idx in items.iter() {
-                    self.vars.push((it.var.as_str(), Value::Item(c, idx), false));
+                    let v = self.item_value(c, idx)?; self.vars.push((it.var.as_str(), v, false));
                     let r = self.exec(body);
                     self.vars.pop();
                     if r.is_err() { res = r; break; }
@@ -620,7 +622,7 @@ impl<'a> Run<'a> {
                 for (n, &idx) in items.iter().enumerate() {
                     if res.is_err() { break; }
                     if n > 0 { if let Err(e) = self.out(b",") { res = Err(e); break; } }
-                    self.vars.push((it.var.as_str(), Value::Item(c, idx), false));
+                    let v = self.item_value(c, idx)?; self.vars.push((it.var.as_str(), v, false));
                     res = self.json(inner);
                     self.vars.pop();
                 }
@@ -912,8 +914,43 @@ mod tests {
         let mut s = server();
         let h = login(&mut s, "ann");
         s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, r#"{"body":"café 😀 tab\t \"q\""}"#).0, 201);
-        let (_, b) = s.handle("GET", "/rooms/0/messages", &h, "");
-        assert!(b.contains(r#"café 😀 tab\t \"q\""#), "{}", b);
+        let bs = char::from(92); // a backslash, built at run time so the escapes below stay escapes in the request text
+        let body = format!("{{\"body\":\"caf{b}u00e9 {b}ud83d{b}ude00 tab{b}t {b}\"q{b}\"\"}}", b = bs);
+        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &body).0, 201);
+        let (_, out) = s.handle("GET", "/rooms/0/messages", &h, "");
+        let want = format!("caf{} {} tab{}t {}\"q{}\"", char::from_u32(0xE9).unwrap(), char::from_u32(0x1F600).unwrap(), bs, bs, bs);
+        assert!(out.contains(&want), "{}", out);
+    }
+
+    #[test]
+    fn frees_happen_only_when_the_request_succeeds() {
+        let inst = Instance::start(Program::parse("struct T { n: i32; } global ts: pool<T, 2>;").unwrap(), 1 << 20).unwrap();
+        let api = "endpoint POST /t { let t = alloc ts; t.n = 7; respond 201 { \"slot\": slot(t) }; }
+            endpoint DELETE /t/{k} { let t = ts[int(param(\"k\"))]; free t; if param(\"k\") == \"0\" { fail 409 \"changed my mind\"; } respond 200 { \"n\": t.n }; }
+            endpoint POST /swap { each t in ts { free t; } let u = try_alloc ts; respond 200 { \"got\": exists(u) }; }";
+        let mut s = Server::new(inst, api).unwrap();
+        assert_eq!(s.handle("POST", "/t", &[], ""), (201, "{\"slot\":0}".to_string()));
+        assert_eq!(s.handle("POST", "/t", &[], ""), (201, "{\"slot\":1}".to_string()));
+        assert_eq!(s.handle("DELETE", "/t/0", &[], "").0, 409); // failed: the free did not happen
+        assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 2);
+        assert_eq!(s.handle("DELETE", "/t/1", &[], ""), (200, "{\"n\":7}".to_string())); // still readable after `free` in the same request
+        assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 1);
+        // a slot freed in a request is not reusable by that request
+        assert_eq!(s.handle("POST", "/t", &[], "").0, 201);
+        assert_eq!(s.handle("POST", "/swap", &[], ""), (200, "{\"got\":false}".to_string()));
+        assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 0);
+    }
+
+    #[test]
+    fn lists_of_plain_values_index_and_loop_as_values() {
+        let inst = Instance::start(Program::parse("struct U { tags: list<i32, 4>; } global us: pool<U, 2>;").unwrap(), 1 << 20).unwrap();
+        let api = "endpoint POST /u { let u = alloc us; let a = alloc u.tags; let b = alloc u.tags; respond 201 { \"n\": count(u.tags) }; }
+            endpoint GET /u { var sum = 0; each t in us[0].tags { sum = sum + t; } respond 200 { \"sum\": sum, \"all\": [each t in us[0].tags t] }; }";
+        let mut s = Server::new(inst, api).unwrap();
+        assert_eq!(s.handle("POST", "/u", &[], "").0, 201);
+        s.inst.set("us[0].tags[0]", "5").unwrap();
+        s.inst.set("us[0].tags[1]", "6").unwrap();
+        assert_eq!(s.inst.get("us[0].tags[1]").unwrap(), "6");
+        assert_eq!(s.handle("GET", "/u", &[], ""), (200, "{\"sum\":11,\"all\":[5,6]}".to_string()));
     }
 }

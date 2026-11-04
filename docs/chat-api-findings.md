@@ -125,5 +125,7 @@ dropped list items and string bytes (the runtime journals every write); frees ha
 in-place upsert); (6) no copied author name; (7) `maxlen` and `capacity` expose declared maxima.
 
 Still open: (4) `string<2000>` slots: 38.4 MB committed for 2.9 MB live, nothing trimmable (deferred by decision);
-(8) HTTP/JSON gaps; (9) single-threaded; (10) interpreter temporaries on the Rust heap (next step); GET messages at
-52 us is still interpreter-bound (each field read copies a string; JSON is built value by value).
+(8) HTTP/JSON gaps; (9) single-threaded; GET messages at 52 us is still interpreter-bound.
+
+**Round 3:** (10) is done: requests run in a declared epoch and make no heap allocations once warm; GET messages is 18.5 us.
+See docs/measurements.md, "Round 3".

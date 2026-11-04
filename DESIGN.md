@@ -60,8 +60,8 @@ Use `checked` when a stale reference would be costly, for example a handle that 
 
 ### 5. `ref<pool>`: typed references
 A field or local of type `ref<sessions>` refers to a slot of that pool: 4 bytes, or 8 with a generation if the pool is `checked`.
-Reading through a reference checks the live bit (and the generation). Reading through a dead reference fails with `NotLive`
-or `Stale`; `or(a, b)` gives `b` instead when `a` is null or a dead-reference read:
+Reading through a reference checks the live bit (and the generation). Reading through a dead reference fails: `Stale` if the pool is `checked` and the slot was freed since the reference was made
+(reused or not), `NotLive` otherwise; `or(a, b)` gives `b` instead when `a` is null or a dead-reference read:
 
 ```
 "author": or(m.author.name, "[deleted]")
@@ -93,7 +93,8 @@ warm request makes no heap allocation; tests check this. The HTTP layer outside 
 - State (the global tree) is read and written directly, as in Stasis.
 - **Every handler is atomic.** The runtime records the old bytes of every write during a request. If the request fails, they are
   written back: allocations, list drops, counters and string bytes all return to where they were. `free` is deferred: the item stays
-  visible until the request ends and is freed only if the request succeeds.
+  visible until the request ends and is freed only if the request succeeds. A consequence: a slot freed in a request cannot be
+  reused by an `alloc` in the same request, so a pool full of expired items still reports `Full` there (503).
 
 Iteration: `each x in collection where cond order by key [desc] limit n { ... }`, and `each x in list reverse limit n` for the
 newest items of a list. The same clause works inside a JSON array in `respond`.
@@ -166,6 +167,9 @@ Every concept above is built and tested (20 tests). Known differences:
 - `ref<...>` targets top-level pools only. Nested-struct fields inside items (`m.pos.x`) take a slower path that allocates.
 - The pressure policy's marks are absolute, not fractions of the budget; machine free memory is not consulted.
 - One thread. The worker/mailbox layer is not built.
+- The write journal (for rollback) is a heap buffer sized at startup (64 KB, 1024 entries). A very large request, such as clearing
+  a big pool, grows it; it is not counted in the epoch total.
+- `GET /stats`-style reads of live bytes allocate (they walk every range), and the HTTP layer outside the handler allocates.
 
 Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat-api-findings.md.
 

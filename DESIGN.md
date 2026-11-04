@@ -143,7 +143,7 @@ crawlers), irregular graphs, exploratory scripting. Durable data belongs in a da
 
 ## Status (2026-11-04)
 Everything above is built. A program or system compiles to one C program (runtime/mito.c, system.c, http.c), built by
-clang -O2 or, in milliseconds, the bundled TinyCC; Rust is only the compiler. The 24 cases in `tests/cases` and
+clang -O3 or, in milliseconds, the bundled TinyCC; Rust is only the compiler. The 24 cases in `tests/cases` and
 `tests/http.record` must give the same answers on the TinyCC build, the clang build and a clang build with
 undefined-behaviour checks. Windows only so far.
 

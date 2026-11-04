@@ -10,7 +10,7 @@ pub fn clang() -> Option<String> {
 /// The bundled TinyCC compiler.
 pub fn tcc_exe() -> String { format!("{}/tcc.exe", crate::tcc::dir()) }
 
-/// Build C translation units into the executable `out`: with TinyCC (`tcc`), or else clang with `flags` (default -O2).
+/// Build C translation units into the executable `out`: with TinyCC (`tcc`), or else clang with `flags` (default -O3, the optimisation level of Rust's release profile, which the benchmarks compare with).
 pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("mito-build-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
@@ -28,7 +28,7 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
         c
     } else {
         let mut c = std::process::Command::new(clang().ok_or("clang not found (install LLVM, set MITO_CLANG, or build with --tcc)")?);
-        c.args(["-fno-strict-aliasing", "-w"]).args(if flags.is_empty() { &["-O2"][..] } else { flags });
+        c.args(["-fno-strict-aliasing", "-w"]).args(if flags.is_empty() { &["-O3"][..] } else { flags });
         c
     };
     cmd.arg("-o").arg(out).args(&cs);

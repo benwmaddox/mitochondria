@@ -10,6 +10,7 @@ use crate::os;
 use crate::region::{Scratch, Space};
 use crate::runtime::{Error, Instance, Loc, Pressure, Val};
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::time::Instant;
@@ -55,11 +56,21 @@ impl Area {
 impl std::fmt::Write for Area { fn write_str(&mut self, s: &str) -> std::fmt::Result { self.push(s.as_bytes()).map(|_| ()).ok_or(std::fmt::Error) } }
 
 /// Write `s` as a JSON string.
-fn escaped(out: &mut Area, s: &[u8]) -> bool {
+pub(crate) fn escaped(out: &mut Area, s: &[u8]) -> bool {
     if out.push(b"\"").is_none() { return false; }
     let mut start = 0;
-    for (i, &c) in s.iter().enumerate() {
+    let mut i = 0;
+    // Skip 8 bytes at a time while none of them is a quote, a backslash or a control character
+    // (the usual "has a zero byte" and "has a byte below n" tricks on a u64).
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let special = |v: u64| { let q = v ^ (ONES * b'"' as u64); let b = v ^ (ONES * b'\\' as u64); ((q.wrapping_sub(ONES) & !q) | (b.wrapping_sub(ONES) & !b) | (v.wrapping_sub(ONES * 0x20) & !v)) & HIGH != 0 };
+    while i < s.len() {
+        if i + 8 <= s.len() && !special(u64::from_le_bytes(s[i..i + 8].try_into().unwrap())) { i += 8; continue; }
+        let c = s[i];
+        i += 1;
         let esc: &[u8] = match c { b'"' => b"\\\"", b'\\' => b"\\\\", b'\n' => b"\\n", b'\r' => b"\\r", b'\t' => b"\\t", c if c < 0x20 => b"", _ => continue };
+        let i = i - 1;
         if out.push(&s[start..i]).is_none() { return false; }
         if esc.is_empty() { const HEX: &[u8] = b"0123456789abcdef"; if out.push(&[b'\\', b'u', b'0', b'0', HEX[(c >> 4) as usize], HEX[(c & 15) as usize]]).is_none() { return false; } }
         else if out.push(esc).is_none() { return false; }
@@ -142,7 +153,7 @@ const NO_FIELDS: StrFields<'static, 'static> = StrFields(&[]);
 pub struct SysInfo { pub kinds: Vec<(String, usize)>, pub me: (usize, usize) }
 
 /// Buffers reused by every request (allocated at startup, grown only if a request needs more).
-struct Bufs { vars: Vec<(&'static str, Value, bool)>, args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>, params: Vec<(usize, Txt)>, query: Vec<(Txt, Txt)>, json: Vec<(Txt, Value)> }
+struct Bufs { vars: Vec<Value>, args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>, params: Vec<(usize, Txt)>, query: Vec<(Txt, Txt)>, json: Vec<(Txt, Value)> }
 impl Bufs {
     /// Placeholder while a request holds the real buffers (allocates nothing).
     fn empty() -> Bufs { Bufs { vars: Vec::new(), args: Vec::new(), frees: Vec::new(), idx: Vec::new(), keyed: Vec::new(), params: Vec::new(), query: Vec::new(), json: Vec::new() } }
@@ -151,8 +162,6 @@ impl Bufs {
             keyed: (0..4).map(|_| Vec::with_capacity(1024)).collect(), params: Vec::with_capacity(8), query: Vec::with_capacity(16), json: Vec::with_capacity(32) }
     }
 }
-/// The locals list holds names borrowed from the endpoint code; it is emptied before its lifetime changes.
-fn recycle<'x, 'y>(mut v: Vec<(&'x str, Value, bool)>) -> Vec<(&'y str, Value, bool)> { v.clear(); unsafe { std::mem::transmute(v) } }
 
 pub struct Server {
     pub inst: Instance,
@@ -176,7 +185,8 @@ pub const TEXT_CAP: usize = 256 * 1024;
 
 impl Server {
     pub fn new(inst: Instance, api_src: &str) -> Result<Server, String> {
-        let api = parse(api_src)?;
+        let mut api = parse(api_src)?;
+        bind(&mut api, &|n| inst.prog.global(n))?; // every name resolved once, before the first request
         let mut space = Space::new(RESPONSE_CAP + TEXT_CAP + 8192);
         let region = space.region(RESPONSE_CAP + TEXT_CAP + 4096, 64 * 1024).map_err(|_| "request epoch region".to_string())?;
         let mut scratch = Scratch::new(region);
@@ -237,7 +247,7 @@ impl Server {
         inst.begin();
         let mut run = Run {
             inst, api, ep, headers, fwd, sys: self.system.as_ref(), fwd_out: &mut self.fwd_out, params: &b.params, query: &b.query, json: &b.json, text, out, now,
-            vars: recycle(std::mem::take(&mut b.vars)), frame: 0, depth: 0,
+            vars: { let mut v = std::mem::take(&mut b.vars); v.clear(); v.resize(ep.slots as usize, Value::Null); v }, frame: 0, depth: 0,
             args: std::mem::take(&mut b.args), frees: std::mem::take(&mut b.frees), idx: std::mem::take(&mut b.idx), keyed: std::mem::take(&mut b.keyed),
         };
         let res = run.exec(&ep.body);
@@ -253,7 +263,7 @@ impl Server {
             Err(Ctl::Forward(kind, key)) => { run.out.len = 0; self.pending = Some((kind, key)); (0, true) }
         };
         let Run { vars, args, mut frees, idx, keyed, .. } = run;
-        b.vars = recycle(vars); b.args = args; b.args.clear(); b.idx = idx; b.keyed = keyed; // ends the borrow of the endpoint code
+        b.vars = vars; b.args = args; b.args.clear(); b.idx = idx; b.keyed = keyed; // ends the borrow of the endpoint code
         if code == 0 { self.pending_frees.clear(); self.pending_frees.extend_from_slice(&frees); } // decided by finish_forward
         else if ok { for &(c, i) in &frees { let _ = self.inst.free_item(c, i); } self.inst.commit_changes(); } else { self.inst.rollback(); }
         frees.clear(); b.frees = frees;
@@ -284,7 +294,7 @@ struct Run<'a> {
     sys: Option<&'a SysInfo>, fwd_out: &'a mut Vec<(Txt, Txt)>,
     params: &'a [(usize, Txt)], query: &'a [(Txt, Txt)], json: &'a [(Txt, Value)],
     text: &'a mut Area, out: &'a mut Area, now: i64,
-    vars: Vec<(&'a str, Value, bool)>, // name, value, mutable
+    vars: Vec<Value>, // frames of local slots: the endpoint's, then one per active function call
     frame: usize, depth: usize,
     args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>,
 }
@@ -293,7 +303,19 @@ fn from_scalar(v: Val) -> Value { match v { Val::Int(i) => Value::Int(i), Val::F
 
 impl<'a> Run<'a> {
     fn txt(&mut self, b: &[u8]) -> R<'a, Txt> { self.text.push(b).ok_or(Ctl::Fail(507, Cow::Borrowed("request text area is full"))) }
-    fn lookup(&self, n: &str) -> Option<Value> { self.vars[self.frame..].iter().rev().find(|v| v.0 == n).map(|v| v.1.clone()) }
+    fn slot(&self, s: u32) -> Value { self.vars[self.frame + s as usize].clone() }
+    fn set_slot(&mut self, s: u32, v: Value) { let i = self.frame + s as usize; self.vars[i] = v; }
+    /// Where field `f` is in collection `c`: from the access site's cache, or looked up once and remembered there.
+    fn hit(&self, c: usize, f: &str, cache: &Cell<FieldHit>) -> FieldHit {
+        match cache.get() {
+            h @ FieldHit::Col(hc, _) | h @ FieldHit::Child(hc, _) if hc as usize == c => h,
+            _ => {
+                let h = match (self.inst.col(c, f), self.inst.child(c, f)) { (Some(ci), _) => FieldHit::Col(c as u32, ci as u32), (None, Some(k)) => FieldHit::Child(c as u32, k as u32), _ => FieldHit::None };
+                if h != FieldHit::None { cache.set(h); }
+                h
+            }
+        }
+    }
     fn arg(&self, base: usize, i: usize) -> Value { self.args.get(base + i).cloned().unwrap_or(Value::Null) }
     fn arg_txt(&self, base: usize, i: usize) -> R<'a, Txt> { match self.args.get(base + i) { Some(Value::Str(t)) => Ok(*t), _ => fail(500, "expected a string argument") } }
 
@@ -326,10 +348,13 @@ impl<'a> Run<'a> {
     /// What a loop variable holds: the item, or for a collection of plain values, the value.
     fn item_value(&mut self, c: usize, idx: usize) -> R<'a, Value> { if self.inst.prog.colls[c].cols.len() == 1 && self.inst.col(c, "").is_some() || self.inst.child(c, "").is_some() { let l = self.inst.item_loc(c, idx); self.loc_value(l) } else { Ok(Value::Item(c, idx)) } }
     fn part_loc(&self, c: usize, i: usize, p: Txt) -> Loc { Loc::Item(c, i, String::from_utf8_lossy(self.text.get(p)).into_owned()) }
-    fn field(&mut self, base: Value, f: &str) -> R<'a, Value> {
+    fn field(&mut self, base: Value, f: &str, cache: &Cell<FieldHit>) -> R<'a, Value> {
         match base {
             Value::Item(c, i) => {
-                if let Some(ci) = self.inst.col(c, f) { // the common case: one column, no path building
+                let h = self.hit(c, f, cache);
+                if let FieldHit::Child(_, k) = h { return Ok(Value::Coll(k as usize, i)); } // a nested collection of this item
+                if let FieldHit::Col(_, ci) = h { // the common case: one column, no path building
+                    let ci = ci as usize;
                     return match self.inst.col_kind(c, ci) {
                         CKind::Arr(..) => Ok(Value::ArrField(c, i, ci)),
                         CKind::StrLen => self.read_str(&Loc::Field(c, i, ci)),
@@ -337,7 +362,6 @@ impl<'a> Run<'a> {
                         _ => Ok(from_scalar(self.inst.field_get(c, i, ci)?)),
                     };
                 }
-                if let Some(k) = self.inst.child(c, f) { return Ok(Value::Coll(k, i)); } // a nested collection of this item
                 let l = self.inst.step_field(Loc::Item(c, i, String::new()), f)?;
                 self.loc_value(l)
             }
@@ -362,7 +386,7 @@ impl<'a> Run<'a> {
     /// The place an assignment writes to.
     fn place(&mut self, e: &'a Expr) -> R<'a, Loc> {
         match e {
-            Expr::Field(b, f) => match self.eval(b)? {
+            Expr::Field(b, f, _) => match self.eval(b)? {
                 Value::Item(c, i) => Ok(match self.inst.col(c, f) { Some(ci) => Loc::Field(c, i, ci), None => self.inst.step_field(Loc::Item(c, i, String::new()), f)? }),
                 Value::Part(c, i, p) => Ok(self.inst.step_field(self.part_loc(c, i, p), f)?),
                 Value::Plain(off, t) => Ok(self.inst.step_field(Loc::Plain(off, t), f)?),
@@ -400,14 +424,13 @@ impl<'a> Run<'a> {
             Expr::Str(s) => Ok(Value::Str(self.txt(s.as_bytes())?)),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
-            Expr::Var(n) => {
-                if let Some(v) = self.lookup(n) { return Ok(v); }
-                let Some(g) = self.inst.prog.global(n) else { return fail(500, format!("unknown name `{}`", n)) };
+            Expr::Var(n, res) => {
+                let g = match res { VarRes::Local(s) => return Ok(self.slot(*s)), VarRes::Global(g) => *g as usize, VarRes::Unbound => return fail(500, format!("`{}` was not bound", n)) };
                 if let Some(c) = self.inst.prog.globals[g].coll { return Ok(Value::Coll(c, 0)); } // no type clone: a pool's type owns a Box
                 let (off, ty) = { let g = &self.inst.prog.globals[g]; (g.off, g.ty.clone()) };
                 self.loc_value(Loc::Plain(off, ty))
             }
-            Expr::Field(b, f) => { let bv = self.eval(b)?; self.field(bv, f) }
+            Expr::Field(b, f, cache) => { let bv = self.eval(b)?; self.field(bv, f, cache) }
             Expr::Index(b, i) => { let (bv, iv) = (self.eval(b)?, self.eval(i)?); self.index(bv, iv) }
             Expr::Un(op, x) => {
                 let v = self.eval(x)?;
@@ -420,7 +443,7 @@ impl<'a> Run<'a> {
                 let (l, r) = (self.eval(a)?, self.eval(b)?);
                 self.binop(op, l, r)
             }
-            Expr::Call(n, args) => self.call(n, args),
+            Expr::Call(n, args, res) => self.call(n, *res, args),
         }
     }
 
@@ -460,22 +483,22 @@ impl<'a> Run<'a> {
         fail(500, "operator does not fit these values")
     }
 
-    fn call(&mut self, n: &'a str, args: &'a [Expr]) -> R<'a, Value> {
+    fn call(&mut self, n: &'a str, res: CallRes, args: &'a [Expr]) -> R<'a, Value> {
         // forms that look at their arguments before (or instead of) evaluating them
-        match n {
-            "or" => {
+        match res {
+            CallRes::Builtin(B::Or) => {
                 let first = match args.first() { Some(e) => self.eval(e), None => return fail(500, "or(a, b)") };
                 return match first {
                     Ok(Value::Null) | Err(Ctl::Dead) | Err(Ctl::Err(Error::NotLive(_))) | Err(Ctl::Err(Error::Stale(_))) => match args.get(1) { Some(e) => self.eval(e), None => Ok(Value::Null) },
                     other => other,
                 };
             }
-            "exists" => return match args.first().map(|e| self.eval(e)) {
+            CallRes::Builtin(B::Exists) => return match args.first().map(|e| self.eval(e)) {
                 Some(Ok(Value::Null)) | Some(Err(Ctl::Dead)) | Some(Err(Ctl::Err(Error::NotLive(_)))) | Some(Err(Ctl::Err(Error::Stale(_)))) => Ok(Value::Bool(false)),
                 Some(Ok(_)) => Ok(Value::Bool(true)), Some(Err(e)) => Err(e), None => fail(500, "exists(x)"),
             },
-            "maxlen" => {
-                let Some(Expr::Field(b, f)) = args.first() else { return fail(500, "maxlen(item.field)") };
+            CallRes::Builtin(B::MaxLen) => {
+                let Some(Expr::Field(b, f, _)) = args.first() else { return fail(500, "maxlen(item.field)") };
                 return match self.eval(b)? {
                     Value::Item(c, _) => match self.inst.col(c, f).map(|ci| self.inst.col_kind(c, ci + 1).clone()) { Some(CKind::StrBytes(m)) => Ok(Value::Int(m as i64)), _ => fail(500, "maxlen needs a string field") },
                     Value::Plain(off, t) => match self.inst.step_field(Loc::Plain(off, t), f)? { Loc::Plain(_, Ty::Str(m)) => Ok(Value::Int(m as i64)), _ => fail(500, "maxlen needs a string field") },
@@ -485,55 +508,55 @@ impl<'a> Run<'a> {
             _ => {}
         }
         let base = self.args.len();
-        let r = self.call_with(n, args, base);
+        let r = self.call_with(n, res, args, base);
         self.args.truncate(base);
         r
     }
 
-    fn call_with(&mut self, n: &'a str, args: &'a [Expr], base: usize) -> R<'a, Value> {
+    fn call_with(&mut self, n: &'a str, res: CallRes, args: &'a [Expr], base: usize) -> R<'a, Value> {
         for x in args { let v = self.eval(x)?; self.args.push(v); }
-        if let Some(f) = self.api.fns.iter().find(|f| f.name == n) { return self.call_fn(f, base); }
+        let b = match res { CallRes::User(k) => return self.call_fn(&self.api.fns[k as usize], base), CallRes::Builtin(b) => b, CallRes::Unbound => return fail(500, format!("`{}` was not bound", n)) };
         let key = |me: &Self| -> R<'a, Txt> { me.arg_txt(base, 0) };
-        Ok(match n {
-            "body" => { let k = key(self)?; let k = self.text.get(k); self.json.iter().find(|x| self.text.get(x.0) == k).map(|x| x.1.clone()).unwrap_or(Value::Null) }
-            "param" => {
+        Ok(match b {
+            B::Body => { let k = key(self)?; let k = self.text.get(k); self.json.iter().find(|x| self.text.get(x.0) == k).map(|x| x.1.clone()).unwrap_or(Value::Null) }
+            B::Param => {
                 let k = key(self)?; let k = self.text.get(k);
                 let seg = self.ep.segs.iter().position(|s| matches!(s, Seg::Param(p) if p.as_bytes() == k));
                 seg.and_then(|si| self.params.iter().find(|p| p.0 == si)).map(|p| Value::Str(p.1)).unwrap_or(Value::Null)
             }
-            "query" => { let k = key(self)?; let k = self.text.get(k); self.query.iter().find(|x| self.text.get(x.0) == k).map(|x| Value::Str(x.1)).unwrap_or(Value::Null) }
-            "header" => {
+            B::Query => { let k = key(self)?; let k = self.text.get(k); self.query.iter().find(|x| self.text.get(x.0) == k).map(|x| Value::Str(x.1)).unwrap_or(Value::Null) }
+            B::Header => {
                 let k = key(self)?;
                 let found = { let k = self.text.get(k); self.headers.field(k) };
                 match found { Some(h) => Value::Str(self.txt(h.as_bytes())?), None => Value::Null }
             }
-            "int" => match self.arg(base, 0) {
+            B::Int => match self.arg(base, 0) {
                 Value::Int(i) => Value::Int(i), Value::Float(f) => Value::Int(f as i64),
                 Value::Str(t) => match std::str::from_utf8(self.text.get(t)).ok().and_then(|s| s.trim().parse::<i64>().ok()) { Some(i) => Value::Int(i), None => return fail(400, format!("`{}` is not a number", String::from_utf8_lossy(self.text.get(t)))) },
                 Value::Null => return fail(400, "missing number"), _ => return fail(500, "int(x)"),
             },
-            "str" => { let v = self.arg(base, 0); let start = self.text.len; self.show_into(&v)?; Value::Str(self.text.since(start)) }
-            "len" => match self.arg(base, 0) { Value::Str(t) => Value::Int(t.len as i64), Value::Null => Value::Int(0), _ => return fail(500, "len(text)") },
-            "now" => Value::Int(self.now),
-            "fwd" => { let k = key(self)?; let found = { let k = self.text.get(k); self.fwd.field(k) }; match found { Some(v) => Value::Str(self.txt(v.as_bytes())?), None => Value::Null } }
-            "worker_index" => Value::Int(self.sys.map_or(0, |s| s.me.1) as i64),
-            "worker_count" => match self.args.get(base) {
+            B::Str => { let v = self.arg(base, 0); let start = self.text.len; self.show_into(&v)?; Value::Str(self.text.since(start)) }
+            B::Len => match self.arg(base, 0) { Value::Str(t) => Value::Int(t.len as i64), Value::Null => Value::Int(0), _ => return fail(500, "len(text)") },
+            B::Now => Value::Int(self.now),
+            B::Fwd => { let k = key(self)?; let found = { let k = self.text.get(k); self.fwd.field(k) }; match found { Some(v) => Value::Str(self.txt(v.as_bytes())?), None => Value::Null } }
+            B::WorkerIndex => Value::Int(self.sys.map_or(0, |s| s.me.1) as i64),
+            B::WorkerCount => match self.args.get(base) {
                 None => Value::Int(self.sys.map_or(1, |s| s.kinds[s.me.0].1) as i64),
                 Some(Value::Str(t)) => { let n = self.text.get(*t); match self.sys.and_then(|s| s.kinds.iter().find(|k| k.0.as_bytes() == n)) { Some(k) => Value::Int(k.1 as i64), None => return fail(500, "no such worker kind") } }
                 _ => return fail(500, "worker_count(\"kind\")"),
             },
-            "__crash" => panic!("__crash() called: test hook for worker supervision"),
-            "random" => Value::Int(os::random_u64() as i64),
-            "min" | "max" => match (self.arg(base, 0), self.arg(base, 1)) { (Value::Int(p), Value::Int(q)) => Value::Int(if n == "min" { p.min(q) } else { p.max(q) }), _ => return fail(500, "min/max need integers") },
-            "count" => match self.arg(base, 0) { Value::Coll(c, i) => Value::Int(self.inst.count(c, i) as i64), _ => return fail(500, "count(collection)") },
-            "capacity" => match self.arg(base, 0) { Value::Coll(c, _) => Value::Int(self.inst.cap(c) as i64), _ => return fail(500, "capacity(collection)") },
-            "slot" => match self.arg(base, 0) { Value::Item(c, i) => Value::Int((i % self.inst.cap(c)) as i64), _ => return fail(500, "slot(item)") },
-            "stat" => {
+            B::Crash => panic!("__crash() called: test hook for worker supervision"),
+            B::Random => Value::Int(os::random_u64() as i64),
+            B::Min | B::Max => match (self.arg(base, 0), self.arg(base, 1)) { (Value::Int(p), Value::Int(q)) => Value::Int(if b == B::Min { p.min(q) } else { p.max(q) }), _ => return fail(500, "min/max need integers") },
+            B::Count => match self.arg(base, 0) { Value::Coll(c, i) => Value::Int(self.inst.count(c, i) as i64), _ => return fail(500, "count(collection)") },
+            B::Capacity => match self.arg(base, 0) { Value::Coll(c, _) => Value::Int(self.inst.cap(c) as i64), _ => return fail(500, "capacity(collection)") },
+            B::Slot => match self.arg(base, 0) { Value::Item(c, i) => Value::Int((i % self.inst.cap(c)) as i64), _ => return fail(500, "slot(item)") },
+            B::Stat => {
                 let k = key(self)?;
                 let v = match self.text.get(k) { b"committed_kb" => self.inst.committed() / 1024, b"live_kb" => self.inst.live_total() / 1024, b"reserved_kb" => self.inst.reserved() / 1024, _ => return fail(500, "unknown stat") };
                 Value::Int(v as i64)
             }
-            "token" => match self.arg(base, 0) {
+            B::Token => match self.arg(base, 0) {
                 Value::Item(c, i) => {
                     let Some(ci) = self.inst.col(c, "secret") else { return fail(500, "token needs a `secret` field") };
                     let Val::Int(sec) = self.inst.field_get(c, i, ci)? else { return fail(500, "`secret` must be an integer") };
@@ -545,7 +568,7 @@ impl<'a> Run<'a> {
                 }
                 _ => return fail(500, "token(item)"),
             },
-            "auth" => {
+            B::Auth => {
                 let Value::Coll(c, 0) = self.arg(base, 0) else { return fail(500, "auth(pool)") };
                 let Some(tok) = self.headers.field(b"x-session") else { return fail(401, "missing X-Session header") };
                 let mut it = tok.split('.');
@@ -557,17 +580,17 @@ impl<'a> Run<'a> {
                 if real as u64 != sec { return fail(403, "bad session secret"); }
                 Value::Item(c, idx)
             }
-            o => return fail(500, format!("unknown function `{}`", o)),
+            B::Or | B::Exists | B::MaxLen => unreachable!("handled before the arguments are evaluated"),
         })
     }
 
     /// Call a declared function in a fresh frame: it sees its parameters and the state, not the caller's locals.
     fn call_fn(&mut self, f: &'a Func, base: usize) -> R<'a, Value> {
-        if self.args.len() - base != f.params.len() { return fail(500, format!("{} takes {} arguments", f.name, f.params.len())); }
         if self.depth >= 64 { return fail(500, "calls nested more than 64 deep"); }
         let (saved, vbase) = (self.frame, self.vars.len());
+        self.vars.resize(vbase + f.slots as usize, Value::Null);
+        for k in 0..f.params.len() { self.vars[vbase + k] = self.args[base + k].clone(); } // parameters are the first slots
         self.frame = vbase; self.depth += 1;
-        for (k, p) in f.params.iter().enumerate() { let v = self.args[base + k].clone(); self.vars.push((p.as_str(), v, false)); }
         let r = self.exec(&f.body);
         self.vars.truncate(vbase); self.frame = saved; self.depth -= 1;
         match r { Ok(()) => Ok(Value::Null), Err(Ctl::Return(v)) => Ok(v), Err(e) => Err(e) }
@@ -585,10 +608,9 @@ impl<'a> Run<'a> {
         hits.clear();
         let mut res = Ok(());
         for &idx in items.iter() {
-            let v = self.item_value(c, idx)?; self.vars.push((it.var.as_str(), v, false));
+            let v = self.item_value(c, idx)?; self.set_slot(it.slot, v);
             let keep = match &it.wher { Some(w) => self.eval(w).and_then(|v| self.truthy(&v)), None => Ok(true) };
             let key = match (&keep, &it.order) { (Ok(true), Some((k, _))) => match self.eval(k) { Ok(Value::Int(i)) => Ok(i as f64), Ok(Value::Float(f)) => Ok(f), Ok(_) => fail(500, "order by needs a number"), Err(e) => Err(e) }, _ => Ok(0.0) };
-            self.vars.pop();
             match (keep, key) { (Ok(true), Ok(k)) => hits.push((k, idx)), (Ok(false), _) => continue, (Err(e), _) | (_, Err(e)) => { res = Err(e); break; } }
             if it.order.is_none() && limit.map_or(false, |l| hits.len() >= l) { break; }
         }
@@ -600,45 +622,30 @@ impl<'a> Run<'a> {
     }
 
     fn exec(&mut self, stmts: &'a [Stmt]) -> R<'a, ()> {
-        let mark = self.vars.len();
-        for s in stmts {
-            let r = self.stmt(s);
-            if r.is_err() { self.vars.truncate(mark); return r; }
-        }
-        self.vars.truncate(mark);
+        for s in stmts { self.stmt(s)?; }
         Ok(())
     }
 
     fn stmt(&mut self, s: &'a Stmt) -> R<'a, ()> {
         match s {
-            Stmt::Let(n, e) => { let v = self.eval(e)?; self.vars.push((n.as_str(), v, false)); }
-            Stmt::Var(n, e) => { let v = self.eval(e)?; self.vars.push((n.as_str(), v, true)); }
-            Stmt::Alloc { var, coll, try_ } => {
+            Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => { let v = self.eval(e)?; self.set_slot(*slot, v); }
+            Stmt::Alloc { slot, coll, try_, .. } => {
                 let Value::Coll(c, inst) = self.eval(coll)? else { return fail(500, "alloc needs a list or pool") };
                 match self.inst.push_item(c, inst) {
-                    Ok(idx) => self.vars.push((var.as_str(), Value::Item(c, idx), false)),
-                    Err(Error::Full(_)) if *try_ => self.vars.push((var.as_str(), Value::Null, false)),
+                    Ok(idx) => self.set_slot(*slot, Value::Item(c, idx)),
+                    Err(Error::Full(_)) if *try_ => self.set_slot(*slot, Value::Null),
                     Err(e) => return Err(e.into()),
                 }
             }
-            Stmt::Assign(Expr::Var(n), rhs) => {
-                let v = self.eval(rhs)?;
-                let frame = self.frame;
-                match self.vars[frame..].iter_mut().rev().find(|x| x.0 == n.as_str()) {
-                    Some(slot) if slot.2 => slot.1 = v,
-                    Some(_) => return fail(500, format!("`{}` is a `let`; declare it with `var` to change it", n)),
-                    None => return fail(500, format!("unknown variable `{}`", n)),
-                }
-            }
+            Stmt::Assign(Expr::Var(_, VarRes::Local(s)), rhs) => { let v = self.eval(rhs)?; self.set_slot(*s, v); } // mutability checked by the binder
             Stmt::Assign(lhs, rhs) => { let l = self.place(lhs)?; let v = self.eval(rhs)?; self.store(l, v)?; }
             Stmt::If(c, t, e) => { let v = self.eval(c)?; if self.truthy(&v)? { self.exec(t)?; } else { self.exec(e)?; } }
             Stmt::Each(it, body) => {
                 let (c, items) = self.select(it)?;
                 let mut res = Ok(());
                 for &idx in items.iter() {
-                    let v = self.item_value(c, idx)?; self.vars.push((it.var.as_str(), v, false));
+                    let v = self.item_value(c, idx)?; self.set_slot(it.slot, v);
                     let r = self.exec(body);
-                    self.vars.pop();
                     if r.is_err() { res = r; break; }
                 }
                 self.idx.push(items);
@@ -690,16 +697,28 @@ impl<'a> Run<'a> {
                 for (n, &idx) in items.iter().enumerate() {
                     if res.is_err() { break; }
                     if n > 0 { if let Err(e) = self.out(b",") { res = Err(e); break; } }
-                    let v = self.item_value(c, idx)?; self.vars.push((it.var.as_str(), v, false));
+                    let v = self.item_value(c, idx)?; self.set_slot(it.slot, v);
                     res = self.json(inner);
-                    self.vars.pop();
                 }
                 self.idx.push(items);
                 res?;
                 self.out(b"]")
             }
             Json::E(e) => {
-                let ok = match self.eval(e)? {
+                let v = match e {
+                    Expr::Field(b, f, cache) => {
+                        let bv = self.eval(b)?;
+                        if let Value::Item(c, i) = bv {
+                            if let FieldHit::Col(_, ci) = self.hit(c, f, cache) {
+                                let l = Loc::Field(c, i, ci as usize);
+                                if let Some(bytes) = self.inst.str_bytes(&l) { return if escaped(self.out, bytes) { Ok(()) } else { fail(507, "response too large") }; }
+                            }
+                        }
+                        self.field(bv, f, cache)?
+                    }
+                    e => self.eval(e)?,
+                };
+                let ok = match v {
                     Value::Int(i) => write!(self.out, "{}", i).is_ok(),
                     Value::Float(f) => write!(self.out, "{}", f).is_ok(),
                     Value::Bool(b) => write!(self.out, "{}", b).is_ok(),
@@ -938,15 +957,57 @@ mod tests {
     }
 
     #[test]
+    fn fast_escaping_matches_a_byte_by_byte_reference() {
+        fn reference(s: &[u8]) -> Vec<u8> {
+            let mut o = vec![b'"'];
+            for &c in s { match c { b'"' => o.extend_from_slice(b"\\\""), b'\\' => o.extend_from_slice(b"\\\\"), b'\n' => o.extend_from_slice(b"\\n"), b'\r' => o.extend_from_slice(b"\\r"), b'\t' => o.extend_from_slice(b"\\t"), c if c < 0x20 => o.extend_from_slice(format!("\\u{:04x}", c).as_bytes()), c => o.push(c) } }
+            o.push(b'"'); o
+        }
+        let mut buf = vec![0u8; 1 << 16];
+        let mut out = Area { ptr: buf.as_mut_ptr(), cap: buf.len(), len: 0 };
+        let alphabet: &[u8] = b"ab\"\\\n\t\x01\x1f \x7f\xc3\xa9z0";
+        let mut r = 12345u64;
+        for n in 0..2000 {
+            let len = n % 70;
+            let s: Vec<u8> = (0..len).map(|_| { r ^= r << 13; r ^= r >> 7; r ^= r << 17; if r % 3 == 0 { alphabet[(r >> 8) as usize % alphabet.len()] } else { b'a' + (r >> 16) as u8 % 26 } }).collect();
+            out.len = 0;
+            assert!(escaped(&mut out, &s));
+            assert_eq!(out.all(), reference(&s).as_slice(), "input {:?}", s);
+        }
+    }
+
+    #[test]
+    fn the_binder_rejects_bad_names_and_calls_at_load() {
+        let st = || Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap();
+        for (api, want) in [
+            ("endpoint GET /a { respond 200 { \"x\": nope }; }", "unknown name `nope`"),
+            ("endpoint GET /a { respond 200 { \"x\": frob(1) }; }", "unknown function `frob`"),
+            ("fn f(a, b) { return a; } endpoint GET /a { respond 200 { \"x\": f(1) }; }", "`f` takes 2 arguments, given 1"),
+            ("endpoint GET /a { x = 1; respond 200 {}; }", "unknown variable `x`"),
+            ("endpoint GET /a { if true { let y = 1; } respond 200 { \"y\": y }; }", "unknown name `y`"), // block scope
+            ("fn len(s) { return 1; }", "name of a builtin"),
+        ] {
+            let e = Server::new(st(), api).err().unwrap_or_default();
+            assert!(e.contains(want), "{} -> {}", api, e);
+        }
+        // shadowing and slot reuse across blocks still work
+        let mut s = Server::new(st(), "endpoint GET /a { let x = 1; var t = 0; if true { let x = 10; t = t + x; } each k in [] {} respond 200 { \"x\": x, \"t\": t }; }".replace("each k in [] {} ", "").as_str()).unwrap();
+        assert_eq!(s.handle("GET", "/a", &[], ""), (200, "{\"x\":1,\"t\":10}".to_string()));
+    }
+
+    #[test]
     fn functions_and_vars() {
         let inst = Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap();
         let api = "fn double(x: i64) -> i64 { return x * 2; }
             fn sum_to(n) { var t = 0; if n > 0 { t = n + sum_to(n - 1); } return t; }
             endpoint GET /t { var a = double(21); a = a + 1; c.n = sum_to(10); respond 200 { \"a\": a, \"s\": c.n, \"j\": \"x\" + a }; }
             endpoint GET /bad { let x = 1; x = 2; respond 200 { \"x\": x }; }";
-        let mut s = Server::new(inst, api).unwrap();
+        let err = Server::new(Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap(), api).err().unwrap();
+        assert!(err.contains("`x` is a `let`"), "{}", err); // caught when the server loads, not at run time
+        let api = api.replace("x = 2;", "");
+        let mut s = Server::new(inst, &api).unwrap();
         assert_eq!(s.handle("GET", "/t", &[], ""), (200, "{\"a\":43,\"s\":55,\"j\":\"x43\"}".to_string()));
-        assert_eq!(s.handle("GET", "/bad", &[], "").0, 500);
+        assert_eq!(s.handle("GET", "/bad", &[], ""), (200, "{\"x\":1}".to_string()));
     }
 
     #[test]
@@ -1030,4 +1091,56 @@ mod tests {
         assert_eq!(s.inst.get("us[0].tags[1]").unwrap(), "6");
         assert_eq!(s.handle("GET", "/u", &[], ""), (200, "{\"sum\":11,\"all\":[5,6]}".to_string()));
     }
+}
+
+/// The floor for `GET /rooms/{room}/messages?limit=50`: the same JSON written by native code from the same state,
+/// next to the interpreter. Integers formatted with `write!` and with a hand-written formatter.
+pub fn json_floor() {
+    use crate::layout::Program;
+    let prog = Program::parse(include_str!("../examples/chat/chat.mito")).unwrap();
+    let mut s = Server::new(Instance::start(prog, usize::MAX).unwrap(), include_str!("../examples/chat/chat.api")).unwrap();
+    s.clock = Some(1_000_000);
+    let _ = s.inst.resolve("meta.rate").and_then(|l| s.inst.loc_set(&l, &Val::Int(1_000_000)));
+    s.handle_raw("POST", "/sessions", &[], "{\"name\":\"ann\"}");
+    let h = vec![("X-Session".to_string(), s.response().split("\"token\":\"").nth(1).unwrap().split('"').next().unwrap().to_string())];
+    s.handle_raw("POST", "/rooms", &h, "{\"name\":\"general\"}");
+    let body = "{\"body\":\"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\"}";
+    for _ in 0..1000 { s.handle_raw("POST", "/rooms/0/messages", &h, body); }
+    let reps = 20_000;
+    let t = Instant::now();
+    for _ in 0..reps { s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""); }
+    let interp = t.elapsed().as_nanos() as f64 / reps as f64 / 1000.0;
+    let interp_len = s.out.len;
+
+    let mc = s.inst.prog.colls.iter().position(|c| c.name == "rooms.messages").unwrap();
+    let sc = s.inst.prog.coll_of("sessions").unwrap();
+    let (cseq, cat, cauth, cbody) = (s.inst.col(mc, "seq").unwrap(), s.inst.col(mc, "at").unwrap(), s.inst.col(mc, "author").unwrap(), s.inst.col(mc, "body").unwrap());
+    let cname = s.inst.col(sc, "name").unwrap();
+    let mut items = Vec::with_capacity(1000);
+    let fast_int = |out: &mut Area, mut v: i64| { let mut b = [0u8; 20]; let mut i = 20; let neg = v < 0; if v == 0 { i -= 1; b[i] = b'0'; } while v != 0 { i -= 1; b[i] = b'0' + (v % 10).unsigned_abs() as u8; v /= 10; } if neg { i -= 1; b[i] = b'-'; } out.push(&b[i..]); };
+    for fast in [false, true] {
+        let t = Instant::now();
+        for _ in 0..reps {
+            let inst = &s.inst;
+            let out = &mut s.out;
+            out.len = 0;
+            out.push(b"{\"room\":"); escaped(out, inst.str_bytes(&Loc::Plain(0, Ty::Str(0))).map(|_| b"general".as_slice()).unwrap_or(b"general")); out.push(b",\"messages\":[");
+            inst.items_into(mc, 0, &mut items);
+            for (n, &idx) in items.iter().rev().take(50).enumerate() {
+                if n > 0 { out.push(b","); }
+                let Val::Int(seq) = inst.field_get(mc, idx, cseq).unwrap() else { unreachable!() };
+                let Val::Int(at) = inst.field_get(mc, idx, cat).unwrap() else { unreachable!() };
+                out.push(b"{\"seq\":"); if fast { fast_int(out, seq); } else { let _ = write!(out, "{}", seq); }
+                out.push(b",\"author\":");
+                match inst.field_get(mc, idx, cauth).unwrap() { Val::Ref(Some(r)) => match inst.deref_quiet(sc, r) { Some(si) => { escaped(out, inst.str_bytes(&Loc::Field(sc, si, cname)).unwrap()); } None => { escaped(out, b"[deleted]"); } }, _ => { escaped(out, b"[deleted]"); } }
+                out.push(b",\"at\":"); if fast { fast_int(out, at); } else { let _ = write!(out, "{}", at); }
+                out.push(b",\"body\":"); escaped(out, inst.str_bytes(&Loc::Field(mc, idx, cbody)).unwrap());
+                out.push(b"}");
+            }
+            out.push(b"]}");
+        }
+        let native = t.elapsed().as_nanos() as f64 / reps as f64 / 1000.0;
+        println!("native, {:<28} {:>6.2} us  ({} bytes)", if fast { "hand-written integer format" } else { "write! integer format" }, native, s.out.len);
+    }
+    println!("interpreter (whole request)          {:>6.2} us  ({} bytes)", interp, interp_len);
 }

@@ -1,31 +1,65 @@
-//! The endpoint language: tokens, syntax tree and parser.
+//! The endpoint language: tokens, syntax tree, parser, and the binder.
 //! A file holds `fn` declarations and `endpoint` handlers. Types written in `fn` signatures are documentation for now.
+//!
+//! The binder runs once when a server loads the file. It gives every local a fixed slot in its function's frame,
+//! resolves every name to a local, a global or a function, checks argument counts and assignments, and turns builtin
+//! calls into an enum. Errors that used to surface as a 500 at run time (an unknown name, assigning to a `let`)
+//! now stop the server from starting.
+use std::cell::Cell;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok { Id(String), Int(i64), Flt(f64), Str(String), Sym(String) }
+
+/// What a name refers to, filled in by the binder.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
+
+/// A field access remembers the last collection it saw and where the field was in it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FieldHit { None, Col(u32, u32), Child(u32, u32) } // (collection, column or child collection)
+impl Default for FieldHit { fn default() -> FieldHit { FieldHit::None } }
+
+/// Built-in functions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen }
+impl B {
+    fn from(n: &str) -> Option<B> {
+        use B::*;
+        Some(match n {
+            "body" => Body, "param" => Param, "query" => Query, "header" => Header, "fwd" => Fwd, "int" => Int, "str" => Str, "len" => Len, "now" => Now,
+            "random" => Random, "min" => Min, "max" => Max, "count" => Count, "capacity" => Capacity, "slot" => Slot, "stat" => Stat, "token" => Token,
+            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen,
+            _ => return None,
+        })
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum CallRes { #[default] Unbound, Builtin(B), User(u32) }
+impl Default for B { fn default() -> B { B::Now } }
 
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64), Float(f64), Str(String), Bool(bool), Null,
-    Var(String),
-    Field(Box<Expr>, String),
+    Var(String, VarRes),
+    Field(Box<Expr>, String, Cell<FieldHit>),
     Index(Box<Expr>, Box<Expr>),
-    Call(String, Vec<Expr>),
+    Call(String, Vec<Expr>, CallRes),
     Un(char, Box<Expr>),
     Bin(String, Box<Expr>, Box<Expr>),
 }
 
 /// `each m in room.messages reverse where ... order by ... desc limit n`
 #[derive(Debug, Clone)]
-pub struct Iter { pub var: String, pub coll: Expr, pub reverse: bool, pub wher: Option<Expr>, pub order: Option<(Expr, bool)>, pub limit: Option<Expr> }
+pub struct Iter { pub var: String, pub slot: u32, pub coll: Expr, pub reverse: bool, pub wher: Option<Expr>, pub order: Option<(Expr, bool)>, pub limit: Option<Expr> }
 
 #[derive(Debug, Clone)]
 pub enum Json { Obj(Vec<(String, Json)>), Arr(Iter, Box<Json>), E(Expr) }
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Let(String, Expr),
-    Var(String, Expr),
-    Alloc { var: String, coll: Expr, try_: bool },
+    Let(String, u32, Expr),
+    Var(String, u32, Expr),
+    Alloc { var: String, slot: u32, coll: Expr, try_: bool },
     Assign(Expr, Expr),
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     Each(Iter, Vec<Stmt>),
@@ -41,9 +75,9 @@ pub enum Stmt {
 #[derive(Debug, Clone)]
 pub enum Seg { Lit(String), Param(String) }
 #[derive(Debug, Clone)]
-pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String }
+pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String, pub slots: u32 }
 #[derive(Debug, Clone)]
-pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt> }
+pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt>, pub slots: u32 }
 #[derive(Debug, Clone, Default)]
 pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 
@@ -92,7 +126,7 @@ pub fn parse(src: &str) -> R<Api> {
             while !p.sym(")") { params.push(p.id()?); if p.sym(":") { p.skip_type()?; } p.sym(","); }
             if p.sym("->") { p.skip_type()?; }
             let body = p.block()?;
-            api.fns.push(Func { name, params, body });
+            api.fns.push(Func { name, params, body, slots: 0 });
             continue;
         }
         p.kw("endpoint")?;
@@ -103,7 +137,7 @@ pub fn parse(src: &str) -> R<Api> {
         }
         let body = p.block()?;
         let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(n) => format!("/{{{}}}", n) }).collect::<String>());
-        api.eps.push(Endpoint { method, segs, body, text });
+        api.eps.push(Endpoint { method, segs, body, text, slots: 0 });
     }
     Ok(api)
 }
@@ -138,7 +172,7 @@ impl P {
         let wher = if self.is_kw("where") { self.i += 1; Some(self.expr()?) } else { None };
         let order = if self.is_kw("order") { self.i += 1; self.kw("by")?; let e = self.expr()?; let desc = if self.is_kw("desc") { self.i += 1; true } else { false }; Some((e, desc)) } else { None };
         let limit = if self.is_kw("limit") { self.i += 1; Some(self.expr()?) } else { None };
-        Ok(Iter { var, coll, reverse, wher, order, limit })
+        Ok(Iter { var, slot: 0, coll, reverse, wher, order, limit })
     }
 
     fn stmt(&mut self) -> R<Stmt> {
@@ -147,10 +181,10 @@ impl P {
             self.i += 1; let n = self.id()?; self.eat("=")?;
             if !is_var && (self.is_kw("alloc") || self.is_kw("try_alloc")) {
                 let try_ = self.is_kw("try_alloc"); self.i += 1; let coll = self.postfix()?; self.eat(";")?;
-                return Ok(Stmt::Alloc { var: n, coll, try_ });
+                return Ok(Stmt::Alloc { var: n, slot: 0, coll, try_ });
             }
             let e = self.expr()?; self.eat(";")?;
-            return Ok(if is_var { Stmt::Var(n, e) } else { Stmt::Let(n, e) });
+            return Ok(if is_var { Stmt::Var(n, 0, e) } else { Stmt::Let(n, 0, e) });
         }
         if self.is_kw("if") { return self.if_stmt(); }
         if self.is_kw("each") { self.i += 1; let it = self.iter()?; let b = self.block()?; return Ok(Stmt::Each(it, b)); }
@@ -222,7 +256,7 @@ impl P {
     fn postfix(&mut self) -> R<Expr> {
         let mut e = self.primary()?;
         loop {
-            if self.sym(".") { e = Expr::Field(Box::new(e), self.id()?); }
+            if self.sym(".") { e = Expr::Field(Box::new(e), self.id()?, Cell::new(FieldHit::None)); }
             else if self.sym("[") { let i = self.expr()?; self.eat("]")?; e = Expr::Index(Box::new(e), Box::new(i)); }
             else { break; }
         }
@@ -240,11 +274,111 @@ impl P {
                 if self.sym("(") {
                     let mut a = Vec::new();
                     while !self.sym(")") { a.push(self.expr()?); self.sym(","); }
-                    return Ok(Expr::Call(n, a));
+                    return Ok(Expr::Call(n, a, CallRes::Unbound));
                 }
-                Ok(Expr::Var(n))
+                Ok(Expr::Var(n, VarRes::Unbound))
             }
             _ => Err(format!("unexpected {}", self.here())),
         }
+    }
+}
+
+// ---------------------------------------------------------------- binder
+
+struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize)>, place: String }
+
+/// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
+pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
+    let fns: Vec<(String, usize)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len())).collect();
+    for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
+    for f in &mut api.fns {
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name) };
+        for p in &f.params { b.declare(p, false); }
+        b.block(&mut f.body)?;
+        f.slots = b.max;
+    }
+    for e in &mut api.eps {
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text) };
+        b.block(&mut e.body)?;
+        e.slots = b.max;
+    }
+    Ok(())
+}
+
+impl Binder<'_> {
+    fn err<T>(&self, m: String) -> R<T> { Err(format!("{}: {}", self.place, m)) }
+    fn declare(&mut self, n: &str, mutable: bool) -> u32 {
+        let s = self.next; self.next += 1; self.max = self.max.max(self.next);
+        self.names.push((n.to_string(), s, mutable)); s
+    }
+    fn block(&mut self, stmts: &mut [Stmt]) -> R<()> {
+        let (mark, next) = (self.names.len(), self.next);
+        for s in stmts.iter_mut() { self.stmt(s)?; }
+        self.names.truncate(mark); self.next = next; // slots of a finished block are reused
+        Ok(())
+    }
+    fn iter_head(&mut self, it: &mut Iter) -> R<()> {
+        self.expr(&mut it.coll)?;
+        if let Some(l) = &mut it.limit { self.expr(l)?; }
+        it.slot = self.declare(&it.var, false);
+        if let Some(w) = &mut it.wher { self.expr(w)?; }
+        if let Some((o, _)) = &mut it.order { self.expr(o)?; }
+        Ok(())
+    }
+    fn stmt(&mut self, s: &mut Stmt) -> R<()> {
+        match s {
+            Stmt::Let(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, false); }
+            Stmt::Var(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, true); }
+            Stmt::Alloc { var, slot, coll, .. } => { self.expr(coll)?; *slot = self.declare(var, false); }
+            Stmt::Assign(lhs, rhs) => {
+                self.expr(rhs)?;
+                if let Expr::Var(n, res) = lhs {
+                    match self.names.iter().rev().find(|x| x.0 == *n) {
+                        Some(x) if x.2 => *res = VarRes::Local(x.1),
+                        Some(_) => return self.err(format!("`{}` is a `let`; declare it with `var` to change it", n)),
+                        None => return self.err(format!("unknown variable `{}`", n)),
+                    }
+                } else { self.expr(lhs)?; }
+            }
+            Stmt::If(c, t, e) => { self.expr(c)?; self.block(t)?; self.block(e)?; }
+            Stmt::Each(it, body) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.block(body)?; self.names.truncate(mark); self.next = next; }
+            Stmt::Free(e) | Stmt::Do(e) => self.expr(e)?,
+            Stmt::Return(e) => { if let Some(e) = e { self.expr(e)?; } }
+            Stmt::Respond(_, j) => self.json(j)?,
+            Stmt::Forward { key, fields, .. } => { self.expr(key)?; for f in fields { self.expr(&mut f.1)?; } }
+            Stmt::Fail(..) => {}
+        }
+        Ok(())
+    }
+    fn json(&mut self, j: &mut Json) -> R<()> {
+        match j {
+            Json::Obj(f) => { for (_, v) in f { self.json(v)?; } Ok(()) }
+            Json::Arr(it, inner) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.json(inner)?; self.names.truncate(mark); self.next = next; Ok(()) }
+            Json::E(e) => self.expr(e),
+        }
+    }
+    fn expr(&mut self, e: &mut Expr) -> R<()> {
+        match e {
+            Expr::Var(n, res) => {
+                *res = match self.names.iter().rev().find(|x| x.0 == *n) {
+                    Some(x) => VarRes::Local(x.1),
+                    None => match (self.globals)(n) { Some(g) => VarRes::Global(g as u32), None => return self.err(format!("unknown name `{}`", n)) },
+                };
+            }
+            Expr::Field(b, _, _) => self.expr(b)?,
+            Expr::Index(b, i) => { self.expr(b)?; self.expr(i)?; }
+            Expr::Un(_, x) => self.expr(x)?,
+            Expr::Bin(_, a, b) => { self.expr(a)?; self.expr(b)?; }
+            Expr::Call(n, args, res) => {
+                for a in args.iter_mut() { self.expr(a)?; }
+                *res = if let Some(k) = self.fns.iter().position(|f| f.0 == *n) {
+                    if self.fns[k].1 != args.len() { return self.err(format!("`{}` takes {} arguments, given {}", n, self.fns[k].1, args.len())); }
+                    CallRes::User(k as u32)
+                } else if let Some(b) = B::from(n) { CallRes::Builtin(b) }
+                else { return self.err(format!("unknown function `{}`", n)); };
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }

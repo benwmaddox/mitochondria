@@ -193,7 +193,8 @@ is the layer above it. Details and the comparison with arenas, garbage collectio
 
 ## Status: prototype vs this design (2026-11-03)
 Every concept above, and the worker system, is built and tested (29 tests). Known differences:
-- Types in `fn` signatures are parsed but not checked; the interpreter is dynamically typed.
+- Endpoints are bound once at load (slots, resolved names and calls, cached field positions), then interpreted.
+  Types in `fn` signatures are parsed but not checked; values are dynamically typed.
 - `ref<...>` targets top-level pools only. Nested-struct fields inside items (`m.pos.x`) take a slower path that allocates.
 - The pressure policy's marks are absolute, not fractions of the budget; machine free memory is not consulted.
 - Workers: mailboxes are a mutex and a condition variable, not lock-free; only `forward` exists (no one-way `send`/`on` messages,

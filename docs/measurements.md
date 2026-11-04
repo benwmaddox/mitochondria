@@ -392,3 +392,27 @@ The no-mailbox baseline in the same run: 70,947 req/s (14.1 us mean per request 
 **So the levers are:** a cheaper handler (the interpreter's GET of 50 messages is about 18 us; the native loop is 6 us), fewer
 competing threads than cores, and placing rooms by load instead of by `id % count`. Cutting handoff cost further would gain
 at most a few microseconds per request.
+
+## Round 6 (2026-11-04): binding pass and the native floor
+A binder now runs once when a server loads its endpoints: every local gets a fixed slot, every name is resolved to a local,
+a global or a function, builtins become an enum, argument counts and assignments are checked, and each field access caches
+where its column is. Unknown names, wrong argument counts and assigning to a `let` are now load errors, not run-time 500s.
+
+**Binding alone gained about 5%**: GET messages 17.9 -> 17.0 us in two alternating before/after rounds; other endpoints
+within noise. Name lookup was not where the time went.
+
+**The floor** (`exp json`): the same 50-message response (8,682 bytes) written by native Rust from the same state:
+
+| | Before faster escaping | After |
+|---|---|---|
+| native, `write!` for integers | 7.74-7.82 us | 4.65-4.77 us |
+| native, hand-written integer format | 7.23-7.24 us | 4.19-4.41 us |
+| interpreter, whole request | 17.58-17.68 us | 14.72-14.75 us |
+
+Most of the native time was escaping the message bodies byte by byte. JSON escaping now checks 8 bytes at a time for a
+quote, backslash or control character (tested against a byte-by-byte reference on 2,000 generated strings). That helped
+both paths by about 3 us.
+
+**What is left:** the interpreter spends about 10.5 us per request beyond the native floor of about 4.2 us (3.4x). That is
+evaluating ~250 expressions per request one tree node at a time: building and matching values, following references,
+copying strings into the text area for `or(...)`. Removing it needs generated code.

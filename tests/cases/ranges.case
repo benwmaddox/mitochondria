@@ -1,0 +1,29 @@
+// counted loops: each over a range of integers, with reverse, where, limit (also as an early exit), in JSON arrays
+--- state
+struct Grid { cells: i32[8]; total: i64; }
+global grid: Grid;
+--- api
+fn first_at_least(x) { var at = -1; each i in 0..8 where grid.cells[i] >= x limit 1 { at = i; } return at; }
+endpoint POST /fill { each i in 0..8 { grid.cells[i] = i * i; } respond 200 { "cells": [each i in 0..8 grid.cells[i]] }; }
+endpoint GET /sum/{n} { var t = 0; each i in 1..int(param("n")) + 1 { t = t + i; } respond 200 { "sum": t }; }
+endpoint GET /evens/{n} { respond 200 { "x": [each i in 0..int(param("n")) reverse where i % 2 == 0 i], "first3": [each i in 0..100 where i % 7 == 3 limit 3 i] }; }
+endpoint GET /find/{x} { respond 200 { "at": first_at_least(int(param("x"))) }; }
+endpoint GET /empty { respond 200 { "a": [each i in 5..5 i], "b": [each i in 9..2 i], "c": [each i in -3..0 reverse i] }; }
+endpoint GET /bad { respond 200 { "x": [each i in 0..body("n") i] }; }
+endpoint GET /badlimit { respond 200 { "x": [each i in 0..3 limit body("n") i] }; }
+endpoint POST /add { each i in 0..8 where grid.cells[i] < 10 { grid.total = grid.total + grid.cells[i]; } respond 200 { "total": grid.total }; }
+--- requests
+GET /find/1
+POST /fill
+GET /sum/10
+GET /sum/0
+GET /evens/9
+GET /find/10
+GET /find/1000
+GET /empty
+GET /bad {"n": 3}
+GET /bad {"n": "3"}
+GET /badlimit {"n": 2}
+GET /badlimit {"n": -1}
+POST /add
+POST /add

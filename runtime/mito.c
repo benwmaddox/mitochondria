@@ -6,6 +6,12 @@
    It reproduces the Rust runtime's behaviour exactly (tests/cases check both against the same records). */
 
 /* ---------------------------------------------------------------- platform (Windows) */
+/* Built as a DLL by clang, the mito_* interface is exported; TinyCC finds it by name in memory. */
+#if defined(_MSC_VER) || defined(__clang__)
+#define MITO_API __declspec(dllexport)
+#else
+#define MITO_API
+#endif
 void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
 int VirtualFree(void *a, u64 n, u32 type);
 void GetSystemTimeAsFileTime(u64 *ft);
@@ -1070,7 +1076,7 @@ static const H mito_h = {
 /* ---------------------------------------------------------------- the interface: mito_* */
 /* Start the program: reserve its layout (refusing if over `budget` bytes), commit plain values and top-level headers.
    `seed` 0 takes random numbers from the OS. Returns 0 if over budget or out of address space. */
-Mito *mito_start(u64 budget, u64 seed) {
+MITO_API Mito *mito_start(u64 budget, u64 seed) {
     const MitoProg *pg = &mito_prog;
     if (pg->total > budget) return 0;
     Mito *m = (Mito *)VirtualAlloc(0, sizeof(Mito), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -1096,9 +1102,9 @@ Mito *mito_start(u64 budget, u64 seed) {
     for (u32 c = 0; c < pg->ncolls; c++) { const MitoColl *k = &pg->colls[c]; if (k->parent < 0) ensure(mem, k->hdr, k->hdr + hdr_fields(k) * 4); }
     return m;
 }
-void mito_stop(Mito *m) { if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.jb.p); os_release(m->mem.je.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }
-void mito_set_clock(Mito *m, i64 ms, int fixed) { m->clock = ms; m->fixed_clock = fixed; }
-void mito_set_marks(Mito *m, u64 soft, u64 hard) {
+MITO_API void mito_stop(Mito *m) { if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.jb.p); os_release(m->mem.je.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }
+MITO_API void mito_set_clock(Mito *m, i64 ms, int fixed) { m->clock = ms; m->fixed_clock = fixed; }
+MITO_API void mito_set_marks(Mito *m, u64 soft, u64 hard) {
     m->pr.on = 1; m->pr.soft = soft; m->pr.hard = hard; m->pr.refusing = 0; m->pr.trims = m->pr.full_trims = m->pr.freed = 0;
     for (u32 c = 0; c < m->mem.prog->ncolls; c++) m->pr.stuck[c] = ~0ULL;
 }
@@ -1121,7 +1127,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
     return 0xFFFFFFFFu;
 }
 /* Handle one request. Headers are "Name:value\n" lines. Returns the status; the body is in the response area. */
-int mito_handle(Mito *m, const char *method, u32 mn, const char *target, u32 tn, const char *hdrs, u32 hn, const char *body, u32 bn) {
+MITO_API int mito_handle(Mito *m, const char *method, u32 mn, const char *target, u32 tn, const char *hdrs, u32 hn, const char *body, u32 bn) {
     m->out.len = 0; m->text.len = 0; m->ekind = E_NONE;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
@@ -1176,16 +1182,16 @@ int mito_handle(Mito *m, const char *method, u32 mn, const char *target, u32 tn,
     if (m->pr.on) relieve(&m->mem, &m->pr);
     return code;
 }
-const char *mito_response(Mito *m, u32 *len) { *len = m->out.len; return (const char *)m->out.p; }
+MITO_API const char *mito_response(Mito *m, u32 *len) { *len = m->out.len; return (const char *)m->out.p; }
 /* The same lines the cases record: `state <name> <live bytes>` per collection, then the memory totals. */
-u32 mito_state(Mito *m, char *buf, u32 cap) {
+MITO_API u32 mito_state(Mito *m, char *buf, u32 cap) {
     Area a = { (u8 *)buf, cap, 0 };
     a_str(&a, "state <plain values> "); a_u64(&a, m->mem.prog->plain_end); a_str(&a, "\n");
     for (u32 c = 0; c < m->mem.prog->ncolls; c++) { a_str(&a, "state "); a_str(&a, m->mem.prog->colls[c].name); a_str(&a, " "); a_u64(&a, coll_live(&m->mem, c)); a_str(&a, "\n"); }
     a_str(&a, "memory reserved="); a_u64(&a, m->mem.reserved); a_str(&a, " committed="); a_u64(&a, m->mem.cpages * PAGE); a_str(&a, " live="); a_u64(&a, live_total(&m->mem)); a_str(&a, "\n");
     return a.len;
 }
-u32 mito_stats(Mito *m, char *buf, u32 cap) {
+MITO_API u32 mito_stats(Mito *m, char *buf, u32 cap) {
     Area a = { (u8 *)buf, cap, 0 };
     if (!m->pr.on) a_str(&a, "stats no marks");
     else { a_str(&a, "stats refusing="); a_str(&a, m->pr.refusing ? "true" : "false"); a_str(&a, " full_trims="); a_u64(&a, m->pr.full_trims); }

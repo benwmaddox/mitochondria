@@ -50,7 +50,9 @@ pub enum Expr {
 
 /// `each m in room.messages reverse where ... order by ... desc limit n`
 #[derive(Debug, Clone)]
-pub struct Iter { pub var: String, pub slot: u32, pub coll: Expr, pub reverse: bool, pub wher: Option<Expr>, pub order: Option<(Expr, bool)>, pub limit: Option<Expr> }
+/// `each var in coll ...`, or with `hi`, a range of integers `each var in coll..hi ...` (from `coll`, the low bound,
+/// up to but not including `hi`).
+pub struct Iter { pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub reverse: bool, pub wher: Option<Expr>, pub order: Option<(Expr, bool)>, pub limit: Option<Expr> }
 
 #[derive(Debug, Clone)]
 pub enum Json { Obj(Vec<(String, Json)>), Arr(Iter, Box<Json>), E(Expr) }
@@ -111,7 +113,7 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
         }
         else {
             let two: String = c[i..(i + 2).min(c.len())].iter().collect();
-            if ["==", "!=", "<=", ">=", "&&", "||", "->"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
+            if ["==", "!=", "<=", ">=", "&&", "||", "->", ".."].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
             else { out.push(Tok::Sym(ch.to_string())); i += 1; }
         }
     }
@@ -177,12 +179,13 @@ impl P {
     }
 
     fn iter(&mut self) -> R<Iter> {
-        let var = self.id()?; self.kw("in")?; let coll = self.postfix()?;
+        let var = self.id()?; self.kw("in")?; let coll = self.unary()?;
+        let hi = if self.sym("..") { Some(self.expr()?) } else { None };
         let reverse = if self.is_kw("reverse") { self.i += 1; true } else { false };
         let wher = if self.is_kw("where") { self.i += 1; Some(self.expr()?) } else { None };
         let order = if self.is_kw("order") { self.i += 1; self.kw("by")?; let e = self.expr()?; let desc = if self.is_kw("desc") { self.i += 1; true } else { false }; Some((e, desc)) } else { None };
         let limit = if self.is_kw("limit") { self.i += 1; Some(self.expr()?) } else { None };
-        Ok(Iter { var, slot: 0, coll, reverse, wher, order, limit })
+        Ok(Iter { var, slot: 0, coll, hi, reverse, wher, order, limit })
     }
 
     fn stmt(&mut self) -> R<Stmt> {
@@ -329,6 +332,8 @@ impl Binder<'_> {
     }
     fn iter_head(&mut self, it: &mut Iter) -> R<()> {
         self.expr(&mut it.coll)?;
+        if let Some(h) = &mut it.hi { self.expr(h)?; }
+        if it.hi.is_some() && it.order.is_some() { return Err(format!("`each {} in a..b order by`: a range is already in order", it.var)); }
         if let Some(l) = &mut it.limit { self.expr(l)?; }
         it.slot = self.declare(&it.var, false);
         if let Some(w) = &mut it.wher { self.expr(w)?; }

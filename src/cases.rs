@@ -85,8 +85,36 @@ impl Backend for RustBackend {
     fn allocs(&self) -> usize { crate::alloc_count::allocs() }
 }
 
-/// The C runtime (runtime/mito.c) and the program's generated C, compiled together by TinyCC, driven through `mito_*`.
-pub struct CBackend { _unit: crate::tcc::Unit, m: *mut std::ffi::c_void, f: CFns, buf: Vec<u8> }
+/// The C runtime (runtime/mito.c) and the program's generated C compiled together, driven through `mito_*`: in memory
+/// by TinyCC, or by clang (-O2) into a DLL.
+pub struct CBackend { _code: Code, m: *mut std::ffi::c_void, f: CFns, buf: Vec<u8> }
+enum Code { Tcc(crate::tcc::Unit), Dll(*mut std::ffi::c_void) }
+extern "system" {
+    fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
+    fn GetProcAddress(m: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+}
+/// The clang to build C runtimes with: `MITO_CLANG`, or LLVM's default install. None if neither exists.
+pub fn clang() -> Option<String> {
+    let p = std::env::var("MITO_CLANG").unwrap_or_else(|_| "C:/Program Files/LLVM/bin/clang.exe".into());
+    if std::path::Path::new(&p).exists() { Some(p) } else { None }
+}
+/// Build `src` with clang into a DLL (in the temp directory, named by `name`) and load it.
+pub fn clang_dll(src: &str, name: &str, extra: &[&str]) -> Result<*mut std::ffi::c_void, String> {
+    let cc = clang().ok_or("clang not found")?;
+    let dir = std::env::temp_dir().join("mito-clang");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let stem = format!("{}-{}-{}", name, std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let (c, dll) = (dir.join(format!("{}.c", stem)), dir.join(format!("{}.dll", stem)));
+    std::fs::write(&c, src).map_err(|e| e.to_string())?;
+    let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(extra).arg("-o").arg(&dll).arg(&c).arg("-lkernel32")
+        .output().map_err(|e| e.to_string())?;
+    if !out.status.success() { return Err(format!("clang failed:\n{}", String::from_utf8_lossy(&out.stderr))); }
+    let w: Vec<u16> = dll.to_string_lossy().encode_utf16().chain([0]).collect();
+    let h = unsafe { LoadLibraryW(w.as_ptr()) };
+    if h.is_null() { return Err(format!("could not load {}", dll.display())); }
+    Ok(h)
+}
 struct CFns {
     handle: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, u32, *const u8, u32, *const u8, u32, *const u8, u32) -> i32,
     response: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u32) -> *const u8,
@@ -97,15 +125,20 @@ struct CFns {
     stop: unsafe extern "C" fn(*mut std::ffi::c_void),
 }
 impl CBackend {
-    pub fn start(case: &Case) -> CBackend {
+    pub fn start(case: &Case) -> CBackend { Self::start_with(case, false) }
+    pub fn start_with(case: &Case, use_clang: bool) -> CBackend {
         let prog = Program::parse(&case.state).unwrap_or_else(|e| panic!("{}: state: {}", case.name, e));
         let mut api = crate::lang::parse(&case.api).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
         crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
         let src = crate::cgen::program_c(&prog, &api, None).unwrap_or_else(|e| panic!("{}: {}", case.name, e));
         // the C runtime makes no heap allocations because it has no allocator: check the program names none
         for w in ["malloc", "calloc", "realloc", "HeapAlloc", "LocalAlloc", "GlobalAlloc", "_alloca"] { assert!(!src.contains(w), "{}: the C program uses {}", case.name, w); }
-        let unit = crate::tcc::Unit::compile(&src, &[]).unwrap_or_else(|e| { let _ = std::fs::write(std::env::temp_dir().join(format!("mito-{}.c", case.name)), &src); panic!("{}: C runtime: {}", case.name, e) });
-        let sym = |n: &str| unit.symbol(n).unwrap_or_else(|| panic!("no {}", n));
+        let code = if use_clang { Code::Dll(clang_dll(&src, &case.name, &[]).unwrap_or_else(|e| panic!("{}: {}", case.name, e))) }
+            else { Code::Tcc(crate::tcc::Unit::compile(&src, &[]).unwrap_or_else(|e| { let _ = std::fs::write(std::env::temp_dir().join(format!("mito-{}.c", case.name)), &src); panic!("{}: C runtime: {}", case.name, e) })) };
+        let sym = |n: &str| -> *const std::ffi::c_void {
+            let p = match &code { Code::Tcc(u) => u.symbol(n), Code::Dll(h) => { let c = std::ffi::CString::new(n).unwrap(); let p = unsafe { GetProcAddress(*h, c.as_ptr()) }; if p.is_null() { None } else { Some(p as *const std::ffi::c_void) } } };
+            p.unwrap_or_else(|| panic!("no {}", n))
+        };
         unsafe {
             let start: unsafe extern "C" fn(u64, u64) -> *mut std::ffi::c_void = std::mem::transmute(sym("mito_start"));
             let f = CFns { handle: std::mem::transmute(sym("mito_handle")), response: std::mem::transmute(sym("mito_response")), set_clock: std::mem::transmute(sym("mito_set_clock")),
@@ -113,7 +146,7 @@ impl CBackend {
             let m = start(1 << 30, 0x1234_5678_9abc_def0);
             assert!(!m.is_null(), "{}: mito_start failed", case.name);
             (f.set_clock)(m, 1000, 1);
-            CBackend { _unit: unit, m, f, buf: Vec::with_capacity(1 << 16) }
+            CBackend { _code: code, m, f, buf: Vec::with_capacity(1 << 16) }
         }
     }
     fn call(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> i32 {
@@ -278,20 +311,116 @@ mod tests {
         assert!(checked > 250_000);
     }
 
+    /// The chat example's requests used by `c_runtime_speed`, written as ordinary Rust (a Vec of sessions, a VecDeque of
+    /// messages per room, Strings for text): the baseline a program written directly in Rust would be.
+    struct NativeChat { sessions: Vec<Option<(String, u64, u32, i64, i64)>>, gens: Vec<u32>, rooms: Vec<(String, std::collections::VecDeque<(i64, i64, (usize, u32), String)>)>, next_seq: i64, now: i64, out: String, rng: u64 }
+    impl NativeChat {
+        fn new() -> NativeChat { NativeChat { sessions: Vec::new(), gens: Vec::new(), rooms: Vec::new(), next_seq: 0, now: 1000, out: String::with_capacity(1 << 16), rng: 0x1234_5678_9abc_def0 } }
+        fn err(&mut self, code: u16, m: &str) -> u16 { self.out.clear(); self.out.push_str("{\"error\":"); esc(&mut self.out, m); self.out.push('}'); code }
+        fn auth(&self, h: &[(String, String)]) -> Result<usize, (u16, &'static str)> {
+            let t = h.iter().find(|x| x.0.eq_ignore_ascii_case("x-session")).map(|x| x.1.as_str()).ok_or((401, "missing X-Session header"))?;
+            let mut it = t.split('.');
+            let (Some(Ok(slot)), Some(Ok(g)), Some(Ok(sec))) = (it.next().map(str::parse::<usize>), it.next().map(str::parse::<u32>), it.next().map(|x| u64::from_str_radix(x, 16))) else { return Err((401, "malformed session token")) };
+            match self.sessions.get(slot) { Some(Some(s)) if s.2 == g => if s.1 == sec { Ok(slot) } else { Err((403, "bad session secret")) }, _ => Err((401, "session ended")) }
+        }
+        /// The string value of a field of a flat JSON body.
+        fn field<'b>(body: &'b str, k: &str) -> Option<String> {
+            let at = body.find(&format!("\"{}\":\"", k))? + k.len() + 4;
+            let mut v = String::new(); let mut it = body[at..].chars();
+            while let Some(c) = it.next() { match c { '"' => return Some(v), '\\' => match it.next()? { 'n' => v.push('\n'), 't' => v.push('\t'), c => v.push(c) }, c => v.push(c) } }
+            None
+        }
+    }
+    fn esc(o: &mut String, s: &str) {
+        o.push('"');
+        for c in s.chars() { match c { '"' => o.push_str("\\\""), '\\' => o.push_str("\\\\"), '\n' => o.push_str("\\n"), '\r' => o.push_str("\\r"), '\t' => o.push_str("\\t"), c if (c as u32) < 0x20 => { use std::fmt::Write; let _ = write!(o, "\\u{:04x}", c as u32); } c => o.push(c) } }
+        o.push('"');
+    }
+    impl Backend for NativeChat {
+        fn handle(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> (u16, String) { let c = self.handle_quiet(m, t, h, b); (c, self.out.clone()) }
+        fn handle_quiet(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> u16 {
+            use std::fmt::Write;
+            let (path, q) = t.split_once('?').unwrap_or((t, ""));
+            let segs: Vec<&str> = path.split('/').filter(|x| !x.is_empty()).collect();
+            match (m, segs.as_slice()) {
+                ("POST", ["sessions"]) => {
+                    let Some(name) = Self::field(b, "name") else { return self.err(400, "name is required") };
+                    let mut x = self.rng; x ^= x << 13; x ^= x >> 7; x ^= x << 17; self.rng = x;
+                    let slot = self.sessions.iter().position(|s| s.is_none()).unwrap_or_else(|| { self.sessions.push(None); self.gens.push(0); self.sessions.len() - 1 });
+                    let g = self.gens[slot];
+                    self.sessions[slot] = Some((name, x, g, self.now, 0));
+                    self.out.clear(); let _ = write!(self.out, "{{\"token\":\"{}.{}.{:x}\",\"slot\":{}}}", slot, g, x, slot); 201
+                }
+                ("POST", ["rooms"]) => {
+                    if let Err((c, e)) = self.auth(h) { return self.err(c, e); }
+                    let Some(name) = Self::field(b, "name") else { return self.err(400, "name is required") };
+                    self.rooms.push((name.clone(), std::collections::VecDeque::with_capacity(1000)));
+                    self.out.clear(); let _ = write!(self.out, "{{\"id\":{},\"name\":", self.rooms.len() - 1); esc(&mut self.out, &name); self.out.push('}'); 201
+                }
+                ("POST", ["rooms", r, "messages"]) => {
+                    let who = match self.auth(h) { Ok(w) => w, Err((c, e)) => return self.err(c, e) };
+                    let Ok(r) = r.parse::<usize>() else { return self.err(400, "bad room") };
+                    let Some(text) = Self::field(b, "body") else { return self.err(400, "body is required") };
+                    let now = self.now;
+                    let s = self.sessions[who].as_mut().unwrap();
+                    if now - s.3 > 60000 { s.3 = now; s.4 = 0; }
+                    if s.4 >= 30 { return self.err(429, "slow down"); }
+                    s.4 += 1;
+                    self.next_seq += 1;
+                    let g = s.2;
+                    let room = &mut self.rooms[r].1;
+                    if room.len() == 1000 { room.pop_front(); }
+                    room.push_back((self.next_seq, now, (who, g), text));
+                    self.out.clear(); let _ = write!(self.out, "{{\"seq\":{}}}", self.next_seq); 201
+                }
+                ("GET", ["rooms", r, "messages"]) => {
+                    if let Err((c, e)) = self.auth(h) { return self.err(c, e); }
+                    let Ok(r) = r.parse::<usize>() else { return self.err(400, "bad room") };
+                    let n = q.split('&').find_map(|kv| kv.strip_prefix("limit=")).map_or(Ok(50), |v| v.parse::<i64>()).unwrap_or(50).min(100).max(0) as usize;
+                    let NativeChat { rooms, sessions, out, .. } = self;
+                    out.clear(); out.push_str("{\"room\":"); esc(out, &rooms[r].0); out.push_str(",\"messages\":[");
+                    for (k, (seq, at, (slot, g), body)) in rooms[r].1.iter().rev().take(n).enumerate() {
+                        if k > 0 { out.push(','); }
+                        let _ = write!(out, "{{\"seq\":{},\"author\":", seq);
+                        match sessions.get(*slot) { Some(Some(s)) if s.2 == *g => esc(out, &s.0), _ => esc(out, "[deleted]") }
+                        let _ = write!(out, ",\"at\":{},\"body\":", at);
+                        esc(out, body);
+                        out.push('}');
+                    }
+                    out.push_str("]}"); 200
+                }
+                _ => self.err(404, "no such endpoint"),
+            }
+        }
+        fn set_clock(&mut self, ms: i64) { self.now = ms; }
+        fn set_marks(&mut self, _: usize, _: usize) {}
+        fn state(&self) -> Vec<String> { Vec::new() }
+        fn stats(&self) -> String { String::new() }
+        fn notes(&self) -> Vec<String> { Vec::new() }
+        fn no_alloc(&self) -> bool { false }
+        fn allocs(&self) -> usize { crate::alloc_count::allocs() }
+    }
+
     /// `cargo test --release c_runtime_speed -- --ignored --nocapture`: the chat example's GET messages (50 of 1000
     /// messages) and POST message, Rust runtime with compiled endpoints against the C runtime, alternating rounds.
     #[test]
     #[ignore]
     fn c_runtime_speed() {
         let case = Case { name: "speed".into(), state: include_str!("../examples/chat/chat.mito").into(), api: include_str!("../examples/chat/chat.api").into(), requests: String::new(), system: None, files: Vec::new() };
-        let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("Rust runtime", Box::new(RustBackend::start(&case, true))), ("C runtime", Box::new(CBackend::start(&case)))];
-        for (_, be) in bes.iter_mut() {
+        let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("Rust runtime", Box::new(RustBackend::start(&case, true))), ("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
+        if clang().is_some() { bes.push(("C runtime, clang -O2", Box::new(CBackend::start_with(&case, true)))); }
+        bes.push(("native Rust (Vec, VecDeque, String)", Box::new(NativeChat::new())));
+        let mut first: Option<String> = None;
+        for (name, be) in bes.iter_mut() {
+            println!("{}:", name);
             let (_, tok) = be.handle("POST", "/sessions", &[], "{\"name\":\"ann\"}");
             let tok = tok.split("\"token\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
             let h = vec![("X-Session".to_string(), tok)];
             be.handle("POST", "/rooms", &h, "{\"name\":\"lobby\"}");
             be.set_clock(1000);
             for i in 0..1000 { be.set_clock(1000 + i * 61_000); be.handle_quiet("POST", "/rooms/0/messages", &h, "{\"body\":\"hello there, a message of ordinary length\"}"); }
+            let (_, body) = be.handle("GET", "/rooms/0/messages?limit=50", &h, "");
+            match &first { None => first = Some(body), Some(f) => assert!(*f == body, "{} answers GET messages differently", name) }
             for round in 0..3 {
                 let t = std::time::Instant::now();
                 for _ in 0..5000 { assert_eq!(be.handle_quiet("GET", "/rooms/0/messages?limit=50", &h, ""), 200); }
@@ -302,7 +431,6 @@ mod tests {
                 println!("round {}: GET messages {:.2} us, POST message {:.2} us", round, get, post);
             }
         }
-        for (name, _) in &bes { println!("({} measured above in order)", name); }
     }
 
     #[test]
@@ -322,6 +450,7 @@ mod tests {
             } else {
                 vec![("interpreted", Box::new(RustBackend::start(&case, false))), ("compiled", Box::new(RustBackend::start(&case, true))), ("C runtime", Box::new(CBackend::start(&case)))]
             };
+            if case.system.is_none() && clang().is_some() { backends.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true)))); }
             let mut logs = Vec::new();
             for (name, be) in backends.iter_mut() {
                 for n in be.notes().iter().filter(|n| !n.ends_with(": compiled")) { problems.push(format!("{} ({}): {}", case.name, name, n)); }

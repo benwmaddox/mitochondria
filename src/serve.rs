@@ -731,6 +731,15 @@ impl<'a> Run<'a> {
         match r { Ok(()) => Ok(Value::Null), Err(Ctl::Return(v)) => Ok(v), Err(e) => Err(e) }
     }
 
+    /// A range loop's low bound, how many values it covers, and its limit. Its values are computed as it goes (there
+    /// are no items to take a snapshot of), so `where` is tested just before each body runs.
+    fn range(&mut self, it: &'a Iter) -> R<'a, (i64, u64, Option<usize>)> {
+        let lo = match self.eval(&it.coll)? { Value::Int(i) => i, _ => return fail(500, "a range needs integers") };
+        let hi = match self.eval(it.hi.as_ref().unwrap())? { Value::Int(i) => i, _ => return fail(500, "a range needs integers") };
+        let limit = match &it.limit { Some(e) => match self.eval(e)? { Value::Int(n) if n >= 0 => Some(n as usize), _ => return fail(400, "bad limit") }, None => None };
+        Ok((lo, if hi > lo { (hi as i128 - lo as i128) as u64 } else { 0 }, limit))
+    }
+
     /// Items of `it.coll` passing `where`, in order (reversed if asked), ordered and limited. Give the vector back with `self.idx.push`.
     fn select(&mut self, it: &'a Iter) -> R<'a, (usize, Vec<usize>)> {
         let Value::Coll(c, inst) = self.eval(&it.coll)? else { return fail(500, "each needs a list or pool") };
@@ -776,6 +785,17 @@ impl<'a> Run<'a> {
             Stmt::Assign(Expr::Var(_, VarRes::Local(s)), rhs) => { let v = self.eval(rhs)?; self.set_slot(*s, v); } // mutability checked by the binder
             Stmt::Assign(lhs, rhs) => { let l = self.place(lhs)?; let v = self.eval(rhs)?; self.store(l, v)?; }
             Stmt::If(c, t, e) => { let v = self.eval(c)?; if self.truthy(&v)? { self.exec(t)?; } else { self.exec(e)?; } }
+            Stmt::Each(it, body) if it.hi.is_some() => {
+                let (lo, n, limit) = self.range(it)?;
+                let mut hits = 0usize;
+                for k in 0..n {
+                    if limit.map_or(false, |l| hits >= l) { break; }
+                    self.set_slot(it.slot, Value::Int(if it.reverse { lo.wrapping_add((n - 1 - k) as i64) } else { lo.wrapping_add(k as i64) }));
+                    if let Some(w) = &it.wher { let v = self.eval(w)?; if !self.truthy(&v)? { continue; } }
+                    hits += 1;
+                    self.exec(body)?;
+                }
+            }
             Stmt::Each(it, body) => {
                 let (c, items) = self.select(it)?;
                 let mut res = Ok(());
@@ -826,6 +846,20 @@ impl<'a> Run<'a> {
                     self.out(b":")?; self.json(v)?;
                 }
                 self.out(b"}")
+            }
+            Json::Arr(it, inner) if it.hi.is_some() => {
+                let (lo, n, limit) = self.range(it)?;
+                self.out(b"[")?;
+                let mut hits = 0usize;
+                for k in 0..n {
+                    if limit.map_or(false, |l| hits >= l) { break; }
+                    self.set_slot(it.slot, Value::Int(if it.reverse { lo.wrapping_add((n - 1 - k) as i64) } else { lo.wrapping_add(k as i64) }));
+                    if let Some(w) = &it.wher { let v = self.eval(w)?; if !self.truthy(&v)? { continue; } }
+                    if hits > 0 { self.out(b",")?; }
+                    hits += 1;
+                    self.json(inner)?;
+                }
+                self.out(b"]")
             }
             Json::Arr(it, inner) => {
                 let (c, items) = self.select(it)?;

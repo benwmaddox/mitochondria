@@ -1,0 +1,16 @@
+GET /find/1 -> 200 {"at":-1}
+POST /fill -> 200 {"cells":[0,1,4,9,16,25,36,49]}
+GET /sum/10 -> 200 {"sum":55}
+GET /sum/0 -> 200 {"sum":0}
+GET /evens/9 -> 200 {"x":[8,6,4,2,0],"first3":[3,10,17]}
+GET /find/10 -> 200 {"at":4}
+GET /find/1000 -> 200 {"at":-1}
+GET /empty -> 200 {"a":[],"b":[],"c":[-1,-2,-3]}
+GET /bad -> 200 {"x":[0,1,2]}
+GET /bad -> 500 {"error":"a range needs integers"}
+GET /badlimit -> 200 {"x":[0,1]}
+GET /badlimit -> 400 {"error":"bad limit"}
+POST /add -> 200 {"total":14}
+POST /add -> 200 {"total":28}
+state <plain values> 40
+memory reserved=4096 committed=4096 live=40

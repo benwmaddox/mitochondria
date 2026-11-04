@@ -524,3 +524,25 @@ single-program cases match their records on it from its first run. Worker system
 Speed, compiled by TinyCC (the runtime too, so almost unoptimised), chat GET 50 of 1000 messages / POST message:
 Rust runtime 4.1 / 0.4 us, C runtime 10.4 / 0.8 us. The clang -O2 build is expected to close this; it waits on the LLVM
 install.
+
+## Round 11 (2026-11-04): the C runtime built by clang, against Rust
+With LLVM installed, the cases also build each program with clang (-O2, as a DLL) and run it: every single-program
+case matches its record there too. `cargo test --release c_runtime_speed -- --ignored --nocapture` runs the chat example
+(1000 messages in a room; GET returns the newest 50, about 5 KB) on each, alongside the same chat written directly in
+Rust over ordinary structures (a Vec of sessions, a VecDeque of messages, Strings), whose answers are checked to be
+byte-identical. Microseconds per request, steady rounds:
+
+| | GET messages | POST message |
+|---|---|---|
+| Rust runtime, endpoints compiled by TinyCC | 4.2 | 0.41 |
+| C runtime, TinyCC | 9.7 | 0.80 |
+| **C runtime, clang -O2** | **2.5** | **0.20** |
+| native Rust (Vec, VecDeque, String) | 2.3 | 0.24 |
+
+Built optimised, the whole program in C is on par with hand-written Rust: within 10% on the read, faster on the write
+(which also journals every byte it changes so a failed request rolls back, and allocates nothing; the Rust version
+allocates a String per message). The native version checks less (a simpler body scan, no JSON validation).
+
+Also new: counted loops, `each i in lo..hi` with `reverse`, `where` and `limit` (which serves as an early exit, so the
+language still has one loop and no `break`). The bounds are read once and the loop variable cannot be assigned, so the
+loop ends. A range has no items to take a snapshot of: its `where` is tested just before each body runs.

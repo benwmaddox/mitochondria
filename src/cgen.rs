@@ -340,7 +340,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); calls(t, out); calls(e, out); }
-                Stmt::Each(it, b) => { ex(&it.coll, out); if let Some(w) = &it.wher { ex(w, out); } if let Some((o, _)) = &it.order { ex(o, out); } if let Some(l) = &it.limit { ex(l, out); } calls(b, out); }
+                Stmt::Each(it, b) => { ex(&it.coll, out); if let Some(h) = &it.hi { ex(h, out); } if let Some(w) = &it.wher { ex(w, out); } if let Some((o, _)) = &it.order { ex(o, out); } if let Some(l) = &it.limit { ex(l, out); } calls(b, out); }
                 Stmt::Respond(_, j) => json_calls(j, out),
                 Stmt::Forward { key, fields, .. } => { ex(key, out); for f in fields { ex(&f.1, out); } }
                 _ => {}
@@ -428,7 +428,7 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Free(e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || writes(api, t, seen) || writes(api, e, seen),
-        Stmt::Each(it, b) => ex(api, &it.coll, seen) || writes(api, b, seen),
+        Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || writes(api, b, seen),
         Stmt::Forward { key, fields, .. } => ex(api, key, seen) || fields.iter().any(|f| ex(api, &f.1, seen)),
         _ => false,
     })
@@ -450,7 +450,7 @@ fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Free(e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || allocates(api, t, seen) || allocates(api, e, seen),
-        Stmt::Each(it, b) => ex(api, &it.coll, seen) || allocates(api, b, seen),
+        Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || allocates(api, b, seen),
         Stmt::Forward { key, fields, .. } => ex(api, key, seen) || fields.iter().any(|f| ex(api, &f.1, seen)),
         _ => false,
     })
@@ -1302,6 +1302,7 @@ impl<'p> G<'p> {
     /// item bound. With `collect`, the items passing `where` are collected (with their order keys) before any body runs,
     /// then ordered and limited, as the interpreter's `select` does; otherwise filtering and the body run in one pass.
     fn each(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+        if let Some(hi) = &it.hi { return self.range_loop(it, hi, env, body); }
         let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
         let coll = self.prog.colls[c].clone();
         let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
@@ -1368,6 +1369,42 @@ impl<'p> G<'p> {
         body(self, env, &hits)?;
         self.close("}");
         self.call(&format!("c->h->sel_end(c, {})", h));
+        self.close("}");
+        Ok(())
+    }
+
+    /// `each i in lo..hi`: the bounds are read once, values are computed as the loop goes (where is tested just before
+    /// each body), and `limit` counts the bodies run.
+    fn range_loop(&mut self, it: &'p Iter, hi: &'p Expr, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+        let v = self.expr(&it.coll, env, None)?;
+        let lo = self.int_or(v, 500, "a range needs integers");
+        let lo = self.hold_int(lo);
+        let v = self.expr(hi, env, None)?;
+        let hi = self.int_or(v, 500, "a range needs integers");
+        let hi = self.hold_int(hi);
+        let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
+        let lim = lim.map(|l| self.hold_int(l));
+        if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
+        let (k, hits) = (self.tmp("k"), self.tmp("hits"));
+        self.open("{");
+        self.line(&format!("i64 {} = 0;", hits));
+        if it.reverse {
+            let kk = self.tmp("k");
+            self.open(&format!("for (i64 {} = {}; {} > {};) {{", kk, hi, kk, lo));
+            self.line(&format!("i64 {} = --{};", k, kk));
+        } else {
+            self.open(&format!("for (i64 {} = {}; {} < {}; {}++) {{", k, lo, k, hi, k));
+        }
+        if let Some(l) = &lim { self.line(&format!("if ({} >= {}) break;", hits, l)); }
+        env[it.slot as usize] = Some(CV::Int(k.clone()));
+        if let Some(w) = &it.wher {
+            let wv = self.expr(w, env, None)?;
+            let wc = self.cond(wv)?;
+            self.line(&format!("if (!({})) continue;", wc));
+        }
+        self.line(&format!("{}++;", hits));
+        body(self, env, &hits)?;
+        self.close("}");
         self.close("}");
         Ok(())
     }

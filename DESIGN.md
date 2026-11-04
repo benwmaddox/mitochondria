@@ -249,3 +249,33 @@ The live bit is in the noise for random reads: 1M rows is 128 KB of bits, so the
 **Use `list` when** the data is small, order matters, and you add and remove at the end (a stack, a short log) or you read whole records at a time.
 
 Rules of thumb: start with `table`; switch to `pool` the first time you need to store a reference to a row. Frequent removal in the middle with no references stored is still `table` (swap-remove is cheap). Many references into data that is also scanned every tick is `pool` (the scan pays one bit test per slot, about 0.6 vs 0.45 ns). A pool that is mostly empty below a high mark wastes scan time and pages; consider a smaller capacity or a `table` plus a separate id map.
+
+## Mailbox/worker vs Erlang (draft; Mitochondria side is design only)
+Erlang is the reference point for message-passing concurrency. The two models differ in granularity, overload behavior and who reclaims memory. Mitochondria's mailbox/worker model is only a sketch (see "Trimming part vs whole"); Erlang's has run production systems for decades.
+
+| | Erlang | Mitochondria mailbox/worker (design) |
+|---|---|---|
+| Unit of isolation | A process per task or entity; millions are normal (about 2-3 KB each when idle) | A worker with its own page-aligned region; dozens to thousands (4 KB minimum) |
+| Mailbox | Unbounded queue per process | Fixed ring of fixed-size slots, always committed |
+| Overload | Mailbox grows until the VM runs out of memory unless the program adds backpressure | A full mailbox is a typed `FULL` the sender must handle |
+| Messages | Copied into the receiver's heap (large binaries shared by reference) | Written into a fixed slot; payload strings have declared maxima |
+| Memory reclaim | Per-process garbage collector | No collector; owner trims its region when its mailbox empties |
+| Process death | Heap freed at once | Region reset (O(1)), then trim |
+| Peak memory | Not known ahead of time | The declared total |
+| Receive | Pattern matching, including selective receive (can scan the whole mailbox) | Next slot only; no selective receive |
+| Scheduling | Preemptive, by reduction count | Not designed |
+| Failure handling | Supervisors, links, monitors | Not designed |
+| Hot code upgrade | Built in | Layout-checked swap (Stasis idea), not built |
+| Distribution | Built in | None |
+
+**Where this model could be better:** bounded mailboxes make "a slow process eats the machine" impossible; worst-case memory is known before launch; no per-process collector and no message copy into a heap; a dead worker's region resets in microseconds.
+
+**Where Erlang is clearly better:** one process per connection, request or entity is natural there, whereas a worker here is page-aligned and sized by declaration, so "one process per entity" should be "one pool row per entity, many rows per worker"; supervision and fault isolation are mature; preemption stops a runaway process from starving others (a worker loop that never returns would here); variable-size messages, dynamic structure and selective receive.
+
+**Closer cousins than Erlang:** shared-nothing, thread-per-core designs (Seastar) and Go channels with a bounded buffer.
+
+**Ideas to borrow from Erlang**
+1. Supervision tree: a failed worker's region is reset and the parent restarts it. (next-lang's job-failure rules in `docs/design/job-failures-revision-2.md` are the likely source.)
+2. Links and monitors: tell the holder of a handle when the worker or item dies. A checked pool's generation is the passive version.
+3. A declared overflow policy per mailbox: block, drop oldest, drop newest, or fail the sender.
+4. No mailbox scan for matches. Selective receive is O(n) per message; a bounded ring makes that cost visible and capped, and the design should not offer it.

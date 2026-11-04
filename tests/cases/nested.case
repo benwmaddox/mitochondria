@@ -12,24 +12,24 @@ state app: App;
 
 fn width(u) { return u.area.hi.x - u.area.lo.x; }
 @post("/units")
-fn post_units() -> Response<{ slot: i64, w: i64 }> {
+fn post_units(x: i64, y: i64, name: string<4096>?) -> Response<{ slot: i64, w: i64 }> {
     let u = app.units.add();
-    u.name = body("name");
-    u.at.x = int(body("x"));
-    u.at.y = int(body("y"));
+    u.name = name;
+    u.at.x = x;
+    u.at.y = y;
     u.area.lo.x = u.at.x - 1;
     u.area.hi.x = u.at.x + 1;
     return created({ "slot": slot(u), "w": width(u) });
 }
 @post("/units/{k}/move")
-fn post_units_k_move() -> Response<{ x: i64, y: i64 }> {
-    let u = app.units[int(param("k"))];
-    u.at.x = u.at.x + int(body("dx"));
-    u.at.y = u.at.y + int(body("dy"));
+fn post_units_k_move(k: i64, dx: i64, dy: i64) -> Response<{ x: i64, y: i64 }> {
+    let u = app.units[k];
+    u.at.x = u.at.x + dx;
+    u.at.y = u.at.y + dy;
     return ok({ "x": u.at.x, "y": u.at.y });
 }
 @post("/world")
-fn post_world() -> Response<{ x: i64 }> { app.world.origin.x = int(body("x")); app.world.origin.y = int(body("y")); app.world.size = 3; return ok({ "x": app.world.origin.x }); }
+fn post_world(x: i64, y: i64) -> Response<{ x: i64 }> { app.world.origin.x = x; app.world.origin.y = y; app.world.size = 3; return ok({ "x": app.world.origin.x }); }
 @get("/units")
 fn get_units() -> Response<{ o: i64, x: [{ name: string, x: i64, y: i64, w: i64 }] }> {
     return ok({ "o": app.world.origin.x + app.world.origin.y, "x": [each u in app.units where u.at.x >= app.world.origin.x { "name": u.name, "x": u.at.x, "y": u.at.y, "w": width(u) }] });

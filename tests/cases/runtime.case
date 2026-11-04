@@ -20,13 +20,13 @@ fn post_w1() -> Response<{ slot: i64 }> { let m = app.w1.s.add(); m.n = 1; retur
 @get("/w")
 fn get_w() -> Response<{ w0: i64, w1: i64 }> { return ok({ "w0": app.w0.s.count(), "w1": app.w1.s.count() }); }
 @post("/t")
-fn post_t() -> Response<{ a: i64 }> { app.t.a = 1; app.t.b = 2; app.t.name = "changed"; let m = app.ms.add(); m.n = 9; if body("fail") == "yes" { fail 409 "rolled back"; } return ok({ "a": app.t.a }); }
+fn post_t(fail: string<4096>?) -> Response<{ a: i64 }> { app.t.a = 1; app.t.b = 2; app.t.name = "changed"; let m = app.ms.add(); m.n = 9; if fail == "yes" { fail 409 "rolled back"; } return ok({ "a": app.t.a }); }
 @get("/t")
 fn get_t() -> Response<{ a: i64, b: i64, name: string, ms: i64 }> { return ok({ "a": app.t.a, "b": app.t.b, "name": app.t.name, "ms": app.ms.count() }); }
 @post("/ms")
-fn post_ms() -> Response<{ slot: i64 }> { let m = app.ms.add(); m.n = int(body("n")); return created({ "slot": slot(m) }); }
+fn post_ms(n: i64) -> Response<{ slot: i64 }> { let m = app.ms.add(); m.n = n; return created({ "slot": slot(m) }); }
 @delete("/ms/{k}")
-fn delete_ms_k() -> Response<{}> { app.ms.remove(app.ms[int(param("k"))]); return ok({}); }
+fn delete_ms_k(k: i64) -> Response<{}> { app.ms.remove(app.ms[k]); return ok({}); }
 @get("/scope")
 fn get_scope() -> Response<{ x: i64, t: i64 }> { let x = 1; var sum = 0; if true { let x = 10; sum = sum + x; } return ok({ "x": x, "t": sum }); }
 @post("/rs")

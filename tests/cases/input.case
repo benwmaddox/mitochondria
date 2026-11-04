@@ -18,36 +18,36 @@ POST /sessions {"name":"ann"} => ann
 @X-Session: $ann
 POST /rooms {"name":"r"}
 @X-Session: $ann
-POST /rooms/0/messages {"body":"caf\u00e9 \ud83d\ude00 tab\t \"q\" back\\slash"}
+POST /rooms/0.0/messages {"body":"caf\u00e9 \ud83d\ude00 tab\t \"q\" back\\slash"}
 @X-Session: $ann
-POST /rooms/0/messages {"body":"line\nbreak \/ \b\f\r"}
+POST /rooms/0.0/messages {"body":"line\nbreak \/ \b\f\r"}
 @X-Session: $ann
-POST /rooms/0/messages {"body": "spaced" , "extra": [1, {"x": null}], "n": -1.5e2}
+POST /rooms/0.0/messages {"body": "spaced" , "extra": [1, {"x": null}], "n": -1.5e2}
 @X-Session: $ann
-POST /rooms/0/messages {"body":"dup","body":"second"}
+POST /rooms/0.0/messages {"body":"dup","body":"second"}
 @X-Session: $ann
-POST /rooms/0/messages {"body":12}
+POST /rooms/0.0/messages {"body":12}
 @X-Session: $ann
-POST /rooms/0/messages {"body":"unterminated
+POST /rooms/0.0/messages {"body":"unterminated
 @X-Session: $ann
-POST /rooms/0/messages not json
+POST /rooms/0.0/messages not json
 @X-Session: $ann
-POST /rooms/0/messages ["body"]
+POST /rooms/0.0/messages ["body"]
 @X-Session: $ann
-GET /rooms/0/messages?limit=10
+GET /rooms/0.0/messages?limit=10
 @X-Session: $ann
-GET /rooms/0/messages?limit=%32
+GET /rooms/0.0/messages?limit=%32
 @X-Session: $ann
-GET /rooms/0/messages?x=1&limit=1&limit=2
+GET /rooms/0.0/messages?x=1&limit=1&limit=2
 @X-Session: $ann
-GET /rooms/00/messages?limit=1
+GET /rooms/00.0/messages?limit=1
 @X-Session: $ann
-*25 POST /rooms/0/messages {"body":"x"}
+*25 POST /rooms/0.0/messages {"body":"x"}
 @X-Session: $ann
-POST /rooms/0/messages {"body":"x"}
+POST /rooms/0.0/messages {"body":"x"}
 clock 62000
 @X-Session: $ann
-POST /rooms/0/messages {"body":"after a minute"}
+POST /rooms/0.0/messages {"body":"after a minute"}
 GET /nope
 PUT /rooms
-GET /rooms/0/messages/extra
+GET /rooms/0.0/messages/extra

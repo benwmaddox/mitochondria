@@ -9,17 +9,17 @@ struct App {
 state app: App;
 
 @post("/grid/{k}")
-fn post_grid_k() -> Response<{ cell: i64 }> { app.grid.cells[int(param("k"))] = int(body("v")); app.grid.total = app.grid.total + int(body("v")); return ok({ "cell": app.grid.cells[int(param("k"))] }); }
+fn post_grid_k(k: i64, v: i64) -> Response<{ cell: i64 }> { app.grid.cells[k] = v; app.grid.total = app.grid.total + v; return ok({ "cell": app.grid.cells[k] }); }
 @get("/grid")
 fn get_grid() -> Response<{ c0: i64, c3: i64, total: i64 }> { return ok({ "c0": app.grid.cells[0], "c3": app.grid.cells[3], "total": app.grid.total }); }
 @get("/grid/{k}")
-fn get_grid_k() -> Response<{ v: i64 }> { return ok({ "v": app.grid.cells[int(param("k"))] }); }
+fn get_grid_k(k: i64) -> Response<{ v: i64 }> { return ok({ "v": app.grid.cells[k] }); }
 @post("/players")
-fn post_players() -> Response<{ slot: i64 }> { let p = app.players.add(); p.name = body("name"); p.hits[0] = 1; p.hits[2] = 3; return created({ "slot": slot(p) }); }
+fn post_players(name: string<4096>?) -> Response<{ slot: i64 }> { let p = app.players.add(); p.name = name; p.hits[0] = 1; p.hits[2] = 3; return created({ "slot": slot(p) }); }
 @post("/players/{p}/hit/{k}")
-fn post_players_p_hit_k() -> Response<{ hits: i64 }> {
-    let p = app.players[int(param("p"))];
-    let k = int(param("k"));
+fn post_players_p_hit_k(p: i64, k: i64) -> Response<{ hits: i64 }> {
+    let p = app.players[p];
+    
     p.hits[k] = p.hits[k] + 1;
     return ok({ "hits": p.hits[k] });
 }

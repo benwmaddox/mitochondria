@@ -845,6 +845,110 @@ static int h_auth(Ctx *c, u32 cid, u32 *out) {
     if ((u64)real.i != sec) return fail(m, 403, "bad session secret");
     *out = (u32)idx; return 0;
 }
+/* ---- typed inputs of an endpoint: `points: i64`, `name: string<1..24>`, `{p}` as an item, a session from a header ---- */
+/* a 400 (or another code) naming the input: "`name`: <msg>" */
+static int in_bad(Mito *m, int code, const char *name, u32 nn, const char *msg) { err(m, E_FAIL, code); a_str(&m->emsg, "`"); a_put(&m->emsg, name, nn); a_str(&m->emsg, "`"); a_str(&m->emsg, msg); return -1; }
+/* An integer written as text: optional '-', digits, no overflow. */
+static int text_i64(const u8 *s, u64 n, i64 *out) {
+    u64 i = 0; int neg = 0; if (n && s[0] == '-') { neg = 1; i = 1; }
+    if (i == n) return 0;
+    u64 v = 0; for (; i < n; i++) { if (s[i] < '0' || s[i] > '9') return 0; u64 d = (u64)(s[i] - '0'); if (v > (9223372036854775808ULL - d) / 10) return 0; v = v * 10 + d; }
+    if (!neg && v > 9223372036854775807ULL) return 0;
+    *out = neg ? (i64)(0 - v) : (i64)v; return 1;
+}
+/* A number written as text, in JSON's grammar. */
+static int text_f64(const u8 *s, u64 n, double *out) {
+    u64 i = 0; if (i < n && s[i] == '-') i++;
+    u64 a = i; while (i < n && s[i] >= '0' && s[i] <= '9') i++; if (i == a) return 0;
+    if (i < n && s[i] == '.') { i++; a = i; while (i < n && s[i] >= '0' && s[i] <= '9') i++; if (i == a) return 0; }
+    if (i < n && (s[i] == 'e' || s[i] == 'E')) { i++; if (i < n && (s[i] == '+' || s[i] == '-')) i++; a = i; while (i < n && s[i] >= '0' && s[i] <= '9') i++; if (i == a) return 0; }
+    if (i != n) return 0;
+    *out = parse_json_double(s, n); return 1;
+}
+/* Input `name` from `src` (0 the JSON body, 1 a path segment, 2 the query, 3 a header, 4 a forwarded field), as `kind`:
+   1 an integer in lo..hi, 2 a number, 3 a bool, 4 a string of lo..hi bytes, 5 the item of top-level pool `lo` that the
+   X-Session token names (as auth), 6 the item of pool `lo` that an id names ("slot", or "slot.generation" for a checked
+   pool). *out is null when the input is absent; the generated code applies its default or answers 400. */
+static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, i64 hi, Val *out) {
+    Mito *m = M_(c);
+    *out = v_null();
+    if (kind == 5) { u32 idx; if (h_auth(c, (u32)lo, &idx)) return -1; *out = v_item((u32)lo, idx); return 0; }
+    Val v = v_null(); const u8 *tp = 0; u64 tn = 0; int text = 1;
+    if (src == 0) {
+        text = 0;
+        for (u32 i = 0; i < m->njson; i++) if (b_eq(t_ptr(m, m->json[i].k), m->json[i].k.len, (const u8 *)name, nn)) { v = m->json[i].v; break; }
+        if (v.tag == 0) return 0;
+    } else if (src == 1) {
+        const MitoRoute *rt = &mito_prog.routes[m->ei]; int found = 0;
+        for (u32 sg = 0; sg < rt->nsegs && !found; sg++) if (rt->segs[sg].param && c_eq(rt->segs[sg].text, (const u8 *)name, nn))
+            for (u32 i = 0; i < m->nparams; i++) if (m->params[i].seg == sg) { tp = t_ptr(m, m->params[i].t); tn = m->params[i].t.len; found = 1; break; }
+        if (!found) return 0;
+    } else if (src == 2) {
+        int found = 0;
+        for (u32 i = 0; i < m->nquery; i++) if (b_eq(t_ptr(m, m->query[i].k), m->query[i].k.len, (const u8 *)name, nn)) { tp = t_ptr(m, m->query[i].v); tn = m->query[i].v.len; found = 1; break; }
+        if (!found) return 0;
+    } else {
+        const u8 *hv; u64 hn;
+        if (!(src == 3 ? header(m, (const u8 *)name, nn, &hv, &hn) : find_pair(m->fwd, m->nfwd, (const u8 *)name, nn, &hv, &hn))) return 0;
+        tp = hv; tn = hn;
+    }
+    switch (kind) {
+        case 1: {
+            i64 i;
+            if (text) { if (!text_i64(tp, tn, &i)) return in_bad(m, 400, name, nn, ": expected an integer"); }
+            else { if (v.tag != 1) return in_bad(m, 400, name, nn, ": expected an integer"); i = v.i; }
+            if (i < lo || i > hi) { in_bad(m, 400, name, nn, ": "); a_i64(&m->emsg, i); a_str(&m->emsg, " is outside "); a_i64(&m->emsg, lo); a_str(&m->emsg, ".."); a_i64(&m->emsg, hi); return -1; }
+            *out = v_int(i); return 0;
+        }
+        case 2: {
+            double f;
+            if (text) { if (!text_f64(tp, tn, &f)) return in_bad(m, 400, name, nn, ": expected a number"); }
+            else if (v.tag == 1) f = (double)v.i; else if (v.tag == 2) f = v.f; else return in_bad(m, 400, name, nn, ": expected a number");
+            *out = v_flt(f); return 0;
+        }
+        case 3:
+            if (text) { if (b_eq(tp, tn, (const u8 *)"true", 4)) *out = v_bool(1); else if (b_eq(tp, tn, (const u8 *)"false", 5)) *out = v_bool(0); else return in_bad(m, 400, name, nn, ": expected true or false"); }
+            else { if (v.tag != 3) return in_bad(m, 400, name, nn, ": expected true or false"); *out = v; }
+            return 0;
+        case 4: {
+            T t;
+            if (text) { if (t_push(m, tp, tn, &t)) return -1; }
+            else { if (v.tag != 4) return in_bad(m, 400, name, nn, ": expected a string"); t.off = v.a; t.len = v.b; }
+            if ((i64)t.len > hi) { in_bad(m, 413, name, nn, ": "); a_u64(&m->emsg, t.len); a_str(&m->emsg, " bytes, at most "); a_i64(&m->emsg, hi); return -1; }
+            if ((i64)t.len < lo) { in_bad(m, 400, name, nn, ": at least "); a_i64(&m->emsg, lo); a_str(&m->emsg, lo == 1 ? " byte" : " bytes"); return -1; }
+            *out = v_str(t); return 0;
+        }
+        case 6: {
+            /* an id: "slot" (a pool without generations), or "slot.generation" (a checked pool) */
+            if (!text) { if (v.tag == 4) { tp = t_ptr(m, (T){ v.a, v.b }); tn = v.b; } else if (v.tag == 1 && v.i >= 0) { char d[24]; int dn = 0; u64 x = (u64)v.i; do { d[dn++] = (char)('0' + x % 10); x /= 10; } while (x); T t; u32 st = m->text.len; while (dn) { char ch = d[--dn]; if (!a_put(&m->text, &ch, 1)) return text_full(m); } t = t_since(m, st); tp = t_ptr(m, t); tn = t.len; } else return in_bad(m, 400, name, nn, ": expected an id"); }
+            const MitoColl *k = coll(&m->mem, (u32)lo);
+            u64 dot = tn; for (u64 i = 0; i < tn; i++) if (tp[i] == '.') { dot = i; break; }
+            u64 slot, gen = 0;
+            if (!parse_u64_radix(tp, dot, 10, &slot) || (k->checked ? (dot == tn || !parse_u64_radix(tp + dot + 1, tn - dot - 1, 10, &gen) || gen > 0xFFFFFFFFULL) : dot != tn)) return in_bad(m, 404, name, nn, k->checked ? ": expected an id slot.generation" : ": expected an id");
+            u64 idx;
+            if (!deref_quiet(m, (u32)lo, slot, (u32)gen, &idx)) { in_bad(m, 404, name, nn, ": no "); a_put(&m->emsg, tp, tn); a_str(&m->emsg, " in "); a_str(&m->emsg, k->name); return -1; }
+            *out = v_item((u32)lo, (u32)idx); return 0;
+        }
+    }
+    return fail(m, 500, "unknown input kind");
+}
+/* An item written as JSON: its id, "slot.generation" (a string) for a checked pool, else the slot (a number). */
+static int h_json_id(Ctx *c, u32 cid, u32 idx) {
+    Mito *m = M_(c); const MitoColl *k = coll(&m->mem, cid);
+    if (!k->checked) return a_i64(&m->out, idx) ? 0 : resp_full(m);
+    u32 g = (u32)rd(&m->mem, gaddr(&m->mem, cid, idx), 4);
+    return a_put(&m->out, "\"", 1) && a_i64(&m->out, idx) && a_put(&m->out, ".", 1) && a_i64(&m->out, g) && a_put(&m->out, "\"", 1) ? 0 : resp_full(m);
+}
+/* The JSON body's fields must be among `names` (each followed by a NUL byte): an unknown one is 400. */
+static int h_fields(Ctx *c, const char *names, u32 n) {
+    Mito *m = M_(c);
+    for (u32 i = 0; i < m->njson; i++) {
+        const u8 *k = t_ptr(m, m->json[i].k); u32 kn = m->json[i].k.len; int ok = 0;
+        for (u32 at = 0; at < n && !ok;) { u32 e = at; while (e < n && names[e]) e++; if (b_eq((const u8 *)names + at, e - at, k, kn)) ok = 1; at = e + 1; }
+        if (!ok) { err(m, E_FAIL, 400); a_str(&m->emsg, "unknown field `"); a_put(&m->emsg, k, kn); a_str(&m->emsg, "`"); return -1; }
+    }
+    return 0;
+}
 static int not_live(Mito *m, const char *a, i64 k, const char *b) { err(m, E_NOTLIVE, 404); a_str(&m->emsg, a); a_i64(&m->emsg, k); a_str(&m->emsg, b); return -1; }
 static int h_index(Ctx *c, u32 cid, u32 inst, i64 k, u32 *out) {
     Mito *m = M_(c); const MitoColl *col = coll(&m->mem, cid);
@@ -1110,7 +1214,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

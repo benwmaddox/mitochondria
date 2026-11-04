@@ -9,20 +9,20 @@ struct App {
 state app: App;
 
 @post("/motd")
-fn post_motd() -> Response<{ motd: string, len: i64, max: i64 }> { app.meta.motd = body("m"); return ok({ "motd": app.meta.motd, "len": len(app.meta.motd), "max": maxlen(app.meta.motd) }); }
+fn post_motd(m: string<4096>?) -> Response<{ motd: string, len: i64, max: i64 }> { app.meta.motd = m; return ok({ "motd": app.meta.motd, "len": len(app.meta.motd), "max": maxlen(app.meta.motd) }); }
 @post("/notes")
-fn post_notes() -> Response<{ text: string }> {
-    let t = body("t");
+fn post_notes(t: string<4096>?) -> Response<{ text: string }> {
+    
     let n = app.notes.add();
     if len(t) + 2 > maxlen(n.text) { fail 413 "too long"; }
     n.text = "[" + t + "]";
     return created({ "text": n.text });
 }
 @get("/notes")
-fn get_notes() -> Response<{ all: any, first: string, eq: any, lt: any, hdr: string, q: string }> {
+fn get_notes(q: string<4096>?, x_name: string<4096>? from header("X-Name")) -> Response<{ all: any, first: string, eq: any, lt: any, hdr: string, q: string }> {
     var all = "";
     each n in app.notes { all = all + n.text; }
-    return ok({ "all": all, "first": app.notes[0].text, "eq": app.notes[0].text == "[a]", "lt": "abc" < "abd", "hdr": or(header("X-Name"), "none"), "q": query("q") });
+    return ok({ "all": all, "first": app.notes[0].text, "eq": app.notes[0].text == "[a]", "lt": "abc" < "abd", "hdr": or(x_name, "none"), "q": q });
 }
 @get("/concat")
 fn get_concat() -> Response<{ a: any, b: any, c: any, d: any }> { return ok({ "a": "n=" + 5, "b": "t=" + true, "c": "x" + null, "d": str(12) + str(false) }); }

@@ -4,9 +4,9 @@ struct Acc { total: f64; small: f32; n: i64; }
 state acc: Acc;
 
 @post("/add")
-fn post_add() -> Response<{ total: f64 }> { acc.total = acc.total + body("x"); acc.n = acc.n + 1; return ok({ "total": acc.total }); }
+fn post_add(x: f64) -> Response<{ total: f64 }> { acc.total = acc.total + x; acc.n = acc.n + 1; return ok({ "total": acc.total }); }
 @post("/small")
-fn post_small() -> Response<{ small: f64 }> { acc.small = body("x"); return ok({ "small": acc.small }); }
+fn post_small(x: f64) -> Response<{ small: f64 }> { acc.small = x; return ok({ "small": acc.small }); }
 @get("/mean")
 fn get_mean() -> Response<{ mean: f64 }> { if acc.n == 0 { fail 409 "no values"; } return ok({ "mean": acc.total / acc.n }); }
 @get("/math")
@@ -22,7 +22,7 @@ fn get_math() -> Response<{ sum: f64, diff: f64, prod: f64, quot: f64, neg: f64,
 @get("/text")
 fn get_text() -> Response<{ s: any, n: f64, e: f64 }> { return ok({ "s": str(0.0000001) + " " + str(1.0 / 0.0) + " " + str(0.0 - 1.0 / 0.0) + " " + str(0.0 / 0.0) + " " + str(123456789012345680000.0 * 10.0) + " " + str(0.0 - 0.0), "n": 0.0000001 * 3.0, "e": 0.0000015 }); }
 @get("/cmp/{x}")
-fn get_cmp_x() -> Response<{ gt: bool, max: bool }> { let x = int(param("x")) + 0.5; return ok({ "gt": x > 2, "max": x >= 10.5 }); }
+fn get_cmp_x(x: i64) -> Response<{ gt: bool, max: bool }> { let x = x + 0.5; return ok({ "gt": x > 2, "max": x >= 10.5 }); }
 --- requests
 GET /mean
 POST /add {"x": 1.25}

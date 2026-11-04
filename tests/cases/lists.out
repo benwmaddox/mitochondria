@@ -6,7 +6,7 @@ GET /evs/0 -> 200 {"n":1,"who":"a"}
 GET /evs/1 -> 200 {"n":2,"who":"b"}
 GET /evs/2 -> 404 {"error":"position 2 is past the end"}
 GET /evs/-1 -> 404 {"error":"index -1 is negative"}
-GET /evs/x -> 400 {"error":"`x` is not a number"}
+GET /evs/x -> 400 {"error":"`k`: expected an integer"}
 POST /evs -> 201 {"count":3}
 POST /evs -> 201 {"count":3}
 GET /evs -> 200 {"x":[2,3,4],"r":[4,3,2],"first":2}
@@ -25,7 +25,7 @@ POST /bags/0/set -> 404 {"error":"position 2 is past the end"}
 POST /bags/0/set -> 413 {"error":"3000000000 does not fit i32"}
 POST /bags/0/set -> 404 {"error":"index -1 is negative"}
 POST /bags/0/flag -> 200 {"flags":[true]}
-POST /bags/0/flag -> 400 {"error":"wrong type for this field"}
+POST /bags/0/flag -> 400 {"error":"`on`: expected true or false"}
 POST /evs/0 -> 500 {"error":"only an item that is a plain value can be assigned; assign its fields"}
 GET /bags/0 -> 200 {"sum":-1,"all":[5,-6],"rev":[-6,5],"at1":-6,"flags":[true]}
 GET /bags/1 -> 404 {"error":"slot 1 is not live"}

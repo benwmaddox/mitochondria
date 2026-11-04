@@ -1,12 +1,12 @@
 POST /sessions -> 201 {"token":"0.0.fe800d6569fa1b4d","slot":0}
-POST /rooms -> 201 {"id":0,"name":"r"}
+POST /rooms -> 201 {"id":"0.0","name":"r"}
 stats refusing=false full_trims=0
-POST /rooms/0/messages -> 201 {"seq":1}
+POST /rooms/0.0/messages -> 201 {"seq":1}
 stats refusing=true full_trims=1
-POST /rooms/0/messages -> 503 {"error":"memory pressure: try again later"}
-GET /rooms/0/messages -> 200 {"room":"r","messages":[{"seq":1,"author":"ann","at":1000,"body":"x"}]}
+POST /rooms/0.0/messages -> 503 {"error":"memory pressure: try again later"}
+GET /rooms/0.0/messages -> 200 {"room":"r","messages":[{"seq":1,"author":"ann","at":1000,"body":"x"}]}
 stats refusing=true full_trims=1
-POST /rooms/0/messages -> 201 {"seq":2}
+POST /rooms/0.0/messages -> 201 {"seq":2}
 stats refusing=false full_trims=0
 state <plain values> 136
 state chat.sessions 59

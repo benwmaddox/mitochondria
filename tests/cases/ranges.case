@@ -7,19 +7,19 @@ fn first_at_least(x) { var at = -1; each i in 0..8 where grid.cells[i] >= x limi
 @post("/fill")
 fn post_fill() -> Response<{ cells: [i64] }> { each i in 0..8 { grid.cells[i] = i * i; } return ok({ "cells": [each i in 0..8 grid.cells[i]] }); }
 @get("/sum/{n}")
-fn get_sum_n() -> Response<{ sum: i64 }> { var t = 0; each i in 1..int(param("n")) + 1 { t = t + i; } return ok({ "sum": t }); }
+fn get_sum_n(n: i64) -> Response<{ sum: i64 }> { var t = 0; each i in 1..n + 1 { t = t + i; } return ok({ "sum": t }); }
 @get("/evens/{n}")
-fn get_evens_n() -> Response<{ x: [i64], first3: [i64] }> { return ok({ "x": [each i in 0..int(param("n")) reverse where i % 2 == 0 i], "first3": [each i in 0..100 where i % 7 == 3 limit 3 i] }); }
+fn get_evens_n(n: i64) -> Response<{ x: [i64], first3: [i64] }> { return ok({ "x": [each i in 0..n reverse where i % 2 == 0 i], "first3": [each i in 0..100 where i % 7 == 3 limit 3 i] }); }
 @get("/find/{x}")
-fn get_find_x() -> Response<{ at: i64 }> { return ok({ "at": first_at_least(int(param("x"))) }); }
+fn get_find_x(x: i64) -> Response<{ at: i64 }> { return ok({ "at": first_at_least(x) }); }
 @get("/empty")
 fn get_empty() -> Response<{ a: [i64], b: [i64], c: [i64] }> { return ok({ "a": [each i in 5..5 i], "b": [each i in 9..2 i], "c": [each i in -3..0 reverse i] }); }
 @get("/bad")
-fn get_bad() -> Response<{ x: [i64] }> { return ok({ "x": [each i in 0..body("n") i] }); }
+fn get_bad(n: i64 from body) -> Response<{ x: [i64] }> { return ok({ "x": [each i in 0..n i] }); }
 @get("/badlimit")
-fn get_badlimit() -> Response<{ x: [i64] }> { return ok({ "x": [each i in 0..3 limit body("n") i] }); }
+fn get_badlimit(n: i64 from body) -> Response<{ x: [i64] }> { return ok({ "x": [each i in 0..3 limit n i] }); }
 @get("/until/{x}")
-fn get_until_x() -> Response<{ t: i64, x: [i64] }> { var t = 0; each i in 0..8 while grid.cells[i] < int(param("x")) { t = t + grid.cells[i]; } return ok({ "t": t, "x": [each i in 0..10 reverse while i > 3 i] }); }
+fn get_until_x(x: i64) -> Response<{ t: i64, x: [i64] }> { var t = 0; each i in 0..8 while grid.cells[i] < x { t = t + grid.cells[i]; } return ok({ "t": t, "x": [each i in 0..10 reverse while i > 3 i] }); }
 @post("/add")
 fn post_add() -> Response<{ total: i64 }> { each i in 0..8 where grid.cells[i] < 10 { grid.total = grid.total + grid.cells[i]; } return ok({ "total": grid.total }); }
 --- requests

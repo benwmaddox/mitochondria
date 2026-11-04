@@ -20,14 +20,14 @@ POST /rooms {"name":"r"}
 marks 0 0
 stats
 @X-Session: $ann
-POST /rooms/0/messages {"body":"x"}
+POST /rooms/0.0/messages {"body":"x"}
 stats
 @X-Session: $ann
-POST /rooms/0/messages {"body":"y"}
+POST /rooms/0.0/messages {"body":"y"}
 @X-Session: $ann
-GET /rooms/0/messages
+GET /rooms/0.0/messages
 stats
 marks 100000000 200000000
 @X-Session: $ann
-POST /rooms/0/messages {"body":"z"}
+POST /rooms/0.0/messages {"body":"z"}
 stats

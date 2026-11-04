@@ -59,6 +59,8 @@ pub struct Coll {
     pub kind: Kind,
     pub cap: usize,
     pub mult: usize,
+    /// The struct its items are, when they are structs (an input of type `Player` finds its pool by this).
+    pub item: Option<usize>,
     pub parent: Option<usize>, // the collection whose items hold this one
     pub hdr: usize,  // list: len, head; pool: high-water, count, hint, ever. Each a u32 array of `mult` entries
     pub live: usize, // pool: live bits, `words()` u64 per instance
@@ -268,7 +270,8 @@ impl Program {
         let items = mult.checked_mul(cap).filter(|n| *n <= 1 << 32).ok_or(format!("`{}`: too many items ({} x {})", name, mult, cap))?;
         let cid = self.colls.len();
         let start = up(*cur, PAGE);
-        let mut c = Coll { name: name.to_string(), kind, cap, mult, parent, hdr: start, live: 0, gen: 0, cols: Vec::new(), children: Vec::new(), start, end: 0 };
+        let item = if let Ty::Struct(s) = &elem { Some(*s) } else { None };
+        let mut c = Coll { name: name.to_string(), kind, cap, mult, item, parent, hdr: start, live: 0, gen: 0, cols: Vec::new(), children: Vec::new(), start, end: 0 };
         let mut o = start + c.hdr_fields() * 4 * mult;
         if let Kind::Pool(checked) = kind {
             o = up(o, 8); c.live = o; o += mult * c.words() * 8;

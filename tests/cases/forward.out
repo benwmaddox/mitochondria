@@ -9,7 +9,7 @@ POST /inc/3 -> 200 {"shard":0,"n":5,"from":1,"seen":4}
 POST /inc/4 -> 200 {"shard":1,"n":3,"from":0,"seen":5}
 POST /inc/5 -> 200 {"shard":2,"n":2,"from":1,"seen":5}
 POST /inc/-1 -> 200 {"shard":2,"n":3,"from":0,"seen":6}
-POST /inc/x -> 400 {"error":"`x` is not a number"}
+POST /inc/x -> 400 {"error":"`k`: expected an integer"}
 POST /bad -> 500 {"error":"no worker kind `nowhere`"}
 POST /odd/1 -> 409 {"error":"the shard said no"}
 GET /front -> 200 {"n":6,"me":0,"of":2}

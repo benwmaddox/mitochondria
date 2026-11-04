@@ -11,15 +11,15 @@ struct Top { head: ref<app.nodes>; }
 fn find(name) { each n in app.nodes { if n.name == name { return n; } } return null; }
 fn describe(k) { if k == 0 { return "zero"; } if k < 0 { return null; } return k; }
 @post("/nodes")
-fn post_nodes() -> Response<{ slot: i64 }> {
+fn post_nodes(name: string<4096>?) -> Response<{ slot: i64 }> {
     let n = app.nodes.add();
-    n.name = body("name");
+    n.name = name;
     n.next = app.top.head;
     app.top.head = n;
     return created({ "slot": slot(n) });
 }
 @delete("/nodes/{name}")
-fn delete_nodes_name() -> Response<{}> { let n = find(param("name")); if n == null { fail 404 "no such node"; } app.nodes.remove(n); return ok({}); }
+fn delete_nodes_name(name: string<4096>) -> Response<{}> { let n = find(name); if n == null { fail 404 "no such node"; } app.nodes.remove(n); return ok({}); }
 @get("/walk")
 fn get_walk() -> Response<{ names: any, steps: i64 }> {
     var cur = app.top.head;
@@ -31,14 +31,14 @@ fn get_walk() -> Response<{ names: any, steps: i64 }> {
     return ok({ "names": names, "steps": steps });
 }
 @get("/find/{name}")
-fn get_find_name() -> Response<{ found: bool, name: string }> { let n = find(param("name")); return ok({ "found": exists(n), "name": or(n.name, "-") }); }
+fn get_find_name(name: string<4096>) -> Response<{ found: bool, name: string }> { let n = find(name); return ok({ "found": exists(n), "name": or(n.name, "-") }); }
 @get("/describe/{k}")
-fn get_describe_k() -> Response<{ d: any }> { return ok({ "d": describe(int(param("k"))) }); }
+fn get_describe_k(k: i64) -> Response<{ d: any }> { return ok({ "d": describe(k) }); }
 @get("/mixed/{k}")
-fn get_mixed_k() -> Response<{ v: any }> {
+fn get_mixed_k(k: i64) -> Response<{ v: any }> {
     var v = 1;
-    if int(param("k")) > 5 { v = "big"; }
-    if int(param("k")) > 9 { v = null; }
+    if k > 5 { v = "big"; }
+    if k > 9 { v = null; }
     return ok({ "v": v });
 }
 --- requests

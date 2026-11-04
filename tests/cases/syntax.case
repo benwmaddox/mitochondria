@@ -14,8 +14,8 @@ state app: App;
 fn items() -> ref<app.items> { return app.items; }
 
 @post("/items")
-fn post_items() -> Response<{ id: i64, entry: i64, total: i64 }> {
-    let it = app.items.add { name: body("name"), n: int(body("n")) };
+fn post_items(n: i64, name: string<4096>?) -> Response<{ id: i64, entry: i64, total: i64 }> {
+    let it = app.items.add { name: name, n: n };
     let e = app.board.add(it.n) { who: it };
     it.entry = e;
     app.log.add { what: "added" };
@@ -28,15 +28,15 @@ fn post_maybe() -> Response<{ got: bool, count: i64, of: i64, via_value: i64 }> 
     return ok({ got: exists(it), count: app.items.count(), of: app.items.capacity(), via_value: items().count() });
 }
 @post("/sub/{k}")
-fn post_sub_k() -> Response<{ total: i64 }> {
-    app.total -= int(param("k"));
+fn post_sub_k(k: i64) -> Response<{ total: i64 }> {
+    app.total -= k;
     app.total *= 2;
     app.total /= 3;
     return ok({ total: app.total });
 }
 @delete("/items/{k}")
-fn delete_items_k() -> Response<{ left: i64 }> {
-    let it = app.items[int(param("k"))];
+fn delete_items_k(k: i64) -> Response<{ left: i64 }> {
+    let it = app.items[k];
     app.board.remove(it.entry);
     app.items.remove(it);
     app.log.add { what: "removed" };

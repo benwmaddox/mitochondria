@@ -7,7 +7,7 @@ GET /find/10 -> 200 {"at":4}
 GET /find/1000 -> 200 {"at":-1}
 GET /empty -> 200 {"a":[],"b":[],"c":[-1,-2,-3]}
 GET /bad -> 200 {"x":[0,1,2]}
-GET /bad -> 500 {"error":"a range needs integers"}
+GET /bad -> 400 {"error":"`n`: expected an integer"}
 GET /badlimit -> 200 {"x":[0,1]}
 GET /badlimit -> 400 {"error":"bad limit"}
 POST /add -> 200 {"total":14}

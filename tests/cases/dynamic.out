@@ -2,25 +2,25 @@ POST /t -> 201 {}
 POST /t -> 201 {}
 POST /t -> 201 {}
 GET /index -> 200 {"n":10}
-GET /index -> 400 {"error":"an index must be an integer"}
-GET /index -> 400 {"error":"an index must be an integer"}
-GET /index -> 400 {"error":"an index must be an integer"}
+GET /index -> 400 {"error":"`k`: expected an integer"}
+GET /index -> 400 {"error":"`k`: expected an integer"}
+GET /index -> 400 {"error":"`k` is required"}
 GET /limit -> 200 {"x":[0,10]}
 GET /limit -> 400 {"error":"bad limit"}
-GET /limit -> 400 {"error":"bad limit"}
+GET /limit -> 400 {"error":"`n`: expected an integer"}
 GET /minmax -> 200 {"min":1,"max":3}
 GET /minmax -> 200 {"min":5,"max":9}
-GET /minmax -> 500 {"error":"min/max need integers"}
+GET /minmax -> 400 {"error":"`a`: expected an integer"}
 GET /neg -> 200 {"neg":-4}
 GET /neg -> 200 {"neg":-2.5}
-GET /neg -> 500 {"error":"cannot negate"}
-GET /neg -> 500 {"error":"cannot negate"}
+GET /neg -> 400 {"error":"`x`: expected a number"}
+GET /neg -> 400 {"error":"`x` is required"}
 GET /arith -> 200 {"sum":2,"lt":true}
 GET /arith -> 200 {"sum":2.5,"lt":true}
-GET /arith -> 500 {"error":"operator does not fit these values"}
+GET /arith -> 400 {"error":"`x`: expected a number"}
 POST /set -> 200 {"n":7}
-POST /set -> 400 {"error":"wrong type for this field"}
-POST /set -> 400 {"error":"wrong type for this field"}
+POST /set -> 400 {"error":"`x`: expected an integer"}
+POST /set -> 400 {"error":"`x`: expected an integer"}
 GET /min_int -> 500 {"error":"integer overflow"}
 GET /divmin -> 500 {"error":"integer overflow"}
 GET /divmin -> 200 {"d":-4611686018427387904}

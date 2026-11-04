@@ -10,18 +10,18 @@ struct App {
 state app: App;
 
 @post("/scores")
-fn post_scores() -> Response<{ slot: i64, size: i64, room: i64 }> {
+fn post_scores(points: i64, name: string<4096>?) -> Response<{ slot: i64, size: i64, room: i64 }> {
     let s = app.scores.add();
-    s.name = body("name");
-    s.points = int(body("points"));
+    s.name = name;
+    s.points = points;
     return created({ "slot": slot(s), "size": app.scores.size(), "room": app.scores.room() });
 }
 @get("/scores/{k}")
-fn get_scores_k() -> Response<{ name: string, points: i64 }> { let s = app.scores.get(int(param("k"))); return ok({ "name": s.name, "points": s.points }); }
+fn get_scores_k(k: i64) -> Response<{ name: string, points: i64 }> { let s = app.scores.get(k); return ok({ "name": s.name, "points": s.points }); }
 @delete("/scores/{k}")
-fn delete_scores_k() -> Response<{ size: i64 }> { app.scores.remove(app.scores.get(int(param("k")))); return ok({ "size": app.scores.size() }); }
+fn delete_scores_k(k: i64) -> Response<{ size: i64 }> { app.scores.remove(app.scores.get(k)); return ok({ "size": app.scores.size() }); }
 @post("/fav/{k}")
-fn post_fav_k() -> Response<{}> { app.fav.s = app.scores.get(int(param("k"))); return ok({}); }
+fn post_fav_k(k: i64) -> Response<{}> { app.fav.s = app.scores.get(k); return ok({}); }
 @get("/fav")
 fn get_fav() -> Response<{ fav: string }> { return ok({ "fav": or(app.fav.s.name, "-") }); }
 @get("/stats")

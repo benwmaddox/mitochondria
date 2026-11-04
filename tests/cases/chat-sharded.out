@@ -1,11 +1,11 @@
 POST /sessions -> 201 {"token":"0.0.0.229b7acb620956e0"}
 POST /sessions -> 201 {"token":"1.0.0.46b6e2393e9ea056"}
-POST /sessions -> 400 {"error":"name is required"}
+POST /sessions -> 400 {"error":"`name` is required"}
 POST /rooms -> 201 {"id":1,"name":"a","shard":1}
 POST /rooms -> 201 {"id":2,"name":"b","shard":2}
 POST /rooms -> 201 {"id":3,"name":"c","shard":0}
 POST /rooms -> 201 {"id":4,"name":"d","shard":1}
-POST /rooms -> 400 {"error":"name is required"}
+POST /rooms -> 400 {"error":"`name` is required"}
 GET /rooms -> 200 {"rooms":[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"},{"id":4,"name":"d"}]}
 POST /rooms/2/messages -> 201 {"seq":1}
 POST /rooms/2/messages -> 201 {"seq":2}
@@ -13,7 +13,7 @@ POST /rooms/2/messages -> 201 {"seq":3}
 GET /rooms/2/messages -> 200 {"room":"b","messages":[{"seq":3,"author":"ann","at":1000,"body":"bye"},{"seq":2,"author":"bob","at":1000,"body":"hello"},{"seq":1,"author":"ann","at":1000,"body":"hi"}]}
 GET /rooms/2/messages?limit=1 -> 200 {"room":"b","messages":[{"seq":3,"author":"ann","at":1000,"body":"bye"}]}
 GET /rooms/9/messages -> 404 {"error":"no such room"}
-GET /rooms/x/messages -> 400 {"error":"`x` is not a number"}
+GET /rooms/x/messages -> 400 {"error":"`room`: expected an integer"}
 POST /rooms/3/typing -> 200 {"ok":true}
 GET /rooms/3/typing -> 200 {"typing":[{"name":"ann"}]}
 GET /rooms/3/typing -> 200 {"typing":[]}
@@ -21,4 +21,4 @@ DELETE /session -> 200 {"ok":true}
 GET /rooms/2/messages -> 401 {"error":"session ended"}
 GET /rooms -> 401 {"error":"missing X-Session header"}
 GET /rooms/2/messages -> 200 {"room":"b","messages":[{"seq":3,"author":"ann","at":1000,"body":"bye"},{"seq":2,"author":"bob","at":1000,"body":"hello"},{"seq":1,"author":"ann","at":1000,"body":"hi"}]}
-auth0 handled=12 forwarded=8 restarts=0 | auth1 handled=11 forwarded=8 restarts=0 | rooms0 handled=11 forwarded=4 restarts=0 | rooms1 handled=2 forwarded=0 restarts=0 | rooms2 handled=7 forwarded=0 restarts=0
+auth0 handled=12 forwarded=7 restarts=0 | auth1 handled=11 forwarded=8 restarts=0 | rooms0 handled=10 forwarded=4 restarts=0 | rooms1 handled=2 forwarded=0 restarts=0 | rooms2 handled=7 forwarded=0 restarts=0

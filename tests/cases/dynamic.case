@@ -11,41 +11,41 @@ struct Top { r: ref<app.ts>; }
 @post("/t")
 fn post_t() -> Response<{}> { let t = app.ts.add(); t.n = slot(t) * 10; return created({}); }
 @get("/index")
-fn get_index() -> Response<{ n: i64 }> { return ok({ "n": app.ts[body("k")].n }); }
+fn get_index(k: i64 from body) -> Response<{ n: i64 }> { return ok({ "n": app.ts[k].n }); }
 @get("/limit")
-fn get_limit() -> Response<{ x: [i64] }> { return ok({ "x": [each t in app.ts limit body("n") t.n] }); }
+fn get_limit(n: i64 from body) -> Response<{ x: [i64] }> { return ok({ "x": [each t in app.ts limit n t.n] }); }
 @get("/minmax")
-fn get_minmax() -> Response<{ min: i64, max: i64 }> { return ok({ "min": min(body("a"), 5), "max": max(3, body("a")) }); }
+fn get_minmax(a: i64 from body) -> Response<{ min: i64, max: i64 }> { return ok({ "min": min(a, 5), "max": max(3, a) }); }
 @get("/neg")
-fn get_neg() -> Response<{ neg: any }> { return ok({ "neg": -body("x") }); }
+fn get_neg(x: f64 from body) -> Response<{ neg: f64 }> { return ok({ "neg": -x }); }
 @get("/arith")
-fn get_arith() -> Response<{ sum: any, lt: any }> { return ok({ "sum": body("x") + 1, "lt": body("x") < 2 }); }
+fn get_arith(x: f64 from body) -> Response<{ sum: f64, lt: bool }> { return ok({ "sum": x + 1.0, "lt": x < 2.0 }); }
 @post("/set")
-fn post_set() -> Response<{ n: i64 }> { let t = app.ts[0]; t.n = body("x"); return ok({ "n": t.n }); }
+fn post_set(x: i64) -> Response<{ n: i64 }> { let t = app.ts[0]; t.n = x; return ok({ "n": t.n }); }
 @get("/ornotlive")
-fn get_ornotlive() -> Response<{ a: i64, b: bool, c: i64 }> { return ok({ "a": or(app.ts[3].n, -1), "b": exists(app.ts[9]), "c": or(app.ts[int(body("k"))].n, 0) }); }
+fn get_ornotlive(k: i64 from body) -> Response<{ a: i64, b: bool, c: i64 }> { return ok({ "a": or(app.ts[3].n, -1), "b": exists(app.ts[9]), "c": or(app.ts[k].n, 0) }); }
 fn pool_of() { return app.ts; }
 fn find(k) { if k < 0 { return app.ts[99]; } if k == 0 { return app.ts[0]; } return find(k - 1); }
 @get("/anyitem")
-fn get_anyitem() -> Response<{ n: any, slot: i64 }> {
+fn get_anyitem(k: i64 = -1 from body) -> Response<{ n: any, slot: i64 }> {
     var x = 5;
-    if body("k") != null { x = app.ts[int(body("k"))]; }
+    if k != -1 { x = app.ts[k]; }
     return ok({ "n": x.n, "slot": slot(x) });
 }
 @post("/anyitem")
-fn post_anyitem() -> Response<{ n: any }> { var x = 5; x = app.ts[int(body("k"))]; x.n = 77; return ok({ "n": x.n }); }
+fn post_anyitem(k: i64) -> Response<{ n: any }> { var x = 5; x = app.ts[k]; x.n = 77; return ok({ "n": x.n }); }
 @delete("/anyitem")
-fn delete_anyitem() -> Response<{ count: i64 }> { var x = "s"; x = app.ts[int(body("k"))]; app.ts.remove(x); return ok({ "count": app.ts.count() }); }
+fn delete_anyitem(k: i64 from body) -> Response<{ count: i64 }> { var x = "s"; x = app.ts[k]; app.ts.remove(x); return ok({ "count": app.ts.count() }); }
 @get("/coll")
 fn get_coll() -> Response<{ n: i64, x: [i64] }> { return ok({ "n": pool_of().count(), "x": [each t in pool_of() t.n] }); }
 @get("/recor")
-fn get_recor() -> Response<{ a: i64 }> { return ok({ "a": or(find(int(body("k"))).n, -1) }); }
+fn get_recor(k: i64 from body) -> Response<{ a: i64 }> { return ok({ "a": or(find(k).n, -1) }); }
 @get("/slotnull")
 fn get_slotnull() -> Response<{ s: i64 }> { return ok({ "s": slot(app.top.r) }); }
 @get("/divmin")
-fn get_divmin() -> Response<{ d: i64 }> { return ok({ "d": (0 - 9223372036854775807 - 1) / int(body("d")) }); }
+fn get_divmin(d: i64 from body) -> Response<{ d: i64 }> { return ok({ "d": (0 - 9223372036854775807 - 1) / d }); }
 @get("/modmin")
-fn get_modmin() -> Response<{ m: i64 }> { return ok({ "m": (0 - 9223372036854775807 - 1) % int(body("d")) }); }
+fn get_modmin(d: i64 from body) -> Response<{ m: i64 }> { return ok({ "m": (0 - 9223372036854775807 - 1) % d }); }
 @post("/setstr")
 fn post_setstr() -> Response<{}> { let t = app.ts[0]; t.n = "text"; return ok({}); }
 @get("/min_int")

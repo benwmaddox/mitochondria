@@ -6,54 +6,58 @@ struct Gate {
 }
 state gate: Gate;
 
-fn me() -> ref<gate.sessions> { return auth(gate.sessions); }
 // "shard.slot": a user id that is unique across auth shards (references do not cross workers)
-fn user_id(who) { return str(worker_index()) + "." + str(slot(who)); }
-fn rate_limited(who) {
+fn user_id(who: Session) -> string { return str(worker_index()) + "." + str(slot(who)); }
+fn rate_limited(who: Session) {
     let t = now();
     if t - who.window > 60000 { who.window = t; who.sent = 0; }
     if who.sent >= max(gate.meta.rate, 30) { fail 429 "slow down"; }
-    who.sent = who.sent + 1;
+    who.sent += 1;
 }
 
 @post("/sessions")
-fn post_sessions() -> Response<{ token: string }> {
-    let name = body("name");
-    if len(name) == 0 { fail 400 "name is required"; }
-    let s = gate.sessions.add();
-    s.name = name;
-    s.secret = random();
-    s.window = now();
-    return created({ "token": token(s) });
+fn sign_in(name: string<1..32>) -> Response<{ token: string }> {
+    let s = gate.sessions.add { name: name, secret: random(), window: now() };
+    return created({ token: token(s) });
 }
 
 @delete("/session")
-fn delete_session() -> Response<{ ok: bool }> {
-    gate.sessions.remove(me());
-    return ok({ "ok": true });
+fn sign_out(who: Session from header("X-Session")) -> Response<{ ok: bool }> {
+    gate.sessions.remove(who);
+    return ok({ ok: true });
 }
 
-// the directory of rooms lives on rooms[0]
+// Every other request is checked here (the session, the rate, the body's fields) and handed to a rooms shard with
+// who sent it. The directory of rooms lives on rooms[0].
 @post("/rooms")
-fn post_rooms() -> Response<{ id: i64, name: string, shard: i64 }> { let who = me(); forward rooms[0] { "user": user_id(who), "name": who.name }; }
+fn add_room(who: Session from header("X-Session"), name: string<1..48>) -> Response<{ id: i64, name: string, shard: i64 }> {
+    forward rooms[0] { user: user_id(who), author: who.name };
+}
 @get("/rooms")
-fn get_rooms() -> Response<{ rooms: [{ id: i64, name: string }] }> { let who = me(); forward rooms[0] { "user": user_id(who), "name": who.name }; }
+fn rooms(who: Session from header("X-Session")) -> Response<{ rooms: [{ id: i64, name: string }] }> {
+    forward rooms[0] { user: user_id(who), author: who.name };
+}
 
 @post("/rooms/{room}/messages")
-fn post_rooms_room_messages() -> Response<{ seq: i64 }> {
-    let who = me();
+fn post_message(who: Session from header("X-Session"), room: i64, body: string<1..2000>) -> Response<{ seq: i64 }> {
     rate_limited(who);
-    forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name };
+    forward rooms[room] { user: user_id(who), author: who.name };
 }
 @get("/rooms/{room}/messages")
-fn get_rooms_room_messages() -> Response<{ room: string, messages: [{ seq: i64, author: string, at: i64, body: string }] }> { let who = me(); forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name }; }
+fn messages(who: Session from header("X-Session"), room: i64, limit: i64 = 50) -> Response<{ room: string, messages: [{ seq: i64, author: string, at: i64, body: string }] }> {
+    forward rooms[room] { user: user_id(who), author: who.name };
+}
 @post("/rooms/{room}/typing")
-fn post_rooms_room_typing() -> Response<{ ok: bool }> { let who = me(); forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name }; }
+fn typing(who: Session from header("X-Session"), room: i64) -> Response<{ ok: bool }> {
+    forward rooms[room] { user: user_id(who), author: who.name };
+}
 @get("/rooms/{room}/typing")
-fn get_rooms_room_typing() -> Response<{ typing: [{ name: string }] }> { let who = me(); forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name }; }
+fn who_is_typing(who: Session from header("X-Session"), room: i64) -> Response<{ typing: [{ name: string }] }> {
+    forward rooms[room] { user: user_id(who), author: who.name };
+}
 
 // this shard only: one-way forwarding has no fan-out to total the other workers
 @get("/stats")
-fn get_stats() -> Response<{ shard: i64, sessions: i64, committed_kb: i64, live_kb: i64 }> {
-    return ok({ "shard": worker_index(), "sessions": gate.sessions.count(), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb") });
+fn stats() -> Response<{ shard: i64, sessions: i64, committed_kb: i64, live_kb: i64 }> {
+    return ok({ shard: worker_index(), sessions: gate.sessions.count(), committed_kb: stat("committed_kb"), live_kb: stat("live_kb") });
 }

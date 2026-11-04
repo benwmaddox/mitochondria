@@ -2,23 +2,23 @@
 > POST /sessions HTTP/1.1\r\nHost: x\r\nContent-Length: 14\r\n\r\n{"name":"ann"}
 < HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 41\r\nConnection: close\r\n\r\n{"token":"0.0.fe800d6569fa1b4d","slot":0}
 > POST /rooms HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 12\r\n\r\n{"name":"a"}
-< HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 19\r\nConnection: close\r\n\r\n{"id":0,"name":"a"}
+< HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 23\r\nConnection: close\r\n\r\n{"id":"0.0","name":"a"}
 > POST /rooms HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 12\r\n\r\n{"name":"b"}
-< HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 19\r\nConnection: close\r\n\r\n{"id":1,"name":"b"}
-> POST /rooms/1/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{"body":"\xff\xe2\x82x"}
+< HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 23\r\nConnection: close\r\n\r\n{"id":"1.0","name":"b"}
+> POST /rooms/$r/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{"body":"\xff\xe2\x82x"}
 < HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 9\r\nConnection: close\r\n\r\n{"seq":1}
-> POST /rooms/1/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{"body":"hi"}
+> POST /rooms/$r/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{"body":"hi"}
 < HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 9\r\nConnection: close\r\n\r\n{"seq":2}
-> GET /rooms/1/messages HTTP/1.1\r\nx-session: $a\r\n\r\n
-< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 124\r\nConnection: close\r\n\r\n{"room":"b","messages":[{"seq":2,"author":"ann","at":1000,"body":"hi"},{"seq":1,"author":"ann","at":1000,"body":"\xef\xbf\xbd\xef\xbf\xbdx"}]}
-> GET /rooms/1/messages?limit=1 HTTP/1.1\r\n  X-Session  :   $a  \r\n\r\n
-< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 72\r\nConnection: close\r\n\r\n{"room":"b","messages":[{"seq":2,"author":"ann","at":1000,"body":"hi"}]}
+> GET /rooms/$r/messages HTTP/1.1\r\nx-session: $a\r\n\r\n
+< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 124\r\nConnection: close\r\n\r\n{"room":"a","messages":[{"seq":2,"author":"ann","at":1000,"body":"hi"},{"seq":1,"author":"ann","at":1000,"body":"\xef\xbf\xbd\xef\xbf\xbdx"}]}
+> GET /rooms/$r/messages?limit=1 HTTP/1.1\r\n  X-Session  :   $a  \r\n\r\n
+< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 72\r\nConnection: close\r\n\r\n{"room":"a","messages":[{"seq":2,"author":"ann","at":1000,"body":"hi"}]}
 > GET /rooms HTTP/1.1\r\nX-Session: \xc2\xa0$a\xe3\x80\x80\r\n\r\n
-< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 51\r\nConnection: close\r\n\r\n{"rooms":[{"id":0,"name":"a"},{"id":1,"name":"b"}]}
+< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 59\r\nConnection: close\r\n\r\n{"rooms":[{"id":"0.0","name":"a"},{"id":"1.0","name":"b"}]}
 > GET /rooms HTTP/1.1\r\nX-Session: $a\r\r\n\r\n
-< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 51\r\nConnection: close\r\n\r\n{"rooms":[{"id":0,"name":"a"},{"id":1,"name":"b"}]}
+< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 59\r\nConnection: close\r\n\r\n{"rooms":[{"id":"0.0","name":"a"},{"id":"1.0","name":"b"}]}
 > GET /rooms HTTP/1.1\r\nno colon here\r\nX-Session: $a\r\n\r\n
-< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 51\r\nConnection: close\r\n\r\n{"rooms":[{"id":0,"name":"a"},{"id":1,"name":"b"}]}
+< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 59\r\nConnection: close\r\n\r\n{"rooms":[{"id":"0.0","name":"a"},{"id":"1.0","name":"b"}]}
 > POST /sessions HTTP/1.1\r\ncontent-length: 14\r\n\r\n{"name":"bob"}
 < HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{"token":"1.0.ce7c497a6b09c3b","slot":1}
 > POST /sessions HTTP/1.1\r\nContent-Length: +14\r\n\r\n{"name":"cat"}
@@ -48,13 +48,13 @@
 > GET  /rooms HTTP/1.1\r\n\r\n
 < HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{"error":"no such endpoint"}
 > GET /rooms\r\nX-Session: $a\r\n\r\n
-< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 51\r\nConnection: close\r\n\r\n{"rooms":[{"id":0,"name":"a"},{"id":1,"name":"b"}]}
+< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 59\r\nConnection: close\r\n\r\n{"rooms":[{"id":"0.0","name":"a"},{"id":"1.0","name":"b"}]}
 > GET /rooms HTTP/1.1\r\nX-Session: $a\r\n
 < HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n
 > 
 < HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n
 > GET /stats HTTP/1.1\r\n\r\n
-< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 101\r\nConnection: close\r\n\r\n{"sessions":9,"rooms":2,"messages":2,"next_seq":2,"committed_kb":72,"live_kb":0,"reserved_kb":126936}
+< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 101\r\nConnection: close\r\n\r\n{"sessions":9,"rooms":2,"messages":2,"next_seq":2,"committed_kb":68,"live_kb":0,"reserved_kb":126936}
 > GET /rooms HTTP/1.1\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...(65237 more bytes)
 < HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n
 > POST /sessions HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n{"name":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz...(1048328 more bytes)
@@ -66,13 +66,13 @@
 < HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 29\r\nConnection: close\r\n\r\n{"id":1,"name":"a","shard":1}
 > POST /rooms HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 12\r\n\r\n{"name":"b"}
 < HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 29\r\nConnection: close\r\n\r\n{"id":2,"name":"b","shard":2}
-> POST /rooms/1/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{"body":"\xff\xe2\x82x"}
+> POST /rooms/$r/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{"body":"\xff\xe2\x82x"}
 < HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 9\r\nConnection: close\r\n\r\n{"seq":1}
-> POST /rooms/1/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{"body":"hi"}
+> POST /rooms/$r/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{"body":"hi"}
 < HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 9\r\nConnection: close\r\n\r\n{"seq":2}
-> GET /rooms/1/messages HTTP/1.1\r\nx-session: $a\r\n\r\n
+> GET /rooms/$r/messages HTTP/1.1\r\nx-session: $a\r\n\r\n
 < HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 124\r\nConnection: close\r\n\r\n{"room":"a","messages":[{"seq":2,"author":"ann","at":1000,"body":"hi"},{"seq":1,"author":"ann","at":1000,"body":"\xef\xbf\xbd\xef\xbf\xbdx"}]}
-> GET /rooms/1/messages?limit=1 HTTP/1.1\r\n  X-Session  :   $a  \r\n\r\n
+> GET /rooms/$r/messages?limit=1 HTTP/1.1\r\n  X-Session  :   $a  \r\n\r\n
 < HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 72\r\nConnection: close\r\n\r\n{"room":"a","messages":[{"seq":2,"author":"ann","at":1000,"body":"hi"}]}
 > GET /rooms HTTP/1.1\r\nX-Session: \xc2\xa0$a\xe3\x80\x80\r\n\r\n
 < HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 51\r\nConnection: close\r\n\r\n{"rooms":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}

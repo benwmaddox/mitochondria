@@ -85,8 +85,21 @@ pub enum Stmt {
 pub enum Seg { Lit(String), Param(String) }
 #[derive(Debug, Clone)]
 /// `lines`: first and last source line (1-based) of the endpoint, for comments in generated code.
-/// An endpoint: a function with an attribute (`@post("/players") fn add_player() -> Response<T> { ... }`).
-pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String, pub slots: u32, pub lines: (u32, u32), pub name: String, pub resp: RType }
+/// An endpoint: a function with an attribute (`@post("/players") fn add_player(name: string<1..24>) -> Response<T>`).
+/// Its parameters are its typed inputs, checked before the body runs.
+pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String, pub slots: u32, pub lines: (u32, u32), pub name: String, pub resp: RType, pub inputs: Vec<Input> }
+
+/// A typed input: where it comes from, its type, and what an absent one is (`= default`, or `?`: null).
+#[derive(Debug, Clone)]
+pub struct Input { pub name: String, pub src: Src, pub ty: InTy, pub default: Option<Expr>, pub optional: bool }
+/// Where an input comes from: a path segment, the JSON body, the query string, a header, or a field forwarded by
+/// another worker.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Src { Path, Body, Query, Header(String), Fwd }
+/// An input's type: an integer in lo..hi, a number, a bool, a string of lo..hi bytes, or an item (`Player`, or
+/// `Player in game.players`): from the path an id, from a header a session token.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64), Item(String, Option<String>) }
 #[derive(Debug, Clone)]
 /// A function. A module instance's functions are named `instance.name` (written by `modules::expand`); `public` ones
 /// (`pub fn`) can be called from outside the module.
@@ -178,7 +191,10 @@ pub fn parse(src: &str) -> R<Api> {
         let segs = path_segs(&path)?;
         p.kw("fn")?;
         let name = p.id()?;
-        p.eat("(")?; p.eat(")")?;
+        p.eat("(")?;
+        let mut inputs: Vec<Input> = Vec::new();
+        while !p.sym(")") { let i = p.input(&method, &segs)?; if inputs.iter().any(|x| x.name == i.name) { return Err(format!("endpoint `{}`: two inputs named `{}`", name, i.name)); } inputs.push(i); p.sym(","); }
+        for s in &segs { if let Seg::Param(n) = s { if !inputs.iter().any(|i| i.name == *n && i.src == Src::Path) { return Err(format!("endpoint `{}`: the path's `{{{}}}` is not one of its inputs: `fn {}({}: ...)`", name, n, name, n)); } } }
         if !(p.sym("->") && p.is_kw("Response")) { return Err(format!("endpoint `{}` returns a `Response<T>`: `fn {}() -> Response<T>`", name, name)); }
         p.i += 1; p.eat("<")?; let resp = p.rtype()?; p.eat(">")?;
         p.in_endpoint = true;
@@ -187,7 +203,7 @@ pub fn parse(src: &str) -> R<Api> {
         let body = body?;
         let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(n) => format!("/{{{}}}", n) }).collect::<String>());
         let last = p.lines.get(p.i.saturating_sub(1)).copied().unwrap_or(first);
-        api.eps.push(Endpoint { method, segs, body, text, slots: 0, lines: (first, last), name, resp });
+        api.eps.push(Endpoint { method, segs, body, text, slots: 0, lines: (first, last), name, resp, inputs });
     }
     Ok(api)
 }
@@ -209,6 +225,62 @@ fn path_segs(path: &str) -> R<Vec<Seg>> {
 }
 
 impl P {
+    /// An endpoint input: `[forwarded] name: TYPE [?] [= default] [from header("H") | from query | from body]`.
+    fn input(&mut self, method: &str, segs: &[Seg]) -> R<Input> {
+        let forwarded = if self.is_kw("forwarded") { self.i += 1; true } else { false };
+        let name = self.id()?; self.eat(":")?;
+        let tn = self.id()?;
+        let range = |p: &mut Self, lo: i64, hi: i64| -> R<(i64, i64)> {
+            if !p.is_kw("in") { return Ok((lo, hi)); }
+            p.i += 1;
+            let a = p.signed()?; p.eat("..")?; let b = p.signed()?;
+            if a > b || a < lo || b > hi { return Err(format!("input `{}`: range {}..{} does not fit its type", name, a, b)); }
+            Ok((a, b))
+        };
+        let ty = match tn.as_str() {
+            "i8" => { let (a, b) = range(self, i8::MIN as i64, i8::MAX as i64)?; InTy::Int(a, b) }
+            "i16" => { let (a, b) = range(self, i16::MIN as i64, i16::MAX as i64)?; InTy::Int(a, b) }
+            "i32" => { let (a, b) = range(self, i32::MIN as i64, i32::MAX as i64)?; InTy::Int(a, b) }
+            "i64" => { let (a, b) = range(self, i64::MIN, i64::MAX)?; InTy::Int(a, b) }
+            "u8" => { let (a, b) = range(self, 0, u8::MAX as i64)?; InTy::Int(a, b) }
+            "u16" => { let (a, b) = range(self, 0, u16::MAX as i64)?; InTy::Int(a, b) }
+            "u32" => { let (a, b) = range(self, 0, u32::MAX as i64)?; InTy::Int(a, b) }
+            "u64" => { let (a, b) = range(self, 0, i64::MAX)?; InTy::Int(a, b) }
+            "f32" | "f64" => InTy::Flt,
+            "bool" => InTy::Bool,
+            "string" => {
+                self.eat("<")?;
+                let a = self.int()?;
+                let (lo, hi) = if self.sym("..") { (a, self.int()?) } else { (0, a) };
+                self.eat(">")?;
+                if lo > hi || lo < 0 { return Err(format!("input `{}`: string<{}..{}> is not a length range", name, lo, hi)); }
+                InTy::Str(lo, hi)
+            }
+            t => { let pool = if self.is_kw("in") { self.i += 1; let mut p = self.id()?; while self.sym(".") { p = format!("{}.{}", p, self.id()?); } Some(p) } else { None }; InTy::Item(t.to_string(), pool) }
+        };
+        let optional = self.sym("?");
+        let default = if self.sym("=") { Some(match self.t.get(self.i).cloned() { Some(Tok::Int(n)) => { self.i += 1; Expr::Int(n) } Some(Tok::Sym(m)) if m == "-" => { self.i += 1; Expr::Int(-self.int()?) } Some(Tok::Flt(f)) => { self.i += 1; Expr::Float(f) } Some(Tok::Str(s)) => { self.i += 1; Expr::Str(s) } Some(Tok::Id(b)) if b == "true" || b == "false" => { self.i += 1; Expr::Bool(b == "true") } _ => return Err(format!("input `{}`: a default is a literal", name)) }) } else { None };
+        let in_path = segs.iter().any(|s| matches!(s, Seg::Param(n) if *n == name));
+        let src = if self.is_kw("from") {
+            self.i += 1;
+            if self.is_kw("query") { self.i += 1; Src::Query }
+            else if self.is_kw("body") { self.i += 1; Src::Body }
+            else { self.kw("header")?; self.eat("(")?; let h = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from header(\"Name\")`", name)) }; self.eat(")")?; Src::Header(h) }
+        } else if forwarded { Src::Fwd } else if in_path { Src::Path } else if matches!(method, "GET" | "DELETE") { Src::Query } else { Src::Body };
+        if in_path && src != Src::Path { return Err(format!("input `{}` is named in the path, so it comes from the path", name)); }
+        if let InTy::Item(..) = ty { if optional || default.is_some() { return Err(format!("input `{}`: an item cannot be optional or have a default yet", name)); } }
+        if optional && !matches!(ty, InTy::Str(..)) { return Err(format!("input `{}`: only a string can be optional (null when absent); give it a default instead", name)); }
+        match (&ty, &default) {
+            (_, None) | (InTy::Int(..), Some(Expr::Int(_))) | (InTy::Flt, Some(Expr::Float(_) | Expr::Int(_))) | (InTy::Bool, Some(Expr::Bool(_))) | (InTy::Str(..), Some(Expr::Str(_))) => {}
+            _ => return Err(format!("input `{}`: the default is not of its type", name)),
+        }
+        if let (InTy::Int(lo, hi), Some(Expr::Int(d))) = (&ty, &default) { if d < lo || d > hi { return Err(format!("input `{}`: the default {} is outside {}..{}", name, d, lo, hi)); } }
+        if matches!(ty, InTy::Item(..)) && !matches!(src, Src::Path | Src::Header(_)) { return Err(format!("input `{}`: an item comes from the path (an id) or a header (a session token)", name)); }
+        if let Src::Header(h) = &src { if matches!(ty, InTy::Item(..)) && !h.eq_ignore_ascii_case("X-Session") { return Err(format!("input `{}`: a session item comes from `header(\"X-Session\")`", name)); } }
+        Ok(Input { name, src, ty, default, optional })
+    }
+    fn signed(&mut self) -> R<i64> { if self.sym("-") { Ok(-self.int()?) } else { self.int() } }
+
     /// The `T` of `Response<T>`: `{ name: T, ... }`, `[T]`, `T?`, or a name (`i64`, `string<24>`, `Row`, `any`, `none`).
     fn rtype(&mut self) -> R<RType> {
         let t = if self.sym("{") {
@@ -446,6 +518,7 @@ pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
     }
     for e in &mut api.eps {
         let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0 };
+        for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         b.block(&mut e.body)?;
         e.slots = b.max;
         if !answers(&e.body) { return Err(format!("endpoint {} ({}) can finish without an answer: end every path with `return ok(...)` (or created, no_content, status), `fail` or `forward`", e.name, e.text)); }
@@ -588,6 +661,8 @@ impl Binder<'_> {
             }
             Expr::Call(n, args, res) => {
                 if n == "count" || n == "capacity" { return self.err(format!("`{}(x)` was replaced by `x.{}()`", n, n)); }
+                if matches!(n.as_str(), "body" | "param" | "query" | "header" | "fwd") { return self.err(format!("`{}(...)` was replaced by typed inputs: the endpoint names what it takes, as in `fn name(points: i64)`", n)); }
+                if n == "auth" { return self.err("`auth(pool)` was replaced by a session input: `who: Session from header(\"X-Session\")`".into()); }
                 for a in args.iter_mut() { self.expr(a)?; }
                 if let (Some(rest), Some(o)) = (n.strip_prefix("self."), self.owner.as_ref()) { *n = format!("{}.{}", o, rest); }
                 *res = if let Some(k) = self.fns.iter().position(|f| f.0 == *n) {

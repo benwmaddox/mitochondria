@@ -59,6 +59,9 @@ struct H {
     int (*store_field)(Ctx *, const Val *, const char *, u32, const Val *); /* journaled write of field `name` of such an item */
     int (*free_val)(Ctx *, const Val *);                       /* free an item held as a value (null: nothing) */
     int (*was_dead)(Ctx *);                                    /* was the error just returned a dead reference or a slot not live? (clears it) */
+    int (*input)(Ctx *, int, const char *, u32, int, i64, i64, Val *); /* a typed input of the endpoint (src, name, kind, lo, hi) */
+    int (*fields)(Ctx *, const char *, u32);                   /* the body's fields are among these (NUL-separated) */
+    int (*json_id)(Ctx *, u32, u32);                           /* an item written as its id: "slot.generation" or the slot */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -113,12 +116,13 @@ pub fn plain_code(t: &Ty) -> Option<(u32, u32)> {
 
 /// The JSON shape of an answer, as known when it is generated: what `Response<T>` is checked against.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Shape { Int, Flt, Bool, Str, Null, Any, Opt(Box<Shape>), Arr(Box<Shape>), Obj(Vec<(String, Shape)>), Nothing }
+pub enum Shape { Int, Flt, Bool, Str, Null, Any, Opt(Box<Shape>), Arr(Box<Shape>), Obj(Vec<(String, Shape)>), Nothing, Id(usize, String) }
 impl Shape {
     fn of(v: &CV) -> Shape {
         match v {
             CV::Int(_) => Shape::Int, CV::Flt(_) => Shape::Flt, CV::Bool(_) => Shape::Bool,
             CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) => Shape::Str, CV::Null => Shape::Null,
+            CV::Item(c, _) => Shape::Id(*c, String::new()), CV::Ref(c, ..) => Shape::Opt(Box::new(Shape::Id(*c, String::new()))),
             _ => Shape::Any,
         }
     }
@@ -133,6 +137,7 @@ impl std::fmt::Display for Shape {
             Shape::Int => write!(f, "i64"), Shape::Flt => write!(f, "f64"), Shape::Bool => write!(f, "bool"), Shape::Str => write!(f, "string"),
             Shape::Null => write!(f, "null"), Shape::Any => write!(f, "any"), Shape::Nothing => write!(f, "none"),
             Shape::Opt(s) => write!(f, "{}?", s), Shape::Arr(s) => write!(f, "[{}]", s),
+            Shape::Id(_, n) => write!(f, "{}", if n.is_empty() { "an item" } else { n }),
             Shape::Obj(fs) => {
                 write!(f, "{{ ")?;
                 for (i, (k, v)) in fs.iter().enumerate() {
@@ -145,6 +150,9 @@ impl std::fmt::Display for Shape {
         }
     }
 }
+
+/// An i64 as a C literal (`I64MIN` for the one value that cannot be written as `-...LL`).
+fn i64_lit(v: i64) -> String { if v == i64::MIN { "I64MIN".into() } else { format!("{}LL", v) } }
 
 /// `T` of `Response<T>` as written.
 fn show_rtype(t: &RType) -> String {
@@ -181,6 +189,8 @@ fn fits_shape(prog: &Program, shape: &Shape, want: &RType, at: &str) -> Result<(
                 "bool" => *shape == Shape::Bool,
                 "string" => *shape == Shape::Str,
                 "none" => *shape == Shape::Nothing,
+                // an item type: the answer holds an item of a pool of that struct, written as its id
+                _ if matches!(shape, Shape::Id(..)) => { let Shape::Id(c, _) = shape else { unreachable!() }; prog.colls[*c].item.map_or(false, |s| prog.structs[s].name == *n) }
                 _ => {
                     // a declared struct: an object with its plain fields
                     let Some(sd) = prog.structs.iter().find(|s| s.name == *n) else { return Err(format!("{}: `{}` is not a type", here(), n)) };
@@ -567,7 +577,7 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             let specs = std::cell::RefCell::new(done.clone());
             let mut g = G::new(prog, api, ep, &slot_kinds, &ret_kinds, &recursive, &specs);
             let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
-            let r = g.block(&ep.body, &mut env);
+            let r = g.inputs(ep, &mut env).and_then(|_| g.block(&ep.body, &mut env));
             let (widen, body) = (g.widen, std::mem::take(&mut g.body));
             drop(g);
             match (r, widen) {
@@ -666,6 +676,54 @@ impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
         G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, recursive, specs, dep: false, inl: 0, or_dead: None }
+    }
+
+    /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
+    /// its fields must be among the body inputs: an unknown field is 400.
+    fn inputs(&mut self, ep: &'p Endpoint, env: &mut Vec<Option<CV>>) -> R<()> {
+        if matches!(ep.method.as_str(), "POST" | "PUT" | "PATCH") || ep.inputs.iter().any(|i| i.src == Src::Body) {
+            let names: String = ep.inputs.iter().filter(|i| i.src == Src::Body).map(|i| format!("{}\0", i.name)).collect();
+            self.call(&format!("c->h->fields(c, {}, {})", c_lit(names.as_bytes()), names.len()));
+        }
+        for (k, inp) in ep.inputs.iter().enumerate() {
+            let src = match &inp.src { Src::Body => 0, Src::Path => 1, Src::Query => 2, Src::Header(_) => 3, Src::Fwd => 4 };
+            let name = match &inp.src { Src::Header(h) => h.clone(), _ => inp.name.clone() };
+            let (kind, lo, hi, pool) = match &inp.ty {
+                InTy::Int(a, b) => (1, *a, *b, 0),
+                InTy::Flt => (2, 0, 0, 0),
+                InTy::Bool => (3, 0, 0, 0),
+                InTy::Str(a, b) => (4, *a, *b, 0),
+                InTy::Item(t, p) => { let c = self.item_pool(&inp.name, t, p.as_deref())?; (if matches!(inp.src, Src::Header(_)) { 5 } else { 6 }, c as i64, 0, c) }
+            };
+            let v = self.tmp("in");
+            self.line(&format!("Val {};", v));
+            self.call(&format!("c->h->input(c, {}, {}, {}, {}, {}, {}, &{})", src, c_lit(name.as_bytes()), name.len(), kind, i64_lit(lo), i64_lit(hi), v));
+            // absent: the default, null when optional, else 400
+            match (&inp.default, inp.optional) {
+                (Some(d), _) => { let dv = self.expr(d, env, None)?; let dv = self.val(dv)?; self.line(&format!("if ({}.tag == 0) {} = {};", v, v, dv)); }
+                (None, true) => {}
+                (None, false) => { let msg = format!("`{}` is required", inp.name); self.line(&format!("if ({}.tag == 0) FAIL(400, {}, {});", v, c_lit(msg.as_bytes()), msg.len())); }
+            }
+            let cv = match &inp.ty {
+                InTy::Int(..) => { let x = self.tmp("i"); self.line(&format!("i64 {} = {}.i;", x, v)); CV::Int(x) }
+                InTy::Flt => { let x = self.tmp("f"); self.line(&format!("double {} = {}.f;", x, v)); CV::Flt(x) }
+                InTy::Bool => { let x = self.tmp("b"); self.line(&format!("int {} = {}.i != 0;", x, v)); CV::Bool(x) }
+                InTy::Str(..) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, v, v, v)); CV::Txt(t) }
+                InTy::Item(..) => { let x = self.tmp("i"); self.line(&format!("u32 {} = {}.b;", x, v)); CV::Item(pool, x) }
+            };
+            env[k] = Some(cv);
+        }
+        Ok(())
+    }
+    /// The pool an input of item type `t` names: the one top-level pool of `t` items, or `in` the one given.
+    fn item_pool(&self, input: &str, t: &str, pool: Option<&str>) -> R<usize> {
+        let Some(sid) = self.prog.structs.iter().position(|s| s.name == t) else { return no(format!("input `{}`: `{}` is not a type", input, t)) };
+        let found: Vec<usize> = self.prog.colls.iter().enumerate().filter(|(_, c)| c.item == Some(sid) && c.parent.is_none() && matches!(c.kind, Kind::Pool(_)) && pool.map_or(true, |p| c.name == p)).map(|(i, _)| i).collect();
+        match found.as_slice() {
+            [c] => Ok(*c),
+            [] => no(format!("input `{}`: no pool that exists once holds `{}`{}", input, t, pool.map_or(String::new(), |p| format!(" as {}", p)))),
+            _ => no(format!("input `{}`: `{}` is kept in more than one pool; say which: `{}: {} in {}`", input, t, input, t, self.prog.colls[found[0]].name)),
+        }
     }
 
     /// The module instance whose function is being generated (None: the program's own code).
@@ -1778,7 +1836,12 @@ impl<'p> G<'p> {
             CV::Any(v) => self.call(&format!("c->h->json_val(c, &{})", v)),
             CV::StateStr(c, idx, ci) => self.call(&format!("c->h->json_col(c, {}, {}, {})", c, idx, ci)),
             CV::Null => self.out("null"),
-            CV::Ref(_, s, _) => { self.line(&format!("if ({} == 0) {{ CALL(c->h->out(c, \"null\", 4)); }}", s)); self.line("else FAIL(500, \"cannot write this value as JSON\", 30);"); }
+            CV::Ref(t, s, k) => {
+                if self.prog.colls[t].parent.is_some() { return no("an item of a collection inside another's items has no id; write `slot(x)`"); }
+                self.line(&format!("if ({} == 0) {{ CALL(c->h->out(c, \"null\", 4)); }}", s));
+                self.line(&format!("else CALL(c->h->json_id(c, {}, {}));", t, k));
+            }
+            CV::Item(c, i) if self.prog.colls[c].parent.is_none() && matches!(self.prog.colls[c].kind, Kind::Pool(_)) => self.call(&format!("c->h->json_id(c, {}, {})", c, i)),
             CV::Item(..) | CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => self.fail(500, "cannot write this value as JSON"),
         }
         Ok(())
@@ -2015,7 +2078,7 @@ mod profile_tests {
         // what fits: a declared struct, optional values, run-time kinds, no body, a status of choice
         for api in [
             "@get(\"/a\") fn a() -> Response<[Row]> { return ok([each it in app.items { name: it.name, n: it.n }]); }",
-            "@get(\"/a\") fn a() -> Response<{ n: string? }> { return ok({ n: or(query(\"x\"), null) }); }",
+            "@get(\"/a\") fn a(x: string<8>?) -> Response<{ n: string? }> { return ok({ n: or(x, null) }); }",
             "@get(\"/a\") fn a() -> Response<{ n: any }> { var v = 1; v = \"x\"; return ok({ n: v }); }",
             "@delete(\"/a\") fn a() -> Response<none> { return no_content(); }",
             "@post(\"/a\") fn a() -> Response<{ total: i64 }> { app.total += 1; if app.total > 2 { return status(202, { total: app.total }); } return created({ total: app.total }); }",

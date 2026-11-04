@@ -8,20 +8,22 @@ use std::time::Duration;
 
 const SEED: u64 = 0x1234_5678_9abc_def0;
 
-/// One request: its parts are sent with a pause between them; `$a` is replaced by the token captured by `=> a`.
-struct Req { parts: Vec<Vec<u8>>, capture: bool }
-fn req(s: &[u8]) -> Req { Req { parts: vec![s.to_vec()], capture: false } }
+/// One request: its parts are sent with a pause between them; `$a` is replaced by the token captured by `capture`, and
+/// `$r` by the id of the room `room` created (`"0.0"` in the chat, `1` in the sharded chat, whose rooms worker numbers
+/// rooms itself).
+struct Req { parts: Vec<Vec<u8>>, capture: bool, room: bool }
+fn req(s: &[u8]) -> Req { Req { parts: vec![s.to_vec()], capture: false, room: false } }
 
 fn script() -> Vec<Req> {
     let mut v = vec![
         Req { capture: true, ..req(b"POST /sessions HTTP/1.1\r\nHost: x\r\nContent-Length: 14\r\n\r\n{\"name\":\"ann\"}") },
-        req(b"POST /rooms HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 12\r\n\r\n{\"name\":\"a\"}"),
-        req(b"POST /rooms HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 12\r\n\r\n{\"name\":\"b\"}"), // room 1 exists in both servers
-        req(b"POST /rooms/1/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{\"body\":\"\xff\xe2\x82x\"}"), // invalid UTF-8, echoed back below
+        Req { room: true, ..req(b"POST /rooms HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 12\r\n\r\n{\"name\":\"a\"}") },
+        req(b"POST /rooms HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 12\r\n\r\n{\"name\":\"b\"}"),
+        req(b"POST /rooms/$r/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n{\"body\":\"\xff\xe2\x82x\"}"), // invalid UTF-8, echoed back below
         // the body arrives after the head, in two pieces
-        Req { parts: vec![b"POST /rooms/1/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n".to_vec(), b"{\"body\":".to_vec(), b"\"hi\"}".to_vec()], capture: false },
-        req(b"GET /rooms/1/messages HTTP/1.1\r\nx-session: $a\r\n\r\n"),
-        req(b"GET /rooms/1/messages?limit=1 HTTP/1.1\r\n  X-Session  :   $a  \r\n\r\n"),
+        Req { parts: vec![b"POST /rooms/$r/messages HTTP/1.1\r\nX-Session: $a\r\nContent-Length: 15\r\n\r\n".to_vec(), b"{\"body\":".to_vec(), b"\"hi\"}".to_vec()], capture: false, room: false },
+        req(b"GET /rooms/$r/messages HTTP/1.1\r\nx-session: $a\r\n\r\n"),
+        req(b"GET /rooms/$r/messages?limit=1 HTTP/1.1\r\n  X-Session  :   $a  \r\n\r\n"),
         req(b"GET /rooms HTTP/1.1\r\nX-Session: \xc2\xa0$a\xe3\x80\x80\r\n\r\n"),
         req(b"GET /rooms HTTP/1.1\r\nX-Session: $a\r\r\n\r\n"),
         req(b"GET /rooms HTTP/1.1\r\nno colon here\r\nX-Session: $a\r\n\r\n"),
@@ -47,14 +49,14 @@ fn script() -> Vec<Req> {
     // headers past 64 KB without an end: exactly 65537 bytes, so the server has read all of them when it answers
     let mut big = b"GET /rooms HTTP/1.1\r\nX-Pad: ".to_vec();
     big.resize(65537, b'a');
-    v.push(Req { parts: vec![big], capture: false });
+    v.push(Req { parts: vec![big], capture: false, room: false });
     // a body at the 1 MB cap: exactly 1 MB is sent, Content-Length says more
     let mut body = b"{\"name\":\"".to_vec();
     body.resize((1 << 20) - 2, b'z');
     body.extend_from_slice(b"\"}");
     let mut r = b"POST /sessions HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n".to_vec();
     r.extend_from_slice(&body);
-    v.push(Req { parts: vec![r], capture: false });
+    v.push(Req { parts: vec![r], capture: false, room: false });
     v
 }
 
@@ -76,11 +78,11 @@ fn connect(port: u16) -> TcpStream {
 /// Run the script against the server on `port`; the log has one `>` and one `<` line per request.
 fn run(port: u16) -> Vec<String> {
     let mut log = Vec::new();
-    let mut tok = String::new();
+    let (mut tok, mut room) = (String::new(), String::new());
     for r in script() {
         let mut c = connect(port);
         c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-        let parts: Vec<Vec<u8>> = r.parts.iter().map(|p| replace(p, b"$a", tok.as_bytes())).collect();
+        let parts: Vec<Vec<u8>> = r.parts.iter().map(|p| replace(&replace(p, b"$a", tok.as_bytes()), b"$r", room.as_bytes())).collect();
         for (i, p) in parts.iter().enumerate() {
             if i > 0 { std::thread::sleep(Duration::from_millis(50)); }
             c.write_all(p).unwrap();
@@ -89,7 +91,13 @@ fn run(port: u16) -> Vec<String> {
         let mut out = Vec::new();
         let _ = c.read_to_end(&mut out);
         let sent = esc(&parts.concat());
+        let sent = if room.is_empty() { sent } else { sent.replace(&format!("/rooms/{}/", room), "/rooms/$r/") };
         log.push(format!("> {}", if tok.is_empty() { sent } else { sent.replace(&tok, "$a") }));
+        if r.room {
+            let s = String::from_utf8_lossy(&out);
+            let id = s.split("\"id\":").nth(1).unwrap_or("");
+            room = if let Some(q) = id.strip_prefix('"') { q.split('"').next().unwrap_or("").to_string() } else { id.chars().take_while(|c| c.is_ascii_digit()).collect() };
+        }
         if r.capture {
             let s = String::from_utf8_lossy(&out);
             tok = s.split("\"token\":\"").nth(1).and_then(|t| t.split('"').next()).unwrap_or("").to_string();

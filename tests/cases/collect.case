@@ -12,7 +12,7 @@ state app: App;
 
 fn first_positive() { each i in app.items where i.score > 0 { i.score = i.score; return i.tag; } return "-"; }
 @post("/items")
-fn post_items() -> Response<{ slot: i64 }> { let it = app.items.add(); it.score = int(body("score")); it.tag = body("tag"); return created({ "slot": slot(it) }); }
+fn post_items(score: i64, tag: string<4096>?) -> Response<{ slot: i64 }> { let it = app.items.add(); it.score = score; it.tag = tag; return created({ "slot": slot(it) }); }
 @post("/double")
 fn post_double() -> Response<{ n: i64 }> { each i in app.items { let c = app.items.add(); c.score = i.score * 2; c.tag = i.tag + "2"; } return ok({ "n": app.items.count() }); }
 @post("/zero")

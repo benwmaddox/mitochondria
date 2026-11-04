@@ -3,68 +3,54 @@
 struct Player { name: string<24>; best: i64; entry: ref<game.board>; }
 struct Entry  { who: ref<game.players>; points: i64; }
 struct Played { who: ref<game.players>; points: i64; at: i64; }
-struct Totals { games: i64; }
+struct Row    { name: string<24>; points: i64; }
 
 struct Game {
-    totals: Totals;
+    games: i64;
     players: pool<Player, 1000> checked;
     board: sorted<Entry, 1000, points>;   // one entry per player, in order of points (lib/sorted.mito)
-    recent: list<Played, 20> drop_oldest;   // the last 20 games; the 21st overwrites the oldest
+    recent: list<Played, 20> drop_oldest; // the last 20 games; the 21st overwrites the oldest
 }
 state game: Game;
 
-fn player() -> ref<game.players> { return game.players[int(param("id"))]; }
-
 @post("/players")
-fn post_players() -> Response<{ id: i64 }> {
-    let name = body("name");
-    if len(name) == 0 { fail 400 "name is required"; }
-    let p = game.players.add();
-    p.name = name;
-    let e = game.board.add(0);
-    e.who = p;
-    p.entry = e;
-    return created({ "id": slot(p) });
+fn add_player(name: string<1..24>) -> Response<{ id: Player }> {
+    let p = game.players.add { name: name };
+    p.entry = game.board.add(0) { who: p };
+    return created({ id: p });
 }
 
-@post("/players/{id}/games")
-fn post_players_id_games() -> Response<{ best: i64 }> {
-    let p = player();
-    let points = int(body("points"));
-    game.totals.games = game.totals.games + 1;
-    let g = game.recent.add();
-    g.who = p;
-    g.points = points;
-    g.at = now();
+@post("/players/{p}/games")
+fn record(p: Player, points: i64) -> Response<{ best: i64 }> {
+    game.games += 1;
+    game.recent.add { who: p, points: points, at: now() };
     if points > p.best { p.best = points; game.board.set_key(p.entry, points); }
     // checked last on purpose: everything above is undone when this fails
     if points > 1000000 { fail 422 "not a believable score"; }
-    return ok({ "best": p.best });
+    return ok({ best: p.best });
 }
 
 @get("/board")
-fn get_board() -> Response<{ top: [{ name: string, points: i64 }] }> {
-    let n = min(int(or(query("top"), "10")), 100);
-    return ok({ "top": [each e in game.board reverse limit n { "name": e.who.name, "points": e.points }] });
+fn board(top: i64 in 1..100 = 10) -> Response<{ top: [Row] }> {
+    return ok({ top: [each e in game.board reverse limit top { name: e.who.name, points: e.points }] });
 }
 
 @get("/recent")
-fn get_recent() -> Response<{ games: [{ name: string, points: i64 }] }> {
-    return ok({ "games": [each g in game.recent reverse { "name": or(g.who.name, "[left]"), "points": g.points }] });
+fn recent() -> Response<{ games: [Row] }> {
+    return ok({ games: [each g in game.recent reverse { name: or(g.who.name, "[left]"), points: g.points }] });
 }
 
-@delete("/players/{id}")
-fn delete_players_id() -> Response<{ ok: bool }> {
-    let p = player();
+@delete("/players/{p}")
+fn remove_player(p: Player) -> Response<none> {
     game.board.remove(p.entry);
     game.players.remove(p);
-    return ok({ "ok": true });
+    return no_content();
 }
 
 @get("/stats")
-fn get_stats() -> Response<{ players: i64, games: i64, reserved_kb: i64, committed_kb: i64, live_kb: i64 }> {
+fn stats() -> Response<{ players: i64, games: i64, reserved_kb: i64, committed_kb: i64, live_kb: i64 }> {
     return ok({
-        "players": game.players.count(), "games": game.totals.games,
-        "reserved_kb": stat("reserved_kb"), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb")
+        players: game.players.count(), games: game.games,
+        reserved_kb: stat("reserved_kb"), committed_kb: stat("committed_kb"), live_kb: stat("live_kb")
     });
 }

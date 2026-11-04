@@ -15,7 +15,6 @@ impl Scalar {
         use Scalar::*;
         match self { I8 | U8 | Bool => 1, I16 | U16 => 2, I32 | U32 | F32 => 4, I64 | U64 | F64 => 8 }
     }
-    pub fn signed(self) -> bool { matches!(self, Scalar::I8 | Scalar::I16 | Scalar::I32 | Scalar::I64) }
     fn parse(s: &str) -> Option<Scalar> {
         use Scalar::*;
         Some(match s { "i8" => I8, "i16" => I16, "i32" => I32, "i64" => I64, "u8" => U8, "u16" => U16, "u32" => U32, "u64" => U64, "f32" => F32, "f64" => F64, "bool" => Bool, _ => return None })
@@ -60,7 +59,6 @@ pub struct Coll {
     pub kind: Kind,
     pub cap: usize,
     pub mult: usize,
-    pub elem: Ty,
     pub parent: Option<usize>, // the collection whose items hold this one
     pub hdr: usize,  // list: len, head; pool: high-water, count, hint, ever. Each a u32 array of `mult` entries
     pub live: usize, // pool: live bits, `words()` u64 per instance
@@ -243,7 +241,7 @@ impl Program {
         let items = mult.checked_mul(cap).filter(|n| *n <= 1 << 32).ok_or(format!("`{}`: too many items ({} x {})", name, mult, cap))?;
         let cid = self.colls.len();
         let start = up(*cur, PAGE);
-        let mut c = Coll { name: name.to_string(), kind, cap, mult, elem: elem.clone(), parent, hdr: start, live: 0, gen: 0, cols: Vec::new(), children: Vec::new(), start, end: 0 };
+        let mut c = Coll { name: name.to_string(), kind, cap, mult, parent, hdr: start, live: 0, gen: 0, cols: Vec::new(), children: Vec::new(), start, end: 0 };
         let mut o = start + c.hdr_fields() * 4 * mult;
         if let Kind::Pool(checked) = kind {
             o = up(o, 8); c.live = o; o += mult * c.words() * 8;
@@ -351,5 +349,20 @@ impl P {
         else { Ty::Named(n) };
         while self.peek() == Some("[") { self.i += 1; let k = self.count()?; self.eat("]")?; t = Ty::Arr(Box::new(t), k); }
         Ok(t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_rejects_what_it_cannot_bound() {
+        assert!(Program::parse("struct A { b: B; } struct B { a: A; } global g: A;").is_err());
+        assert!(Program::parse("struct N { kids: list<N, 2>; } global g: pool<N, 2>;").is_err()); // nests forever
+        assert!(Program::parse("struct M { t: list<i32, 2>; } global g: list<M, 2> drop_oldest;").is_err());
+        assert!(Program::parse("struct M { who: ref<nope>; } global g: list<M, 2>;").is_err());
+        let p = Program::parse("struct M { t: i32; } struct R { m: list<M, 1000>; } global rooms: pool<R, 64>;").unwrap();
+        assert_eq!(p.colls[1].mult, 64);
     }
 }

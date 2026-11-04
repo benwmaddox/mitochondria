@@ -120,9 +120,9 @@ fn start_exe(path: &std::path::Path, port: u16) -> Exe {
     Exe(c)
 }
 
-fn sharded_spec() -> crate::system::Spec {
+fn sharded_spec() -> crate::spec::Spec {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/chat-sharded");
-    crate::system::parse_spec(&std::fs::read_to_string(dir.join("chat.system")).unwrap(), &dir).unwrap()
+    crate::spec::parse_spec(&std::fs::read_to_string(dir.join("chat.system")).unwrap(), &dir).unwrap()
 }
 #[test]
 fn http_servers_match_their_record() {

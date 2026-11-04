@@ -1,122 +1,101 @@
-mod alloc_count;
 mod build;
 #[cfg(test)]
 mod cases;
-mod exp;
 #[cfg(test)]
 mod http_check;
 mod lang;
 mod modules;
 mod layout;
-mod os;
-mod region;
-mod runtime;
-mod serve;
 mod cgen;
-mod system;
+mod spec;
+// the in-memory compiler drives the tests; uild runs tcc.exe from the same directory
+#[cfg_attr(not(test), allow(dead_code))]
 mod tcc;
-use runtime::{Error, Instance};
 
-const MB: usize = 1 << 20;
+const USAGE: &str = "usage: mitochondria <command> <program> [options]
 
-#[global_allocator]
-static ALLOC: alloc_count::Counting = alloc_count::Counting;
+A program is a state and an api (`app.mito app.api`) or a system of workers (`app.system`).
+
+  check  <program>                  report the first problem, or say it loads
+  build  <program> [-o app.exe] [--tcc]
+                                    an executable serving HTTP (clang -O2; --tcc builds in milliseconds, unoptimised)
+  serve  <program> [--clang] [executable options]
+                                    build with TinyCC (or clang) and run it at once
+  emit-c <state.mito> <api> [-o file.c]  |  emit-c <file.system> [-o dir]
+                                    the generated C, to read or build yourself
+
+Executable options: --port N (8080); --budget MB, --soft MB, --hard MB (one program's memory; soft and hard turn on
+memory pressure); --conns N (a system's connection threads, 16); --seed N and --clock MS (fixed, for tests).";
+
+fn die(e: String) -> ! { eprintln!("error: {}", e); std::process::exit(1) }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(|s| s.as_str()) == Some("exp") { return if args.get(1).map(|s| s.as_str()) == Some("json") { serve::json_floor() } else if args.get(1).map(|s| s.as_str()) == Some("pressure") { exp::pressure() } else if args.get(1).map(|s| s.as_str()) == Some("chat") { exp::chat_scan() } else if args.get(1).map(|s| s.as_str()) == Some("access") { exp::access_cost() } else if args.get(1).map(|s| s.as_str()) == Some("trim") { { exp::trim_cost(); exp::scoped_cost() } } else { exp::run() }; }
-    if args.first().map(|s| s.as_str()) == Some("emit-c") { return emit_c(&args[1..]); }
-    if args.first().map(|s| s.as_str()) == Some("build") { return build_exe(&args[1..]); }
-    if matches!(args.first().map(|s| s.as_str()), Some("system") | Some("bench-system")) {
-        let file = std::path::Path::new(args.get(1).expect("system file"));
-        let src = std::fs::read_to_string(file).expect("read system file");
-        let dir = file.parent().unwrap_or(std::path::Path::new("."));
-        let opt = |name: &str, d: usize| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(d);
-        if args[0] == "bench-system" {
-            let configs: Vec<(usize, usize)> = args.iter().position(|a| a == "--configs").and_then(|i| args.get(i + 1)).map(|s| s.split(',').filter_map(|c| c.split_once('x')).filter_map(|(a, r)| Some((a.parse().ok()?, r.parse().ok()?))).collect()).unwrap_or(vec![(1, 1), (1, 2), (2, 4), (4, 8)]);
-            system::bench(&src, dir, opt("--clients", 8), &configs, opt("--ops", 100_000), opt("--reps", 2), args.iter().position(|a| a == "--spin").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()), args.iter().position(|a| a == "--batch").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()), !args.iter().any(|a| a == "--interpret"));
-        } else {
-            let mut spec = system::parse_spec(&src, dir).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
-            for k in &mut spec.kinds { if let Some(n) = args.iter().position(|a| *a == format!("--{}", k.name)).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()) { k.count = n; } }
-            if args.iter().any(|a| a == "--interpret") { spec.compile = false; }
-            let sys = system::System::start(spec).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
-            system::serve(std::sync::Arc::new(sys), opt("--port", 8080) as u16, opt("--conns", 16)).expect("serve");
+    let rest = args.get(1..).unwrap_or(&[]);
+    match args.first().map(|s| s.as_str()) {
+        Some("check") => { let (_, name) = program(&inputs(rest)); println!("{}: loads", name); }
+        Some("build") => build_exe(rest),
+        Some("serve") => serve(rest),
+        Some("emit-c") => emit_c(rest),
+        _ => { eprintln!("{}", USAGE); std::process::exit(2) }
+    }
+}
+
+/// The program files among `args`: everything before the first option.
+fn inputs(args: &[String]) -> Vec<&String> { args.iter().take_while(|a| !a.starts_with('-')).collect() }
+
+/// A program's C translation units for an executable, and a name for it.
+fn program(files: &[&String]) -> (Vec<String>, String) {
+    let read = |f: &str| std::fs::read_to_string(f).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
+    let stem = |f: &str| std::path::Path::new(f).file_stem().map_or("app".into(), |n| n.to_string_lossy().into_owned());
+    match files {
+        [sys] if sys.ends_with(".system") => {
+            let file = std::path::Path::new(sys.as_str());
+            let spec = spec::parse_spec(&read(sys), file.parent().unwrap_or(std::path::Path::new("."))).unwrap_or_else(|e| die(e));
+            (cgen::system_exe(&spec).unwrap_or_else(|e| die(e)), stem(sys))
         }
-        return;
-    }
-    if matches!(args.first().map(|s| s.as_str()), Some("serve") | Some("bench")) {
-        let (state, api) = (args.get(1).expect("state file"), args.get(2).expect("api file"));
-        let (state, api) = modules::expand(&std::fs::read_to_string(state).expect("read state"), &std::fs::read_to_string(api).expect("read api")).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
-        let prog = layout::Program::parse(&state).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
-        let inst = Instance::start(prog, 1024 * MB).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
-        let mut server = serve::Server::new(inst, &api).unwrap_or_else(|e| { eprintln!("error in api file: {}", e); std::process::exit(1) });
-        let opt = |name: &str, d: usize| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(d);
-        if args.iter().any(|a| a == "--soft") { let p = runtime::Pressure::new(&server.inst, opt("--soft", 0) * MB, opt("--hard", usize::MAX / MB) * MB); server.pressure = Some(p); }
-        // endpoints are compiled; `--interpret` runs them on the interpreter, the reference the tests compare against
-        if !args.iter().any(|a| a == "--interpret") {
-            match server.compile() {
-                Ok((notes, _)) => if let Some(n) = notes.iter().find(|n| !n.ends_with(": compiled")) { eprintln!("error: {}", n); std::process::exit(1) },
-                Err(e) => { eprintln!("error: compiling failed: {}", e); std::process::exit(1) }
-            }
+        [state, api] => {
+            let (s, text) = modules::expand(&read(state), &read(api)).unwrap_or_else(|e| die(e));
+            let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(e));
+            let src_name = std::path::Path::new(api.as_str()).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+            let a = cgen::check(&prog, &text).unwrap_or_else(|e| die(format!("{}: {}", src_name, e)));
+            (cgen::program_exe(&prog, &a, Some((&src_name, &text))).unwrap_or_else(|e| die(e)), stem(api))
         }
-        if args[0] == "bench" { serve::bench(&mut server, opt("--n", 2000)); } else { serve::serve(&mut server, opt("--port", 8080) as u16).expect("serve"); }
-        return;
+        _ => { eprintln!("{}", USAGE); std::process::exit(2) }
     }
-    let mut budget = 1024 * MB;
-    let mut files = Vec::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "--budget" { budget = it.next().and_then(|v| v.parse::<usize>().ok()).expect("--budget <MB>") * MB; } else { files.push(a.clone()); }
-    }
-    if files.is_empty() { eprintln!("usage: mitochondria <state.mito> [script] [--budget MB]  |  mitochondria exp"); std::process::exit(2); }
-    let src = std::fs::read_to_string(&files[0]).expect("read state file");
-    let prog = match layout::Program::parse(&src) { Ok(p) => p, Err(e) => { eprintln!("error: {}", e); std::process::exit(1); } };
-    let base = os::os_mem();
-    let mut inst = match Instance::start(prog, budget) { Ok(i) => i, Err(e) => { eprintln!("error: {}", e); std::process::exit(1); } };
-    println!("started: reserved {:.2} MB; committed {:.3} MB (live bytes only); budget {} MB", mb(inst.reserved()), mb(inst.committed()), budget / MB);
-    let Some(script) = files.get(1) else { return inspect(&inst, base) };
-    for line in std::fs::read_to_string(script).expect("read script").lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        let (cmd, rest) = line.split_once(' ').unwrap_or((line, ""));
-        let (a, b) = rest.split_once(' ').unwrap_or((rest, ""));
-        println!("> {}", line);
-        let r: Result<(), Error> = match cmd {
-            "push" => inst.push(a).map(|(i, g)| match g { Some(g) => println!("  slot {} generation {}", i, g), None => println!("  index {}", i) }),
-            "fill" => (0..b.parse::<usize>().unwrap_or(0)).try_for_each(|_| inst.push(a).map(|_| ())),
-            "pop" => inst.pop(a),
-            "remove" => inst.remove(a, b.trim()),
-            "sum" => inst.sum(a, b.trim(), 20).map(|(t, n, ns)| println!("  sum {} over {} rows, {:.3} ns/row", t, n, ns)),
-            "clear" => inst.clear(a),
-            "set" => inst.set(a, b.trim()),
-            "get" => inst.get(a).map(|v| println!("  {}", v)),
-            "trim" => { let f = if a.is_empty() { Ok(inst.trim()) } else { inst.trim_path(a) }.unwrap_or_else(|e| { println!("  error: {:?}", e); 0 }); let t = inst.last_trim; println!("  released {:.3} MB: scanned {} live ranges in {:.2} ms, {} OS calls in {:.2} ms", mb(f), t.ranges, t.scan_ns as f64 / 1e6, t.os_calls, t.os_ns as f64 / 1e6); Ok(()) }
-            "inspect" => { inspect(&inst, base); Ok(()) }
-            _ => Err(Error::Bad(format!("unknown command `{}`", cmd))),
-        };
-        match r { Ok(()) => {}, Err(Error::Full(m)) => println!("  FULL: {}", m), Err(Error::TooLong(m)) => println!("  TOO LONG: {}", m), Err(Error::NotLive(m)) => println!("  NOT LIVE: {}", m), Err(Error::Stale(m)) => println!("  STALE: {}", m), Err(Error::Bad(m)) => println!("  error: {}", m) }
-    }
+}
+
+/// `build <program> [-o app.exe] [--tcc]`
+fn build_exe(args: &[String]) {
+    let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1)).cloned();
+    let (units, name) = program(&inputs(args));
+    let out = std::path::PathBuf::from(out.unwrap_or_else(|| format!("{}.exe", name)));
+    build::exe(&units, &out, args.iter().any(|a| a == "--tcc"), &[]).unwrap_or_else(|e| die(e));
+    println!("built {}", out.display());
+}
+
+/// `serve <program> [--clang] [executable options]`: build into the temp directory and run, passing the options on.
+fn serve(args: &[String]) {
+    let files = inputs(args);
+    let (units, name) = program(&files);
+    let clang = args.iter().any(|a| a == "--clang");
+    let exe = std::env::temp_dir().join(format!("mito-serve-{}-{}.exe", name, std::process::id()));
+    build::exe(&units, &exe, !clang, &[]).unwrap_or_else(|e| die(e));
+    let pass: Vec<&String> = args[files.len()..].iter().filter(|a| *a != "--clang").collect();
+    let status = std::process::Command::new(&exe).args(pass).status().unwrap_or_else(|e| die(format!("{}: {}", exe.display(), e)));
+    let _ = std::fs::remove_file(&exe);
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 /// `emit-c <state.mito> <api> [-o file.c]`, or `emit-c <file.system> [-o dir]`: one file per worker kind and system.c.
 fn emit_c(args: &[String]) {
-    let die = |e: String| -> ! { eprintln!("error: {}", e); std::process::exit(1) };
     let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1)).cloned();
-    let files: Vec<&String> = args.iter().enumerate().filter(|(i, a)| *a != "-o" && (*i == 0 || args[i - 1] != "-o")).map(|(_, a)| a).collect();
     let read = |f: &str| std::fs::read_to_string(f).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
-    let one = |state: &str, name: &str, text: &str| -> String {
-        let (state, text) = modules::expand(state, text).unwrap_or_else(|e| die(e));
-        let (state, text) = (state.as_str(), text.as_str());
-        let prog = layout::Program::parse(state).unwrap_or_else(|e| die(e));
-        let mut a = lang::parse(text).unwrap_or_else(|e| die(format!("{}: {}", name, e)));
-        lang::bind(&mut a, &|n| prog.global(n)).unwrap_or_else(|e| die(format!("{}: {}", name, e)));
-        cgen::emit(&prog, &a, (name, text)).unwrap_or_else(|e| die(e))
-    };
-    match files.as_slice() {
+    match inputs(args).as_slice() {
         [sys] if sys.ends_with(".system") => {
             let file = std::path::Path::new(sys.as_str());
             let dir = file.parent().unwrap_or(std::path::Path::new("."));
-            let spec = system::parse_spec(&std::fs::read_to_string(file).unwrap_or_else(|e| die(e.to_string())), dir).unwrap_or_else(|e| die(e));
+            let spec = spec::parse_spec(&read(sys), dir).unwrap_or_else(|e| die(e));
             let to = std::path::PathBuf::from(out.unwrap_or_else(|| ".".into()));
             // one file per worker kind (its program, interface prefixed k<n>_) and system.c: build them together
             let units = cgen::system_c(&spec).unwrap_or_else(|e| die(e));
@@ -129,50 +108,12 @@ fn emit_c(args: &[String]) {
         }
         [state, api] => {
             let name = std::path::Path::new(api.as_str()).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-            let c = one(&read(state), &name, &read(api));
+            let (state, text) = modules::expand(&read(state), &read(api)).unwrap_or_else(|e| die(e));
+            let prog = layout::Program::parse(&state).unwrap_or_else(|e| die(e));
+            let a = cgen::check(&prog, &text).unwrap_or_else(|e| die(format!("{}: {}", name, e)));
+            let c = cgen::emit(&prog, &a, (&name, &text)).unwrap_or_else(|e| die(e));
             match out { Some(p) => { std::fs::write(&p, c).unwrap_or_else(|e| die(format!("{}: {}", p, e))); println!("wrote {}", p); } None => print!("{}", c) }
         }
         _ => die("usage: emit-c <state.mito> <api> [-o file.c]  |  emit-c <file.system> [-o dir]".into()),
     }
-}
-
-/// `build <state.mito> <api> [-o app.exe] [--tcc]`, or `build <file.system> [-o app.exe] [--tcc]`: an executable serving
-/// HTTP. The executable takes --port, --conns (a system's connection threads), --budget/--soft/--hard MB (a program's
-/// memory), and for tests --seed and --clock.
-fn build_exe(args: &[String]) {
-    let die = |e: String| -> ! { eprintln!("error: {}", e); std::process::exit(1) };
-    let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1)).cloned();
-    let use_tcc = args.iter().any(|a| a == "--tcc");
-    let files: Vec<&String> = args.iter().enumerate().filter(|(i, a)| *a != "-o" && *a != "--tcc" && (*i == 0 || args[i - 1] != "-o")).map(|(_, a)| a).collect();
-    let read = |f: &str| std::fs::read_to_string(f).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
-    let stem = |f: &str| std::path::Path::new(f).file_stem().map_or("app".into(), |n| n.to_string_lossy().into_owned());
-    let (units, name) = match files.as_slice() {
-        [sys] if sys.ends_with(".system") => {
-            let file = std::path::Path::new(sys.as_str());
-            let spec = system::parse_spec(&read(sys), file.parent().unwrap_or(std::path::Path::new("."))).unwrap_or_else(|e| die(e));
-            (cgen::system_exe(&spec).unwrap_or_else(|e| die(e)), stem(sys))
-        }
-        [state, api] => {
-            let (s, text) = modules::expand(&read(state), &read(api)).unwrap_or_else(|e| die(e));
-            let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(e));
-            let src_name = std::path::Path::new(api.as_str()).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-            let mut a = lang::parse(&text).unwrap_or_else(|e| die(format!("{}: {}", src_name, e)));
-            lang::bind(&mut a, &|n| prog.global(n)).unwrap_or_else(|e| die(format!("{}: {}", src_name, e)));
-            (cgen::program_exe(&prog, &a, Some((&src_name, &text))).unwrap_or_else(|e| die(e)), stem(api))
-        }
-        _ => die("usage: build <state.mito> <api> [-o app.exe] [--tcc]  |  build <file.system> [-o app.exe] [--tcc]".into()),
-    };
-    let out = std::path::PathBuf::from(out.unwrap_or_else(|| format!("{}.exe", name)));
-    build::exe(&units, &out, use_tcc, &[]).unwrap_or_else(|e| die(e));
-    println!("built {}", out.display());
-}
-
-fn mb(n: usize) -> f64 { n as f64 / MB as f64 }
-
-fn inspect(inst: &Instance, base: os::OsMem) {
-    println!("  {:<24} {:<44} {:>10} {:>11} {:>11}", "path", "type", "start", "reserved", "live");
-    for (p, t, o, r, l) in inst.inspect() { println!("  {:<24} {:<44} {:>10} {:>11} {:>11}", p, t, o, r, l); }
-    let now = os::os_mem();
-    println!("  totals: reserved {:.3} MB, live {:.3} MB, committed {:.3} MB | OS commit {:+.3} MB, resident {:+.3} MB (since start)",
-        mb(inst.reserved()), mb(inst.live_total()), mb(inst.committed()), mb(now.private) - mb(base.private), mb(now.resident) - mb(base.resident));
 }

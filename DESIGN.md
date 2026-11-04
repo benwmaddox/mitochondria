@@ -207,40 +207,41 @@ is the layer above it. Details and the comparison with arenas, garbage collectio
 - **Keyed indexes** for lookups that are not by parent. Not planned until nesting proves insufficient.
 - **Debug-only orphan report** (rows nothing refers to) and **FIFO slot reuse** for pools.
 
-## Status: prototype vs this design (2026-11-03)
-Every concept above, and the worker system, is built and tested. Behaviour is specified by the cases in `tests/cases`
-(16 programs and systems with request scripts and recorded logs, including memory totals); every way of running a program
-must reproduce them, and compiled ones without heap allocations in warm requests. Unit tests cover the compiler and
-runtime internals. Known differences:
-- Endpoints are compiled: generated as C and compiled in memory with the bundled TinyCC (`emit-c` writes the same C as one
-  file for review). Known items and columns become constant-offset loads; a value whose kind is only known at run time is
-  a tagged `Val`, checked where an integer is required, and dynamic operations call helpers that still run the
-  interpreter's Rust code. What the compiler refuses does not load, interpreted or not, so both always agree on which
-  programs run. Refused: wrong names and wrong kinds that would fail when reached (an unknown field, `count` of something
-  that is not a collection, `auth` of a nested pool, ...), and three narrow gaps the interpreter could run: a struct field
-  or fixed array of an item passed to a recursive function, returned by a function or held in a `var`; values that mix a
-  collection or struct with other kinds; `maxlen` of an item held as a run-time value.
-  Recursive functions become C functions, one per combination of argument kinds, with the interpreter's limit of 64 nested
-  calls. Generated C follows an enforced safety profile (docs/codegen-options.md). The interpreter remains as the
-  reference the tests compare against (`--interpret` runs it); it goes once the runtime is C (Next, 1).
-  The clang release path is designed (same C, built to a DLL) but not built: clang is not installed on this machine.
-  Types in `fn` signatures are parsed but not checked.
-- `ref<...>` targets top-level pools only. Interpreted, nested-struct fields inside items (`m.pos.x`) take a slower path that
-  allocates; compiled, they are plain column loads.
-- The pressure policy's marks are absolute, not fractions of the budget; machine free memory is not consulted.
-- Workers: mailboxes are a mutex and a condition variable, not lock-free; only `forward` exists (no one-way `send`/`on` messages,
-  no fan-out); a restart is the whole supervision story (no supervision tree, links or monitors).
-- The write journal (for rollback) is a heap buffer sized at startup (64 KB, 1024 entries). A very large request, such as clearing
-  a big pool, grows it; it is not counted in the epoch total.
-- `GET /stats`-style reads of live bytes allocate (they walk every range), and the HTTP layer outside the handler allocates.
+## Status: prototype vs this design (2026-11-04)
+Every concept above, and the worker system, is built and tested. A program or a system compiles to one C program: the
+generated endpoints, the C runtime (runtime/mito.c), the worker system (runtime/system.c) and the HTTP server
+(runtime/http.c). `mitochondria build` makes an executable with clang -O2, or in milliseconds with the bundled TinyCC
+(`--tcc`); `serve` builds and runs one. Rust is only the compiler. Behaviour is specified by the cases in `tests/cases`
+(22 programs and systems with request scripts and recorded logs, including memory totals) and by `tests/http.record` (raw
+HTTP requests and answers); the TinyCC build, the clang build and a clang build with undefined-behaviour checks must all
+reproduce them. The C runtime has no allocator: it declares no malloc, and every buffer is a reservation made at start.
+Known differences:
+- Endpoints that use something the generator does not handle do not compile, and the program does not load. Refused:
+  wrong names and wrong kinds that would fail when reached (an unknown field, `count` of something that is not a
+  collection, `auth` of a nested pool, ...), and three narrow gaps: a struct field or fixed array of an item passed to a
+  recursive function, returned by a function or held in a `var`; values that mix a collection or struct with other kinds;
+  `maxlen` of an item held as a run-time value. Recursive functions become C functions, one per combination of argument
+  kinds, with a limit of 64 nested calls (so request handling needs little stack: the executables keep the default 1 MB).
+  Generated C follows an enforced safety profile (docs/codegen-options.md). Types in `fn` signatures are parsed but not
+  checked.
+- A real fault in C (a bug in the runtime or the compiler, not a failed request) ends the whole process, every worker
+  with it. `__crash()`, the test hook for supervision, is the only failure a worker is restarted from.
+- `ref<...>` targets top-level pools only.
+- The pressure policy's marks are absolute, not fractions of the budget; machine free memory is not consulted. The C
+  servers do not yet trim when idle (the Rust server released slack after a quiet second).
+- Workers: mailboxes are an SRW lock and a condition variable, not lock-free; only `forward` exists (no one-way
+  `send`/`on` messages, no fan-out); a restart is the whole supervision story (no supervision tree, links or monitors).
+- The write journal (for rollback) is a reservation that commits as a request writes; a very large request, such as
+  clearing a big pool, commits more of it. It is not counted in the epoch total.
+- HTTP: one request per connection, a thread per connection; see Next for keep-alive and an event loop.
 
 Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat-api-findings.md.
 
 ## Next
-1. One self-contained C program (in progress): the C runtime (runtime/mito.c) runs every single-program case, with the
-   same declared limits as the Rust runtime. Left: workers, mailboxes and HTTP in C; a sanitizer-checked clang build as
-   another backend; then the Rust runtime, the interpreter, `.script` and `exp` removed. Rust stays only as the compiler.
-   TinyCC builds for development (20-40 ms to load), clang -O2 for release (about 1 s; about 4x faster requests).
+1. HTTP performance, in order: send each response in one write (two small writes can wait on a delayed acknowledgement);
+   reserve the per-connection buffers and commit them as used; keep-alive, with exact Content-Length framing; an event
+   loop over a fixed table of connections declared up front (IOCP on Windows; then a Linux port with epoll, then
+   io_uring with registered buffers). Each step measured with a load generator.
 2. Long uneven text (the deferred 92% waste): `text<N>` fields packed into a per-collection text area, a ring for `drop_oldest` lists.
 3. Placing items on shards by load rather than `id % count` (20 rooms over 8 shards left workers 35-98% busy).
 4. Worker messages beyond `forward`: one-way `send` with `on Msg` handlers, fan-out with gathered replies, links and monitors.

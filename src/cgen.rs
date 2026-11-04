@@ -1,9 +1,8 @@
 //! Generates C for bound endpoints. Types are worked out while generating: a value whose collection is known becomes a
 //! direct load at a constant offset from the reservation's base; integer arithmetic, comparisons and loops are inline.
 //! Everything dynamic (request values, strings, conditions on them) goes through helper functions the runtime passes
-//! in a table (`H` below); those helpers reuse the interpreter's own code for values, comparisons and errors, so compiled
-//! and interpreted endpoints answer alike. An endpoint using something the generator does not handle yet stays
-//! interpreted; `generate` says which endpoints compiled and why the others did not.
+//! in a table (`H` below), which the C runtime (runtime/mito.c) provides. An endpoint using something the generator does
+//! not handle does not compile, and then the program does not load; `generate` says why.
 //!
 //! Rules the generated code keeps: it never writes state itself (writes go through helpers, which journal them); it only
 //! loads from items it reached by live iteration, a checked index or a followed reference; every helper returns 0, or -1
@@ -111,12 +110,9 @@ pub fn plain_code(t: &Ty) -> Option<(u32, u32)> {
         _ => return None,
     })
 }
-pub fn plain_ty(code: u32, cap: u32) -> Option<Ty> {
-    use Scalar::*;
-    Some(match code { 1..=11 => Ty::Scalar([I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Bool][code as usize - 1]), 20 => Ty::Str(cap as usize), _ => return None })
-}
 
-pub struct Generated { pub src: String, pub eps: Vec<Option<String>>, pub notes: Vec<String> }
+/// Generated endpoint C, and one note per endpoint that cannot be compiled (such a program does not load).
+pub struct Generated { pub src: String, pub notes: Vec<String> }
 
 /// What an expression produced, in C terms. String-valued variants are C variable names.
 #[derive(Clone, Debug)]
@@ -218,7 +214,7 @@ pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, ap
 pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
     let mut api = parse(api_src)?;
     bind(&mut api, &|n| prog.global(n))?;
-    if let Some(n) = generate(prog, &api).notes.first() { return Err(n.replace(": interpreted (", ": ").trim_end_matches(')').to_string()); }
+    if let Some(n) = generate(prog, &api).notes.first() { return Err(n.clone()); }
     Ok(api)
 }
 
@@ -253,7 +249,7 @@ pub fn program_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> R
 }
 
 /// A system as an executable's sources: its translation units, the HTTP server after the system's.
-pub fn system_exe(spec: &crate::system::Spec) -> Result<Vec<String>, String> {
+pub fn system_exe(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
     let mut units = system_c(spec)?;
     if let Some(last) = units.last_mut() { *last += HTTP; }
     Ok(units)
@@ -264,7 +260,7 @@ pub const SYSTEM: &str = include_str!("../runtime/system.c");
 
 /// A system of workers as C translation units: one per worker kind (its program, interface prefixed `k<n>_`), then the
 /// system itself with the table of kinds. Built together, `mito_system_*` is the interface.
-pub fn system_c(spec: &crate::system::Spec) -> Result<Vec<String>, String> {
+pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
     let mut units = Vec::new();
     let mut table = String::from("/* ---- the system's worker kinds (generated) ---- */\ntypedef unsigned char u8; typedef unsigned short u16; typedef unsigned int u32; typedef unsigned long long u64; typedef long long i64;\n");
     table += "#if defined(_MSC_VER) || defined(__clang__)\n#define MITO_API __declspec(dllexport)\n#else\n#define MITO_API\n#endif\n";
@@ -275,8 +271,10 @@ pub fn system_c(spec: &crate::system::Spec) -> Result<Vec<String>, String> {
         "int {}handle(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);", "const char *{}response(void *, u32 *);",
         "void {}set_system(void *, u32, const char *const *, const u32 *, u32, u32);", "u32 {}forward_to(void *, u32 *, i64 *, MitoPair *, u32);", "void {}finish_forward(void *, int);", "int {}crashed(void *);"];
     let mut rows = Vec::new();
+    let mut total = 0usize;
     for (i, k) in spec.kinds.iter().enumerate() {
         let prog = Program::parse(&k.state).map_err(|e| format!("worker {}: {}", k.name, e))?;
+        total = total.saturating_add(prog.total.saturating_mul(k.count));
         let mut api = crate::lang::parse(&k.api).map_err(|e| format!("worker {}: {}", k.name, e))?;
         crate::lang::bind(&mut api, &|n| prog.global(n)).map_err(|e| format!("worker {}: {}", k.name, e))?;
         let pre = format!("k{}_", i);
@@ -286,6 +284,8 @@ pub fn system_c(spec: &crate::system::Spec) -> Result<Vec<String>, String> {
         rows.push(format!("    {{ {}, {}, {}, {}, {}ULL, {}ULL, {}, {} }}", c_lit(k.name.as_bytes()), k.count, k.mailbox, k.slot, k.soft.unwrap_or(0), k.hard.unwrap_or(usize::MAX), k.soft.is_some() as i32,
             f.iter().zip(["(void *(*)(u64, u64))", "", "", "", "", "", "", "", "", ""]).map(|(n, c)| format!("{}{}", c, n)).collect::<Vec<_>>().join(", ")));
     }
+    const MB: usize = 1 << 20;
+    if total > spec.budget { return Err(format!("over budget: {} workers need {} MB, budget is {} MB", spec.kinds.iter().map(|k| k.count).sum::<usize>(), total / MB, spec.budget / MB)); }
     table += &format!("static const SysKind SYS_KINDS[] = {{\n{}\n}};\n#define SYS_NKINDS {}\n#define SYS_ENTRY {}\n#define SYS_INFLIGHT {}\n", rows.join(",\n"), spec.kinds.len(), spec.entry, spec.inflight);
     units.push(table + SYSTEM);
     Ok(units)
@@ -462,7 +462,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
 /// endpoints up by name.
 fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str) -> Generated {
     let mut src = String::from(PRELUDE);
-    let (mut eps, mut notes) = (Vec::new(), Vec::new());
+    let mut notes = Vec::new();
     let recursive = recursive_fns(api);
     let mut done: Vec<Spec> = Vec::new(); // functions for recursive calls, generated by endpoints that compiled
     for (k, ep) in api.eps.iter().enumerate() {
@@ -496,15 +496,14 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 }
                 done = specs;
                 src += &format!("{}{}int {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b;\n{}    return 0;\n}}\n", head, linkage, name, body);
-                eps.push(Some(name));
             }
             Err(why) => {
                 if let Some(sf) = source { src += &source_comment(ep, sf); src += &format!("// not compiled: {}\n", why); }
-                notes.push(format!("{}: interpreted ({})", ep.text, why)); eps.push(None);
+                notes.push(format!("{}: {}", ep.text, why));
             }
         }
     }
-    Generated { src, eps, notes }
+    Generated { src, notes }
 }
 
 /// What generating a C function's body for one guess of its result kind gave.
@@ -800,7 +799,7 @@ impl<'p> G<'p> {
                     return Err(e);
                 }
             }
-            Stmt::Assign(Expr::Field(base, f, _), rhs) => {
+            Stmt::Assign(Expr::Field(base, f), rhs) => {
                 let bv = self.expr(base, env, None)?;
                 let (c, idx, path) = match bv {
                     CV::Item(c, idx) => (c, idx, f.clone()),
@@ -1074,7 +1073,7 @@ impl<'p> G<'p> {
                 self.plain(gl.off, &gl.ty.clone(), dead).map_err(|_| format!("global `{}` of this kind not compiled yet", n))
             }
             Expr::Var(n, VarRes::Unbound) => no(format!("`{}` was not bound", n)),
-            Expr::Field(base, f, _) => { let bv = self.expr(base, env, dead)?; self.field(bv, f, dead) }
+            Expr::Field(base, f) => { let bv = self.expr(base, env, dead)?; self.field(bv, f, dead) }
             Expr::Index(base, k) => {
                 let bv = self.expr(base, env, dead)?;
                 let kv = self.expr(k, env, dead)?;
@@ -1317,7 +1316,7 @@ impl<'p> G<'p> {
                         Ok(CV::Bool(res))
                     }
                     B::MaxLen => {
-                        let Some(Expr::Field(b, f, _)) = args.first() else { return no("maxlen(item.field)") };
+                        let Some(Expr::Field(b, f)) = args.first() else { return no("maxlen(item.field)") };
                         match self.expr(b, env, dead)? {
                             CV::Item(c, _) | CV::Ref(c, _, _) => match self.prog.colls[c].cols.iter().position(|x| x.path == **f).and_then(|ci| self.prog.colls[c].cols.get(ci + 1)).map(|x| x.kind.clone()) {
                                 Some(CKind::StrBytes(m)) => Ok(CV::Int(format!("{}LL", m))), _ => no("maxlen needs a string field") },
@@ -1812,7 +1811,6 @@ mod profile_tests {
             crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
             let g = generate(&prog, &api);
             assert!(!g.notes.iter().any(|n| n.contains("profile")), "{:#?}", g.notes);
-            assert!(g.eps.iter().filter(|e| e.is_some()).count() >= 5);
         }
     }
 

@@ -591,3 +591,24 @@ system built by TinyCC, by clang and by clang with undefined-behaviour checks. T
 interface was declared with different pointer types in the two units (`Mito *` against `void *`); it now takes `void *`.
 
 Workers now count a message before answering it (both runtimes), so counters read after an answer are exact.
+
+## Round 14 (2026-11-04): HTTP in C, and the Rust runtime removed
+`runtime/http.c` is the HTTP front end in C, a copy of the Rust servers' behaviour: one request per connection, headers
+up to 64 KB, a body of Content-Length bytes (at most 1 MB), invalid UTF-8 read as U+FFFD, the same response head.
+`tests/http.record` holds the Rust servers' raw answers to 30 requests chosen for edge cases (a body in pieces,
+Content-Length as `+14`, `abc` or past 2^64, more and fewer body bytes than it says, invalid UTF-8 in headers and bodies,
+Unicode spaces around header values, a bare `\r`, no end of headers, a 64 KB head, a 1 MB body). The executables built
+by TinyCC and by clang matched it byte for byte, for the chat program and the sharded chat system.
+
+Then the Rust runtime went: the interpreter, the Rust servers and worker system (`src/runtime.rs`, `serve.rs`,
+`system.rs`, `region.rs`, `os.rs`, `alloc_count.rs`: about 2,970 lines), the `.script` state runner and the `exp` experiments
+(`src/exp.rs`, `examples/*.script`). The measurements above that used them stand as recorded; they cannot be rerun
+from this commit (the last commit with them is `0070fb9`). Recording moved first: cases and the HTTP record are recorded
+by the TinyCC build, and every `.out` file and the HTTP record were unchanged by the switch. Tests of the Rust runtime
+that described language behaviour moved to the C runtime (`tests/cases/runtime.case`, JavaScript float texts and JSON
+escaping, mailbox and reply-slot limits, a forward rolled back); the allocation counter went with the Rust heap. The
+live Rust comparison in `c_runtime_speed` is now only the hand-written Rust baseline; the Rust runtime's own figures are
+in Rounds 11 and earlier.
+
+Found on the way: the `recursion` case overflowed the debug-build interpreter's 2 MB test-thread stack (it passed with
+16 MB); the C runtime caps calls at 64 deep, so the C builds were unaffected.

@@ -5,19 +5,12 @@
 //! resolves every name to a local, a global or a function, checks argument counts and assignments, and turns builtin
 //! calls into an enum. Errors that used to surface as a 500 at run time (an unknown name, assigning to a `let`)
 //! now stop the server from starting.
-use std::cell::Cell;
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok { Id(String), Int(i64), Flt(f64), Str(String), Sym(String) }
 
 /// What a name refers to, filled in by the binder.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
-
-/// A field access remembers the last collection it saw and where the field was in it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum FieldHit { None, Col(u32, u32), Child(u32, u32) } // (collection, column or child collection)
-impl Default for FieldHit { fn default() -> FieldHit { FieldHit::None } }
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,7 +34,7 @@ impl Default for B { fn default() -> B { B::Now } }
 pub enum Expr {
     Int(i64), Float(f64), Str(String), Bool(bool), Null,
     Var(String, VarRes),
-    Field(Box<Expr>, String, Cell<FieldHit>),
+    Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>, CallRes),
     Un(char, Box<Expr>),
@@ -306,7 +299,7 @@ impl P {
                     e = Expr::Call(format!("{}.{}", n, f), a, CallRes::Unbound);
                     continue;
                 }
-                e = Expr::Field(Box::new(e), f, Cell::new(FieldHit::None));
+                e = Expr::Field(Box::new(e), f);
             }
             else if self.sym("[") { let i = self.expr()?; self.eat("]")?; e = Expr::Index(Box::new(e), Box::new(i)); }
             else { break; }
@@ -433,7 +426,7 @@ impl Binder<'_> {
                     None => match (self.globals)(n) { Some(g) => VarRes::Global(g as u32), None => return self.err(format!("unknown name `{}`", n)) },
                 };
             }
-            Expr::Field(b, _, _) => self.expr(b)?,
+            Expr::Field(b, _) => self.expr(b)?,
             Expr::Index(b, i) => { self.expr(b)?; self.expr(i)?; }
             Expr::Un(_, x) => self.expr(x)?,
             Expr::Bin(_, a, b) => { self.expr(a)?; self.expr(b)?; }

@@ -157,7 +157,7 @@ struct SysFns {
 impl CSystemBackend {
     pub fn start(case: &Case, use_clang: bool, flags: &[&str]) -> CSystemBackend {
         let read = |f: &str| case.files.iter().find(|x| x.0 == f).map(|x| x.1.clone()).ok_or_else(|| format!("no `--- file {}` section", f));
-        let spec = crate::system::parse_spec_with(case.system.as_deref().unwrap(), &read).unwrap_or_else(|e| panic!("{}: system: {}", case.name, e));
+        let spec = crate::spec::parse_spec_with(case.system.as_deref().unwrap(), &read).unwrap_or_else(|e| panic!("{}: system: {}", case.name, e));
         let units = crate::cgen::system_c(&spec).unwrap_or_else(|e| panic!("{}: {}", case.name, e));
         let refs: Vec<&str> = units.iter().map(|s| s.as_str()).collect();
         let code = if use_clang { Code::Dll(clang_dll_units(&refs, &case.name, flags).unwrap_or_else(|e| panic!("{}: {}", case.name, e))) }
@@ -434,6 +434,82 @@ mod tests {
                 let post = t.elapsed().as_nanos() as f64 / 5000.0 / 1000.0;
                 println!("round {}: GET messages {:.2} us, POST message {:.2} us", round, get, post);
             }
+        }
+    }
+
+    /// What the system cases cannot make happen on purpose, checked on the C system's own parts: a mailbox that is full,
+    /// a message too big for its slot, a closed mailbox; in-flight requests bounded, and a reply slot abandoned by a
+    /// caller that gave up freed by its late answer; a forward that could not be sent rolls its handler back.
+    #[test]
+    fn c_system_parts_behave() {
+        let one = "worker w { state \"w.mito\"; api \"w.api\"; count 1; mailbox 4; slot 256; }\nentry w;\ninflight 2;\n";
+        let read = |f: &str| Ok(if f == "w.mito" { "struct C { n: i64; } global c: C;".to_string() } else { "endpoint GET /n { respond 200 { \"n\": c.n }; }".to_string() });
+        let spec = crate::spec::parse_spec_with(one, &read).unwrap();
+        let mut units = crate::cgen::system_c(&spec).unwrap();
+        *units.last_mut().unwrap() += r#"
+MITO_API int t_box(void) {
+    if (!sys_os()) return 100;
+    Box b = {0}; lk_init(&b.lk); cv_init(&b.cv); b.cap = 2; b.slot = 64; b.buf = (u8 *)sys_mem(128);
+    u8 out[64]; u32 id; char big[100] = {0};
+    if (box_send(&b, 1, "a", 1, "/", 1, "", 0, 0, 0, 0, 0) != SENT) return 1;
+    if (box_send(&b, 2, "b", 1, "/", 1, "", 0, 0, 0, 0, 0) != SENT) return 2;
+    if (box_send(&b, 3, "c", 1, "/", 1, "", 0, 0, 0, 0, 0) != FULL) return 3;
+    if (!box_recv(&b, out)) return 4; memcpy(&id, out, 4); if (id != 1) return 5; /* first in, first out */
+    if (box_send(&b, 4, big, 100, "/", 1, "", 0, 0, 0, 0, 0) != TOOBIG) return 6;
+    box_close(&b);
+    if (!box_recv(&b, out)) return 7; memcpy(&id, out, 4); if (id != 2) return 8; /* queued messages still arrive after close */
+    if (box_recv(&b, out) != 0) return 9;
+    if (box_send(&b, 5, "a", 1, "/", 1, "", 0, 0, 0, 0, 0) != CLOSED) return 10;
+    return b.refused == 1 ? 0 : 11;
+}
+MITO_API int t_reply(void *sp) {
+    Sys *s = (Sys *)sp; u32 a, b, c;
+    if (!reply_take(s, &a) || !reply_take(s, &b)) return 1;
+    if (reply_take(s, &c)) return 2; /* inflight 2 */
+    reply_put(s, a, 200, "x", 1);
+    if (s->replies[a].state != 2 || s->replies[a].code != 200 || s->replies[a].len != 1) return 3;
+    s->replies[a].state = 0; reply_free(s, a);
+    s->replies[b].state = 3; /* its caller gave up, as mito_system_request does at its deadline */
+    reply_put(s, b, 200, "late", 4); /* the late answer frees the slot instead of being delivered */
+    if (s->replies[b].state != 0) return 4;
+    return reply_take(s, &a) && reply_take(s, &c) ? 0 : 5;
+}
+"#;
+        let refs: Vec<&str> = units.iter().map(|s| s.as_str()).collect();
+        let u = crate::tcc::Unit::compile_units(&refs, &[]).unwrap();
+        unsafe {
+            let t_box: unsafe extern "C" fn() -> i32 = std::mem::transmute(u.symbol("t_box").unwrap());
+            assert_eq!(t_box(), 0, "mailbox check failed at step {}", t_box());
+            let start: unsafe extern "C" fn(u64, i32) -> *mut std::ffi::c_void = std::mem::transmute(u.symbol("mito_system_start").unwrap());
+            let stop: unsafe extern "C" fn(*mut std::ffi::c_void) = std::mem::transmute(u.symbol("mito_system_stop").unwrap());
+            let t_reply: unsafe extern "C" fn(*mut std::ffi::c_void) -> i32 = std::mem::transmute(u.symbol("t_reply").unwrap());
+            let s = start(1, 1);
+            assert!(!s.is_null());
+            assert_eq!(t_reply(s), 0, "reply slots");
+            stop(s);
+        }
+
+        // a forward: the handler's writes are kept only if the request was handed on
+        let case = Case { name: "forward-rollback".into(), state: "struct C { n: i64; } global c: C;".into(),
+            api: "endpoint POST /f { c.n = c.n + 1; forward next[0] { \"n\": c.n }; }\nendpoint GET /n { respond 200 { \"n\": c.n }; }".into(), requests: String::new(), system: None, files: Vec::new() };
+        let mut be = CBackend::start(&case);
+        let sym = |n: &str| match &be._code { Code::Tcc(u) => u.symbol(n).unwrap(), Code::Dll(_) => unreachable!() };
+        unsafe {
+            let set_system: unsafe extern "C" fn(*mut std::ffi::c_void, u32, *const *const u8, *const u32, u32, u32) = std::mem::transmute(sym("mito_set_system"));
+            let forward_to: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u32, *mut i64, *mut MitoPair, u32) -> u32 = std::mem::transmute(sym("mito_forward_to"));
+            let finish: unsafe extern "C" fn(*mut std::ffi::c_void, i32) = std::mem::transmute(sym("mito_finish_forward"));
+            let names = [b"me\0".as_ptr(), b"next\0".as_ptr()];
+            set_system(be.m, 2, names.as_ptr(), [1u32, 1].as_ptr(), 0, 0);
+            assert_eq!(be.handle_quiet("POST", "/f", &[], ""), 0); // 0: forward, not an answer
+            let (mut kind, mut key) = (0u32, 0i64);
+            let mut out = [MitoPair { k: std::ptr::null(), kn: 0, v: std::ptr::null(), vn: 0 }; 4];
+            assert_eq!(forward_to(be.m, &mut kind, &mut key, out.as_mut_ptr(), 4), 1);
+            assert_eq!((kind, key, std::slice::from_raw_parts(out[0].v, out[0].vn as usize)), (1, 0, b"1".as_slice()));
+            finish(be.m, 0); // the next mailbox was full
+            assert_eq!(be.handle("GET", "/n", &[], "").1, "{\"n\":0}");
+            assert_eq!(be.handle_quiet("POST", "/f", &[], ""), 0);
+            finish(be.m, 1);
+            assert_eq!(be.handle("GET", "/n", &[], "").1, "{\"n\":1}");
         }
     }
 

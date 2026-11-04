@@ -95,6 +95,9 @@ extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
     fn GetProcAddress(m: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
 }
+/// clang's undefined-behaviour checks in trap mode (no runtime library: a violation stops the process at once), and
+/// array bounds: overflow of signed integers, shifts, out-of-range indexes into the C runtime's fixed arrays.
+pub const UBSAN: &[&str] = &["-O1", "-fsanitize=undefined,bounds", "-fsanitize-trap=undefined,bounds"];
 /// The clang to build C runtimes with: `MITO_CLANG`, or LLVM's default install. None if neither exists.
 pub fn clang() -> Option<String> {
     let p = std::env::var("MITO_CLANG").unwrap_or_else(|_| "C:/Program Files/LLVM/bin/clang.exe".into());
@@ -452,7 +455,10 @@ mod tests {
              endpoint GET /from/{k} { let k = int(param(\"k\")); respond 200 { \"up\": [each e in s from k e.id], \"down\": [each e in s from k reverse e.id] }; }\n").unwrap();
         let case = Case { name: "sorted-model".into(), state, api, requests: String::new(), system: None, files: Vec::new() };
         let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("compiled", Box::new(RustBackend::start(&case, true)))];
-        if clang().is_some() { bes.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true)))); }
+        if clang().is_some() {
+            bes.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true))));
+            bes.push(("C runtime, clang, undefined-behaviour checks", Box::new(CBackend::start_flags(&case, true, UBSAN))));
+        }
         for (name, be) in bes.iter_mut() {
             let mut model: Vec<(i64, i64, i64)> = Vec::new(); // (slot, key, id), in order
             let mut x = 0x2545_F491_4F6C_DD1Du64;
@@ -569,7 +575,10 @@ mod tests {
             } else {
                 vec![("interpreted", Box::new(RustBackend::start(&case, false))), ("compiled", Box::new(RustBackend::start(&case, true))), ("C runtime", Box::new(CBackend::start(&case)))]
             };
-            if case.system.is_none() && clang().is_some() { backends.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true)))); }
+            if case.system.is_none() && clang().is_some() {
+                backends.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true))));
+                backends.push(("C runtime, clang, undefined-behaviour checks", Box::new(CBackend::start_flags(&case, true, UBSAN))));
+            }
             let mut logs = Vec::new();
             for (name, be) in backends.iter_mut() {
                 for n in be.notes().iter().filter(|n| !n.ends_with(": compiled")) { problems.push(format!("{} ({}): {}", case.name, name, n)); }

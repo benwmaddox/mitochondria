@@ -229,3 +229,23 @@ The live bit is in the noise for random reads: 1M rows is 128 KB of bits, so the
 - **Measured here:** scan of 1M slots with a live bit per slot, 0.63 ns/slot, in line with the table scan (0.56-0.72 ns/row). The script shows: slots 5 and 6 freed and reported "not live", reused lowest-first; the accepted stale-index hazard (slot 7 reused, old index sees the new item); and the checked pool rejecting `0@0` after slot 0 moved to generation 1.
 - **Tests:** lowest-free reuse and live-bit guard, unchecked accepts a stale index while checked rejects it, Full / high-water mark falling / trim keeping live data, clear.
 - **Not done:** FIFO reuse option; per-page live counters; the debug-only generation mode; pools of rows with lists-of-lists.
+
+## Choosing: list, table or pool
+| | `list<T,N>` | `table<T,N>` | `pool<T,N>` |
+|---|---|---|---|
+| Storage | record after record | one column per field, rows dense | one column per field, slots stable, live bit |
+| Remove | pop last only | swap-remove (rows move, order changes) | free a slot (nothing moves) |
+| Reference by | position | row, valid only until the next removal | slot index (or `slot@gen` if `checked`) |
+| Scan one field | strided (slow) | fastest (no check) | fast (one bit test per slot, up to the mark) |
+| Holes | none | none | yes, below the high-water mark |
+| Trim | by length | exact (live is a prefix) | above the mark; holes keep pages |
+
+**Use `table` when** nothing outside the table refers to a row for longer than one tick or handler: particles, bullets, per-frame work lists, batch records, columns you only scan, results and scratch rows. Order may change; rows are cheap to move.
+
+**Use `pool` when** other data holds on to an item between ticks: units that others target, owners and parents, sessions, connections, inventory slots, anything in a mailbox message. Slots do not move, so a stored index stays meaningful until the item is freed.
+
+**Use `pool ... checked` when** a stale reference would be costly: handles sent outside the program, long-lived references to things freed and reused quickly, or any pool in a debug build.
+
+**Use `list` when** the data is small, order matters, and you add and remove at the end (a stack, a short log) or you read whole records at a time.
+
+Rules of thumb: start with `table`; switch to `pool` the first time you need to store a reference to a row. Frequent removal in the middle with no references stored is still `table` (swap-remove is cheap). Many references into data that is also scanned every tick is `pool` (the scan pays one bit test per slot, about 0.6 vs 0.45 ns). A pool that is mostly empty below a high mark wastes scan time and pages; consider a smaller capacity or a `table` plus a separate id map.

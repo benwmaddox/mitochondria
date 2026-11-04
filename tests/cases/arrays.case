@@ -11,7 +11,7 @@ state app: App;
 endpoint POST /grid/{k} { app.grid.cells[int(param("k"))] = int(body("v")); app.grid.total = app.grid.total + int(body("v")); respond 200 { "cell": app.grid.cells[int(param("k"))] }; }
 endpoint GET /grid { respond 200 { "c0": app.grid.cells[0], "c3": app.grid.cells[3], "total": app.grid.total }; }
 endpoint GET /grid/{k} { respond 200 { "v": app.grid.cells[int(param("k"))] }; }
-endpoint POST /players { let p = alloc app.players; p.name = body("name"); p.hits[0] = 1; p.hits[2] = 3; respond 201 { "slot": slot(p) }; }
+endpoint POST /players { let p = app.players.add(); p.name = body("name"); p.hits[0] = 1; p.hits[2] = 3; respond 201 { "slot": slot(p) }; }
 endpoint POST /players/{p}/hit/{k} {
     let p = app.players[int(param("p"))];
     let k = int(param("k"));

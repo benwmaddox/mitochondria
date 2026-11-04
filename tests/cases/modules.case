@@ -21,7 +21,7 @@ endpoint POST /fav/{k} { app.fav.s = app.scores.get(int(param("k"))); respond 20
 endpoint GET /fav { respond 200 { "fav": or(app.fav.s.name, "-") }; }
 endpoint GET /stats {
     respond 200 {
-        "added": app.scores.added(), "removed": app.scores.removed(), "count": count(app.scores.items),
+        "added": app.scores.added(), "removed": app.scores.removed(), "count": app.scores.items.count(),
         "others": app.others.size(), "names": [each s in app.scores.items s.name]
     };
 }

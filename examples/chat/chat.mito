@@ -25,7 +25,7 @@ fn typing_until(t: i64) -> i64 { return t + max(chat.meta.typing_ttl, 5000); }
 endpoint POST /sessions {
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
-    let s = alloc chat.sessions;
+    let s = chat.sessions.add();
     s.name = name;
     s.secret = random();
     s.window = now();
@@ -33,7 +33,7 @@ endpoint POST /sessions {
 }
 
 endpoint DELETE /session {
-    free me();
+    chat.sessions.remove(me());
     respond 200 { "ok": true };
 }
 
@@ -61,7 +61,7 @@ endpoint POST /rooms/{room}/messages {
     if who.sent >= max(chat.meta.rate, 30) { fail 429 "slow down"; }
     who.sent = who.sent + 1;
     chat.meta.next_seq = chat.meta.next_seq + 1;
-    let m = alloc room.messages;
+    let m = room.messages.add();
     m.seq = chat.meta.next_seq;
     m.at = t;
     m.author = who;
@@ -88,10 +88,10 @@ endpoint POST /rooms/{room}/typing {
     var found = false;
     each ty in room.typing {
         if or(ty.who == who, false) { ty.until = typing_until(t); found = true; }
-        else if ty.until < t { free ty; }
+        else if ty.until < t { room.typing.remove(ty); }
     }
     if !found {
-        let ty = alloc room.typing;
+        let ty = room.typing.add();
         ty.who = who;
         ty.until = typing_until(t);
     }
@@ -107,9 +107,9 @@ endpoint GET /rooms/{room}/typing {
 
 endpoint GET /stats {
     var messages = 0;
-    each r in chat.rooms { messages = messages + count(r.messages); }
+    each r in chat.rooms { messages = messages + r.messages.count(); }
     respond 200 {
-        "sessions": count(chat.sessions), "rooms": chat.rooms.size(), "messages": messages, "next_seq": chat.meta.next_seq,
+        "sessions": chat.sessions.count(), "rooms": chat.rooms.size(), "messages": messages, "next_seq": chat.meta.next_seq,
         "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb"), "reserved_kb": stat("reserved_kb")
     };
 }

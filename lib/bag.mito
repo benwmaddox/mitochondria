@@ -7,16 +7,16 @@ global items: pool<T, N> checked;
 global counts: Counts;
 --- functions
 pub fn add() {
-    let it = alloc self.items;
+    let it = self.items.add();
     self.counts.added = self.counts.added + 1;
     return it;
 }
 pub fn remove(it) {
-    free it;
+    self.items.remove(it);
     self.counts.removed = self.counts.removed + 1;
 }
-pub fn size() { return count(self.items); }
-pub fn room() { return N - count(self.items); }
+pub fn size() { return self.items.count(); }
+pub fn room() { return N - self.items.count(); }
 pub fn get(k) { return self.items[k]; }
 pub fn added() { return self.counts.added; }
 pub fn removed() { return self.counts.removed; }

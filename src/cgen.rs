@@ -390,7 +390,8 @@ fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
     fn st(stmts: &[Stmt], out: &mut Vec<u32>) {
         for s in stmts {
             match s {
-                Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Free(e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
+                Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
+                Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); st(t, out); st(e, out); }
@@ -432,7 +433,8 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
         }
         for s in stmts {
             match s {
-                Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Free(e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
+                Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
+                Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); calls(t, out); calls(e, out); }
@@ -522,7 +524,8 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     }
     stmts.iter().any(|s| match s {
         Stmt::Alloc { .. } | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
-        Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Free(e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
+        Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
+        Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || writes(api, t, seen) || writes(api, e, seen),
         Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || writes(api, b, seen),
@@ -544,7 +547,8 @@ fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     }
     stmts.iter().any(|s| match s {
         Stmt::Alloc { .. } => true,
-        Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Free(e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
+        Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
+        Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || allocates(api, t, seen) || allocates(api, e, seen),
         Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || allocates(api, b, seen),
@@ -602,14 +606,14 @@ impl<'p> G<'p> {
     fn may_add_or_free(&self, c: usize, verb: &str) -> R<()> {
         let Some((m, data, items)) = self.coll_owner(c) else { return Ok(()) };
         if self.module_code().as_deref() == Some(m.name.as_str()) || (data && !items) { return Ok(()); }
-        Err(format!("{} items of {} with its functions, not `{}`", if verb == "alloc" { "add" } else { "remove" }, m.name, verb))
+        Err(format!("{} items of {} with its functions, not `{}.{}()`", verb, m.name, self.prog.colls[c].name, verb))
     }
     /// A field store or free through a value whose kind is known only at run time: refused outside module code when it
     /// could reach a module's key or private state.
     fn may_write_dynamic(&self, field: Option<&str>) -> R<()> {
         if self.prog.instances.is_empty() || self.module_code().is_some() { return Ok(()); }
         match field {
-            None => Err("`free` of a value whose kind is only known at run time, in a program with module instances: free a named item".into()),
+            None => Ok(()),
             Some(f) => {
                 for m in &self.prog.instances { if m.key.as_deref() == Some(f) { return Err(format!("`.{}` through a value whose kind is only known at run time could change the key of {}", f, m.name)); } }
                 for (c, coll) in self.prog.colls.iter().enumerate() {
@@ -891,13 +895,23 @@ impl<'p> G<'p> {
                 let collect = allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
                 self.each(it, env, collect, |g, env, _| g.block(body, env))?;
             }
-            Stmt::Free(e) => match self.expr(e, env, None)? {
-                CV::Item(c, i) => { self.may_add_or_free(c, "free")?; self.call(&format!("c->h->free_(c, {}, {})", c, i)) }
-                CV::Ref(t, s, k) => { self.may_add_or_free(t, "free")?; self.line(&format!("if ({} != 0) {{ CALL(c->h->free_(c, {}, {})); }}", s, t, k)) }
-                CV::Null => {}
-                CV::Any(x) => { self.may_write_dynamic(None)?; self.call(&format!("c->h->free_val(c, &{})", x)) }
-                _ => self.fail(500, "free needs an item"),
-            },
+            Stmt::Remove(coll, e) => {
+                let CV::Coll(want, _) = self.expr(coll, env, None)? else { return no("`remove` is a function of a collection") };
+                let wname = self.prog.colls[want].name.clone();
+                let other = |c: usize| no(format!("an item of {} cannot be removed from {}", self.prog.colls[c].name, wname));
+                match self.expr(e, env, None)? {
+                    CV::Item(c, i) => { if c != want { return other(c); } self.may_add_or_free(c, "remove")?; self.call(&format!("c->h->free_(c, {}, {})", c, i)) }
+                    CV::Ref(t, s, k) => { if t != want { return other(t); } self.may_add_or_free(t, "remove")?; self.line(&format!("if ({} != 0) {{ CALL(c->h->free_(c, {}, {})); }}", s, t, k)) }
+                    CV::Null => {}
+                    CV::Any(x) => {
+                        // a value whose kind is known only at run time: it must be an item of this collection
+                        self.may_add_or_free(want, "remove")?;
+                        self.line(&format!("if ({}.tag == 5 && {}.a != {}) FAIL(500, {}, {});", x, x, want, c_lit(format!("not an item of {}", wname).as_bytes()), format!("not an item of {}", wname).len()));
+                        self.call(&format!("c->h->free_val(c, &{})", x))
+                    }
+                    _ => self.fail(500, "remove needs an item"),
+                }
+            }
             Stmt::Fail(code, m) => self.fail(*code, m),
             Stmt::Respond(code, j) => { self.json(j, env)?; self.line(&format!("return {};", code)); }
             Stmt::Return(e) => {
@@ -918,8 +932,8 @@ impl<'p> G<'p> {
             }
             Stmt::Do(e) => { self.expr(e, env, None)?; }
             Stmt::Alloc { slot, coll, try_, .. } => {
-                let CV::Coll(c, inst) = self.expr(coll, env, None)? else { return no("alloc of something other than a collection") };
-                self.may_add_or_free(c, "alloc")?;
+                let CV::Coll(c, inst) = self.expr(coll, env, None)? else { return no("`add` is a function of a collection") };
+                self.may_add_or_free(c, "add")?;
                 let t = self.tmp("i");
                 self.line(&format!("u32 {};", t));
                 self.call(&format!("c->h->alloc(c, {}, {}, {}, &{})", c, inst, *try_ as i32, t));
@@ -1383,7 +1397,7 @@ impl<'p> G<'p> {
                 let f = if col.is_list() { 0 } else { 1 };
                 CV::Int(format!("(i64)LD_U32({}, {})", col.hdr + 4 * f * col.mult, inst))
             }
-            B::Capacity => { let Some(CV::Coll(c, _)) = a.first() else { return no("capacity(collection)") }; CV::Int(format!("{}LL", self.prog.colls[*c].cap)) }
+            B::Capacity => { let Some(CV::Coll(c, _)) = a.first() else { return no("`capacity()` is a function of a collection") }; CV::Int(format!("{}LL", self.prog.colls[*c].cap)) }
             B::Slot => match a.first() {
                 Some(CV::Item(c, i)) => CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)),
                 Some(CV::Ref(c, s, i)) => { self.line(&format!("if ({} == 0) FAIL(500, \"slot(item)\", 10);", s)); CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)) }
@@ -1844,6 +1858,32 @@ mod profile_tests {
             let e = super::check(&prog, api).err().unwrap_or_default();
             assert!(e.contains(want), "{} -> {}", api, e);
         }
+    }
+
+    /// Collections are used through their functions; the old keywords, and operations in the wrong place, do not load.
+    #[test]
+    fn collection_functions_replace_the_old_keywords() {
+        let st = "struct I { n: i64; } struct E { who: ref<app.items>; n: i64; } struct App { items: pool<I, 4>; board: sorted<E, 4, n>; } state app: App;";
+        let (st, _) = crate::modules::expand(st, "").unwrap();
+        let load = |api: &str| -> String {
+            let (_, api) = crate::modules::expand("struct I { n: i64; } struct E { who: ref<app.items>; n: i64; } struct App { items: pool<I, 4>; board: sorted<E, 4, n>; } state app: App;", api).unwrap();
+            super::check(&Program::parse(&st).unwrap(), &api).err().unwrap_or_default()
+        };
+        for (api, want) in [
+            ("endpoint POST /a { let p = alloc app.items; respond 200 {}; }", "replaced by collection functions"),
+            ("endpoint POST /a { let p = app.items[0]; free p; respond 200 {}; }", "replaced by the collection's function"),
+            ("endpoint GET /a { respond 200 { n: count(app.items) }; }", "`count(x)` was replaced by `x.count()`"),
+            ("endpoint GET /a { respond 200 { n: capacity(app.items) }; }", "`capacity(x)` was replaced by `x.capacity()`"),
+            ("endpoint POST /a { respond 200 { n: slot(app.items.add()) }; }", "makes an item"),
+            ("endpoint POST /a { let p = app.items[0]; app.board.items.remove(p); respond 200 {}; }", "cannot be removed from"),
+            ("endpoint POST /a { let p = app.items[0]; let n = app.items.remove(p); respond 200 {}; }", "is a statement"),
+            ("endpoint GET /a { respond 200 { n: app.items.count(1) }; }", "takes no arguments, given 1"),
+            ("endpoint POST /a { if app.items.add { n: 1 } { } respond 200 {}; }", "expected"),
+        ] {
+            let e = load(api);
+            assert!(e.contains(want), "{} -> {}", api, e);
+        }
+        assert_eq!(load("endpoint POST /a { let p = app.items.add { n: 2 }; p.n += 1; app.items.remove(p); respond 200 { n: p.n, c: app.items.count() }; }"), "");
     }
 
     #[test]

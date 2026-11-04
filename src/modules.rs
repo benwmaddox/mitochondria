@@ -217,7 +217,7 @@ mod tests {
         let (st, api) = expand("struct S { n: i64; }\nstruct App { b: bag<S, 4>; }\nstate app: App;\n", "").unwrap();
         assert!(st.contains("struct __mito__app__b__Counts {") && st.contains("struct __mito__app__b__state {") && st.contains("items: pool<S, 4> checked;") && st.contains("counts: __mito__app__b__Counts;"), "{}", st);
         assert!(st.contains("b: __mito__app__b__state;") && st.contains("instance app.b of bag;"), "{}", st);
-        assert!(api.contains("pub fn app.b.add()") && api.contains("alloc self.items") && api.contains("return 4 - count(self.items);"), "{}", api);
+        assert!(api.contains("pub fn app.b.add()") && api.contains("self.items.add()") && api.contains("return 4 - self.items.count();"), "{}", api);
         assert!(expand("struct S { n: i64; }\nstruct App { b: bag<S>; }\nstate app: App;\n", "").unwrap_err().contains("takes 2 arguments"));
         // an instance exists once: its struct is reached through plain structs from the state, one way only
         let twice = expand("struct S { n: i64; }\nstruct H { b: bag<S, 4>; }\nstruct App { x: H; y: H; }\nstate app: App;\n", "").unwrap_err();
@@ -241,9 +241,9 @@ mod tests {
         assert_eq!(load("endpoint POST /ok { let s = app.b.add(); s.n = 5; s.name = \"x\"; app.b.remove(s); respond 200 {}; }"), Ok(()));
         for (api, want) in [
             ("endpoint POST /a { app.b.counts.added = 9; respond 200 {}; }", "belongs to app.b (module bag)"),
-            ("endpoint POST /a { let s = alloc app.b.items; respond 200 {}; }", "add items of app.b with its functions, not `alloc`"),
-            ("endpoint POST /a { free app.b.get(0); respond 200 {}; }", "remove items of app.b with its functions, not `free`"),
-            ("endpoint POST /a { var x = 1; x = app.b.get(0); free x; respond 200 {}; }", "`free` of a value whose kind is only known at run time"),
+            ("endpoint POST /a { let s = app.b.items.add(); respond 200 {}; }", "add items of app.b with its functions, not `app.b.items.add()`"),
+            ("endpoint POST /a { app.b.items.remove(app.b.get(0)); respond 200 {}; }", "remove items of app.b with its functions, not `app.b.items.remove()`"),
+            ("endpoint POST /a { var x = 1; x = app.b.get(0); app.b.items.remove(x); respond 200 {}; }", "remove items of app.b with its functions"),
             ("endpoint POST /a { each s in app.b { app.b.remove(s); } respond 200 {}; }", "a loop over app.b calls a function that changes app.b"),
             ("endpoint GET /a { respond 200 { \"x\": [each s in app.b app.b.add()] }; }", "a loop over app.b calls a function that changes app.b"),
             ("endpoint GET /a { respond 200 { \"x\": [each s in app.b from 1 order by s.n s.n] }; }", "`order by` was removed"),

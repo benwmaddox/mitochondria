@@ -11,13 +11,13 @@ struct App {
 state app: App;
 
 fn first_positive() { each i in app.items where i.score > 0 { i.score = i.score; return i.tag; } return "-"; }
-endpoint POST /items { let it = alloc app.items; it.score = int(body("score")); it.tag = body("tag"); respond 201 { "slot": slot(it) }; }
-endpoint POST /double { each i in app.items { let c = alloc app.items; c.score = i.score * 2; c.tag = i.tag + "2"; } respond 200 { "n": count(app.items) }; }
+endpoint POST /items { let it = app.items.add(); it.score = int(body("score")); it.tag = body("tag"); respond 201 { "slot": slot(it) }; }
+endpoint POST /double { each i in app.items { let c = app.items.add(); c.score = i.score * 2; c.tag = i.tag + "2"; } respond 200 { "n": app.items.count() }; }
 endpoint POST /zero { var n = 0; each i in app.items where i.score > 0 { each j in app.items { j.score = 0; } n = n + 1; } respond 200 { "visited": n }; }
 endpoint POST /boxes {
-    let b = alloc app.boxes;
-    each i in app.items where i.score != 0 limit 3 { let c = alloc b.items; c.score = i.score * 10; c.tag = i.tag; }
-    respond 201 { "n": count(b.items), "scores": [each c in b.items c.score] };
+    let b = app.boxes.add();
+    each i in app.items where i.score != 0 limit 3 { let c = b.items.add(); c.score = i.score * 10; c.tag = i.tag; }
+    respond 201 { "n": b.items.count(), "scores": [each c in b.items c.score] };
 }
 endpoint GET /firsts {
     var n = 0;

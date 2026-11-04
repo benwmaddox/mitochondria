@@ -1,0 +1,57 @@
+// collection functions, initializers, compound assignment and unquoted keys (the syntax of docs/proposals/syntax.md)
+--- program
+struct Item { name: string<8>; n: i64; entry: ref<app.board>; }
+struct Entry { who: ref<app.items>; n: i64; }
+struct Log { what: string<16>; }
+struct App {
+    total: i64;
+    items: pool<Item, 3> checked;
+    board: sorted<Entry, 3, n>;
+    log: list<Log, 2> drop_oldest;
+}
+state app: App;
+
+fn items() -> ref<app.items> { return app.items; }
+
+endpoint POST /items {
+    let it = app.items.add { name: body("name"), n: int(body("n")) };
+    let e = app.board.add(it.n) { who: it };
+    it.entry = e;
+    app.log.add { what: "added" };
+    app.total += it.n;
+    respond 201 { id: slot(it), entry: slot(e), total: app.total };
+}
+endpoint POST /maybe {
+    let it = app.items.try_add();
+    respond 200 { got: exists(it), count: app.items.count(), of: app.items.capacity(), via_value: items().count() };
+}
+endpoint POST /sub/{k} {
+    app.total -= int(param("k"));
+    app.total *= 2;
+    app.total /= 3;
+    respond 200 { total: app.total };
+}
+endpoint DELETE /items/{k} {
+    let it = app.items[int(param("k"))];
+    app.board.remove(it.entry);
+    app.items.remove(it);
+    app.log.add { what: "removed" };
+    respond 200 { left: app.items.count() };
+}
+endpoint GET /all {
+    respond 200 {
+        items: [each it in app.items { name: it.name, n: it.n }],
+        board: [each e in app.board reverse { name: or(e.who.name, "[gone]"), n: e.n }],
+        log: [each l in app.log { what: l.what }],
+        "quoted key": app.total
+    };
+}
+--- requests
+POST /items {"name": "a", "n": 5}
+POST /items {"name": "b", "n": 9}
+POST /maybe
+POST /maybe
+GET /all
+POST /sub/2
+DELETE /items/1
+GET /all

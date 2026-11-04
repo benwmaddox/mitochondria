@@ -9,17 +9,17 @@ struct App {
 }
 state app: App;
 
-endpoint POST /evs { let e = alloc app.evs; e.n = int(body("n")); e.who = body("who"); respond 201 { "count": count(app.evs) }; }
+endpoint POST /evs { let e = app.evs.add(); e.n = int(body("n")); e.who = body("who"); respond 201 { "count": app.evs.count() }; }
 endpoint GET /evs/{k} { let e = app.evs[int(param("k"))]; respond 200 { "n": e.n, "who": e.who }; }
 endpoint GET /evs { respond 200 { "x": [each e in app.evs e.n], "r": [each e in app.evs reverse e.n], "first": app.evs[0].n }; }
-endpoint POST /strict { let e = alloc app.strict; e.n = count(app.strict); respond 201 { "n": e.n }; }
-endpoint POST /strict/try { let e = try_alloc app.strict; respond 200 { "got": exists(e) }; }
+endpoint POST /strict { let e = app.strict.add(); e.n = app.strict.count(); respond 201 { "n": e.n }; }
+endpoint POST /strict/try { let e = app.strict.try_add(); respond 200 { "got": exists(e) }; }
 endpoint POST /copy {
     // the loop sees the items there were when it started, not the ones it adds
-    each e in app.evs { let f = alloc app.evs; f.n = e.n + 100; f.who = e.who; }
+    each e in app.evs { let f = app.evs.add(); f.n = e.n + 100; f.who = e.who; }
     respond 200 { "x": [each e in app.evs e.n] };
 }
-endpoint POST /bags { let b = alloc app.bags; let x = alloc b.nums; let y = alloc b.nums; let f = alloc b.flags; respond 201 { "n": count(b.nums), "f": count(b.flags) }; }
+endpoint POST /bags { let b = app.bags.add(); let x = b.nums.add(); let y = b.nums.add(); let f = b.flags.add(); respond 201 { "n": b.nums.count(), "f": b.flags.count() }; }
 endpoint GET /bags/{k} {
     let b = app.bags[int(param("k"))];
     var sum = 0;
@@ -31,8 +31,8 @@ endpoint POST /bags/{k}/flag { let b = app.bags[int(param("k"))]; b.flags[0] = b
 endpoint POST /evs/{k} { app.evs[int(param("k"))] = 5; respond 200 {}; }
 endpoint POST /bags/{k}/grow {
     let b = app.bags[int(param("k"))];
-    each v in b.nums { let w = alloc b.nums; }
-    respond 200 { "n": count(b.nums) };
+    each v in b.nums { let w = b.nums.add(); }
+    respond 200 { "n": b.nums.count() };
 }
 --- requests
 GET /evs

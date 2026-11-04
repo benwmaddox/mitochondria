@@ -11,7 +11,7 @@ state app: App;
 endpoint POST /motd { app.meta.motd = body("m"); respond 200 { "motd": app.meta.motd, "len": len(app.meta.motd), "max": maxlen(app.meta.motd) }; }
 endpoint POST /notes {
     let t = body("t");
-    let n = alloc app.notes;
+    let n = app.notes.add();
     if len(t) + 2 > maxlen(n.text) { fail 413 "too long"; }
     n.text = "[" + t + "]";
     respond 201 { "text": n.text };

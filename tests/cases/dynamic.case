@@ -8,7 +8,7 @@ struct App {
 state app: App;
 struct Top { r: ref<app.ts>; }
 
-endpoint POST /t { let t = alloc app.ts; t.n = slot(t) * 10; respond 201 {}; }
+endpoint POST /t { let t = app.ts.add(); t.n = slot(t) * 10; respond 201 {}; }
 endpoint GET /index { respond 200 { "n": app.ts[body("k")].n }; }
 endpoint GET /limit { respond 200 { "x": [each t in app.ts limit body("n") t.n] }; }
 endpoint GET /minmax { respond 200 { "min": min(body("a"), 5), "max": max(3, body("a")) }; }
@@ -24,8 +24,8 @@ endpoint GET /anyitem {
     respond 200 { "n": x.n, "slot": slot(x) };
 }
 endpoint POST /anyitem { var x = 5; x = app.ts[int(body("k"))]; x.n = 77; respond 200 { "n": x.n }; }
-endpoint DELETE /anyitem { var x = "s"; x = app.ts[int(body("k"))]; free x; respond 200 { "count": count(app.ts) }; }
-endpoint GET /coll { respond 200 { "n": count(pool_of()), "x": [each t in pool_of() t.n] }; }
+endpoint DELETE /anyitem { var x = "s"; x = app.ts[int(body("k"))]; app.ts.remove(x); respond 200 { "count": app.ts.count() }; }
+endpoint GET /coll { respond 200 { "n": pool_of().count(), "x": [each t in pool_of() t.n] }; }
 endpoint GET /recor { respond 200 { "a": or(find(int(body("k"))).n, -1) }; }
 endpoint GET /slotnull { respond 200 { "s": slot(app.top.r) }; }
 endpoint GET /divmin { respond 200 { "d": (0 - 9223372036854775807 - 1) / int(body("d")) }; }

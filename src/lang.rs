@@ -65,7 +65,8 @@ pub enum Stmt {
     Assign(Expr, Expr),
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     Each(Iter, Vec<Stmt>),
-    Free(Expr),
+    /// `coll.remove(item)`: the item leaves the collection when the request succeeds.
+    Remove(Expr, Expr),
     Fail(u16, String),
     Respond(u16, Json),
     Return(Option<Expr>),
@@ -125,7 +126,7 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
         }
         else {
             let two: String = c[i..(i + 2).min(c.len())].iter().collect();
-            if ["==", "!=", "<=", ">=", "&&", "||", "->", ".."].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
+            if ["==", "!=", "<=", ">=", "&&", "||", "->", "..", "+=", "-=", "*=", "/="].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
             else { out.push(Tok::Sym(ch.to_string())); i += 1; }
         }
     }
@@ -133,12 +134,15 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
     Ok((out, at))
 }
 
-struct P { t: Vec<Tok>, i: usize, lines: Vec<u32> }
+/// `pre`: statements an initializer (`coll.add() { f: v }`) puts before the statement it is in; `init_ok`: whether
+/// an initializer may appear here (not in a condition, a loop's clauses or a JSON array, where it would run at a
+/// different time); `tmp`: hidden locals made so far.
+struct P { t: Vec<Tok>, i: usize, lines: Vec<u32>, pre: Vec<Stmt>, init_ok: bool, tmp: u32 }
 type R<T> = Result<T, String>;
 
 pub fn parse(src: &str) -> R<Api> {
     let (t, lines) = lex_lines(src)?;
-    let mut p = P { t, i: 0, lines };
+    let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0 };
     let mut api = Api::default();
     while p.i < p.t.len() {
         let public = p.is_kw("pub");
@@ -191,11 +195,20 @@ impl P {
     fn block(&mut self) -> R<Vec<Stmt>> {
         self.eat("{")?;
         let mut v = Vec::new();
-        while !self.sym("}") { if self.peek().is_none() { return Err("missing `}`".into()); } v.push(self.stmt()?); }
+        while !self.sym("}") {
+            if self.peek().is_none() { return Err("missing `}`".into()); }
+            let st = self.stmt()?;
+            v.append(&mut self.pre);
+            v.push(st);
+        }
         Ok(v)
     }
 
-    fn iter(&mut self) -> R<Iter> {
+    /// Parse with initializers refused (they would run at another time than they are written).
+    fn no_init<T>(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> { let was = self.init_ok; self.init_ok = false; let r = f(self); self.init_ok = was; r }
+
+    fn iter(&mut self) -> R<Iter> { self.no_init(|p| p.iter_inner()) }
+    fn iter_inner(&mut self) -> R<Iter> {
         let var = self.id()?; self.kw("in")?; let coll = self.expr()?;
         let hi = if self.sym("..") { Some(self.expr()?) } else { None };
         let from = if self.is_kw("from") { self.i += 1; Some(self.expr()?) } else { None };
@@ -211,23 +224,20 @@ impl P {
         if self.is_kw("let") || self.is_kw("var") {
             let is_var = self.is_kw("var");
             self.i += 1; let n = self.id()?; self.eat("=")?;
-            if !is_var && (self.is_kw("alloc") || self.is_kw("try_alloc")) {
-                let try_ = self.is_kw("try_alloc"); self.i += 1; let coll = self.postfix()?; self.eat(";")?;
-                return Ok(Stmt::Alloc { var: n, slot: 0, coll, try_ });
-            }
+            if self.is_kw("alloc") || self.is_kw("try_alloc") { return Err(format!("`{}` was replaced by collection functions: `let {} = coll.add();` (or `coll.try_add()`)", self.here_word(), n)); }
             let e = self.expr()?; self.eat(";")?;
             return Ok(if is_var { Stmt::Var(n, 0, e) } else { Stmt::Let(n, 0, e) });
         }
         if self.is_kw("if") { return self.if_stmt(); }
         if self.is_kw("each") { self.i += 1; let it = self.iter()?; let b = self.block()?; return Ok(Stmt::Each(it, b)); }
-        if self.is_kw("free") { self.i += 1; let e = self.expr()?; self.eat(";")?; return Ok(Stmt::Free(e)); }
+        if self.is_kw("free") { return Err("`free x` was replaced by the collection's function: `coll.remove(x);`".into()); }
         if self.is_kw("forward") {
             self.i += 1;
             let kind = self.id()?; self.eat("[")?; let key = self.expr()?; self.eat("]")?;
             let mut fields = Vec::new();
             if self.sym("{") {
                 while !self.sym("}") {
-                    let k = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("expected a field name string, found {}", self.here())) };
+                    let k = self.key()?;
                     self.eat(":")?; fields.push((k, self.expr()?)); self.sym(",");
                 }
             }
@@ -244,27 +254,37 @@ impl P {
         if self.is_kw("respond") { self.i += 1; let code = self.int()? as u16; let j = self.json()?; self.eat(";")?; return Ok(Stmt::Respond(code, j)); }
         let lhs = self.expr()?;
         if self.sym(";") { return Ok(Stmt::Do(lhs)); }
+        // `x += e` is `x = x + e`
+        for op in ["+=", "-=", "*=", "/="] {
+            if self.sym(op) { let rhs = self.expr()?; self.eat(";")?; return Ok(Stmt::Assign(lhs.clone(), Expr::Bin(op[..1].to_string(), Box::new(lhs), Box::new(rhs)))); }
+        }
         self.eat("=")?;
         let rhs = self.expr()?; self.eat(";")?;
         Ok(Stmt::Assign(lhs, rhs))
     }
 
     fn if_stmt(&mut self) -> R<Stmt> {
-        self.kw("if")?; let c = self.expr()?; let t = self.block()?;
+        self.kw("if")?; let c = self.no_init(|p| p.expr())?; let t = self.block()?;
         let e = if self.is_kw("else") { self.i += 1; if self.is_kw("if") { vec![self.if_stmt()?] } else { self.block()? } } else { vec![] };
         Ok(Stmt::If(c, t, e))
     }
+
+    /// A key of a JSON object or a forwarded field: a name, or a string for one that is not a name.
+    fn key(&mut self) -> R<String> {
+        match self.t.get(self.i) { Some(Tok::Str(s)) | Some(Tok::Id(s)) => { let s = s.clone(); self.i += 1; Ok(s) } _ => Err(format!("expected a key, found {}", self.here())) }
+    }
+    fn here_word(&self) -> String { match self.peek() { Some(Tok::Id(x)) => x.clone(), _ => self.here() } }
 
     fn json(&mut self) -> R<Json> {
         if self.sym("{") {
             let mut f = Vec::new();
             while !self.sym("}") {
-                let k = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("expected a key string, found {}", self.here())) };
+                let k = self.key()?;
                 self.eat(":")?; f.push((k, self.json()?)); self.sym(",");
             }
             return Ok(Json::Obj(f));
         }
-        if self.sym("[") { self.kw("each")?; let it = self.iter()?; let v = self.json()?; self.eat("]")?; return Ok(Json::Arr(it, Box::new(v))); }
+        if self.sym("[") { self.kw("each")?; let it = self.iter()?; let v = self.no_init(|p| p.json())?; self.eat("]")?; return Ok(Json::Arr(it, Box::new(v))); }
         Ok(Json::E(self.expr()?))
     }
 
@@ -291,12 +311,24 @@ impl P {
         loop {
             if self.sym(".") {
                 let f = self.id()?;
-                // `game.board.add(args)`: a call of a module instance's function, named by the instance's path
-                if let (Some(n), true) = (path_of(&e), matches!(self.peek(), Some(Tok::Sym(s)) if s == "(")) {
-                    self.i += 1;
+                // `game.board.add(args)`: named by the receiver's path (a module instance's function, or the binder makes it
+                // a collection operation); on any other value, `.f(value, args)`
+                // `coll.add { ... }`: an initializer may follow `add` without parentheses
+                let bare_init = (f == "add" || f == "try_add") && self.init_ok && matches!(self.peek(), Some(Tok::Sym(s)) if s == "{");
+                if bare_init || matches!(self.peek(), Some(Tok::Sym(s)) if s == "(") {
                     let mut a = Vec::new();
-                    while !self.sym(")") { a.push(self.expr()?); self.sym(","); }
-                    e = Expr::Call(format!("{}.{}", n, f), a, CallRes::Unbound);
+                    if !bare_init { self.i += 1; while !self.sym(")") { a.push(self.expr()?); self.sym(","); } }
+                    e = match path_of(&e) { Some(n) => Expr::Call(format!("{}.{}", n, f), a, CallRes::Unbound), None => { a.insert(0, e); Expr::Call(format!(".{}", f), a, CallRes::Unbound) } };
+                    // `coll.add() { field: value, ... }`: made into a hidden local and assignments before this statement
+                    if self.init_ok && matches!(self.peek(), Some(Tok::Sym(s)) if s == "{") {
+                        self.i += 1;
+                        let t = format!("__mito__new{}", self.tmp); self.tmp += 1;
+                        let mut sets = Vec::new();
+                        while !self.sym("}") { let k = self.id()?; self.eat(":")?; let v = self.expr()?; sets.push(Stmt::Assign(Expr::Field(Box::new(Expr::Var(t.clone(), VarRes::Unbound)), k), v)); self.sym(","); }
+                        self.pre.push(Stmt::Let(t.clone(), 0, e));
+                        self.pre.extend(sets);
+                        e = Expr::Var(t, VarRes::Unbound);
+                    }
                     continue;
                 }
                 e = Expr::Field(Box::new(e), f);
@@ -335,20 +367,20 @@ pub fn path_of(e: &Expr) -> Option<String> {
 }
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String> }
+struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32 }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
 pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
     let fns: Vec<(String, usize, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()) };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0 };
         for p in &f.params { b.declare(p, false); }
         b.block(&mut f.body)?;
         f.slots = b.max;
     }
     for e in &mut api.eps {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0 };
         b.block(&mut e.body)?;
         e.slots = b.max;
     }
@@ -385,7 +417,31 @@ impl Binder<'_> {
         if let Some(w) = &mut it.wher { self.expr(w)?; }
         Ok(())
     }
+    /// `x.f(args)` naming no function of a module instance: a collection operation, `.f(x, args)`.
+    fn operation(&self, e: &mut Expr) {
+        let Expr::Call(n, args, _) = e else { return };
+        if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
+        let Some((recv, op)) = n.rsplit_once('.') else { return };
+        if !matches!(op, "add" | "try_add" | "remove" | "count" | "capacity") { return; }
+        let mut parts = recv.split('.');
+        let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
+        for f in parts { r = Expr::Field(Box::new(r), f.to_string()); }
+        args.insert(0, r);
+        *n = format!(".{}", op);
+    }
     fn stmt(&mut self, s: &mut Stmt) -> R<()> {
+        // collection operations that are statements: `let p = coll.add();`, `coll.add();`, `coll.remove(p);`
+        match s {
+            Stmt::Let(_, _, e) | Stmt::Do(e) => self.operation(e),
+            _ => {}
+        }
+        let lowered = match s {
+            Stmt::Let(n, _, Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => Some(Stmt::Alloc { var: n.clone(), slot: 0, coll: args.remove(0), try_: op == ".try_add" }),
+            Stmt::Do(Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => { self.hidden += 1; Some(Stmt::Alloc { var: format!("__mito__added{}", self.hidden), slot: 0, coll: args.remove(0), try_: op == ".try_add" }) }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".remove" && args.len() == 2 => { let item = args.remove(1); Some(Stmt::Remove(args.remove(0), item)) }
+            _ => None,
+        };
+        if let Some(l) = lowered { *s = l; }
         match s {
             Stmt::Let(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, false); }
             Stmt::Var(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, true); }
@@ -402,7 +458,8 @@ impl Binder<'_> {
             }
             Stmt::If(c, t, e) => { self.expr(c)?; self.block(t)?; self.block(e)?; }
             Stmt::Each(it, body) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.block(body)?; self.names.truncate(mark); self.next = next; }
-            Stmt::Free(e) | Stmt::Do(e) => self.expr(e)?,
+            Stmt::Remove(c, e) => { self.expr(c)?; self.expr(e)?; }
+            Stmt::Do(e) => self.expr(e)?,
             Stmt::Return(e) => { if let Some(e) = e { self.expr(e)?; } }
             Stmt::Respond(_, j) => self.json(j)?,
             Stmt::Forward { key, fields, .. } => { self.expr(key)?; for f in fields { self.expr(&mut f.1)?; } }
@@ -427,6 +484,7 @@ impl Binder<'_> {
             for f in parts { p = Expr::Field(Box::new(p), f.to_string()); }
             *e = p;
         }
+        self.operation(e);
         match e {
             Expr::Var(n, res) => {
                 *res = match self.names.iter().rev().find(|x| x.0 == *n) {
@@ -438,7 +496,21 @@ impl Binder<'_> {
             Expr::Index(b, i) => { self.expr(b)?; self.expr(i)?; }
             Expr::Un(_, x) => self.expr(x)?,
             Expr::Bin(_, a, b) => { self.expr(a)?; self.expr(b)?; }
+            Expr::Call(n, ..) if n.starts_with('.') => {
+                let Expr::Call(n, args, res) = e else { unreachable!() };
+                for a in args.iter_mut() { self.expr(a)?; }
+                *res = match (n.as_str(), args.len()) {
+                    (".count", 1) => CallRes::Builtin(B::Count),
+                    (".capacity", 1) => CallRes::Builtin(B::Capacity),
+                    (".add" | ".try_add", 1) => return self.err(format!("`{}()` makes an item: write `let x = coll{}();` or `coll{}();` as a statement", &n[1..], n, n)),
+                    (".remove", 2) => return self.err("`remove(item)` is a statement: `coll.remove(item);`".into()),
+                    (".count" | ".capacity" | ".add" | ".try_add", k) => return self.err(format!("`{}()` takes no arguments, given {}", &n[1..], k - 1)),
+                    (".remove", k) => return self.err(format!("`remove` takes one item, given {}", k - 1)),
+                    _ => return self.err(format!("unknown function `{}`", &n[1..])),
+                };
+            }
             Expr::Call(n, args, res) => {
+                if n == "count" || n == "capacity" { return self.err(format!("`{}(x)` was replaced by `x.{}()`", n, n)); }
                 for a in args.iter_mut() { self.expr(a)?; }
                 if let (Some(rest), Some(o)) = (n.strip_prefix("self."), self.owner.as_ref()) { *n = format!("{}.{}", o, rest); }
                 *res = if let Some(k) = self.fns.iter().position(|f| f.0 == *n) {

@@ -18,7 +18,7 @@ fn player() -> ref<game.players> { return game.players[int(param("id"))]; }
 endpoint POST /players {
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
-    let p = alloc game.players;
+    let p = game.players.add();
     p.name = name;
     let e = game.board.add(0);
     e.who = p;
@@ -30,7 +30,7 @@ endpoint POST /players/{id}/games {
     let p = player();
     let points = int(body("points"));
     game.totals.games = game.totals.games + 1;
-    let g = alloc game.recent;
+    let g = game.recent.add();
     g.who = p;
     g.points = points;
     g.at = now();
@@ -52,13 +52,13 @@ endpoint GET /recent {
 endpoint DELETE /players/{id} {
     let p = player();
     game.board.remove(p.entry);
-    free p;
+    game.players.remove(p);
     respond 200 { "ok": true };
 }
 
 endpoint GET /stats {
     respond 200 {
-        "players": count(game.players), "games": game.totals.games,
+        "players": game.players.count(), "games": game.totals.games,
         "reserved_kb": stat("reserved_kb"), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb")
     };
 }

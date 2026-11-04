@@ -1,0 +1,14 @@
+POST /items -> 201 {"id":0,"entry":0,"total":5}
+POST /items -> 201 {"id":1,"entry":1,"total":14}
+POST /maybe -> 200 {"got":true,"count":3,"of":3,"via_value":3}
+POST /maybe -> 200 {"got":false,"count":3,"of":3,"via_value":3}
+GET /all -> 200 {"items":[{"name":"a","n":5},{"name":"b","n":9},{"name":"","n":0}],"board":[{"name":"b","n":9},{"name":"a","n":5}],"log":[{"what":"added"},{"what":"added"}],"quoted key":14}
+POST /sub/2 -> 200 {"total":8}
+DELETE /items/1 -> 200 {"left":3}
+GET /all -> 200 {"items":[{"name":"a","n":5},{"name":"","n":0}],"board":[{"name":"a","n":5}],"log":[{"what":"added"},{"what":"removed"}],"quoted key":8}
+state <plain values> 120
+state app.items 97
+state app.board.items 48
+state app.board.links 121
+state app.log 28
+memory reserved=20480 committed=20480 live=414

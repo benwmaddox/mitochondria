@@ -15,14 +15,14 @@ struct App {
 }
 state app: App;
 
-endpoint POST /w1 { let m = alloc app.w1.s; m.n = 1; respond 201 { "slot": slot(m) }; }
-endpoint GET /w { respond 200 { "w0": count(app.w0.s), "w1": count(app.w1.s) }; }
-endpoint POST /t { app.t.a = 1; app.t.b = 2; app.t.name = "changed"; let m = alloc app.ms; m.n = 9; if body("fail") == "yes" { fail 409 "rolled back"; } respond 200 { "a": app.t.a }; }
-endpoint GET /t { respond 200 { "a": app.t.a, "b": app.t.b, "name": app.t.name, "ms": count(app.ms) }; }
-endpoint POST /ms { let m = alloc app.ms; m.n = int(body("n")); respond 201 { "slot": slot(m) }; }
-endpoint DELETE /ms/{k} { free app.ms[int(param("k"))]; respond 200 {}; }
+endpoint POST /w1 { let m = app.w1.s.add(); m.n = 1; respond 201 { "slot": slot(m) }; }
+endpoint GET /w { respond 200 { "w0": app.w0.s.count(), "w1": app.w1.s.count() }; }
+endpoint POST /t { app.t.a = 1; app.t.b = 2; app.t.name = "changed"; let m = app.ms.add(); m.n = 9; if body("fail") == "yes" { fail 409 "rolled back"; } respond 200 { "a": app.t.a }; }
+endpoint GET /t { respond 200 { "a": app.t.a, "b": app.t.b, "name": app.t.name, "ms": app.ms.count() }; }
+endpoint POST /ms { let m = app.ms.add(); m.n = int(body("n")); respond 201 { "slot": slot(m) }; }
+endpoint DELETE /ms/{k} { app.ms.remove(app.ms[int(param("k"))]); respond 200 {}; }
 endpoint GET /scope { let x = 1; var sum = 0; if true { let x = 10; sum = sum + x; } respond 200 { "x": x, "t": sum }; }
-endpoint POST /rs { let r = alloc app.rs; let m = alloc r.m; m.n = 1; respond 201 { "slot": slot(r), "m": count(r.m) }; }
+endpoint POST /rs { let r = app.rs.add(); let m = r.m.add(); m.n = 1; respond 201 { "slot": slot(r), "m": r.m.count() }; }
 --- requests
 POST /w1
 GET /w

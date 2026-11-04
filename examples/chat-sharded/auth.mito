@@ -19,7 +19,7 @@ fn rate_limited(who) {
 endpoint POST /sessions {
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
-    let s = alloc gate.sessions;
+    let s = gate.sessions.add();
     s.name = name;
     s.secret = random();
     s.window = now();
@@ -27,7 +27,7 @@ endpoint POST /sessions {
 }
 
 endpoint DELETE /session {
-    free me();
+    gate.sessions.remove(me());
     respond 200 { "ok": true };
 }
 
@@ -46,5 +46,5 @@ endpoint GET /rooms/{room}/typing { let who = me(); forward rooms[int(param("roo
 
 // this shard only: one-way forwarding has no fan-out to total the other workers
 endpoint GET /stats {
-    respond 200 { "shard": worker_index(), "sessions": count(gate.sessions), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb") };
+    respond 200 { "shard": worker_index(), "sessions": gate.sessions.count(), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb") };
 }

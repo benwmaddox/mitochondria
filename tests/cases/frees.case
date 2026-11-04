@@ -8,10 +8,10 @@ struct App {
 }
 state app: App;
 
-endpoint POST /t { let t = alloc app.ts; t.n = 7; respond 201 { "slot": slot(t) }; }
-endpoint DELETE /t/{k} { let t = app.ts[int(param("k"))]; free t; if param("k") == "0" { fail 409 "changed my mind"; } respond 200 { "n": t.n }; }
-endpoint POST /swap { each t in app.ts { free t; } let u = try_alloc app.ts; respond 200 { "got": exists(u) }; }
-endpoint GET /count { respond 200 { "n": count(app.ts), "c": app.c.n }; }
+endpoint POST /t { let t = app.ts.add(); t.n = 7; respond 201 { "slot": slot(t) }; }
+endpoint DELETE /t/{k} { let t = app.ts[int(param("k"))]; app.ts.remove(t); if param("k") == "0" { fail 409 "changed my mind"; } respond 200 { "n": t.n }; }
+endpoint POST /swap { each t in app.ts { app.ts.remove(t); } let u = app.ts.try_add(); respond 200 { "got": exists(u) }; }
+endpoint GET /count { respond 200 { "n": app.ts.count(), "c": app.c.n }; }
 endpoint POST /f { app.c.n = 5; forward other[1] { "x": 1 }; }
 --- requests
 POST /t

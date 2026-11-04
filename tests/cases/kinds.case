@@ -11,13 +11,13 @@ struct Top { head: ref<app.nodes>; }
 fn find(name) { each n in app.nodes { if n.name == name { return n; } } return null; }
 fn describe(k) { if k == 0 { return "zero"; } if k < 0 { return null; } return k; }
 endpoint POST /nodes {
-    let n = alloc app.nodes;
+    let n = app.nodes.add();
     n.name = body("name");
     n.next = app.top.head;
     app.top.head = n;
     respond 201 { "slot": slot(n) };
 }
-endpoint DELETE /nodes/{name} { let n = find(param("name")); if n == null { fail 404 "no such node"; } free n; respond 200 {}; }
+endpoint DELETE /nodes/{name} { let n = find(param("name")); if n == null { fail 404 "no such node"; } app.nodes.remove(n); respond 200 {}; }
 endpoint GET /walk {
     var cur = app.top.head;
     var names = "";

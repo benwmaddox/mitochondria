@@ -33,7 +33,7 @@ endpoint POST /rooms {
         d.name = name;
         forward rooms[d.id] { "user": fwd("user"), "name": fwd("name"), "id": d.id };
     }
-    let r = alloc shard.rooms;
+    let r = shard.rooms.add();
     r.id = int(fwd("id"));
     r.name = name;
     r.created = now();
@@ -49,7 +49,7 @@ endpoint POST /rooms/{room}/messages {
     let text = body("body");
     if len(text) == 0 { fail 400 "body is required"; }
     shard.meta.next_seq = shard.meta.next_seq + 1;
-    let m = alloc r.messages;
+    let m = r.messages.add();
     m.seq = shard.meta.next_seq;
     m.at = now();
     m.user = fwd("user");
@@ -74,10 +74,10 @@ endpoint POST /rooms/{room}/typing {
     var found = false;
     each ty in r.typing {
         if ty.user == user { ty.until = typing_until(t); found = true; }
-        else if ty.until < t { free ty; }
+        else if ty.until < t { r.typing.remove(ty); }
     }
     if !found {
-        let ty = alloc r.typing;
+        let ty = r.typing.add();
         ty.user = user;
         ty.name = fwd("name");
         ty.until = typing_until(t);

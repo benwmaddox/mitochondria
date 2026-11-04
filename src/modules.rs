@@ -20,16 +20,21 @@ pub const STDLIB: &[(&str, &str)] = &[("bag", include_str!("../lib/bag.mito")), 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PKind { Struct, Count, Field }
 
-struct Module { name: String, params: Vec<(String, PKind)>, state: String, funcs: String }
+/// A module: its parameters, its structs, the fields an instance holds (its `state { ... }` block) and its functions.
+struct Module { name: String, params: Vec<(String, PKind)>, structs: String, fields: String, funcs: String }
 
+/// A module file, in the program syntax: `module name<parameters>`, its structs, `state { fields }` (what an instance
+/// holds), and its functions.
 fn parse_module(src: &str) -> Result<Module, String> {
-    let (mut header, mut state, mut funcs, mut at) = (None, String::new(), String::new(), 0);
-    for line in src.lines() {
-        let t = line.trim();
-        if header.is_none() && t.starts_with("module ") { header = Some(t[7..].to_string()); continue; }
-        match t { "--- state" => { at = 1; continue; } "--- functions" => { at = 2; continue; } _ => {} }
-        if at == 1 { state += line; state.push('\n'); } else if at == 2 { funcs += line; funcs.push('\n'); }
-    }
+    let at = src.match_indices("module ").map(|m| m.0).find(|&i| i == 0 || src.as_bytes()[i - 1] == b'\n').ok_or("a module file starts with `module name<parameters>`")?;
+    let line_end = src[at..].find('\n').map_or(src.len(), |e| at + e);
+    let header = Some(src[at + 7..line_end].trim().to_string());
+    let body = &src[line_end..];
+    // `state { ... }`: the instance's fields
+    let st = body.find("\nstate {").ok_or("a module has a `state { ... }` block: what an instance holds")? + 1;
+    let close = body[st..].find('}').map(|e| st + e).ok_or("module state block: expected `}`")?;
+    let fields = body[st + 7..close].to_string();
+    let (structs, funcs) = crate::source::split(&format!("{}{}", &body[..st], &body[close + 1..])).map_err(|e| format!("module: {}", e))?;
     let h = header.ok_or("a module file starts with `module name<parameters>`")?;
     let (name, rest) = h.split_once('<').ok_or("module header: expected `<`")?;
     let rest = rest.trim_end().strip_suffix('>').ok_or("module header: expected `>` at the end")?;
@@ -39,7 +44,7 @@ fn parse_module(src: &str) -> Result<Module, String> {
         let k = match k.trim() { "struct" => PKind::Struct, "count" => PKind::Count, k if k.starts_with("field of ") => PKind::Field, k => return Err(format!("module parameter kind `{}`: expected struct, count or field of T", k)) };
         params.push((n.trim().to_string(), k));
     }
-    Ok(Module { name: name.trim().to_string(), params, state, funcs })
+    Ok(Module { name: name.trim().to_string(), params, structs, fields, funcs })
 }
 
 /// Replace identifiers by `map` (outside strings and comments). After `fn`, a function's name gets `fn_prefix`.
@@ -88,21 +93,12 @@ fn instantiate(inst: &str, module: &str, args: &[String]) -> Result<(String, Str
         if *k == PKind::Field { key = Some(a.clone()); }
         map.insert(p.clone(), a.clone());
     }
-    // the module's own structs are renamed for this instance
-    let st = subst(&m.state, &map, None);
+    // the module's own structs are renamed for this instance; its state block becomes the instance's struct
+    let (st, fields) = (subst(&m.structs, &map, None), subst(&m.fields, &map, None));
     let mut names: HashMap<String, String> = HashMap::new();
     for w in st.split_whitespace().collect::<Vec<_>>().windows(2) { if w[0] == "struct" { let n = w[1].trim_end_matches('{'); names.insert(n.to_string(), format!("__mito__{}__{}", id, n)); } }
-    let st = subst(&st, &names, None);
-    // its globals become fields of the instance's state struct
-    let (mut decls, mut fields) = (String::new(), String::new());
-    let mut s = st.as_str();
-    while let Some(i) = s.find(|c: char| !c.is_whitespace()) {
-        s = &s[i..];
-        if s.starts_with("//") { s = s.find('\n').map_or("", |e| &s[e..]); continue; }
-        if let Some(r) = s.strip_prefix("struct") { let e = r.find('}').ok_or_else(|| format!("module {}: unclosed struct", module))?; decls += "struct"; decls += &r[..=e]; decls.push('\n'); s = &r[e + 1..]; continue; }
-        if let Some(r) = s.strip_prefix("global") { let e = r.find(';').ok_or_else(|| format!("module {}: expected `;`", module))?; fields += &r[..e]; fields += ";"; s = &r[e + 1..]; continue; }
-        return Err(format!("module {}: its state holds struct and global declarations, found `{}`", module, s.lines().next().unwrap_or("")));
-    }
+    let (mut decls, fields) = (subst(&st, &names, None), subst(&fields, &names, None));
+    let fields: String = fields.lines().map(|l| l.split("//").next().unwrap_or("").trim()).filter(|l| !l.is_empty()).map(|l| format!(" {}", l)).collect();
     decls += &format!("struct __mito__{}__state {{{} }}\n", id, fields);
     let line = format!("instance {} of {}{};\n", inst, module, key.map(|k| format!(" key {}", k)).unwrap_or_default());
     let funcs = format!("// module {} as `{}`\n{}", module, inst, subst(&m.funcs, &map, Some(inst)));

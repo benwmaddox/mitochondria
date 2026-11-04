@@ -1,11 +1,13 @@
 // A bag of up to N items of struct T: added and removed only through its functions, which count what they did.
 // The smallest module: it exists to exercise the module mechanism (parameters, instance state, `self`, refs).
 module bag<T: struct, N: count>
---- state
 struct Counts { added: i64; removed: i64; }
-global items: pool<T, N> checked;
-global counts: Counts;
---- functions
+// what an instance holds
+state {
+    items: pool<T, N> checked;
+    counts: Counts;
+}
+
 pub fn add() {
     let it = self.items.add();
     self.counts.added = self.counts.added + 1;

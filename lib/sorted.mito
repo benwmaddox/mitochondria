@@ -7,13 +7,15 @@
 // Links run both ways at every level, so an item is unlinked in O(levels) without searching. Nothing holds a copy
 // of a key: comparisons read the items' own keys. Positions in links are slot + 1, and 0 is the head (or the end).
 module sorted<T: struct, N: count, key: field of T>
---- state
 struct Link { level: u8; next: u32[12]; prev: u32[12]; }
 struct Head { next: u32[12]; last: u32; rng: i64; update: u32[12]; }
-global items: pool<T, N> checked;
-global links: pool<Link, N>;
-global head: Head;
---- functions
+// what an instance holds
+state {
+    items: pool<T, N> checked;
+    links: pool<Link, N>;
+    head: Head;
+}
+
 pub fn add(kv) {
     let it = self.items.add();
     let ln = self.links.add();

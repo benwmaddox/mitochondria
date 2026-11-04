@@ -33,6 +33,8 @@ pub enum Stmt {
     Fail(u16, String),
     Respond(u16, Json),
     Return(Option<Expr>),
+    /// Hand the request on to another worker: `forward rooms[key] { "user": expr };`
+    Forward { kind: String, key: Expr, fields: Vec<(String, Expr)> },
     Do(Expr),
 }
 
@@ -153,6 +155,19 @@ impl P {
         if self.is_kw("if") { return self.if_stmt(); }
         if self.is_kw("each") { self.i += 1; let it = self.iter()?; let b = self.block()?; return Ok(Stmt::Each(it, b)); }
         if self.is_kw("free") { self.i += 1; let e = self.expr()?; self.eat(";")?; return Ok(Stmt::Free(e)); }
+        if self.is_kw("forward") {
+            self.i += 1;
+            let kind = self.id()?; self.eat("[")?; let key = self.expr()?; self.eat("]")?;
+            let mut fields = Vec::new();
+            if self.sym("{") {
+                while !self.sym("}") {
+                    let k = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("expected a field name string, found {}", self.here())) };
+                    self.eat(":")?; fields.push((k, self.expr()?)); self.sym(",");
+                }
+            }
+            self.eat(";")?;
+            return Ok(Stmt::Forward { kind, key, fields });
+        }
         if self.is_kw("return") { self.i += 1; if self.sym(";") { return Ok(Stmt::Return(None)); } let e = self.expr()?; self.eat(";")?; return Ok(Stmt::Return(Some(e))); }
         if self.is_kw("fail") {
             self.i += 1; let code = self.int()? as u16;

@@ -1,0 +1,15 @@
+struct Meta { next_room: i64; next_seq: i64; typing_ttl: i64; }
+struct Dir { id: i64; name: string<48>; }
+// authors are kept by value: a reference cannot point into another worker
+struct Msg { seq: i64; at: i64; user: string<16>; author: string<32>; body: string<2000>; }
+struct Typing { user: string<16>; name: string<32>; until: i64; }
+struct Room {
+    id: i64;
+    name: string<48>;
+    created: i64;
+    messages: list<Msg, 1000> drop_oldest;
+    typing: pool<Typing, 32>;
+}
+global meta: Meta;
+global directory: pool<Dir, 256>;   // used on rooms[0] only
+global rooms: pool<Room, 32>;       // the rooms this shard owns

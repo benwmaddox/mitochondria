@@ -6,6 +6,7 @@ mod os;
 mod region;
 mod runtime;
 mod serve;
+mod system;
 use runtime::{Error, Instance};
 
 const MB: usize = 1 << 20;

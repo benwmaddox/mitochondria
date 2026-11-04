@@ -28,7 +28,7 @@ enum Value {
     Plain(usize, Ty),              // a plain struct or fixed array at an offset
 }
 
-enum Ctl<'a> { Done(u16), Fail(u16, Cow<'a, str>), Return(Value), Err(Error), Dead }
+enum Ctl<'a> { Done(u16), Fail(u16, Cow<'a, str>), Return(Value), Err(Error), Dead, Forward(usize, i64) }
 impl<'a> From<Error> for Ctl<'a> { fn from(e: Error) -> Self { Ctl::Err(e) } }
 type R<'a, T> = Result<T, Ctl<'a>>;
 fn fail<'a, T>(code: u16, m: impl Into<Cow<'a, str>>) -> R<'a, T> { Err(Ctl::Fail(code, m.into())) }
@@ -127,6 +127,20 @@ fn parse_json(s: &[u8], text: &mut Area, out: &mut Vec<(Txt, Value)>) -> bool {
     true
 }
 
+/// Request headers or forwarded fields: looked up by name, case-insensitively.
+pub trait Fields { fn field(&self, k: &[u8]) -> Option<&str>; }
+/// Owned (name, value) pairs, as in tests and the socket front end.
+pub struct OwnedFields<'x>(pub &'x [(String, String)]);
+impl Fields for OwnedFields<'_> { fn field(&self, k: &[u8]) -> Option<&str> { self.0.iter().find(|h| h.0.as_bytes().eq_ignore_ascii_case(k)).map(|h| h.1.as_str()) } }
+/// Borrowed (name, value) pairs, as decoded from a mailbox message.
+pub struct StrFields<'x, 'y>(pub &'x [(&'y str, &'y str)]);
+impl Fields for StrFields<'_, '_> { fn field(&self, k: &[u8]) -> Option<&str> { self.0.iter().find(|h| h.0.as_bytes().eq_ignore_ascii_case(k)).map(|h| h.1) } }
+const NO_FIELDS: StrFields<'static, 'static> = StrFields(&[]);
+
+/// Who this server is inside a system of workers: every worker kind (name, count) and its own (kind, index).
+#[derive(Clone)]
+pub struct SysInfo { pub kinds: Vec<(String, usize)>, pub me: (usize, usize) }
+
 /// Buffers reused by every request (allocated at startup, grown only if a request needs more).
 struct Bufs { vars: Vec<(&'static str, Value, bool)>, args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>, params: Vec<(usize, Txt)>, query: Vec<(Txt, Txt)>, json: Vec<(Txt, Value)> }
 impl Bufs {
@@ -148,6 +162,11 @@ pub struct Server {
     bufs: Bufs,
     pub clock: Option<i64>, // fixed time in ms, for tests and benchmarks; otherwise the system clock
     pub pressure: Option<Pressure>,
+    pub system: Option<SysInfo>,
+    /// Set when the last request forwarded: (worker kind, key). Its writes stay uncommitted until `finish_forward`.
+    pending: Option<(usize, i64)>,
+    pending_frees: Vec<(usize, usize)>,
+    fwd_out: Vec<(Txt, Txt)>, // the forwarded fields, in the text area
     _scratch: Scratch,
     _space: Space,
 }
@@ -163,7 +182,7 @@ impl Server {
         let mut scratch = Scratch::new(region);
         let out = scratch.alloc(RESPONSE_CAP).map_err(|_| "response area".to_string())?;
         let text = scratch.alloc(TEXT_CAP).map_err(|_| "text area".to_string())?;
-        Ok(Server { inst, api, out: Area { ptr: out, cap: RESPONSE_CAP, len: 0 }, text: Area { ptr: text, cap: TEXT_CAP, len: 0 }, bufs: Bufs::startup(), clock: None, pressure: None, _scratch: scratch, _space: space })
+        Ok(Server { inst, api, out: Area { ptr: out, cap: RESPONSE_CAP, len: 0 }, text: Area { ptr: text, cap: TEXT_CAP, len: 0 }, bufs: Bufs::startup(), clock: None, pressure: None, system: None, pending: None, pending_frees: Vec::with_capacity(64), fwd_out: Vec::with_capacity(16), _scratch: scratch, _space: space })
     }
 
     /// The last response body.
@@ -188,6 +207,14 @@ impl Server {
 
     /// Handle one request; the body is left in the response area (see `response`).
     pub fn handle_raw(&mut self, method: &str, target: &str, headers: &[(String, String)], body: &str) -> u16 {
+        let code = self.handle_req(method, target, &OwnedFields(headers), body, &NO_FIELDS);
+        if code == 0 { self.finish_forward(false); Self::out_err(&mut self.out, "forward needs a system of workers"); return 500; }
+        code
+    }
+
+    /// Handle one request with forwarded fields. Returns 0 if the handler forwarded: then the caller sends the request on and
+    /// calls `finish_forward` with whether the send worked, which commits or rolls back this handler's writes.
+    pub fn handle_req(&mut self, method: &str, target: &str, headers: &dyn Fields, body: &str, fwd: &dyn Fields) -> u16 {
         self.out.len = 0; self.text.len = 0; // the request epoch starts empty
         let (path, qs) = target.split_once('?').unwrap_or((target, ""));
         let Some(ei) = self.route(method, path) else { Self::out_err(&mut self.out, "no such endpoint"); return 404 };
@@ -209,7 +236,7 @@ impl Server {
         let now = clock.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0));
         inst.begin();
         let mut run = Run {
-            inst, api, ep, headers, params: &b.params, query: &b.query, json: &b.json, text, out, now,
+            inst, api, ep, headers, fwd, sys: self.system.as_ref(), fwd_out: &mut self.fwd_out, params: &b.params, query: &b.query, json: &b.json, text, out, now,
             vars: recycle(std::mem::take(&mut b.vars)), frame: 0, depth: 0,
             args: std::mem::take(&mut b.args), frees: std::mem::take(&mut b.frees), idx: std::mem::take(&mut b.idx), keyed: std::mem::take(&mut b.keyed),
         };
@@ -223,14 +250,29 @@ impl Server {
             Err(Ctl::Err(Error::NotLive(m))) | Err(Ctl::Err(Error::Stale(m))) => { Self::out_err(run.out, &m); (404, false) }
             Err(Ctl::Err(Error::Bad(m))) => { Self::out_err(run.out, &m); (400, false) }
             Err(Ctl::Dead) => { Self::out_err(run.out, "reference is not live"); (404, false) }
+            Err(Ctl::Forward(kind, key)) => { run.out.len = 0; self.pending = Some((kind, key)); (0, true) }
         };
         let Run { vars, args, mut frees, idx, keyed, .. } = run;
         b.vars = recycle(vars); b.args = args; b.args.clear(); b.idx = idx; b.keyed = keyed; // ends the borrow of the endpoint code
-        if ok { for &(c, i) in &frees { let _ = self.inst.free_item(c, i); } self.inst.commit_changes(); } else { self.inst.rollback(); }
+        if code == 0 { self.pending_frees.clear(); self.pending_frees.extend_from_slice(&frees); } // decided by finish_forward
+        else if ok { for &(c, i) in &frees { let _ = self.inst.free_item(c, i); } self.inst.commit_changes(); } else { self.inst.rollback(); }
         frees.clear(); b.frees = frees;
         self.bufs = b;
-        if let Some(p) = self.pressure.as_mut() { self.inst.relieve(p); }
+        if code != 0 { if let Some(p) = self.pressure.as_mut() { self.inst.relieve(p); } }
         code
+    }
+
+    /// Where the last request was forwarded: (worker kind, key), if it was.
+    pub fn pending_forward(&self) -> Option<(usize, i64)> { self.pending }
+    /// The forwarded fields of the last request, as (name, value) bytes.
+    pub fn forward_fields(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ { self.fwd_out.iter().map(move |(k, v)| (self.text.get(*k), self.text.get(*v))) }
+    /// Commit the forwarding handler's writes if the request was handed on, or roll them back if it could not be.
+    pub fn finish_forward(&mut self, sent: bool) {
+        if self.pending.take().is_none() { return; }
+        if sent { for k in 0..self.pending_frees.len() { let (c, i) = self.pending_frees[k]; let _ = self.inst.free_item(c, i); } self.inst.commit_changes(); }
+        else { self.inst.rollback(); }
+        self.pending_frees.clear();
+        if let Some(p) = self.pressure.as_mut() { self.inst.relieve(p); }
     }
 
     /// Quiet time: release slack (see `Instance::idle`).
@@ -238,7 +280,8 @@ impl Server {
 }
 
 struct Run<'a> {
-    inst: &'a mut Instance, api: &'a Api, ep: &'a Endpoint, headers: &'a [(String, String)],
+    inst: &'a mut Instance, api: &'a Api, ep: &'a Endpoint, headers: &'a dyn Fields, fwd: &'a dyn Fields,
+    sys: Option<&'a SysInfo>, fwd_out: &'a mut Vec<(Txt, Txt)>,
     params: &'a [(usize, Txt)], query: &'a [(Txt, Txt)], json: &'a [(Txt, Value)],
     text: &'a mut Area, out: &'a mut Area, now: i64,
     vars: Vec<(&'a str, Value, bool)>, // name, value, mutable
@@ -461,8 +504,8 @@ impl<'a> Run<'a> {
             "query" => { let k = key(self)?; let k = self.text.get(k); self.query.iter().find(|x| self.text.get(x.0) == k).map(|x| Value::Str(x.1)).unwrap_or(Value::Null) }
             "header" => {
                 let k = key(self)?;
-                let found = { let k = self.text.get(k); self.headers.iter().find(|h| h.0.as_bytes().eq_ignore_ascii_case(k)) };
-                match found { Some(h) => Value::Str(self.txt(h.1.as_bytes())?), None => Value::Null }
+                let found = { let k = self.text.get(k); self.headers.field(k) };
+                match found { Some(h) => Value::Str(self.txt(h.as_bytes())?), None => Value::Null }
             }
             "int" => match self.arg(base, 0) {
                 Value::Int(i) => Value::Int(i), Value::Float(f) => Value::Int(f as i64),
@@ -472,6 +515,14 @@ impl<'a> Run<'a> {
             "str" => { let v = self.arg(base, 0); let start = self.text.len; self.show_into(&v)?; Value::Str(self.text.since(start)) }
             "len" => match self.arg(base, 0) { Value::Str(t) => Value::Int(t.len as i64), Value::Null => Value::Int(0), _ => return fail(500, "len(text)") },
             "now" => Value::Int(self.now),
+            "fwd" => { let k = key(self)?; let found = { let k = self.text.get(k); self.fwd.field(k) }; match found { Some(v) => Value::Str(self.txt(v.as_bytes())?), None => Value::Null } }
+            "worker_index" => Value::Int(self.sys.map_or(0, |s| s.me.1) as i64),
+            "worker_count" => match self.args.get(base) {
+                None => Value::Int(self.sys.map_or(1, |s| s.kinds[s.me.0].1) as i64),
+                Some(Value::Str(t)) => { let n = self.text.get(*t); match self.sys.and_then(|s| s.kinds.iter().find(|k| k.0.as_bytes() == n)) { Some(k) => Value::Int(k.1 as i64), None => return fail(500, "no such worker kind") } }
+                _ => return fail(500, "worker_count(\"kind\")"),
+            },
+            "__crash" => panic!("__crash() called: test hook for worker supervision"),
             "random" => Value::Int(os::random_u64() as i64),
             "min" | "max" => match (self.arg(base, 0), self.arg(base, 1)) { (Value::Int(p), Value::Int(q)) => Value::Int(if n == "min" { p.min(q) } else { p.max(q) }), _ => return fail(500, "min/max need integers") },
             "count" => match self.arg(base, 0) { Value::Coll(c, i) => Value::Int(self.inst.count(c, i) as i64), _ => return fail(500, "count(collection)") },
@@ -487,15 +538,18 @@ impl<'a> Run<'a> {
                     let Some(ci) = self.inst.col(c, "secret") else { return fail(500, "token needs a `secret` field") };
                     let Val::Int(sec) = self.inst.field_get(c, i, ci)? else { return fail(500, "`secret` must be an integer") };
                     let start = self.text.len;
-                    if write!(self.text, "{}.{}.{:x}", i, self.inst.gen(c, i).unwrap_or(0), sec as u64).is_err() { return fail(507, "request text area is full"); }
+                    let shard = self.sys.map(|s| s.me.1);
+                    let r = match shard { Some(w) => write!(self.text, "{}.{}.{}.{:x}", w, i, self.inst.gen(c, i).unwrap_or(0), sec as u64), None => write!(self.text, "{}.{}.{:x}", i, self.inst.gen(c, i).unwrap_or(0), sec as u64) };
+                    if r.is_err() { return fail(507, "request text area is full"); }
                     Value::Str(self.text.since(start))
                 }
                 _ => return fail(500, "token(item)"),
             },
             "auth" => {
                 let Value::Coll(c, 0) = self.arg(base, 0) else { return fail(500, "auth(pool)") };
-                let Some(tok) = self.headers.iter().find(|h| h.0.eq_ignore_ascii_case("x-session")).map(|h| h.1.as_str()) else { return fail(401, "missing X-Session header") };
+                let Some(tok) = self.headers.field(b"x-session") else { return fail(401, "missing X-Session header") };
                 let mut it = tok.split('.');
+                if let Some(s) = self.sys { if it.next().and_then(|w| w.parse::<usize>().ok()) != Some(s.me.1) { return fail(401, "session token belongs to another shard"); } }
                 let (Some(Ok(slot)), Some(Ok(gen)), Some(Ok(sec))) = (it.next().map(str::parse::<usize>), it.next().map(str::parse::<u32>), it.next().map(|h| u64::from_str_radix(h, 16))) else { return fail(401, "malformed session token") };
                 let Some(idx) = self.inst.deref_quiet(c, (slot, gen)) else { return fail(401, "session ended") };
                 let Some(ci) = self.inst.col(c, "secret") else { return fail(500, "auth needs a `secret` field") };
@@ -599,6 +653,20 @@ impl<'a> Run<'a> {
             Stmt::Respond(code, j) => { self.json(j)?; return Err(Ctl::Done(*code)); }
             Stmt::Return(e) => { let v = match e { Some(e) => self.eval(e)?, None => Value::Null }; return Err(Ctl::Return(v)); }
             Stmt::Do(e) => { self.eval(e)?; }
+            Stmt::Forward { kind, key, fields } => {
+                let Some(s) = self.sys else { return fail(500, "forward needs a system of workers") };
+                let Some(k) = s.kinds.iter().position(|x| x.0 == *kind) else { return fail(500, format!("no worker kind `{}`", kind)) };
+                let Value::Int(key) = self.eval(key)? else { return fail(500, "a forward key must be an integer") };
+                self.fwd_out.clear();
+                for (name, e) in fields {
+                    let v = self.eval(e)?;
+                    let kt = self.txt(name.as_bytes())?;
+                    let start = self.text.len;
+                    if !matches!(v, Value::Null) { self.show_into(&v)?; }
+                    self.fwd_out.push((kt, self.text.since(start)));
+                }
+                return Err(Ctl::Forward(k, key));
+            }
         }
         Ok(())
     }
@@ -920,6 +988,15 @@ mod tests {
         let (_, out) = s.handle("GET", "/rooms/0/messages", &h, "");
         let want = format!("caf{} {} tab{}t {}\"q{}\"", char::from_u32(0xE9).unwrap(), char::from_u32(0x1F600).unwrap(), bs, bs, bs);
         assert!(out.contains(&want), "{}", out);
+    }
+
+    #[test]
+    fn forward_outside_a_system_is_a_clear_error_and_rolls_back() {
+        let inst = Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap();
+        let mut s = Server::new(inst, "endpoint POST /f { c.n = 5; forward other[1] { \"x\": 1 }; }").unwrap();
+        let (code, body) = s.handle("POST", "/f", &[], "");
+        assert_eq!(code, 500, "{}", body);
+        assert_eq!(s.inst.get("c.n").unwrap(), "0");
     }
 
     #[test]

@@ -19,6 +19,7 @@ static ALLOC: alloc_count::Counting = alloc_count::Counting;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(|s| s.as_str()) == Some("exp") { return if args.get(1).map(|s| s.as_str()) == Some("json") { serve::json_floor() } else if args.get(1).map(|s| s.as_str()) == Some("pressure") { exp::pressure() } else if args.get(1).map(|s| s.as_str()) == Some("chat") { exp::chat_scan() } else if args.get(1).map(|s| s.as_str()) == Some("access") { exp::access_cost() } else if args.get(1).map(|s| s.as_str()) == Some("trim") { { exp::trim_cost(); exp::scoped_cost() } } else { exp::run() }; }
+    if args.first().map(|s| s.as_str()) == Some("emit-c") { return emit_c(&args[1..]); }
     if matches!(args.first().map(|s| s.as_str()), Some("system") | Some("bench-system")) {
         let file = std::path::Path::new(args.get(1).expect("system file"));
         let src = std::fs::read_to_string(file).expect("read system file");
@@ -80,6 +81,40 @@ fn main() {
             _ => Err(Error::Bad(format!("unknown command `{}`", cmd))),
         };
         match r { Ok(()) => {}, Err(Error::Full(m)) => println!("  FULL: {}", m), Err(Error::TooLong(m)) => println!("  TOO LONG: {}", m), Err(Error::NotLive(m)) => println!("  NOT LIVE: {}", m), Err(Error::Stale(m)) => println!("  STALE: {}", m), Err(Error::Bad(m)) => println!("  error: {}", m) }
+    }
+}
+
+/// `emit-c <state.mito> <api> [-o file.c]`, or `emit-c <file.system> [-o dir]` for one file per worker kind.
+fn emit_c(args: &[String]) {
+    let die = |e: String| -> ! { eprintln!("error: {}", e); std::process::exit(1) };
+    let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1)).cloned();
+    let files: Vec<&String> = args.iter().enumerate().filter(|(i, a)| *a != "-o" && (*i == 0 || args[i - 1] != "-o")).map(|(_, a)| a).collect();
+    let read = |f: &str| std::fs::read_to_string(f).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
+    let one = |state: &str, name: &str, text: &str| -> String {
+        let prog = layout::Program::parse(state).unwrap_or_else(|e| die(e));
+        let mut a = lang::parse(text).unwrap_or_else(|e| die(format!("{}: {}", name, e)));
+        lang::bind(&mut a, &|n| prog.global(n)).unwrap_or_else(|e| die(format!("{}: {}", name, e)));
+        cgen::emit(&prog, &a, (name, text))
+    };
+    match files.as_slice() {
+        [sys] if sys.ends_with(".system") => {
+            let file = std::path::Path::new(sys.as_str());
+            let dir = file.parent().unwrap_or(std::path::Path::new("."));
+            let spec = system::parse_spec(&std::fs::read_to_string(file).unwrap_or_else(|e| die(e.to_string())), dir).unwrap_or_else(|e| die(e));
+            let to = std::path::PathBuf::from(out.unwrap_or_else(|| ".".into()));
+            for k in &spec.kinds {
+                let c = one(&k.state, &format!("{} api", k.name), &k.api);
+                let p = to.join(format!("{}.c", k.name));
+                std::fs::write(&p, c).unwrap_or_else(|e| die(format!("{}: {}", p.display(), e)));
+                println!("wrote {}", p.display());
+            }
+        }
+        [state, api] => {
+            let name = std::path::Path::new(api.as_str()).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+            let c = one(&read(state), &name, &read(api));
+            match out { Some(p) => { std::fs::write(&p, c).unwrap_or_else(|e| die(format!("{}: {}", p, e))); println!("wrote {}", p); } None => print!("{}", c) }
+        }
+        _ => die("usage: emit-c <state.mito> <api> [-o file.c]  |  emit-c <file.system> [-o dir]".into()),
     }
 }
 

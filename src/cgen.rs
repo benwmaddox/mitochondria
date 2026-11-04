@@ -20,31 +20,34 @@ typedef struct { u32 off, len; int present; } Txt;
 typedef struct { int tag; u32 a, b; i64 i; double f; } Val;
 typedef struct H H;
 typedef struct { u8 *base; void *run; const H *h; } Ctx;
+/* The runtime's helpers. Every one returns 0, or a non-zero status after recording the error (the generated code then
+   returns that status at once and the runtime rolls the request back). Collections, columns and items are numbered as
+   in the layout table at the top of an emitted file; `idx` is an item's index across all instances of its collection. */
 struct H {
-    int (*out)(Ctx *, const char *, u32);
-    int (*json_i64)(Ctx *, i64);
-    int (*json_col)(Ctx *, u32, u32, u32);
-    int (*json_txt)(Ctx *, const Txt *);
-    int (*json_val)(Ctx *, const Val *);
-    int (*auth)(Ctx *, u32, u32 *);
-    int (*index)(Ctx *, u32, u32, i64, u32 *);
-    int (*lit)(Ctx *, const char *, u32, Txt *);
-    int (*deref)(Ctx *, u32, u32, u32, u32 *);
-    int (*fail)(Ctx *, int, const char *, u32);
-    int (*dead)(Ctx *);
-    int (*col_txt)(Ctx *, u32, u32, u32, Txt *);
-    int (*plain_txt)(Ctx *, u32, Txt *);
-    int (*binop)(Ctx *, int, const Val *, const Val *, Val *);
-    int (*truthy)(Ctx *, const Val *, int *);
-    int (*store)(Ctx *, u32, u32, u32, const Val *);
-    int (*store_plain)(Ctx *, u32, u32, u32, const Val *);
-    int (*alloc)(Ctx *, u32, u32, int, u32 *);
-    int (*free_)(Ctx *, u32, u32);
-    int (*fwd_begin)(Ctx *, const char *, u32);
-    int (*fwd_put)(Ctx *, const char *, u32, const Val *);
-    int (*forward)(Ctx *, const char *, u32, i64);
-    int (*crash)(Ctx *);
-    int (*builtin)(Ctx *, int, const Val *, u32, Val *);
+    int (*out)(Ctx *, const char *, u32);                      /* append bytes to the response */
+    int (*json_i64)(Ctx *, i64);                               /* append an integer as JSON */
+    int (*json_col)(Ctx *, u32, u32, u32);                     /* append column (coll, idx, col) of a live item as JSON */
+    int (*json_txt)(Ctx *, const Txt *);                       /* append a request-text string as JSON (null if absent) */
+    int (*json_val)(Ctx *, const Val *);                       /* append any value as JSON */
+    int (*auth)(Ctx *, u32, u32 *);                            /* the item of pool `coll` named by the request's token, or 401 */
+    int (*index)(Ctx *, u32, u32, i64, u32 *);                 /* item k of instance `inst` of `coll`, checked live, or 404 */
+    int (*lit)(Ctx *, const char *, u32, Txt *);               /* copy bytes into the request's text area */
+    int (*deref)(Ctx *, u32, u32, u32, u32 *);                 /* follow a reference (pool, slot+1, generation): index, or 0 if gone */
+    int (*fail)(Ctx *, int, const char *, u32);                /* fail the request with a status and message */
+    int (*dead)(Ctx *);                                        /* fail: a reference that is no longer live was used */
+    int (*col_txt)(Ctx *, u32, u32, u32, Txt *);               /* copy a string column of an item into the text area */
+    int (*plain_txt)(Ctx *, u32, Txt *);                       /* copy a plain (record-style) string at an offset into the text area */
+    int (*binop)(Ctx *, int, const Val *, const Val *, Val *); /* an operator (OPS order) on values of run-time kind */
+    int (*truthy)(Ctx *, const Val *, int *);                  /* is a value true (bool), or an error for other kinds */
+    int (*store)(Ctx *, u32, u32, u32, const Val *);           /* journaled write of column (coll, idx, col) */
+    int (*store_plain)(Ctx *, u32, u32, u32, const Val *);     /* journaled write of a plain value: offset, kind, capacity */
+    int (*alloc)(Ctx *, u32, u32, int, u32 *);                 /* add an item to instance `inst` of `coll`; try: u32 max when full */
+    int (*free_)(Ctx *, u32, u32);                             /* free a pool item when the request succeeds */
+    int (*fwd_begin)(Ctx *, const char *, u32);                /* start a forward to worker kind `name` */
+    int (*fwd_put)(Ctx *, const char *, u32, const Val *);     /* add a field to the forward */
+    int (*forward)(Ctx *, const char *, u32, i64);             /* send the forward to the worker for key; ends the request here */
+    int (*crash)(Ctx *);                                       /* test hook: crash this worker */
+    int (*builtin)(Ctx *, int, const Val *, u32, Val *);       /* a builtin (BUILTINS order) on argument values */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -137,7 +140,52 @@ fn json_lit(s: &str) -> String {
     o.push('"'); o
 }
 
-pub fn generate(prog: &Program, api: &Api) -> Generated {
+pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, api, None) }
+
+/// One readable C file for review: the layout, the helper interface, and every endpoint next to its source.
+/// `source` is the api file's name and text. The C is the same code `generate` makes, with comments added.
+pub fn emit(prog: &Program, api: &Api, source: (&str, &str)) -> String {
+    let g = generate_with(prog, api, Some(source));
+    let compiled = g.eps.iter().filter(|e| e.is_some()).count();
+    let mut o = format!("/* Generated by Mitochondria from {}: {} of {} endpoints compiled.\n", source.0, compiled, g.eps.len());
+    for n in &g.notes { o += &format!("   {}\n", n); }
+    o += "\n";
+    o += &layout_table(prog);
+    o += "*/\n";
+    o + &g.src
+}
+
+/// The declared layout as a table: every collection, its columns and their offsets from the reservation's base.
+pub fn layout_table(prog: &Program) -> String {
+    let mut o = format!("   Layout: {} bytes reserved; plain values at 0..{}; collections from {}.\n", prog.total, prog.plain_end, prog.colls.first().map_or(prog.plain_end, |c| c.start));
+    for g in prog.globals.iter().filter(|g| g.coll.is_none()) { o += &format!("   plain {:<20} {:<28} at {}\n", g.name, prog.show(&g.ty), g.off); }
+    for (k, c) in prog.colls.iter().enumerate() {
+        let kind = match c.kind { Kind::List(f) => format!("list cap {}{}", c.cap, if f == crate::layout::Full::DropOldest { " drop_oldest" } else { "" }), Kind::Pool(ch) => format!("pool cap {}{}", c.cap, if ch { " checked" } else { "" }) };
+        let parent = c.parent.map_or(String::new(), |p| format!(", {} instances (one per item of coll {})", c.mult, p));
+        o += &format!("   coll {} {}: {}{}; bytes {}..{}; header at {}", k, c.name, kind, parent, c.start, c.end, c.hdr);
+        if !c.is_list() { o += &format!(", live bits at {}", c.live); }
+        if c.checked() { o += &format!(", generations at {}", c.gen); }
+        o += "\n";
+        for (ci, col) in c.cols.iter().enumerate() {
+            let t = match &col.kind { CKind::Scalar(s) => format!("{:?}", s).to_lowercase(), CKind::Arr(s, n) => format!("{:?}[{}]", s, n).to_lowercase(), CKind::StrLen => "string length u32".into(), CKind::StrBytes(n) => format!("string bytes [{}]", n), CKind::Ref(t) => format!("ref to coll {} (slot+1 u32, generation u32)", t) };
+            o += &format!("     col {:<2} {:<22} {:<40} at {} + idx * {}\n", ci, col.path, t, col.off, col.kind.size());
+        }
+    }
+    o
+}
+
+/// The api source lines of an endpoint as C comments.
+fn source_comment(ep: &Endpoint, (name, text): (&str, &str)) -> String {
+    let mut o = format!("\n// {}:{}-{}\n", name, ep.lines.0, ep.lines.1);
+    for l in text.lines().skip(ep.lines.0.saturating_sub(1) as usize).take((ep.lines.1 + 1).saturating_sub(ep.lines.0) as usize) {
+        let l = l.trim_end();
+        let l = if l.ends_with('\\') { format!("{} (ends in a backslash)", &l[..l.len() - 1]) } else { l.to_string() }; // a final backslash would join the next line onto the comment
+        o += &format!("//   | {}\n", l);
+    }
+    o
+}
+
+fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Generated {
     let mut src = String::from(PRELUDE);
     let (mut eps, mut notes) = (Vec::new(), Vec::new());
     for (k, ep) in api.eps.iter().enumerate() {
@@ -146,10 +194,14 @@ pub fn generate(prog: &Program, api: &Api) -> Generated {
         match g.block(&ep.body, &mut env).and_then(|_| check_profile(&g.body).map_err(|e| format!("C safety profile: {}", e))) {
             Ok(()) => {
                 let name = format!("ep{}", k);
-                src += &format!("\n// {}\nint {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b;\n{}    return 0;\n}}\n", ep.text, name, g.body);
+                let head = match source { Some(sf) => source_comment(ep, sf), None => format!("\n// {}\n", ep.text) };
+                src += &format!("{}int {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b;\n{}    return 0;\n}}\n", head, name, g.body);
                 eps.push(Some(name));
             }
-            Err(why) => { notes.push(format!("{}: interpreted ({})", ep.text, why)); eps.push(None); }
+            Err(why) => {
+                if let Some(sf) = source { src += &source_comment(ep, sf); src += &format!("// not compiled: {}\n", why); }
+                notes.push(format!("{}: interpreted ({})", ep.text, why)); eps.push(None);
+            }
         }
     }
     Generated { src, eps, notes }
@@ -757,6 +809,7 @@ impl<'p> G<'p> {
     fn write(&mut self, v: CV) -> R<()> {
         match v {
             CV::Int(e) => self.call(&format!("c->h->json_i64(c, {})", e)),
+            CV::Bool(e) if e == "1" || e == "0" => self.out(if e == "1" { "true" } else { "false" }),
             CV::Bool(e) => self.line(&format!("CALL({} ? c->h->out(c, \"true\", 4) : c->h->out(c, \"false\", 5));", e)),
             CV::Lit(s) => { let j = json_lit(&s); self.out(&j); }
             CV::Txt(t) => self.line(&format!("CALL({}.present ? c->h->json_txt(c, &{}) : c->h->out(c, \"null\", 4));", t, t)),
@@ -913,6 +966,19 @@ mod profile_tests {
             assert!(!g.notes.iter().any(|n| n.contains("profile")), "{:#?}", g.notes);
             assert!(g.eps.iter().filter(|e| e.is_some()).count() >= 5);
         }
+    }
+
+    #[test]
+    fn emitted_files_compile_on_their_own_and_cite_their_source() {
+        let (state, api) = (include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api"));
+        let prog = Program::parse(state).unwrap();
+        let mut a = crate::lang::parse(api).unwrap();
+        crate::lang::bind(&mut a, &|n| prog.global(n)).unwrap();
+        let c = emit(&prog, &a, ("chat.api", api));
+        crate::tcc::Unit::check(&c).unwrap();
+        assert!(c.contains("coll 2 rooms.messages: list cap 1000 drop_oldest"), "{}", &c[..800]);
+        for ep in &a.eps { assert!(c.contains(&format!("// chat.api:{}-{}", ep.lines.0, ep.lines.1))); }
+        assert!(c.contains("//   | endpoint DELETE /session {"));
     }
 
     #[test]

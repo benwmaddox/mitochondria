@@ -75,17 +75,24 @@ pub enum Stmt {
 #[derive(Debug, Clone)]
 pub enum Seg { Lit(String), Param(String) }
 #[derive(Debug, Clone)]
-pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String, pub slots: u32 }
+/// `lines`: first and last source line (1-based) of the endpoint, for comments in generated code.
+pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String, pub slots: u32, pub lines: (u32, u32) }
 #[derive(Debug, Clone)]
 pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt>, pub slots: u32 }
 #[derive(Debug, Clone, Default)]
 pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 
-pub fn lex(src: &str) -> Result<Vec<Tok>, String> {
+pub fn lex(src: &str) -> Result<Vec<Tok>, String> { lex_lines(src).map(|t| t.0) }
+
+/// Tokens, and the source line each one starts on.
+fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
     let c: Vec<char> = src.chars().collect();
-    let (mut i, mut out) = (0, Vec::new());
+    let (mut i, mut out, mut at, mut line, mut tl) = (0, Vec::new(), Vec::new(), 1u32, 1u32);
     while i < c.len() {
         let ch = c[i];
+        while at.len() < out.len() { at.push(tl); } // tokens pushed by the last step started on its line
+        tl = line;
+        if ch == '\n' { line += 1; }
         if ch.is_whitespace() { i += 1; }
         else if ch == '/' && c.get(i + 1) == Some(&'/') { while i < c.len() && c[i] != '\n' { i += 1; } }
         else if ch.is_alphabetic() || ch == '_' { let s = i; while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') { i += 1; } out.push(Tok::Id(c[s..i].iter().collect())); }
@@ -101,6 +108,7 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 i += 1;
             }
             if i >= c.len() { return Err("unterminated string".into()); }
+            line += s.matches('\n').count() as u32;
             i += 1; out.push(Tok::Str(s));
         }
         else {
@@ -109,14 +117,16 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, String> {
             else { out.push(Tok::Sym(ch.to_string())); i += 1; }
         }
     }
-    Ok(out)
+    while at.len() < out.len() { at.push(tl); }
+    Ok((out, at))
 }
 
-struct P { t: Vec<Tok>, i: usize }
+struct P { t: Vec<Tok>, i: usize, lines: Vec<u32> }
 type R<T> = Result<T, String>;
 
 pub fn parse(src: &str) -> R<Api> {
-    let mut p = P { t: lex(src)?, i: 0 };
+    let (t, lines) = lex_lines(src)?;
+    let mut p = P { t, i: 0, lines };
     let mut api = Api::default();
     while p.i < p.t.len() {
         if p.is_kw("fn") {
@@ -129,6 +139,7 @@ pub fn parse(src: &str) -> R<Api> {
             api.fns.push(Func { name, params, body, slots: 0 });
             continue;
         }
+        let first = p.lines.get(p.i).copied().unwrap_or(0);
         p.kw("endpoint")?;
         let method = p.id()?;
         let mut segs = Vec::new();
@@ -137,7 +148,8 @@ pub fn parse(src: &str) -> R<Api> {
         }
         let body = p.block()?;
         let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(n) => format!("/{{{}}}", n) }).collect::<String>());
-        api.eps.push(Endpoint { method, segs, body, text, slots: 0 });
+        let last = p.lines.get(p.i.saturating_sub(1)).copied().unwrap_or(first);
+        api.eps.push(Endpoint { method, segs, body, text, slots: 0, lines: (first, last) });
     }
     Ok(api)
 }

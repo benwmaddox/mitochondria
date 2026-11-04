@@ -21,6 +21,8 @@ global rooms: pool<Room, 64>;
 - Growing past a maximum is a typed failure (503, 413), never a crash or out-of-memory kill.
 - `--compile` generates C for endpoints and compiles it in memory with the bundled TinyCC (`third_party/tinycc`, LGPL-2.1,
   loaded at run time); what is not compiled yet stays interpreted, and both modes answer alike.
+- `emit-c` writes that C as one readable file for review: the layout table, the helper interface, and each endpoint
+  next to its source lines.
 - A `.system` file runs several programs as shared-nothing worker threads with bounded mailboxes; `forward kind[key] { ... }`
   hands a request to another worker as part of the handler's transaction. A worker that panics is rebuilt.
 
@@ -29,6 +31,7 @@ cargo run --release -- serve examples/chat/chat.mito examples/chat/chat.api --po
 cargo run --release -- bench examples/chat/chat.mito examples/chat/chat.api [--soft 16 --hard 32]
 cargo run --release -- system examples/chat-sharded/chat.system --port 8080 [--auth 2 --rooms 4]   # worker threads
 cargo run --release -- bench-system examples/chat-sharded/chat.system --clients 32
+cargo run --release -- emit-c examples/chat/chat.mito examples/chat/chat.api -o chat.c   # or: emit-c x.system -o dir
 cargo run --release -- examples/world.mito examples/world.script    # state scripts
 cargo run --release -- exp pressure | trim | access | chat           # experiments
 ```

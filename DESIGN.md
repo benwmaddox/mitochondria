@@ -114,6 +114,37 @@ A collection whose trim released nothing is skipped until 256 of its items have 
 live pages, only shrinking creates dead ones, so this keeps a steady state from rescanning. Marks are given in megabytes
 (`--soft`, `--hard`). Not done: marks as fractions of the budget, and machine-level free memory as an input.
 
+## Workers and mailboxes (built from concepts 3, 7, 8 and 9)
+A **system** runs several programs as **workers**, each on its own OS thread with its own reservation, commit tracking and
+pressure policy. Workers share nothing. A `.system` file declares worker kinds, how many of each, and their mailboxes:
+
+```
+worker auth  { state "auth.mito";  api "auth.api";  count 2; mailbox 1024; slot 4096; }
+worker rooms { state "rooms.mito"; api "rooms.api"; count 4; mailbox 1024; slot 4096; }
+entry auth;       // requests enter here (by session-token shard, otherwise round-robin)
+inflight 4096;    // reply slots: the most requests in flight at once
+budget 8192;      // MB: the sum of every worker's declared total must fit
+```
+
+- **A mailbox is a list with a full policy (concept 3):** a bounded ring of fixed-size message slots, allocated once. A message
+  is the request (method, target, body, headers) plus forwarded fields. A full mailbox is `Full`: the sender answers 503.
+- **One message is one epoch (concept 7)** and one atomic handler (concept 8).
+- **`forward kind[key] { "field": expr };`** is the one new statement. It ends the handler and hands the request to worker
+  `key % count` of that kind, with the fields; `fwd("field")` reads them there. The forward is part of the handler's
+  transaction: the message is queued first and the handler's writes are committed only if that worked; if the next mailbox
+  is full the writes roll back and the client gets 503. Worker-to-worker sends never block, so chains of forwards cannot deadlock.
+- **Every request is answered once,** through a fixed table of reply slots (`inflight`). When none is free, the front answers 503.
+- **A worker that panics is rebuilt** from its source with a fresh reservation, so its state is lost (as an Erlang process's
+  is); the message gets 500 and the restart is counted.
+- Each worker trims its own region when its mailbox is quiet (concept 9).
+- `worker_index()` and `worker_count("kind")` let handlers compute ids that are unique across shards. A session token carries
+  its auth shard (`shard.slot.generation.secret`), and `auth()` rejects a token for another shard.
+
+**What one-way forwarding cannot do (by choice, for now):** references do not cross workers, so data about another worker's
+items is copied by value (a message keeps its author's name and id); there is no fan-out, so nothing can total or list across
+shards unless one worker owns that list (the chat's room directory lives on rooms[0]); and a forward chain is not a distributed
+transaction: if a later worker fails, earlier workers' committed writes stay.
+
 ## Failures
 | Failure | Meaning | Default HTTP status |
 |---|---|---|
@@ -154,19 +185,18 @@ is the layer above it. Details and the comparison with arenas, garbage collectio
 ## Deferred, with known limits
 - **Long uneven text.** `string<N>` reserves N bytes per slot. Measured: 2000-byte chat bodies averaging ~120 bytes left 39.5 MB committed
   for 3.1 MB live, and trim could release none of it. Accepted for now; nesting improves locality but not this.
-- **Workers and mailboxes.** A later layer: a mailbox is a `list` with a full policy (adding `block` and `drop_newest`), each worker owns
-  a region and trims it when its mailbox empties. Supervision, scheduling and cross-thread commit are undesigned.
 - **Compilation.** Endpoints are interpreted. Reading a room's newest 50 messages and writing them as JSON takes 18.5 us; a scan of
   20,000 rows through the interpreter was ~470x a native loop. A compiler would bind columns once and turn `each ... where` into a column loop.
 - **Keyed indexes** for lookups that are not by parent. Not planned until nesting proves insufficient.
 - **Debug-only orphan report** (rows nothing refers to) and **FIFO slot reuse** for pools.
 
 ## Status: prototype vs this design (2026-11-03)
-Every concept above is built and tested (20 tests). Known differences:
+Every concept above, and the worker system, is built and tested (29 tests). Known differences:
 - Types in `fn` signatures are parsed but not checked; the interpreter is dynamically typed.
 - `ref<...>` targets top-level pools only. Nested-struct fields inside items (`m.pos.x`) take a slower path that allocates.
 - The pressure policy's marks are absolute, not fractions of the budget; machine free memory is not consulted.
-- One thread. The worker/mailbox layer is not built.
+- Workers: mailboxes are a mutex and a condition variable, not lock-free; only `forward` exists (no one-way `send`/`on` messages,
+  no fan-out); a restart is the whole supervision story (no supervision tree, links or monitors).
 - The write journal (for rollback) is a heap buffer sized at startup (64 KB, 1024 entries). A very large request, such as clearing
   a big pool, grows it; it is not counted in the epoch total.
 - `GET /stats`-style reads of live bytes allocate (they walk every range), and the HTTP layer outside the handler allocates.
@@ -174,6 +204,7 @@ Every concept above is built and tested (20 tests). Known differences:
 Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat-api-findings.md.
 
 ## Next
-1. Long uneven text (the deferred 92% waste): a per-collection text area with a declared total, compacted during trim.
-2. Workers and mailboxes on top of `list` full policies and per-worker regions.
+1. Long uneven text (the deferred 92% waste): `text<N>` fields packed into a per-collection text area, a ring for `drop_oldest` lists.
+2. Cheaper cross-thread handoff (measured as the main cost of workers): batching, fewer hops, lock-free mailboxes.
 3. A compiler for endpoints (bind columns, compile `each ... where` to column loops), measured against the native baselines.
+4. Worker messages beyond `forward`: one-way `send` with `on Msg` handlers, fan-out with gathered replies, links and monitors.

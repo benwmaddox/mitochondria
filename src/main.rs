@@ -17,6 +17,22 @@ static ALLOC: alloc_count::Counting = alloc_count::Counting;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(|s| s.as_str()) == Some("exp") { return if args.get(1).map(|s| s.as_str()) == Some("pressure") { exp::pressure() } else if args.get(1).map(|s| s.as_str()) == Some("chat") { exp::chat_scan() } else if args.get(1).map(|s| s.as_str()) == Some("access") { exp::access_cost() } else if args.get(1).map(|s| s.as_str()) == Some("trim") { { exp::trim_cost(); exp::scoped_cost() } } else { exp::run() }; }
+    if matches!(args.first().map(|s| s.as_str()), Some("system") | Some("bench-system")) {
+        let file = std::path::Path::new(args.get(1).expect("system file"));
+        let src = std::fs::read_to_string(file).expect("read system file");
+        let dir = file.parent().unwrap_or(std::path::Path::new("."));
+        let opt = |name: &str, d: usize| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(d);
+        if args[0] == "bench-system" {
+            let configs: Vec<(usize, usize)> = args.iter().position(|a| a == "--configs").and_then(|i| args.get(i + 1)).map(|s| s.split(',').filter_map(|c| c.split_once('x')).filter_map(|(a, r)| Some((a.parse().ok()?, r.parse().ok()?))).collect()).unwrap_or(vec![(1, 1), (1, 2), (2, 4), (4, 8)]);
+            system::bench(&src, dir, opt("--clients", 8), &configs, opt("--ops", 100_000), opt("--reps", 2), args.iter().position(|a| a == "--spin").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()));
+        } else {
+            let mut spec = system::parse_spec(&src, dir).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
+            for k in &mut spec.kinds { if let Some(n) = args.iter().position(|a| *a == format!("--{}", k.name)).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()) { k.count = n; } }
+            let sys = system::System::start(spec).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
+            system::serve(std::sync::Arc::new(sys), opt("--port", 8080) as u16, opt("--conns", 16)).expect("serve");
+        }
+        return;
+    }
     if matches!(args.first().map(|s| s.as_str()), Some("serve") | Some("bench")) {
         let (state, api) = (args.get(1).expect("state file"), args.get(2).expect("api file"));
         let prog = layout::Program::parse(&std::fs::read_to_string(state).expect("read state")).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });

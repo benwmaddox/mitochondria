@@ -19,10 +19,14 @@ global rooms: pool<Room, 64>;
 - Endpoints (`fn`, `endpoint`, `let`/`var`, `each ... where ... reverse ... limit`) are atomic: a failed request is rolled back
   exactly. Requests run in a declared epoch and make no heap allocations once warm.
 - Growing past a maximum is a typed failure (503, 413), never a crash or out-of-memory kill.
+- A `.system` file runs several programs as shared-nothing worker threads with bounded mailboxes; `forward kind[key] { ... }`
+  hands a request to another worker as part of the handler's transaction. A worker that panics is rebuilt.
 
 ```
 cargo run --release -- serve examples/chat/chat.mito examples/chat/chat.api --port 8080
 cargo run --release -- bench examples/chat/chat.mito examples/chat/chat.api [--soft 16 --hard 32]
+cargo run --release -- system examples/chat-sharded/chat.system --port 8080 [--auth 2 --rooms 4]   # worker threads
+cargo run --release -- bench-system examples/chat-sharded/chat.system --clients 32
 cargo run --release -- examples/world.mito examples/world.script    # state scripts
 cargo run --release -- exp pressure | trim | access | chat           # experiments
 ```

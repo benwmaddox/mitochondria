@@ -8,7 +8,7 @@ struct Room {
     name: string<48>;
     created: i64;
     messages: list<Msg, 1000> drop_oldest;
-    typing: pool<Typing, 32>;
+    typing: pool<Typing, 256>;
 }
 global meta: Meta;
 global directory: pool<Dir, 256>;   // used on rooms[0] only

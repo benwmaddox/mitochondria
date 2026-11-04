@@ -20,7 +20,7 @@ const MB: usize = 1 << 20;
 // ---------------------------------------------------------------- spec
 
 pub struct KindSpec { pub name: String, pub state: String, pub api: String, pub count: usize, pub mailbox: usize, pub slot: usize, pub soft: Option<usize>, pub hard: Option<usize> }
-pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usize, pub budget: usize }
+pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usize, pub budget: usize, pub spin: Duration }
 
 /// Parse a `.system` file. Paths in it are relative to `dir`.
 ///
@@ -34,7 +34,7 @@ pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usiz
 pub fn parse_spec(src: &str, dir: &Path) -> Result<Spec, String> {
     let toks = tokens(src);
     let mut i = 0;
-    let mut spec = Spec { kinds: Vec::new(), entry: usize::MAX, inflight: 4096, budget: 4096 * MB };
+    let mut spec = Spec { kinds: Vec::new(), entry: usize::MAX, inflight: 4096, budget: 4096 * MB, spin: Duration::ZERO }; // sleep at once by default: spinning only pays when there are idle cores
     let mut entry = String::new();
     let next = |i: &mut usize| -> Result<String, String> { let t = toks.get(*i).cloned().ok_or("unexpected end of system file")?; *i += 1; Ok(t) };
     let num = |s: String| -> Result<usize, String> { s.parse().map_err(|_| format!("expected a number, found `{}`", s)) };
@@ -62,7 +62,8 @@ pub fn parse_spec(src: &str, dir: &Path) -> Result<Spec, String> {
             "entry" => { entry = next(&mut i)?; next(&mut i)?; }
             "inflight" => { spec.inflight = num(next(&mut i)?)?.max(1); next(&mut i)?; }
             "budget" => { spec.budget = num(next(&mut i)?)? * MB; next(&mut i)?; }
-            o => return Err(format!("expected `worker`, `entry`, `inflight` or `budget`, found `{}`", o)),
+            "spin" => { spec.spin = Duration::from_micros(num(next(&mut i)?)? as u64); next(&mut i)?; }
+            o => return Err(format!("expected `worker`, `entry`, `inflight`, `budget` or `spin`, found `{}`", o)),
         }
     }
     spec.entry = spec.kinds.iter().position(|k| k.name == entry).ok_or(format!("entry `{}` is not a declared worker", entry))?;
@@ -85,13 +86,24 @@ fn tokens(src: &str) -> Vec<String> {
 
 struct Ring { buf: Vec<u8>, head: usize, len: usize, closed: bool }
 /// A bounded queue of fixed-size message slots, allocated once.
-pub struct Mailbox { ring: Mutex<Ring>, cv: Condvar, cap: usize, slot: usize, refused: AtomicU64 }
+pub struct Mailbox { ring: Mutex<Ring>, cv: Condvar, cap: usize, slot: usize, refused: AtomicU64, queued: AtomicUsize, spin: Duration }
 #[derive(Debug, PartialEq)]
 pub enum SendErr { Full, TooBig, Closed }
 enum Recv { Got, Idle, Closed }
 
+/// Busy-wait up to `d` for `ready()`, checking the clock only every 64 rounds. Waking a sleeping thread costs far more
+/// than a short spin when the next message is about to arrive.
+fn spin_for(d: Duration, ready: impl Fn() -> bool) -> bool {
+    if d.is_zero() { return ready(); }
+    let end = std::time::Instant::now() + d;
+    loop {
+        for _ in 0..64 { if ready() { return true; } std::hint::spin_loop(); }
+        if std::time::Instant::now() >= end { return ready(); }
+    }
+}
+
 impl Mailbox {
-    fn new(cap: usize, slot: usize) -> Mailbox { Mailbox { ring: Mutex::new(Ring { buf: vec![0; cap * slot], head: 0, len: 0, closed: false }), cv: Condvar::new(), cap, slot, refused: AtomicU64::new(0) } }
+    fn new(cap: usize, slot: usize, spin: Duration) -> Mailbox { Mailbox { ring: Mutex::new(Ring { buf: vec![0; cap * slot], head: 0, len: 0, closed: false }), cv: Condvar::new(), cap, slot, refused: AtomicU64::new(0), queued: AtomicUsize::new(0), spin } }
     /// Put one message in; `fill` writes it into the slot and returns its length (or `None` if it does not fit). Never blocks.
     fn send(&self, fill: impl FnOnce(&mut [u8]) -> Option<usize>) -> Result<(), SendErr> {
         let mut r = self.ring.lock().unwrap();
@@ -101,12 +113,14 @@ impl Mailbox {
         let used = fill(&mut r.buf[at + 4..at + self.slot]).ok_or(SendErr::TooBig)?;
         r.buf[at..at + 4].copy_from_slice(&(used as u32).to_le_bytes());
         r.len += 1;
+        self.queued.store(r.len, Relaxed);
         drop(r);
         self.cv.notify_one();
         Ok(())
     }
     /// Take the oldest message into `out`, waiting up to `wait`. After `close`, what is queued is still delivered.
     fn recv(&self, out: &mut Vec<u8>, wait: Duration) -> Recv {
+        spin_for(self.spin, || self.queued.load(Relaxed) > 0);
         let mut r = self.ring.lock().unwrap();
         while r.len == 0 {
             if r.closed { return Recv::Closed; }
@@ -118,6 +132,7 @@ impl Mailbox {
         let n = u32::from_le_bytes(r.buf[at..at + 4].try_into().unwrap()) as usize;
         out.clear(); out.extend_from_slice(&r.buf[at + 4..at + 4 + n]);
         r.head = (r.head + 1) % self.cap; r.len -= 1;
+        self.queued.store(r.len, Relaxed);
         Recv::Got
     }
     fn close(&self) { self.ring.lock().unwrap().closed = true; self.cv.notify_all(); }
@@ -152,25 +167,26 @@ impl<'m> Rd<'m> {
 
 // ---------------------------------------------------------------- replies
 
-struct Slot { st: Mutex<(u8, u16, Vec<u8>)>, cv: Condvar } // state 0 free, 1 waiting, 2 answered, 3 abandoned by a timed-out caller
+struct Slot { st: Mutex<(u8, u16, Vec<u8>)>, cv: Condvar, answered: std::sync::atomic::AtomicBool } // state 0 free, 1 waiting, 2 answered, 3 abandoned by a timed-out caller
 /// A fixed table of reply slots: the number of requests in flight is bounded by it.
-struct Replies { slots: Vec<Slot>, free: Mutex<Vec<u32>> }
+struct Replies { slots: Vec<Slot>, free: Mutex<Vec<u32>>, spin: Duration }
 impl Replies {
-    fn new(n: usize) -> Replies { Replies { slots: (0..n).map(|_| Slot { st: Mutex::new((0, 0, Vec::with_capacity(4096))), cv: Condvar::new() }).collect(), free: Mutex::new((0..n as u32).rev().collect()) } }
-    fn take(&self) -> Option<u32> { let id = self.free.lock().unwrap().pop()?; self.slots[id as usize].st.lock().unwrap().0 = 1; Some(id) }
+    fn new(n: usize, spin: Duration) -> Replies { Replies { slots: (0..n).map(|_| Slot { st: Mutex::new((0, 0, Vec::with_capacity(4096))), cv: Condvar::new(), answered: false.into() }).collect(), free: Mutex::new((0..n as u32).rev().collect()), spin } }
+    fn take(&self) -> Option<u32> { let id = self.free.lock().unwrap().pop()?; let s = &self.slots[id as usize]; s.answered.store(false, Relaxed); s.st.lock().unwrap().0 = 1; Some(id) }
     fn release(&self, id: u32) { self.slots[id as usize].st.lock().unwrap().0 = 0; self.free.lock().unwrap().push(id); }
     /// Answer a request. Each request is answered once; an answer to an abandoned slot just frees it.
     fn put(&self, id: u32, code: u16, body: &[u8]) {
         let Some(s) = self.slots.get(id as usize) else { return };
         let mut g = s.st.lock().unwrap();
         match g.0 {
-            1 => { g.0 = 2; g.1 = code; g.2.clear(); g.2.extend_from_slice(body); drop(g); s.cv.notify_one(); }
+            1 => { g.0 = 2; g.1 = code; g.2.clear(); g.2.extend_from_slice(body); drop(g); s.answered.store(true, std::sync::atomic::Ordering::Release); s.cv.notify_one(); }
             3 => { g.0 = 0; drop(g); self.free.lock().unwrap().push(id); }
             _ => {} // already answered: never happens by construction; ignored rather than double-answering
         }
     }
     fn wait(&self, id: u32, timeout: Duration) -> Option<(u16, Vec<u8>)> {
         let s = &self.slots[id as usize];
+        spin_for(self.spin, || s.answered.load(std::sync::atomic::Ordering::Acquire));
         let mut g = s.st.lock().unwrap();
         let deadline = std::time::Instant::now() + timeout;
         while g.0 == 1 {
@@ -208,9 +224,9 @@ impl System {
         }
         if total > spec.budget { return Err(format!("over budget: {} workers need {} MB, budget is {} MB", spec.kinds.iter().map(|k| k.count).sum::<usize>(), total / MB, spec.budget / MB)); }
         let (mut base, mut boxes, mut n) = (Vec::new(), Vec::new(), 0);
-        for k in &spec.kinds { base.push(n); for _ in 0..k.count { boxes.push(Mailbox::new(k.mailbox, k.slot)); } n += k.count; }
+        for k in &spec.kinds { base.push(n); for _ in 0..k.count { boxes.push(Mailbox::new(k.mailbox, k.slot, spec.spin)); } n += k.count; }
         let shared = Arc::new(Shared {
-            boxes, base, counts: spec.kinds.iter().map(|k| k.count).collect(), entry: spec.entry, replies: Replies::new(spec.inflight),
+            boxes, base, counts: spec.kinds.iter().map(|k| k.count).collect(), entry: spec.entry, replies: Replies::new(spec.inflight, spec.spin),
             stats: (0..n).map(|_| WStats::default()).collect(), names: spec.kinds.iter().map(|k| k.name.clone()).collect(),
         });
         let spec = Arc::new(spec);
@@ -332,6 +348,130 @@ fn handle(server: &mut Server, msg: &[u8], sh: &Shared, hv: &mut Vec<(&'static s
     forwarded
 }
 
+// ---------------------------------------------------------------- socket front end
+
+/// Serve a system over HTTP: `conns` threads each accept and handle one connection at a time.
+pub fn serve(sys: Arc<System>, port: u16, conns: usize) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind(("127.0.0.1", port))?;
+    println!("listening on http://127.0.0.1:{} ({} connection threads)", port, conns);
+    let mut ts = Vec::new();
+    for _ in 0..conns {
+        let (l, sys) = (l.try_clone()?, sys.clone());
+        ts.push(std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(mut c) = conn else { continue };
+                let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
+                let (mut data, mut chunk) = (Vec::new(), [0u8; 4096]);
+                let he = loop {
+                    if let Some(p) = data.windows(4).position(|w| w == b"\r\n\r\n") { break Some(p); }
+                    if data.len() > 64 * 1024 { break None; }
+                    match c.read(&mut chunk) { Ok(0) | Err(_) => break None, Ok(n) => data.extend_from_slice(&chunk[..n]) }
+                };
+                let Some(he) = he else { let _ = c.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); continue };
+                let head = String::from_utf8_lossy(&data[..he]).into_owned();
+                let mut lines = head.lines();
+                let mut rl = lines.next().unwrap_or("").split(' ');
+                let (method, target) = (rl.next().unwrap_or("").to_string(), rl.next().unwrap_or("/").to_string());
+                let headers: Vec<(String, String)> = lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect();
+                let want: usize = headers.iter().find(|h| h.0.eq_ignore_ascii_case("content-length")).and_then(|h| h.1.parse().ok()).unwrap_or(0).min(1 << 20);
+                while data.len() < he + 4 + want { match c.read(&mut chunk) { Ok(0) | Err(_) => break, Ok(n) => data.extend_from_slice(&chunk[..n]) } }
+                let body = String::from_utf8_lossy(&data[(he + 4).min(data.len())..]).into_owned();
+                let hv: Vec<(&str, &str)> = headers.iter().map(|h| (h.0.as_str(), h.1.as_str())).collect();
+                let (code, out) = sys.request(&method, &target, &hv, &body, Duration::from_secs(10));
+                let reason = match code { 200 => "OK", 201 => "Created", 204 => "No Content", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found", 413 => "Payload Too Large", 429 => "Too Many Requests", 503 => "Service Unavailable", 504 => "Gateway Timeout", _ => "Error" };
+                let _ = c.write_all(format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", code, reason, out.len()).as_bytes());
+                let _ = c.write_all(&out);
+            }
+        }));
+    }
+    for t in ts { let _ = t.join(); }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- benchmark
+
+fn pct(v: &mut [u64], p: usize) -> f64 { if v.is_empty() { return 0.0; } v.sort_unstable(); v[(v.len() * p / 100).min(v.len() - 1)] as f64 / 1000.0 }
+fn xorshift(r: &mut u64) -> u64 { *r ^= *r << 13; *r ^= *r >> 7; *r ^= *r << 17; *r }
+
+/// The sharded chat under load from `clients` threads, for each (auth, rooms) worker count in `configs`.
+/// Also measures one plain `Server` on one thread running the same mix (examples/chat), as the no-mailbox baseline.
+pub fn bench(src: &str, dir: &Path, clients: usize, configs: &[(usize, usize)], ops: usize, reps: usize, spin: Option<u64>) {
+    use std::time::Instant;
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    println!("logical cores: {}; client threads: {}; {} mixed requests per run (70% GET messages, 20% POST message, 5% POST typing, 5% GET typing); runs per config: {}", cores, clients, ops, reps);
+    let body = "{\"body\":\"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\"}";
+
+    // baseline: one Server, one thread, no mailboxes
+    {
+        let prog = Program::parse(include_str!("../examples/chat/chat.mito")).unwrap();
+        let mut s = Server::new(Instance::start(prog, usize::MAX).unwrap(), include_str!("../examples/chat/chat.api")).unwrap();
+        let _ = s.inst.resolve("meta.rate").and_then(|l| s.inst.loc_set(&l, &crate::runtime::Val::Int(1_000_000)));
+        let mut toks = Vec::new();
+        for i in 0..1000 { s.handle_raw("POST", "/sessions", &[], &format!("{{\"name\":\"u{}\"}}", i)); toks.push(vec![("X-Session".to_string(), s.response().split("\"token\":\"").nth(1).unwrap().split('"').next().unwrap().to_string())]); }
+        for i in 0..20 { s.handle_raw("POST", "/rooms", &toks[0], &format!("{{\"name\":\"r{}\"}}", i)); }
+        let posts: Vec<String> = (0..20).map(|r| format!("/rooms/{}/messages", r)).collect();
+        let gets: Vec<String> = (0..20).map(|r| format!("/rooms/{}/messages?limit=50", r)).collect();
+        let typ: Vec<String> = (0..20).map(|r| format!("/rooms/{}/typing", r)).collect();
+        let mut rng = 7u64;
+        for _ in 0..10_000 { let (u, r) = (xorshift(&mut rng) as usize % 1000, xorshift(&mut rng) as usize % 20); s.handle_raw("POST", &posts[r], &toks[u], body); }
+        let t = Instant::now();
+        for _ in 0..ops {
+            let (u, r, k) = (xorshift(&mut rng) as usize % 1000, xorshift(&mut rng) as usize % 20, xorshift(&mut rng) % 100);
+            if k < 70 { s.handle_raw("GET", &gets[r], &toks[u], ""); } else if k < 90 { s.handle_raw("POST", &posts[r], &toks[u], body); } else if k < 95 { s.handle_raw("POST", &typ[r], &toks[u], ""); } else { s.handle_raw("GET", &typ[r], &toks[u], ""); }
+        }
+        let secs = t.elapsed().as_secs_f64();
+        println!("\n  baseline: one Server on one thread, direct calls, no mailboxes: {:.0} req/s ({:.1} us mean)", ops as f64 / secs, secs * 1e6 / ops as f64);
+    }
+
+    println!("\n  {:<12} {:>4} {:>10} {:>9} {:>9} {:>9} {:>9} {:>9}  {}", "auth x rooms", "run", "req/s", "GET p50", "GET p99", "POST p50", "POST p99", "w-allocs", "status codes");
+    for &(a, r) in configs {
+        for rep in 0..reps {
+            let mut spec = parse_spec(src, dir).expect("system file");
+            for k in &mut spec.kinds { if k.name == "auth" { k.count = a; } if k.name == "rooms" { k.count = r; } }
+            if let Some(us) = spin { spec.spin = Duration::from_micros(us); }
+            if rep == 0 && a == configs[0].0 && r == configs[0].1 { println!("  spin before sleeping: {} us", spec.spin.as_micros()); }
+            let sys = System::start(spec).expect("start");
+            let to = Duration::from_secs(10);
+            let toks: Vec<String> = (0..3000).map(|i| { let res = sys.request("POST", "/sessions", &[], &format!("{{\"name\":\"u{}\"}}", i), to); String::from_utf8_lossy(&res.1).split("\"token\":\"").nth(1).unwrap_or("").split('"').next().unwrap_or("").to_string() }).collect();
+            let ids: Vec<usize> = (0..20).map(|i| { let res = sys.request("POST", "/rooms", &[("X-Session", toks[0].as_str())], &format!("{{\"name\":\"r{}\"}}", i), to); String::from_utf8_lossy(&res.1).split("\"id\":").nth(1).and_then(|x| x.split(',').next()).and_then(|x| x.parse().ok()).unwrap_or(1) }).collect();
+            let posts: Vec<String> = ids.iter().map(|r| format!("/rooms/{}/messages", r)).collect();
+            let gets: Vec<String> = ids.iter().map(|r| format!("/rooms/{}/messages?limit=50", r)).collect();
+            let typ: Vec<String> = ids.iter().map(|r| format!("/rooms/{}/typing", r)).collect();
+            let run = |n: usize, mix: bool| -> (f64, Vec<(u8, u64, u16)>) {
+                let t = Instant::now();
+                let parts: Vec<Vec<(u8, u64, u16)>> = std::thread::scope(|sc| {
+                    let hs: Vec<_> = (0..clients).map(|c| { let (sys, toks, posts, gets, typ) = (&sys, &toks, &posts, &gets, &typ); sc.spawn(move || {
+                        let mut rng = 0x9E37_79B9_7F4A_7C15u64 ^ ((c as u64 + 1) * 0x1234_5678);
+                        let mut out = Vec::with_capacity(n / clients + 1);
+                        for _ in 0..n / clients {
+                            let (u, r, k) = (xorshift(&mut rng) as usize % toks.len(), xorshift(&mut rng) as usize % posts.len(), if mix { xorshift(&mut rng) % 100 } else { 80 });
+                            let h = [("X-Session", toks[u].as_str())];
+                            let t0 = Instant::now();
+                            let (kind, code) = if k < 70 { (0u8, sys.request("GET", &gets[r], &h, "", to).0) } else if k < 90 { (1, sys.request("POST", &posts[r], &h, body, to).0) } else if k < 95 { (2, sys.request("POST", &typ[r], &h, "", to).0) } else { (3, sys.request("GET", &typ[r], &h, "", to).0) };
+                            out.push((kind, t0.elapsed().as_nanos() as u64, code));
+                        }
+                        out
+                    }) }).collect();
+                    hs.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                (t.elapsed().as_secs_f64(), parts.into_iter().flatten().collect())
+            };
+            run(10_000, false); // fill the rooms with messages
+            let before = sys.report().iter().fold((0u64, 0u64), |s, w| (s.0 + w.allocs, s.1 + w.handled));
+            let (secs, all) = run(ops, true);
+            let after = sys.report().iter().fold((0u64, 0u64), |s, w| (s.0 + w.allocs, s.1 + w.handled));
+            let mut by: Vec<Vec<u64>> = vec![Vec::new(); 4];
+            let mut codes: std::collections::BTreeMap<u16, usize> = Default::default();
+            for (k, ns, c) in &all { by[*k as usize].push(*ns); *codes.entry(*c).or_default() += 1; }
+            let wa = (after.0 - before.0) as f64 / (after.1 - before.1).max(1) as f64;
+            println!("  {:<12} {:>4} {:>10.0} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.2}  {:?}", format!("{} x {}", a, r), rep + 1, all.len() as f64 / secs, pct(&mut by[0], 50), pct(&mut by[0], 99), pct(&mut by[1], 50), pct(&mut by[1], 99), wa, codes);
+            sys.shutdown();
+        }
+    }
+    println!("  (latencies in us, measured by the client threads, including the trip through the mailboxes; w-allocs = heap allocations per message handled inside workers)");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,7 +484,7 @@ mod tests {
     fn forwards_reach_the_right_shard_in_order_and_each_request_is_answered_once() {
         let front = kind("front", "struct M { n: i64; } global m: M;", "endpoint POST /inc/{k} { forward count[int(param(\"k\"))] { \"from\": worker_index() }; }", 2);
         let count = kind("count", "struct C { n: i64; } global c: C;", "endpoint POST /inc/{k} { c.n = c.n + 1; respond 200 { \"shard\": worker_index(), \"n\": c.n, \"from\": int(fwd(\"from\")) }; }", 3);
-        let sys = System::start(Spec { kinds: vec![front, count], entry: 0, inflight: 16, budget: 1 << 30 }).unwrap();
+        let sys = System::start(Spec { kinds: vec![front, count], entry: 0, inflight: 16, budget: 1 << 30, spin: Duration::ZERO }).unwrap();
         for round in 1..=4 {
             for k in 0..6 {
                 let r = sys.request("POST", &format!("/inc/{}", k), &[], "", T);
@@ -362,7 +502,7 @@ mod tests {
     #[test]
     fn a_panicking_worker_is_restarted_with_fresh_state() {
         let w = kind("w", "struct C { n: i64; } global c: C;", "endpoint POST /inc { c.n = c.n + 1; respond 200 { \"n\": c.n }; } endpoint POST /crash { c.n = 99; __crash(); }", 1);
-        let sys = System::start(Spec { kinds: vec![w], entry: 0, inflight: 4, budget: 1 << 30 }).unwrap();
+        let sys = System::start(Spec { kinds: vec![w], entry: 0, inflight: 4, budget: 1 << 30, spin: Duration::ZERO }).unwrap();
         assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":1}");
         assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":2}");
         assert_eq!(sys.request("POST", "/crash", &[], "", T).0, 500);
@@ -373,7 +513,7 @@ mod tests {
 
     #[test]
     fn mailbox_full_and_too_big_are_typed() {
-        let m = Mailbox::new(2, 64);
+        let m = Mailbox::new(2, 64, Duration::ZERO);
         assert!(m.send(|s| { s[0] = 1; Some(1) }).is_ok());
         assert!(m.send(|s| { s[0] = 2; Some(1) }).is_ok());
         assert_eq!(m.send(|_| Some(1)), Err(SendErr::Full));
@@ -402,7 +542,7 @@ mod tests {
 
     #[test]
     fn in_flight_requests_are_bounded() {
-        let r = Replies::new(2);
+        let r = Replies::new(2, Duration::ZERO);
         let (a, b) = (r.take().unwrap(), r.take().unwrap());
         assert!(r.take().is_none());
         r.put(a, 200, b"x");
@@ -417,7 +557,7 @@ mod tests {
         let k = |n: &str, st: &str, api: &str, c| kind(n, st, api, c);
         let auth = k("auth", include_str!("../examples/chat-sharded/auth.mito"), include_str!("../examples/chat-sharded/auth.api"), 2);
         let rooms = k("rooms", include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api"), 3);
-        let sys = System::start(Spec { kinds: vec![auth, rooms], entry: 0, inflight: 64, budget: 4 << 30 }).unwrap();
+        let sys = System::start(Spec { kinds: vec![auth, rooms], entry: 0, inflight: 64, budget: 4 << 30, spin: Duration::ZERO }).unwrap();
         let login = |n: &str| { let r = sys.request("POST", "/sessions", &[], &format!("{{\"name\":\"{}\"}}", n), T); assert_eq!(r.0, 201, "{}", body(&r)); body(&r).split("\"token\":\"").nth(1).unwrap().split('"').next().unwrap().to_string() };
         let (ann, bob) = (login("ann"), login("bob"));
         assert_ne!(ann.split('.').next(), bob.split('.').next(), "round-robin puts them on different auth shards");

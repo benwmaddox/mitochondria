@@ -327,3 +327,37 @@ about 10 us per request) and is now a running counter; and a collection that yie
 
 **A debugging note.** A segfault after the nested-header change was not undefined behaviour: `cargo test` rebuilt only the test
 binary, and the server being run was the stale build from before the fix. Rebuild the binary before running it.
+
+## Round 4 (2026-11-04): workers and mailboxes
+The chat sharded across worker threads (`examples/chat-sharded`): auth shards check the session and rate limit and forward to
+the room's shard; rooms[0] owns room ids and the directory. 29 tests, including the sharded chat end to end across 2 auth and 3
+room workers, restart after a panic, rollback when a forward cannot be sent, and the in-flight bound.
+
+**Throughput** (`bench-system examples/chat-sharded/chat.system --clients 32 --ops 100000 --reps 2 --spin 0`; 22 logical cores,
+shared with other work; 100,000 requests per run, 70% GET messages / 20% POST message / 5% typing ping / 5% typing list):
+
+| Configuration | req/s, run 1 | req/s, run 2 | GET p50 (us) | GET p99 (us) |
+|---|---|---|---|---|
+| one Server, one thread, direct calls (no mailboxes) | 69,971 | 70,416 | 14 (mean) | |
+| 1 auth x 1 rooms | 46,905 | 24,354 | 566-1,327 | ~1,700 |
+| 1 x 2 | 48,155 | 51,012 | 621-655 | ~1,450 |
+| 2 x 4 | 104,796 | 101,351 | 182-192 | ~1,130 |
+| 4 x 8 | 104,917 | 136,135 | 83-96 | 1,218-1,852 |
+
+Workers make no heap allocations per message (measured inside each worker thread). 66 requests per run got 503: typing pings
+when a room's 256 typing slots were full.
+
+**Reading it.**
+- **The handoff dominates.** A handler takes 2-18 us; a request crosses three threads (client to auth, auth to room shard,
+  shard back to the client), and each crossing wakes a sleeping thread through a condition variable. One auth and one room
+  worker (two handoffs of real work) are slower than one thread doing everything directly.
+- **Sharding does pay:** 4 x 8 workers reach 1.5-1.9x the single direct-call server, and about 2.5x the 1 x 1 system. That is
+  far below 12 threads' worth, because of the handoffs and because 32 client threads and 12 workers share 22 logical cores
+  with other jobs.
+- **Spinning before sleeping hurt here.** With a 50 us spin, 4 x 8 fell to 53-57k req/s (oversubscribed cores burn time
+  spinning). The default is now to sleep at once; spinning is a setting (`spin N;`) for machines with idle cores.
+- **Runs are noisy:** 1 x 1 varied 2x between runs on this shared machine.
+
+**What sharding cost in the design** (see DESIGN.md, "What one-way forwarding cannot do"): authors stored by value instead of
+`ref<sessions>`, so the `[deleted]` fallback is gone; `/stats` reports one shard; a directory owner is needed for room ids and
+the room list; creating a room is two committed steps on two workers, not one transaction.

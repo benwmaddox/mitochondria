@@ -731,6 +731,25 @@ impl<'a> Run<'a> {
         match r { Ok(()) => Ok(Value::Null), Err(Ctl::Return(v)) => Ok(v), Err(e) => Err(e) }
     }
 
+    /// The start of a loop over a module instance: the first cursor, the most steps it can take (the instance's
+    /// capacity), and its limit. Evaluated in this order: `from`, `limit`, then the first cursor.
+    fn walk_start(&mut self, it: &'a Iter) -> R<'a, (Value, usize, Option<usize>)> {
+        let from = match &it.from { Some(e) => self.eval(e)?, None => Value::Null };
+        let limit = match &it.limit { Some(e) => match self.eval(e)? { Value::Int(n) if n >= 0 => Some(n as usize), _ => return fail(400, "bad limit") }, None => None };
+        let Expr::Var(n, _) = &it.coll else { unreachable!() };
+        let steps = self.inst.prog.colls.iter().find(|c| c.name == format!("{}.items", n)).map_or(0, |c| c.cap);
+        let v = it.via.unwrap();
+        let cur = self.call_values(if it.reverse { v.last.unwrap() } else { v.first }, &[from])?;
+        Ok((cur, steps, limit))
+    }
+    fn call_values(&mut self, k: u32, vals: &[Value]) -> R<'a, Value> {
+        let base = self.args.len();
+        for v in vals { self.args.push(v.clone()); }
+        let r = self.call_fn(&self.api.fns[k as usize], base);
+        self.args.truncate(base);
+        r
+    }
+
     /// A range loop's low bound, how many values it covers, and its limit. Its values are computed as it goes (there
     /// are no items to take a snapshot of), so `where` is tested just before each body runs.
     fn range(&mut self, it: &'a Iter) -> R<'a, (i64, u64, Option<usize>)> {
@@ -785,6 +804,18 @@ impl<'a> Run<'a> {
             Stmt::Assign(Expr::Var(_, VarRes::Local(s)), rhs) => { let v = self.eval(rhs)?; self.set_slot(*s, v); } // mutability checked by the binder
             Stmt::Assign(lhs, rhs) => { let l = self.place(lhs)?; let v = self.eval(rhs)?; self.store(l, v)?; }
             Stmt::If(c, t, e) => { let v = self.eval(c)?; if self.truthy(&v)? { self.exec(t)?; } else { self.exec(e)?; } }
+            Stmt::Each(it, body) if it.via.is_some() => {
+                let (mut cur, steps, limit) = self.walk_start(it)?;
+                let mut hits = 0usize;
+                for _ in 0..steps {
+                    if matches!(cur, Value::Null) || limit.map_or(false, |l| hits >= l) { break; }
+                    let v = self.call_values(it.via.unwrap().item, &[cur.clone()])?;
+                    self.set_slot(it.slot, v);
+                    let keep = match &it.wher { Some(w) => { let v = self.eval(w)?; self.truthy(&v)? } None => true };
+                    if keep { hits += 1; self.exec(body)?; }
+                    cur = self.call_values(if it.reverse { it.via.unwrap().prev.unwrap() } else { it.via.unwrap().next }, &[cur])?;
+                }
+            }
             Stmt::Each(it, body) if it.hi.is_some() => {
                 let (lo, n, limit) = self.range(it)?;
                 let mut hits = 0usize;
@@ -846,6 +877,20 @@ impl<'a> Run<'a> {
                     self.out(b":")?; self.json(v)?;
                 }
                 self.out(b"}")
+            }
+            Json::Arr(it, inner) if it.via.is_some() => {
+                let (mut cur, steps, limit) = self.walk_start(it)?;
+                self.out(b"[")?;
+                let mut hits = 0usize;
+                for _ in 0..steps {
+                    if matches!(cur, Value::Null) || limit.map_or(false, |l| hits >= l) { break; }
+                    let v = self.call_values(it.via.unwrap().item, &[cur.clone()])?;
+                    self.set_slot(it.slot, v);
+                    let keep = match &it.wher { Some(w) => { let v = self.eval(w)?; self.truthy(&v)? } None => true };
+                    if keep { if hits > 0 { self.out(b",")?; } hits += 1; self.json(inner)?; }
+                    cur = self.call_values(if it.reverse { it.via.unwrap().prev.unwrap() } else { it.via.unwrap().next }, &[cur])?;
+                }
+                self.out(b"]")
             }
             Json::Arr(it, inner) if it.hi.is_some() => {
                 let (lo, n, limit) = self.range(it)?;

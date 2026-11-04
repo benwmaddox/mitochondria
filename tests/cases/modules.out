@@ -1,3 +1,4 @@
+GET /walk -> 200 {"all":[],"back":[],"from1":[],"back_from1":[],"first":[],"total":0}
 GET /stats -> 200 {"added":0,"removed":0,"count":0,"others":0,"names":[]}
 POST /scores -> 201 {"slot":0,"size":1,"room":2}
 POST /scores -> 201 {"slot":1,"size":2,"room":1}
@@ -14,6 +15,7 @@ GET /scores/1 -> 404 {"error":"slot 1 is not live"}
 POST /scores -> 201 {"slot":1,"size":3,"room":0}
 GET /fav -> 200 {"fav":"-"}
 GET /stats -> 200 {"added":4,"removed":1,"count":3,"others":0,"names":["ann","eve","cy"]}
+GET /walk -> 200 {"all":["ann","eve","cy"],"back":["cy","eve","ann"],"from1":["eve","cy"],"back_from1":["eve","ann"],"first":["ann"],"total":80}
 POST /others -> 201 {"size":1}
 POST /others -> 201 {"size":2}
 POST /others -> 503 {"error":"capacity: others.items is full (2 of 2)"}

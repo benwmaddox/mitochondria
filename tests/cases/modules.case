@@ -22,8 +22,17 @@ endpoint GET /stats {
         "others": others.size(), "names": [each s in scores.items s.name]
     };
 }
+endpoint GET /walk {
+    var total = 0;
+    each s in scores where s.points > 15 { total = total + s.points; }
+    respond 200 {
+        "all": [each s in scores s.name], "back": [each s in scores reverse s.name], "from1": [each s in scores from 1 s.name],
+        "back_from1": [each s in scores from 1 reverse s.name], "first": [each s in scores limit 1 s.name], "total": total
+    };
+}
 endpoint POST /others { let o = others.add(); o.points = 1; respond 201 { "size": others.size() }; }
 --- requests
+GET /walk
 GET /stats
 POST /scores {"name": "ann", "points": 10}
 POST /scores {"name": "bob", "points": 20}
@@ -40,6 +49,7 @@ GET /scores/1
 POST /scores {"name": "eve", "points": 50}
 GET /fav
 GET /stats
+GET /walk
 POST /others
 POST /others
 POST /others

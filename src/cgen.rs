@@ -318,6 +318,44 @@ fn source_comment(ep: &Endpoint, (name, text): (&str, &str)) -> String {
     o
 }
 
+/// Do these statements call (directly or through other functions) one of instance `inst`'s functions that changes state?
+fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
+    fn ex(e: &Expr, out: &mut Vec<u32>) {
+        match e {
+            Expr::Call(_, a, r) => { if let CallRes::User(k) = r { out.push(*k); } for x in a { ex(x, out); } }
+            Expr::Field(b, ..) | Expr::Un(_, b) => ex(b, out),
+            Expr::Index(a, b) | Expr::Bin(_, a, b) => { ex(a, out); ex(b, out); }
+            _ => {}
+        }
+    }
+    fn js(j: &Json, out: &mut Vec<u32>) { match j { Json::Obj(f) => for (_, v) in f { js(v, out); }, Json::Arr(it, inner) => { ex(&it.coll, out); if let Some(w) = &it.wher { ex(w, out); } js(inner, out); } Json::E(e) => ex(e, out) } }
+    fn st(stmts: &[Stmt], out: &mut Vec<u32>) {
+        for s in stmts {
+            match s {
+                Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Free(e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
+                Stmt::Alloc { coll, .. } => ex(coll, out),
+                Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
+                Stmt::If(c, t, e) => { ex(c, out); st(t, out); st(e, out); }
+                Stmt::Each(it, b) => { ex(&it.coll, out); if let Some(w) = &it.wher { ex(w, out); } st(b, out); }
+                Stmt::Respond(_, j) => js(j, out),
+                Stmt::Forward { key, fields, .. } => { ex(key, out); for f in fields { ex(&f.1, out); } }
+                _ => {}
+            }
+        }
+    }
+    let (mut todo, mut seen) = (Vec::new(), Vec::new());
+    st(stmts, &mut todo);
+    let pre = format!("{}.", inst);
+    while let Some(k) = todo.pop() {
+        if seen.contains(&k) { continue; }
+        seen.push(k);
+        let f = &api.fns[k as usize];
+        if f.name.starts_with(&pre) && writes(api, &f.body, &mut Vec::new()) { return true; }
+        st(&f.body, &mut todo);
+    }
+    false
+}
+
 /// Does a function body contain a loop (which may collect items and be left by `return`)?
 fn has_loop(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match s { Stmt::Each(..) => true, Stmt::If(_, t, e) => has_loop(t) || has_loop(e), _ => false })
@@ -780,6 +818,9 @@ impl<'p> G<'p> {
                 if !e.is_empty() { self.open("else {"); self.block(e, env)?; self.close("}"); }
             }
             Stmt::Each(it, body) => {
+                if let (Some(_), Expr::Var(n, _)) = (&it.via, &it.coll) {
+                    if changes_instance(self.api, n, body) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
+                }
                 let collect = it.order.is_some() || allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
                 self.each(it, env, collect, |g, env, _| g.block(body, env))?;
             }
@@ -1288,9 +1329,14 @@ impl<'p> G<'p> {
 
     /// Inline a user function: its parameters become values in a fresh frame; `return` jumps to the end of the inlined block.
     fn inline(&mut self, k: u32, args: &'p [Expr], env: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<CV> {
-        let f = &self.api.fns[k as usize];
         let mut vals = Vec::new();
         for a in args { let v = self.expr(a, env, dead)?; vals.push(self.hold(v, false)?); }
+        self.call_values(k, vals, dead)
+    }
+
+    /// Call user function `k` with argument values already computed: inlined, or a generated C function if recursive.
+    fn call_values(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>) -> R<CV> {
+        let f = &self.api.fns[k as usize];
         self.depth_check();
         if self.recursive[k as usize] {
             return self.call_spec(k, vals);
@@ -1358,6 +1404,7 @@ impl<'p> G<'p> {
     /// item bound. With `collect`, the items passing `where` are collected (with their order keys) before any body runs,
     /// then ordered and limited, as the interpreter's `select` does; otherwise filtering and the body run in one pass.
     fn each(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+        if let Some(v) = it.via { return self.walk(it, v, env, body); }
         if let Some(hi) = &it.hi { return self.range_loop(it, hi, env, body); }
         let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
         let coll = self.prog.colls[c].clone();
@@ -1429,6 +1476,40 @@ impl<'p> G<'p> {
         Ok(())
     }
 
+    /// `each s in instance [from k] [reverse] ...`: walk a module instance with its iteration functions, at most its
+    /// capacity of steps, stopping at a null cursor or the limit. Order of evaluation as in the interpreter: `from`,
+    /// `limit`, then the first cursor.
+    fn walk(&mut self, it: &'p Iter, v: crate::lang::Via, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+        let Expr::Var(n, _) = &it.coll else { return no("walking something other than a module instance") };
+        let steps = self.prog.colls.iter().find(|c| c.name == format!("{}.items", n)).map_or(0, |c| c.cap);
+        let from = match &it.from { Some(e) => { let x = self.expr(e, env, None)?; self.hold(x, false)? } None => CV::Null };
+        let lim = match &it.limit { Some(e) => { let x = self.expr(e, env, None)?; Some(self.int_or(x, 400, "bad limit")) } None => None };
+        let lim = lim.map(|l| self.hold_int(l));
+        if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
+        let c0 = self.call_values(if it.reverse { v.last.ok_or("no reverse walk")? } else { v.first }, vec![from], None)?;
+        let c0 = self.val(c0)?;
+        let (cur, k, hits) = (self.tmp("cur"), self.tmp("k"), self.tmp("hits"));
+        self.open("{");
+        self.line(&format!("Val {} = {};", cur, c0));
+        self.line(&format!("i64 {} = 0;", hits));
+        self.open(&format!("for (u32 {} = 0; {} < {}; {}++) {{", k, k, steps, k));
+        self.line(&format!("if ({}.tag == 0) break;", cur));
+        if let Some(l) = &lim { self.line(&format!("if ({} >= {}) break;", hits, l)); }
+        let item = self.call_values(v.item, vec![CV::Any(cur.clone())], None)?;
+        let item = self.hold(item, false)?;
+        env[it.slot as usize] = Some(item);
+        let filtered = if let Some(w) = &it.wher { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.open(&format!("if ({}) {{", wc)); true } else { false };
+        self.line(&format!("{}++;", hits));
+        body(self, env, &hits)?;
+        if filtered { self.close("}"); }
+        let nx = self.call_values(if it.reverse { v.prev.ok_or("no reverse walk")? } else { v.next }, vec![CV::Any(cur.clone())], None)?;
+        let nx = self.val(nx)?;
+        self.line(&format!("{} = {};", cur, nx));
+        self.close("}");
+        self.close("}");
+        Ok(())
+    }
+
     /// `each i in lo..hi`: the bounds are read once, values are computed as the loop goes (where is tested just before
     /// each body), and `limit` counts the bodies run.
     fn range_loop(&mut self, it: &'p Iter, hi: &'p Expr, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
@@ -1480,6 +1561,9 @@ impl<'p> G<'p> {
             }
             Json::Arr(it, inner) => {
                 self.out("[");
+                if let (Some(_), Expr::Var(n, _)) = (&it.via, &it.coll) {
+                    if changes_instance(self.api, n, &[Stmt::Respond(200, (**inner).clone())]) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
+                }
                 self.each(it, env, it.order.is_some(), |g, env, hits| {
                     g.line(&format!("if ({} > 1) {{ CALL(c->h->out(c, \",\", 1)); }}", hits));
                     g.json(inner, env)

@@ -163,6 +163,9 @@ mod tests {
             ("endpoint POST /a { let s = alloc b.items; respond 200 {}; }", "add items of b with its functions, not `alloc`"),
             ("endpoint POST /a { free b.get(0); respond 200 {}; }", "remove items of b with its functions, not `free`"),
             ("endpoint POST /a { var x = 1; x = b.get(0); free x; respond 200 {}; }", "`free` of a value whose kind is only known at run time"),
+            ("endpoint POST /a { each s in b { b.remove(s); } respond 200 {}; }", "a loop over b calls a function that changes b"),
+            ("endpoint GET /a { respond 200 { \"x\": [each s in b b.add()] }; }", "a loop over b calls a function that changes b"),
+            ("endpoint GET /a { respond 200 { \"x\": [each s in b from 1 order by s.n s.n] }; }", "b keeps its own order"),
         ] {
             let e = load(api).err().unwrap_or_default();
             assert!(e.contains(want), "{} -> {}", api, e);

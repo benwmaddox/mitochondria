@@ -1,4 +1,14 @@
-# Compiling endpoints to native code: options (2026-11-04)
+# Compiling endpoints to native code
+
+## Decision (2026-11-04)
+Endpoints are generated as **C** (`src/cgen.rs`). The default compiler is the **bundled TinyCC** library
+(`third_party/tinycc`, loaded at run time), which compiles in memory in milliseconds and keeps live reload. **clang** is
+the planned option for release builds (same C, built `-O2` into a DLL); it is not built yet because clang is not
+installed. TinyCC 0.9.27's library crashes while reporting a compile error to an MSVC-built host, so generated C is first
+checked with the bundled `tcc.exe` in a child process. Results are in docs/measurements.md, Round 7. The comparison
+below is how the choice was made.
+
+## Options considered
 
 Measured starting point (`exp json`, GET of a room's newest 50 messages, 8.7 KB of JSON): the interpreter takes 14.7 us;
 native Rust writing the same response from the same state takes 4.2 us. The 10.5 us between them is interpretation:

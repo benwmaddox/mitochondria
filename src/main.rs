@@ -30,10 +30,10 @@ fn main() {
         let (a, b) = rest.split_once(' ').unwrap_or((rest, ""));
         println!("> {}", line);
         let r: Result<(), Error> = match cmd {
-            "push" => inst.push(a).map(|i| println!("  index {}", i)),
+            "push" => inst.push(a).map(|(i, g)| match g { Some(g) => println!("  slot {} generation {}", i, g), None => println!("  index {}", i) }),
             "fill" => (0..b.parse::<usize>().unwrap_or(0)).try_for_each(|_| inst.push(a).map(|_| ())),
             "pop" => inst.pop(a),
-            "remove" => inst.swap_remove(a, b.trim().parse().unwrap_or(usize::MAX)),
+            "remove" => inst.remove(a, b.trim()),
             "sum" => inst.sum(a, b.trim(), 20).map(|(t, n, ns)| println!("  sum {} over {} rows, {:.3} ns/row", t, n, ns)),
             "clear" => inst.clear(a),
             "set" => inst.set(a, b.trim()),

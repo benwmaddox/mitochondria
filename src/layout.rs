@@ -21,13 +21,14 @@ pub enum Ty {
     List(Box<Ty>, usize),  // list<T, N>: u32 length, then N elements of capacity
     Arr(Box<Ty>, usize),   // T[N]: exactly N elements, all always present
     Table(Box<Ty>, usize), // table<Struct, N>: same data as list<Struct, N>, stored one column per field
+    Pool(Box<Ty>, usize, bool), // pool<Struct, N> [checked]: stable slots, a live bit per slot, optional generations
     Struct(usize),
     Named(String),         // only before resolution
 }
 
 /// One column of a table. Strings and lists take two: a length column and a data column.
 #[derive(Clone, Debug)]
-pub enum CKind { Scalar(Scalar), Arr(Scalar, usize), StrLen, StrBytes(usize), ListLen, ListData(Scalar, usize) }
+pub enum CKind { Scalar(Scalar), Arr(Scalar, usize), StrLen, StrBytes(usize), ListLen, ListData(Scalar, usize), Live, Gen }
 #[derive(Clone, Debug)]
 pub struct TCol { pub path: String, pub kind: CKind, pub off: usize } // off is relative to the table start
 
@@ -46,6 +47,7 @@ impl Program {
             Ty::List(e, n) => { let (es, ea) = self.size_align(e); let a = ea.max(4); (up(up(4, ea) + es * n, a), a) }
             Ty::Arr(e, n) => { let (es, ea) = self.size_align(e); (es * n, ea) }
             Ty::Table(row, n) => (self.table_cols(row, *n).unwrap().1, 8),
+            Ty::Pool(row, n, c) => (self.pool_cols(row, *n, *c).unwrap().1, 8),
             Ty::Struct(i) => (self.structs[*i].size, self.structs[*i].align),
             Ty::Named(_) => unreachable!(),
         }
@@ -53,13 +55,20 @@ impl Program {
 
     /// Columns of `table<row, n>` and the table's total size. Rows may hold scalars, scalar arrays,
     /// strings, lists of scalars, and nested structs of those.
-    pub fn table_cols(&self, row: &Ty, n: usize) -> Result<(Vec<TCol>, usize), String> {
+    pub fn table_cols(&self, row: &Ty, n: usize) -> Result<(Vec<TCol>, usize), String> { self.columns(row, n, 0) }
+    /// A pool has a live bitset column, then (if `checked`) a generation column, then the field columns.
+    /// Its header is: high-water mark, live count, lowest-free hint, ever-allocated mark (4 bytes each).
+    pub fn pool_cols(&self, row: &Ty, n: usize, checked: bool) -> Result<(Vec<TCol>, usize), String> { self.columns(row, n, 1 + checked as u8) }
+
+    fn columns(&self, row: &Ty, n: usize, extra: u8) -> Result<(Vec<TCol>, usize), String> {
         let mut fields = Vec::new();
         self.flatten(row, "", &mut fields)?;
         let (mut cols, mut off) = (Vec::new(), TABLE_HEADER);
         let mut place = |path: &str, kind: CKind, align: usize, bytes: usize, off: &mut usize, cols: &mut Vec<TCol>| {
             *off = up(*off, align); cols.push(TCol { path: path.to_string(), kind, off: *off }); *off += bytes;
         };
+        if extra >= 1 { place("<live>", CKind::Live, 8, up(n, 64) / 8, &mut off, &mut cols); }
+        if extra == 2 { place("<gen>", CKind::Gen, 4, n * 4, &mut off, &mut cols); }
         for (path, t) in fields {
             match t {
                 Ty::Scalar(s) => place(&path, CKind::Scalar(s), s.size(), n * s.size(), &mut off, &mut cols),
@@ -89,7 +98,7 @@ impl Program {
     pub fn all_live(&self, t: &Ty) -> bool {
         match t {
             Ty::Scalar(_) => true,
-            Ty::Str(_) | Ty::List(..) | Ty::Table(..) => false,
+            Ty::Str(_) | Ty::List(..) | Ty::Table(..) | Ty::Pool(..) => false,
             Ty::Arr(e, _) => self.all_live(e),
             Ty::Struct(i) => self.structs[*i].fields.iter().all(|f| self.all_live(&f.1)),
             Ty::Named(_) => unreachable!(),
@@ -102,6 +111,7 @@ impl Program {
             Ty::List(e, n) => format!("list<{}, {}>", self.show(e), n),
             Ty::Arr(e, n) => format!("{}[{}]", self.show(e), n),
             Ty::Table(e, n) => format!("table<{}, {}>", self.show(e), n),
+            Ty::Pool(e, n, c) => format!("pool<{}, {}>{}", self.show(e), n, if *c { " checked" } else { "" }),
             Ty::Struct(i) => self.structs[*i].name.clone(),
             Ty::Named(n) => n.clone(),
         }
@@ -144,6 +154,7 @@ impl Program {
             Ty::Named(n) => { let i = *names.get(&n).ok_or(format!("unknown type `{}`", n))?; self.layout_struct(i, names)?; Ty::Struct(i) }
             Ty::List(e, n) => Ty::List(Box::new(self.resolve(*e, names)?), n),
             Ty::Arr(e, n) => Ty::Arr(Box::new(self.resolve(*e, names)?), n),
+            Ty::Pool(e, n, c) => { let e = self.resolve(*e, names)?; if !matches!(e, Ty::Struct(_)) { return Err("pool<T, N> needs a struct T".into()); } self.pool_cols(&e, n, c)?; Ty::Pool(Box::new(e), n, c) }
             Ty::Table(e, n) => { let e = self.resolve(*e, names)?; if !matches!(e, Ty::Struct(_)) { return Err("table<T, N> needs a struct T".into()); } self.table_cols(&e, n)?; Ty::Table(Box::new(e), n) }
             o => o,
         })
@@ -189,6 +200,7 @@ impl P {
         let mut t = if let Some(s) = Scalar::parse(&n) { Ty::Scalar(s) }
         else if n == "string" { self.eat("<")?; let k = self.num()?; self.eat(">")?; Ty::Str(k) }
         else if n == "list" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.num()?; self.eat(">")?; Ty::List(Box::new(e), k) }
+        else if n == "pool" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.num()?; self.eat(">")?; let c = self.peek() == Some("checked"); if c { self.i += 1; } Ty::Pool(Box::new(e), k, c) }
         else if n == "table" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.num()?; self.eat(">")?; Ty::Table(Box::new(e), k) }
         else { Ty::Named(n) };
         while self.peek() == Some("[") { self.i += 1; let k = self.num()?; self.eat("]")?; t = Ty::Arr(Box::new(t), k); }

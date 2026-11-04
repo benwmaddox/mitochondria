@@ -1,0 +1,12 @@
+struct Unit {
+    hp: f32;
+    team: i32;
+    name: string<16>;
+}
+
+struct World {
+    units: pool<Unit, 1000000>;             // other data points at units by slot index
+    sessions: pool<Unit, 1000> checked;     // handles leave the program: slot index + generation
+}
+
+global world: World;

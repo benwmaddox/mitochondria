@@ -206,7 +206,7 @@ The live bit is in the noise for random reads: 1M rows is 128 KB of bits, so the
 
 **What a stale index can and cannot do.** It can never read outside the table (the index is checked against capacity) or corrupt memory; it can only mean the wrong item. It is deterministic: the same inputs reproduce the same mix-up, which suits replay-based debugging (Stasis's record/replay).
 
-**Proposed kinds**
+**Built (2026-11-03): `pool<T,N>` and `pool<T,N> checked`.** The list below says what each kind does; `table` was built earlier.
 - `table<T,N>`: dense, swap-remove, rows move. For bulk data, scans, and per-tick work; reference rows only within a tick.
 - `pool<T,N>`: stable slots, live bit, free slots reused lowest-first, tracked with a high-water mark so scans run over `0..hw` and `trim` can release everything above it. References are indexes. This is the default for things other data points at.
 - `pool<T,N> checked`: adds a generation column and 8-byte handles. Opt in per type where reuse bugs are expensive.
@@ -219,3 +219,13 @@ The live bit is in the noise for random reads: 1M rows is 128 KB of bits, so the
 **Cheap mitigation without a generation:** reuse freed slots in FIFO order (oldest-freed first) so a stale index is likely to point at a still-empty slot for a long time. This conflicts with lowest-first reuse (which keeps live rows near the front for `trim`), so choose one per pool.
 
 **Costs of holes:** a pool with live rows scattered across a wide range keeps those pages committed even if most rows are dead; lowest-first reuse keeps live rows near the front. Scans test one bit per row up to `hw`.
+
+## Pool, as built (`examples/pool.mito`, `examples/pool.script`)
+- **Layout:** header (high-water mark, live count, lowest-free hint, ever-allocated mark), a live bitset (1 bit per slot), a generation column only if `checked`, then the same field columns as a `table`.
+- **Allocate (`push`):** the lowest free slot at or after the hint and below the high-water mark, found with word-wide bit scans; otherwise the high-water mark itself. A reused slot starts zeroed. A full pool returns `FULL` even if a slot below the mark is free, only when none is.
+- **Free (`remove p k`, or `remove p k@gen` on a checked pool):** clears the bit, lowers the hint, bumps the generation if checked, and if it was the top slot, lowers the high-water mark to the highest remaining live slot + 1. Other slots do not move.
+- **Access:** `p[k].field` checks `k < high-water` and the live bit; `p[k@g].field` on a checked pool also checks the generation. Plain `p[k]` is allowed on a checked pool (no generation check).
+- **Trim:** live ranges of a pool are the header, the live bits up to the mark, the generation column up to the ever-allocated mark (generations must outlive their slot), fixed columns up to the mark, and string/list bytes of live slots only. Everything above the mark is dead and releasable. Holes below the mark keep their pages.
+- **Measured here:** scan of 1M slots with a live bit per slot, 0.63 ns/slot, in line with the table scan (0.56-0.72 ns/row). The script shows: slots 5 and 6 freed and reported "not live", reused lowest-first; the accepted stale-index hazard (slot 7 reused, old index sees the new item); and the checked pool rejecting `0@0` after slot 0 moved to generation 1.
+- **Tests:** lowest-free reuse and live-bit guard, unchecked accepts a stale index while checked rejects it, Full / high-water mark falling / trim keeping live data, clear.
+- **Not done:** FIFO reuse option; per-page live counters; the debug-only generation mode; pools of rows with lists-of-lists.

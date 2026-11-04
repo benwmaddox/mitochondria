@@ -1,0 +1,82 @@
+// An ordered-map benchmark: the same workloads and key sequence as bench/btree-rust (Rust's BTreeMap), on lib/sorted.mito.
+// Keys: r = MINSTD sequence from seed 20261104, unique; a present key is 2r, an absent key 2r + 1. Every workload is one
+// request looping inside the program (a request costs hundreds of microseconds of connection handling), timed by the
+// driver (bench/ordered/run.py). `now()` is the request's start time, not a clock.
+struct KV { k: i64; v: i64; }
+struct Bench { m: sorted<KV, 1048576, k>; sum: i64; }
+state b: Bench;
+
+@post("/insert/{n}")
+fn insert(n: i64 in 1..1048576) -> Response<{ size: i64 }> {
+    var x = 20261104;
+    each i in 0..n { x = x * 48271 % 2147483647; let e = b.m.add(x * 2); e.v = x; }
+    return ok({ "size": b.m.size() });
+}
+@get("/hit/{n}/{ops}")
+fn hit(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    each j in 0..ops {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        each e in b.m from x * 2 limit 1 { if e.k == x * 2 { s = s + e.v; } }
+    }
+    return ok({ "sum": s });
+}
+@get("/miss/{n}/{ops}")
+fn miss(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    each j in 0..ops {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        each e in b.m from x * 2 + 1 limit 1 { if e.k == x * 2 + 1 { s = s + e.v; } }
+    }
+    return ok({ "sum": s });
+}
+@get("/mixed/{n}/{ops}")
+fn mixed(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    each j in 0..ops {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        let q = x * 2 + j % 2;
+        each e in b.m from q limit 1 { if e.k == q { s = s + e.v; } }
+    }
+    return ok({ "sum": s });
+}
+@post("/increment/{n}/{ops}")
+fn increment(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104;
+    each j in 0..ops {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        each e in b.m from x * 2 limit 1 { if e.k == x * 2 { e.v = e.v + 1; } }
+    }
+    return ok({ "sum": 0 });
+}
+@get("/range/{n}/{ops}")
+fn range(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    each j in 0..ops {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        each e in b.m from x * 2 limit 100 { s = s + e.v; }
+    }
+    return ok({ "sum": s });
+}
+// a request may free at most 65536 slots and a remove frees two, so delete runs in batches: `x` is the sequence's state
+// where the last batch stopped (the first batch starts at 20261104), and the answer is where this one stopped
+@delete("/delete/{x}/{count}")
+fn delete(x: i64, count: i64 in 1..32768) -> Response<{ x: i64, size: i64 }> {
+    var y = x;
+    each i in 0..count {
+        y = y * 48271 % 2147483647;
+        var hit = -1;
+        each e in b.m from y * 2 limit 1 { if e.k == y * 2 { hit = slot(e); } }
+        if hit >= 0 { b.m.remove(b.m.get(hit)); }
+    }
+    return ok({ "x": y, "size": b.m.size() });
+}
+@get("/stats")
+fn stats() -> Response<{ committed_kb: i64, live_kb: i64, reserved_kb: i64 }> {
+    return ok({ "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb"), "reserved_kb": stat("reserved_kb") });
+}

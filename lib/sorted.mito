@@ -8,7 +8,7 @@
 // of a key: comparisons read the items' own keys. Positions in links are slot + 1, and 0 is the head (or the end).
 module sorted<T: struct, N: count, key: field of T>
 struct Link { level: u8; next: u32[12]; prev: u32[12]; }
-struct Head { next: u32[12]; last: u32; rng: i64; update: u32[12]; }
+struct Head { next: u32[12]; last: u32; rng: i64; update: u32[12]; top: u32; }
 // what an instance holds
 state {
     items: pool<T, N> checked;
@@ -43,12 +43,15 @@ pub fn last() { let n = self.head.last; if n == 0 { return null; } return self.i
 
 // the position after x at level l (x: 0 the head, else slot + 1)
 fn nxt(x, l) { if x == 0 { return self.head.next[l]; } return self.links[x - 1].next[l]; }
+// is the key of position n (slot + 1) below kv (up to kv when not `strict`)?
+fn before(n, kv, strict) { let k = self.items[n - 1].key; return k < kv || (!strict && k == kv); }
 // the last position whose key is below kv (strictly when `strict`), 0 if none; with `record`, also the last such
-// position at every level, where link() puts a new item
+// position at every level, where link() puts a new item. Levels above head.top hold nothing, so the search starts there.
 fn below(kv, strict, record) {
     var x = 0;
-    each l in 0..12 reverse {
-        each step in 0..N while self.nxt(x, l) != 0 && (self.items[self.nxt(x, l) - 1].key < kv || (!strict && self.items[self.nxt(x, l) - 1].key == kv)) { x = self.nxt(x, l); }
+    each l in 0..self.head.top reverse {
+        var n = self.nxt(x, l);
+        each step in 0..N while n != 0 && self.before(n, kv, strict) { x = n; n = self.nxt(x, l); }
         if record { self.head.update[l] = x; }
     }
     return x;
@@ -69,6 +72,8 @@ fn levels() {
 fn link(s) {
     self.below(self.items[s].key, false, true);
     let h = self.levels();
+    each l in self.head.top..h { self.head.update[l] = 0; }
+    if h > self.head.top { self.head.top = h; }
     self.links[s].level = h;
     each l in 0..h {
         let p = self.head.update[l];

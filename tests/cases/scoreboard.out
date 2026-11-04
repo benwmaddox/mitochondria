@@ -45,9 +45,9 @@ POST /players/2.0/games -> 200 {"best":90}
 POST /players/2.0/games -> 200 {"best":90}
 GET /recent -> 200 {"games":[{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1}]}
 GET /stats -> 200 {"players":3,"games":26,"reserved_kb":172,"committed_kb":52,"live_kb":1}
-state <plain values> 120
+state <plain values> 128
 state game.players 104
 state game.board.items 84
 state game.board.links 315
 state game.recent 488
-memory reserved=176128 committed=53248 live=1111
+memory reserved=176128 committed=53248 live=1119

@@ -83,9 +83,9 @@ POST /words -> 201 {}
 POST /words -> 201 {}
 GET /words/g -> 200 {"all":["apple","apple","fig","pear","plum"],"from":["pear","plum"],"back":["fig","apple","apple"]}
 GET /words/plum -> 200 {"all":["apple","apple","fig","pear","plum"],"from":["plum"],"back":["plum","pear","fig","apple","apple"]}
-state <plain values> 232
+state <plain values> 248
 state app.board.items 135
 state app.board.links 606
 state app.words.items 125
 state app.words.links 509
-memory reserved=20480 committed=20480 live=1607
+memory reserved=20480 committed=20480 live=1623

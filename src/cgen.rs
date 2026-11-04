@@ -89,9 +89,15 @@ struct H {
 #define FAIL(code, msg, n) return c->h->fail(c, (code), (msg), (n))
 #define DEREF(t, s, g, out) c->h->deref(c, (t), (s), (g), (out))
 #define OVERFLOW_ FAIL(500, "integer overflow", 16)
+#ifdef __clang__
+#define ADD(r, x, y) i64 r; if (__builtin_add_overflow((x), (y), &r)) OVERFLOW_
+#define SUB(r, x, y) i64 r; if (__builtin_sub_overflow((x), (y), &r)) OVERFLOW_
+#define MUL(r, x, y) i64 r; if (__builtin_mul_overflow((x), (y), &r)) OVERFLOW_
+#else
 #define ADD(r, x, y) i64 r; if (((y) > 0 && (x) > I64MAX - (y)) || ((y) < 0 && (x) < I64MIN - (y))) OVERFLOW_; r = (x) + (y)
 #define SUB(r, x, y) i64 r; if (((y) < 0 && (x) > I64MAX + (y)) || ((y) > 0 && (x) < I64MIN + (y))) OVERFLOW_; r = (x) - (y)
 #define MUL(r, x, y) i64 r; if ((x) > 0 ? ((y) > 0 ? (x) > I64MAX / (y) : (y) < I64MIN / (x)) : ((y) > 0 ? (x) < I64MIN / (y) : ((x) != 0 && (y) < I64MAX / (x)))) OVERFLOW_; r = (x) * (y)
+#endif
 #define DIV(r, x, y) i64 r; if ((y) == 0) FAIL(500, "division by zero", 16); if ((x) == I64MIN && (y) == -1) OVERFLOW_; r = (x) / (y)
 #define MOD(r, x, y) i64 r; if ((y) == 0) FAIL(500, "division by zero", 16); if ((x) == I64MIN && (y) == -1) OVERFLOW_; r = (x) % (y)
 #define NEG(r, x) i64 r; if ((x) == I64MIN) OVERFLOW_; r = -(x)
@@ -349,12 +355,15 @@ pub fn program_c(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Res
 pub fn program_c_named(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefix: &str) -> Result<String, String> {
     let g = generate_with(prog, api, source, "static ");
     if let Some(n) = g.notes.first() { return Err(n.clone()); }
-    let mut o = String::from(PRELUDE);
+    // The profile was checked on `c->h->helper`; in the unit itself the helper table is the runtime's own constant
+    // `mito_h`, so the optimizer sees the calls go straight to the helpers and can inline them.
+    let direct = |s: &str| s.replace("c->h->", "mito_h.");
+    let mut o = direct(PRELUDE);
     o += RUNTIME_TYPES;
     o += &format!("#define MITO(x) {}##x\n", prefix);
     o += &layout_c(prog, api);
     o += RUNTIME;
-    o += &g.src[PRELUDE.len()..];
+    o += &direct(&g.src[PRELUDE.len()..]);
     Ok(o)
 }
 

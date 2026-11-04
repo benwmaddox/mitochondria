@@ -80,10 +80,10 @@ POST /rooms/0.0/messages -> 429 {"error":"slow down"}
 POST /rooms/0.0/messages -> 429 {"error":"slow down"}
 POST /rooms/0.0/messages -> 429 {"error":"slow down"}
 GET /nope -> 404 {"error":"no such endpoint"}
-state <plain values> 136
+state <plain values> 144
 state chat.sessions 95
 state chat.rooms.items 63
 state chat.rooms.items.messages 181
 state chat.rooms.items.typing 72
 state chat.rooms.links 218
-memory reserved=40960 committed=32768 live=765
+memory reserved=40960 committed=32768 live=773

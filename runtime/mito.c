@@ -957,9 +957,9 @@ static int h_index(Ctx *c, u32 cid, u32 inst, i64 k, u32 *out) {
         if ((u64)k >= hget(&m->mem, cid, LEN, inst)) return not_live(m, "position ", k, " is past the end");
         *out = (u32)((u64)inst * col->cap + (hget(&m->mem, cid, HEAD, inst) + (u64)k) % col->cap); return 0;
     }
-    u64 idx = (u64)inst * col->cap + (u64)k;
-    if ((u64)k >= col->cap || !item_live(&m->mem, cid, idx)) return not_live(m, "slot ", k, " is not live");
-    *out = (u32)idx; return 0;
+    /* a pool: the slot is live when it is below the high-water mark and its bit is set (item_live without the divisions) */
+    if ((u64)k >= col->cap || inst >= col->mult || (u64)k >= hget(&m->mem, cid, HW, inst) || !bit(&m->mem, cid, inst, (u64)k)) return not_live(m, "slot ", k, " is not live");
+    *out = (u32)((u64)inst * col->cap + (u64)k); return 0;
 }
 static int h_lit(Ctx *c, const char *p, u32 n, Txt *out) { Mito *m = M_(c); T t; if (t_push(m, p, n, &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
 static int h_deref(Ctx *c, u32 t, u32 slot, u32 g, u32 *out) { Mito *m = M_(c); u64 i; if (!deref_quiet(m, t, slot, g, &i)) return 0; *out = (u32)i; return 1; }

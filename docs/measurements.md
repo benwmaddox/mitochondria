@@ -633,3 +633,25 @@ handling against about 2 us in the handler, so reusing connections (keep-alive) 
 Committing connection buffers as used, idle commit charge (Windows private bytes): one program 10.2 -> 1.3 MB; the
 sharded chat system with 16 connection threads 171.5 -> 34.1 MB. The rest of the system's is its own (mailboxes and
 worker buffers), not HTTP.
+
+## Round 16 (2026-11-04): Windows Defender, and what a connection costs
+Windows Defender blocked a freshly built chat executable as `Trojan:Win32/Wacatac.B!ml` (`!ml`: a machine-learning
+guess, a known false positive for small unsigned programs). The likely trigger was ours: the runtime looked up its
+socket, lock and random-number functions by name at run time (`LoadLibraryA` + `GetProcAddress`), a pattern malware
+loaders use. They are now ordinary imports (`ws2_32`, `bcrypt`, and kernel32's SRW locks and condition variables, added
+to TinyCC's import lists). TinyCC executables import no lookup functions at all; clang executables list
+`GetProcAddress` only through Microsoft's C runtime startup code, as every MSVC-style program does. No Defender
+setting was changed. The executables have run since without a detection; a machine-learning guess can still recur,
+and signing the executables would be the further step.
+
+What a connection costs here, one client, GET /nope, 2000 connections per measurement, alternating:
+
+| round | bare Rust server (accept, read, fixed answer, close) | chat executable |
+|---|---|---|
+| 1 | p50 212 us, p99 337 | p50 209 us, p99 345 |
+| 2 | p50 504 us, p99 642 | p50 484 us, p99 691 |
+| 3 | p50 479 us, p99 733 | p50 493 us, p99 808 |
+
+The executable costs the same as a server that does nothing: the time is Windows' connection setup and teardown
+(the machine's load moves it between 200 and 500 us), not Mitochondria's. Only reusing connections (keep-alive)
+removes it.

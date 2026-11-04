@@ -7,8 +7,6 @@
    --hard MB (one program's memory), and for tests --seed N and --clock MS. */
 
 void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
-void *LoadLibraryA(const char *name);
-void *GetProcAddress(void *m, const char *name);
 void *CreateThread(void *attr, u64 stack, u32 (*fn)(void *), void *arg, u32 flags, u32 *id);
 u32 WaitForSingleObject(void *h, u32 ms);
 int printf(const char *f, ...);
@@ -27,26 +25,29 @@ void mito_system_set_clock(void *s, i64 ms, int fixed);
 int mito_system_request(void *s, const char *m, u32 mn, const char *t, u32 tn, const MitoPair *h, u32 nh, const char *body, u32 bn, u32 timeout_ms, char *out, u32 cap, u32 *outlen);
 #endif
 
-/* sockets */
-static void *(*ws_socket)(int, int, int);
-static int (*ws_startup)(unsigned short, void *), (*ws_bind)(void *, const void *, int), (*ws_listen)(void *, int), (*ws_close)(void *);
-static void *(*ws_accept)(void *, void *, int *);
-static int (*ws_recv)(void *, char *, int, int), (*ws_send)(void *, const char *, int, int), (*ws_opt)(void *, int, int, const char *, int);
+/* sockets (ws2_32, Winsock) */
 typedef struct { u32 len; char *buf; } WsBuf;
-static int (*ws_sendv)(void *, WsBuf *, u32, u32 *, u32, void *, void *);
+int WSAStartup(unsigned short version, void *data);
+void *socket(int af, int type, int proto);
+int bind(void *s, const void *addr, int n);
+int listen(void *s, int backlog);
+void *accept(void *s, void *addr, int *n);
+int recv(void *s, char *b, int n, int flags);
+int send(void *s, const char *b, int n, int flags);
+int closesocket(void *s);
+int setsockopt(void *s, int level, int name, const char *v, int n);
+int WSASend(void *s, WsBuf *bufs, u32 n, u32 *sent, u32 flags, void *overlapped, void *done);
+#define ws_socket socket
+#define ws_bind bind
+#define ws_listen listen
+#define ws_accept accept
+#define ws_recv recv
+#define ws_send send
+#define ws_close closesocket
+#define ws_opt setsockopt
+#define ws_sendv WSASend
 #define BAD_SOCKET ((void *)~0ULL)
-static int ws_load(void) {
-    void *w = LoadLibraryA("ws2_32.dll");
-    if (!w) return 0;
-    ws_startup = (int (*)(unsigned short, void *))GetProcAddress(w, "WSAStartup"); ws_socket = (void *(*)(int, int, int))GetProcAddress(w, "socket");
-    ws_bind = (int (*)(void *, const void *, int))GetProcAddress(w, "bind"); ws_listen = (int (*)(void *, int))GetProcAddress(w, "listen");
-    ws_accept = (void *(*)(void *, void *, int *))GetProcAddress(w, "accept"); ws_recv = (int (*)(void *, char *, int, int))GetProcAddress(w, "recv");
-    ws_send = (int (*)(void *, const char *, int, int))GetProcAddress(w, "send"); ws_close = (int (*)(void *))GetProcAddress(w, "closesocket");
-    ws_opt = (int (*)(void *, int, int, const char *, int))GetProcAddress(w, "setsockopt");
-    ws_sendv = (int (*)(void *, WsBuf *, u32, u32 *, u32, void *, void *))GetProcAddress(w, "WSASend");
-    if (!(ws_startup && ws_socket && ws_bind && ws_listen && ws_accept && ws_recv && ws_send && ws_close && ws_opt && ws_sendv)) return 0;
-    u8 wsa[512]; return ws_startup(0x0202, wsa) == 0;
-}
+static int ws_load(void) { u8 wsa[512]; return WSAStartup(0x0202, wsa) == 0; }
 
 static const char *reason(int code) {
     switch (code) {
@@ -236,7 +237,7 @@ int main(int argc, char **argv) {
     flag(argc, argv, "--port", &port); flag(argc, argv, "--conns", &conns); flag(argc, argv, "--budget", &budget);
     int marks = flag(argc, argv, "--soft", &soft); if (!flag(argc, argv, "--hard", &hard)) hard = ~0ULL >> 21;
     int seeded = flag(argc, argv, "--seed", &seed), clocked = flag(argc, argv, "--clock", &clock);
-    if (!ws_load()) { printf("error: could not load ws2_32.dll\n"); return 1; }
+    if (!ws_load()) { printf("error: Winsock did not start\n"); return 1; }
     void *l = ws_socket(2, 1, 6); /* AF_INET, SOCK_STREAM, TCP */
     if (l == BAD_SOCKET) { printf("error: no socket\n"); return 1; }
     u8 addr[16] = { 2, 0, (u8)(port >> 8), (u8)port, 127, 0, 0, 1 };

@@ -33,6 +33,7 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
     };
     cmd.arg("-o").arg(out).args(&cs);
     if !tcc { cmd.arg("-lkernel32"); }
+    for l in crate::tcc::LIBS { cmd.arg(format!("-l{}", l)); } // after the sources: system DLLs imported normally
     let r = cmd.output().map_err(|e| e.to_string())?;
     for c in &cs { let _ = std::fs::remove_file(c); }
     let _ = std::fs::remove_dir(&dir);

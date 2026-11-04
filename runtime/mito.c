@@ -15,8 +15,7 @@
 void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
 int VirtualFree(void *a, u64 n, u32 type);
 void GetSystemTimeAsFileTime(u64 *ft);
-void *LoadLibraryA(const char *name);
-void *GetProcAddress(void *m, const char *name);
+int BCryptGenRandom(void *alg, u8 *buf, u32 n, u32 flags);
 void *memcpy(void *d, const void *s, u64 n);
 void *memmove(void *d, const void *s, u64 n);
 void *memset(void *d, int c, u64 n);
@@ -36,10 +35,8 @@ static void os_release(void *p) { if (p) VirtualFree(p, 0, MEM_RELEASE); }
 static i64 os_now_ms(void) { u64 ft = 0; GetSystemTimeAsFileTime(&ft); return (i64)((ft - 116444736000000000ULL) / 10000ULL); }
 /* Random bits from the OS (BCryptGenRandom with the system's preferred generator). */
 static u64 os_random(void) {
-    static int (*gen)(void *, u8 *, u32, u32);
-    if (!gen) { void *m = LoadLibraryA("bcrypt.dll"); if (m) gen = (int (*)(void *, u8 *, u32, u32))GetProcAddress(m, "BCryptGenRandom"); }
     u64 v = 0;
-    if (gen) gen(0, (u8 *)&v, 8, 2); /* BCRYPT_USE_SYSTEM_PREFERRED_RNG */
+    BCryptGenRandom(0, (u8 *)&v, 8, 2); /* BCRYPT_USE_SYSTEM_PREFERRED_RNG */
     return v;
 }
 

@@ -17,10 +17,11 @@ type Compile = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type AddSymbol = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_void) -> c_int;
 type Relocate = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
 type GetSymbol = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
+type AddLibrary = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type ErrorFunc = unsafe extern "C" fn(*mut c_void, *const c_char);
 type SetErrorFunc = unsafe extern "C" fn(*mut c_void, *mut c_void, ErrorFunc);
 
-struct Lib { new: New, delete: Delete, set_lib_path: SetPath, set_options: SetOptions, set_output: SetOutput, compile: Compile, add_symbol: AddSymbol, relocate: Relocate, get_symbol: GetSymbol, set_error: SetErrorFunc, dir: String }
+struct Lib { new: New, delete: Delete, set_lib_path: SetPath, set_options: SetOptions, set_output: SetOutput, compile: Compile, add_symbol: AddSymbol, relocate: Relocate, get_symbol: GetSymbol, set_error: SetErrorFunc, add_library: AddLibrary, dir: String }
 unsafe impl Send for Lib {}
 unsafe impl Sync for Lib {}
 
@@ -39,7 +40,7 @@ fn lib() -> Result<&'static Lib, String> {
             new: std::mem::transmute(f("tcc_new")?), delete: std::mem::transmute(f("tcc_delete")?), set_lib_path: std::mem::transmute(f("tcc_set_lib_path")?),
             set_options: std::mem::transmute(f("tcc_set_options")?), set_output: std::mem::transmute(f("tcc_set_output_type")?), compile: std::mem::transmute(f("tcc_compile_string")?),
             add_symbol: std::mem::transmute(f("tcc_add_symbol")?), relocate: std::mem::transmute(f("tcc_relocate")?), get_symbol: std::mem::transmute(f("tcc_get_symbol")?),
-            set_error: std::mem::transmute(f("tcc_set_error_func")?), dir: d,
+            set_error: std::mem::transmute(f("tcc_set_error_func")?), add_library: std::mem::transmute(f("tcc_add_library")?), dir: d,
         })
     }).as_ref().map_err(|e| e.clone())
 }
@@ -49,6 +50,10 @@ unsafe extern "C" fn on_error(opaque: *mut c_void, msg: *const c_char) {
     out.push_str(&unsafe { std::ffi::CStr::from_ptr(msg) }.to_string_lossy());
     out.push('\n');
 }
+
+/// The system DLLs generated programs import from, besides kernel32 and msvcrt: sockets (ws2_32) and the OS's
+/// random numbers (bcrypt). Imported normally, never looked up by name at run time.
+pub const LIBS: &[&str] = &["ws2_32", "bcrypt"];
 
 /// libtcc 0.9.27 keeps global state: one compile (or delete) at a time in the whole process.
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -90,6 +95,8 @@ impl Unit {
             let o = CString::new("-nostdinc").unwrap(); // generated code includes nothing; it declares what it uses
             (l.set_options)(s, o.as_ptr());
             (l.set_output)(s, 1); // TCC_OUTPUT_MEMORY
+            // the system DLLs the runtime imports from, besides kernel32 and msvcrt (lib/*.def)
+            for name in LIBS { let n = CString::new(*name).unwrap(); if (l.add_library)(s, n.as_ptr()) != 0 { return Err(format!("tcc: no import list for {}", name)); } }
             for (name, p) in symbols { let n = CString::new(*name).unwrap(); (l.add_symbol)(s, n.as_ptr(), *p); }
             for src in srcs {
                 let c = CString::new(*src).map_err(|_| "source contains a NUL byte".to_string())?;

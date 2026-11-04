@@ -9,8 +9,6 @@
 
 void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
 int VirtualFree(void *a, u64 n, u32 type);
-void *LoadLibraryA(const char *name);
-void *GetProcAddress(void *m, const char *name);
 void *CreateThread(void *attr, u64 stack, u32 (*fn)(void *), void *arg, u32 flags, u32 *id);
 u32 WaitForSingleObject(void *h, u32 ms);
 int CloseHandle(void *h);
@@ -21,21 +19,26 @@ void *memcpy(void *d, const void *s, u64 n);
 #define S_RW 4
 #define REPLY_CAP (256 * 1024)
 
-/* locks and condition variables, from kernel32 (TinyCC's import list predates them) */
+/* locks and condition variables (kernel32: Windows' SRW locks and condition variables) */
 typedef struct { void *p; } Lock;
 typedef struct { void *p; } Cond;
-static void (*lk_init)(Lock *), (*lk_on)(Lock *), (*lk_off)(Lock *), (*cv_init)(Cond *), (*cv_one)(Cond *), (*cv_all)(Cond *);
-static int (*cv_wait)(Cond *, Lock *, u32, u32);
-static u64 (*ticks)(void);
-static int sys_os(void) {
-    void *k = LoadLibraryA("kernel32.dll");
-    if (!k) return 0;
-    lk_init = (void (*)(Lock *))GetProcAddress(k, "InitializeSRWLock"); lk_on = (void (*)(Lock *))GetProcAddress(k, "AcquireSRWLockExclusive");
-    lk_off = (void (*)(Lock *))GetProcAddress(k, "ReleaseSRWLockExclusive"); cv_init = (void (*)(Cond *))GetProcAddress(k, "InitializeConditionVariable");
-    cv_one = (void (*)(Cond *))GetProcAddress(k, "WakeConditionVariable"); cv_all = (void (*)(Cond *))GetProcAddress(k, "WakeAllConditionVariable");
-    cv_wait = (int (*)(Cond *, Lock *, u32, u32))GetProcAddress(k, "SleepConditionVariableSRW"); ticks = (u64 (*)(void))GetProcAddress(k, "GetTickCount64");
-    return lk_init && lk_on && lk_off && cv_init && cv_one && cv_all && cv_wait && ticks;
-}
+void InitializeSRWLock(Lock *l);
+void AcquireSRWLockExclusive(Lock *l);
+void ReleaseSRWLockExclusive(Lock *l);
+void InitializeConditionVariable(Cond *c);
+void WakeConditionVariable(Cond *c);
+void WakeAllConditionVariable(Cond *c);
+int SleepConditionVariableSRW(Cond *c, Lock *l, u32 ms, u32 flags);
+u64 GetTickCount64(void);
+#define lk_init InitializeSRWLock
+#define lk_on AcquireSRWLockExclusive
+#define lk_off ReleaseSRWLockExclusive
+#define cv_init InitializeConditionVariable
+#define cv_one WakeConditionVariable
+#define cv_all WakeAllConditionVariable
+#define cv_wait SleepConditionVariableSRW
+#define ticks GetTickCount64
+static int sys_os(void) { return 1; }
 static void *sys_mem(u64 n) { return VirtualAlloc(0, n, S_RESERVE | S_COMMIT, S_RW); }
 
 /* ---- a mailbox: a ring of `cap` slots of `slot` bytes, each a u32 length and an encoded message ---- */

@@ -76,7 +76,7 @@ pub fn clang_dll_units(srcs: &[&str], name: &str, extra: &[&str]) -> Result<*mut
     let dll = dir.join(format!("{}.dll", stem));
     let mut cs = Vec::new();
     for (k, src) in srcs.iter().enumerate() { let c = dir.join(format!("{}-{}.c", stem, k)); std::fs::write(&c, src).map_err(|e| e.to_string())?; cs.push(c); }
-    let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(extra).arg("-o").arg(&dll).args(&cs).arg("-lkernel32")
+    let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(extra).arg("-o").arg(&dll).args(&cs).arg("-lkernel32").args(crate::tcc::LIBS.iter().map(|l| format!("-l{}", l)))
         .output().map_err(|e| e.to_string())?;
     if !out.status.success() { return Err(format!("clang failed:\n{}", String::from_utf8_lossy(&out.stderr))); }
     let w: Vec<u16> = dll.to_string_lossy().encode_utf16().chain([0]).collect();

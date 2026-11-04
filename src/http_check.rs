@@ -246,3 +246,55 @@ fn http_load() {
     }
     for (_, _, _, server, exe) in servers { drop(server); let _ = std::fs::remove_file(&exe); }
 }
+
+/// `cargo test --release connection_floor -- --ignored --nocapture`: what a connection costs on this machine with no
+/// Mitochondria in it: a bare Rust server that accepts, reads the request, writes a fixed 125-byte answer and closes,
+/// next to the chat executable answering GET /nope (404, no handler work), one client, alternating rounds.
+#[test]
+#[ignore]
+fn connection_floor() {
+    let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let bare = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let answer = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", 125 - 58, "x".repeat(125 - 58));
+        for c in l.incoming() {
+            let Ok(mut c) = c else { continue };
+            let _ = c.set_nodelay(true);
+            let mut b = [0u8; 4096];
+            let _ = c.read(&mut b);
+            let _ = c.write_all(answer.as_bytes());
+        }
+    });
+    let (s, a) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
+    let prog = crate::layout::Program::parse(&s).unwrap();
+    let api = crate::cgen::check(&prog, &a).unwrap();
+    let exe = std::env::temp_dir().join(format!("mito-floor-{}.exe", std::process::id()));
+    crate::build::exe(&crate::cgen::program_exe(&prog, &api, None).unwrap(), &exe, crate::build::clang().is_none(), &[]).unwrap();
+    let port = free_port();
+    let _server = start_exe(&exe, port);
+    let req = b"GET /nope HTTP/1.1\r\n\r\n";
+    let run = |port: u16, n: usize| { let mut v: Vec<u64> = (0..n).map(|_| timed(port, req).0.as_micros() as u64).collect(); v.sort_unstable(); (v[n / 2], v[n * 99 / 100]) };
+    // the parts of one connection, on the bare server
+    let parts = |port: u16, n: usize| {
+        let (mut c_us, mut rest_us) = (Vec::new(), Vec::new());
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c_us.push(t.elapsed().as_micros() as u64);
+            let t = std::time::Instant::now();
+            c.write_all(req).unwrap();
+            let mut out = Vec::new();
+            let _ = c.read_to_end(&mut out);
+            rest_us.push(t.elapsed().as_micros() as u64);
+        }
+        c_us.sort_unstable(); rest_us.sort_unstable();
+        (c_us[n / 2], rest_us[n / 2])
+    };
+    for round in 0..3 {
+        let (b50, b99) = run(bare, 2000);
+        let (m50, m99) = run(port, 2000);
+        let (pc, pr) = parts(bare, 2000);
+        println!("round {}: bare Rust server p50 {} us p99 {} us | chat executable p50 {} us p99 {} us | bare: connect {} us, request to close {} us", round + 1, b50, b99, m50, m99, pc, pr);
+    }
+    let _ = std::fs::remove_file(&exe);
+}

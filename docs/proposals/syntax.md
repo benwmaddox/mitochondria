@@ -1,6 +1,9 @@
 # Proposal: syntax review (2026-11-04)
 
-Status: **decided, except where marked "open".** Nothing here is built yet. Decisions are Ben's (2026-11-04):
+Status: **built** (2026-11-04). Decisions are Ben's (2026-11-04), plus, from building it: no `any` (every value's kind
+is known when compiling: a `var` keeps one kind, a function returns one kind), a session is a typed input
+(`who: Session from header("X-Session")`), forwarded fields are typed inputs (`forwarded user: string<16>`), and
+`from query` / `from body` name a source other than the method's default.
 
 1. One file extension, `.mito`, for everything.
 2. One named state per program, holding all of it; the compiler requires exactly one.

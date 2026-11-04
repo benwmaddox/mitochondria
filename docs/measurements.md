@@ -655,3 +655,16 @@ What a connection costs here, one client, GET /nope, 2000 connections per measur
 The executable costs the same as a server that does nothing: the time is Windows' connection setup and teardown
 (the machine's load moves it between 200 and 500 us), not Mitochondria's. Only reusing connections (keep-alive)
 removes it.
+
+## Round 17 (2026-11-04): the syntax change (docs/proposals/syntax.md)
+Built in steps, each converted by script and checked against the recorded answers before the next. One named state,
+one `.mito` file per program, collection functions, and endpoints as attribute functions returning `Response<T>` left
+every recorded answer unchanged apart from checked renames (the state's name in paths and error texts) and a few bytes
+less padding. Two steps changed answers on purpose, case by case:
+- **Typed inputs**: errors now name the input and are found before the body runs (`` `points`: expected an integer ``,
+  `` `name`: 41 bytes, at most 24 ``); items are written and named by id (`"0.0"`); a body field the endpoint does not
+  take is 400. A non-string name or message body was a 500 (`len(text)`) and is now a 400. In the sharded chat a bad
+  room id is refused at the auth worker instead of one hop later.
+- **Static kinds**: the endpoints whose only purpose was a `var` or a function changing kind (dynamic.case `/anyitem`,
+  kinds.case `/describe` and `/mixed`) are load errors now, tested in cgen's unit tests.
+Compiling the shape of every answer found no wrong answer in the existing programs.

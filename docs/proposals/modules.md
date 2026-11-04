@@ -1,5 +1,8 @@
 # Proposal: modules with compile-time parameters, and a standard library
 
+> The syntax below is as of the proposal. Current syntax (one state, collection functions, endpoints as attribute
+> functions, an integer walk cursor that is -1 for none): docs/proposals/syntax.md and DESIGN.md.
+
 Status: decided and built (2026-11-04); see DESIGN.md, "Modules and the standard library". Built differently from
 the sketch below: `sorted` is a skip list, not a B-tree (a B-tree's inner nodes need copies of keys, which items of
 string keys cannot hold, and separators would point at removed items); `self` is resolved by the binder rather than

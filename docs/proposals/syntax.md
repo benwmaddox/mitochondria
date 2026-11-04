@@ -92,13 +92,13 @@ longer read the running request behind its caller's back: inputs are values pass
   is `string<1..N>`), and integer ranges, `i64 in 0..1000000`.
 - **Headers** stay for the runtime's own use (`auth()` reads `X-Session`); typed header parameters can come later.
 
-**Open, recommended:**
+**Decided (Ben, 2026-11-04):**
 - **Reused slots in URLs.** An id that is only a slot number (`/players/3/games`) cannot tell whether slot 3 still
   holds the player the client meant: if player 3 left and someone new took slot 3, the request would act on the new
   player. For a `checked` pool, the id carries the slot's generation too (`"3.7"`), and a stale `3.6` is 404. For a
-  pool that is not `checked`, the id stays the slot. Recommended: yes.
+  pool that is not `checked`, the id stays the slot.
 - **Unknown fields** (`{"pionts": 500}`): answered 400, `unknown field pionts`, rather than ignored. Ignoring hides the
-  typo whenever the field has a default. Recommended: strict.
+  typo whenever the field has a default. Strict for now.
 
 ## 7. Endpoints are functions with an attribute
 
@@ -162,6 +162,5 @@ fn remove_player(p: Player) {
 
 ## Questions for Ben
 
-1. Section 6: ids of `checked` pools as `"slot.generation"`, and unknown fields rejected? (Both recommended.)
-2. Section 7: `status:` in the attribute for the success status, and `return` as the answer: right?
-3. How a system file reads (section 1): worth a sketch before building, or decide while building?
+1. Section 7: `status:` in the attribute for the success status, and `return` as the answer: right?
+2. How a system file reads (section 1): worth a sketch before building, or decide while building?

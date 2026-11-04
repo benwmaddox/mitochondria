@@ -126,14 +126,15 @@ struct CFns {
 }
 impl CBackend {
     pub fn start(case: &Case) -> CBackend { Self::start_with(case, false) }
-    pub fn start_with(case: &Case, use_clang: bool) -> CBackend {
+    pub fn start_with(case: &Case, use_clang: bool) -> CBackend { Self::start_flags(case, use_clang, &[]) }
+    pub fn start_flags(case: &Case, use_clang: bool, flags: &[&str]) -> CBackend {
         let prog = Program::parse(&case.state).unwrap_or_else(|e| panic!("{}: state: {}", case.name, e));
         let mut api = crate::lang::parse(&case.api).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
         crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
         let src = crate::cgen::program_c(&prog, &api, None).unwrap_or_else(|e| panic!("{}: {}", case.name, e));
         // the C runtime makes no heap allocations because it has no allocator: check the program names none
         for w in ["malloc", "calloc", "realloc", "HeapAlloc", "LocalAlloc", "GlobalAlloc", "_alloca"] { assert!(!src.contains(w), "{}: the C program uses {}", case.name, w); }
-        let code = if use_clang { Code::Dll(clang_dll(&src, &case.name, &[]).unwrap_or_else(|e| panic!("{}: {}", case.name, e))) }
+        let code = if use_clang { Code::Dll(clang_dll(&src, &case.name, flags).unwrap_or_else(|e| panic!("{}: {}", case.name, e))) }
             else { Code::Tcc(crate::tcc::Unit::compile(&src, &[]).unwrap_or_else(|e| { let _ = std::fs::write(std::env::temp_dir().join(format!("mito-{}.c", case.name)), &src); panic!("{}: C runtime: {}", case.name, e) })) };
         let sym = |n: &str| -> *const std::ffi::c_void {
             let p = match &code { Code::Tcc(u) => u.symbol(n), Code::Dll(h) => { let c = std::ffi::CString::new(n).unwrap(); let p = unsafe { GetProcAddress(*h, c.as_ptr()) }; if p.is_null() { None } else { Some(p as *const std::ffi::c_void) } } };
@@ -408,7 +409,10 @@ mod tests {
     fn c_runtime_speed() {
         let case = Case { name: "speed".into(), state: include_str!("../examples/chat/chat.mito").into(), api: include_str!("../examples/chat/chat.api").into(), requests: String::new(), system: None, files: Vec::new() };
         let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("Rust runtime", Box::new(RustBackend::start(&case, true))), ("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
-        if clang().is_some() { bes.push(("C runtime, clang -O2", Box::new(CBackend::start_with(&case, true)))); }
+        if clang().is_some() {
+            bes.push(("C runtime, clang -O2", Box::new(CBackend::start_with(&case, true))));
+            bes.push(("C runtime, clang -O2, journal off (measurement only: no rollback)", Box::new(CBackend::start_flags(&case, true, &["-DMITO_MEASURE_NO_JOURNAL"]))));
+        }
         bes.push(("native Rust (Vec, VecDeque, String)", Box::new(NativeChat::new())));
         let mut first: Option<String> = None;
         for (name, be) in bes.iter_mut() {

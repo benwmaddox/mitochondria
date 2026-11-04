@@ -253,6 +253,9 @@ static void ensure(Mem *m, u64 a, u64 b) {
 }
 static u64 rd(Mem *m, u64 off, u32 n) { u64 v = 0; memcpy(&v, m->base + off, n); return v; }
 static void save(Mem *m, u64 a, u64 n) {
+#ifdef MITO_MEASURE_NO_JOURNAL /* for measuring what journaling costs only: failed requests are then not rolled back */
+    return;
+#endif
     if (!m->jon || !n) return;
     u64 pos = m->jb.len;
     if (!grow_to(&m->jb, pos + n) || !grow_to(&m->je, (m->je.len + 1) * sizeof(JEnt))) fatal("journal full");

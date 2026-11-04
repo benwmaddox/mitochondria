@@ -546,3 +546,9 @@ allocates a String per message). The native version checks less (a simpler body 
 Also new: counted loops, `each i in lo..hi` with `reverse`, `where` and `limit` (which serves as an early exit, so the
 language still has one loop and no `break`). The bounds are read once and the loop variable cannot be assigned, so the
 loop ends. A range has no items to take a snapshot of: its `where` is tested just before each body runs.
+
+What journaling costs: the same speed test with the C runtime built with `-DMITO_MEASURE_NO_JOURNAL` (writes are not
+recorded, so failed requests are not rolled back; for measuring only). Two runs, steady rounds, POST message:
+journaling on 0.18 / 0.18 us, off 0.19 / 0.17 us. No measurable difference: a POST message journals about 12 writes,
+some 110 bytes, which is a few copies into a buffer that is already committed. Skipping the journal where the compiler
+proves nothing can fail after a write (the "hybrid" option) would buy nothing for this workload.

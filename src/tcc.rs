@@ -73,8 +73,11 @@ impl Unit {
     }
 
     /// Compile `src` in memory (after `check`). `symbols` are host functions or data the C code may call or read by name.
-    pub fn compile(src: &str, symbols: &[(&str, *const c_void)]) -> Result<Unit, String> {
-        Self::check(src)?;
+    pub fn compile(src: &str, symbols: &[(&str, *const c_void)]) -> Result<Unit, String> { Self::compile_units(&[src], symbols) }
+
+    /// Compile several translation units into one: each keeps its own `static` names; external names are shared.
+    pub fn compile_units(srcs: &[&str], symbols: &[(&str, *const c_void)]) -> Result<Unit, String> {
+        for src in srcs { Self::check(src)?; }
         let l = lib()?;
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -88,8 +91,10 @@ impl Unit {
             (l.set_options)(s, o.as_ptr());
             (l.set_output)(s, 1); // TCC_OUTPUT_MEMORY
             for (name, p) in symbols { let n = CString::new(*name).unwrap(); (l.add_symbol)(s, n.as_ptr(), *p); }
-            let c = CString::new(src).map_err(|_| "source contains a NUL byte".to_string())?;
-            if (l.compile)(s, c.as_ptr()) != 0 { return Err(format!("C compile failed:\n{}", u.errors)); }
+            for src in srcs {
+                let c = CString::new(*src).map_err(|_| "source contains a NUL byte".to_string())?;
+                if (l.compile)(s, c.as_ptr()) != 0 { return Err(format!("C compile failed:\n{}", u.errors)); }
+            }
             if (l.relocate)(s, 1 as *mut c_void) < 0 { return Err(format!("C relocation failed:\n{}", u.errors)); } // TCC_RELOCATE_AUTO
             Ok(u)
         }
@@ -125,6 +130,15 @@ mod tests {
         let h = Host { add: host_add, base: data.as_ptr() };
         assert_eq!(unsafe { run(&h, 4) }, 18);
         assert!(took.as_millis() < 2000, "compile took {:?}", took); // includes starting tcc.exe for the check, slow when cold or under load
+    }
+
+    #[test]
+    fn units_keep_their_own_static_names() {
+        let a = "static int f(void) { return 1; } int a_get(void) { return f(); }";
+        let b = "static int f(void) { return 2; } int b_get(void) { return f(); }";
+        let u = Unit::compile_units(&[a, b], &[]).unwrap();
+        let (ga, gb): (unsafe extern "C" fn() -> i32, unsafe extern "C" fn() -> i32) = unsafe { (std::mem::transmute(u.symbol("a_get").unwrap()), std::mem::transmute(u.symbol("b_get").unwrap())) };
+        assert_eq!(unsafe { (ga(), gb()) }, (1, 2));
     }
 
     #[test]

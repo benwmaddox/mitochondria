@@ -366,19 +366,20 @@ fn worker(sh: Arc<Shared>, spec: Arc<Spec>, k: usize, i: usize) {
             Recv::Closed => break,
             Recv::Got => {}
         }
-        let a0 = crate::alloc_count::allocs();
         let busy = std::time::Instant::now();
         server.clock = match sh.clock.load(Relaxed) { i64::MIN => None, t => Some(t) };
         let mut start = 0;
         for &end in &ends {
             let msg = &msgs[start..end];
             start = end;
-            let r = catch_unwind(AssertUnwindSafe(|| handle(&mut server, msg, &sh, &mut hv, &mut fv)));
+            let a0 = crate::alloc_count::allocs();
+            let r = catch_unwind(AssertUnwindSafe(|| handle(&mut server, msg, &sh, &mut hv, &mut fv, stats, a0)));
             match r {
-                Ok(forwarded) => { if forwarded { stats.forwarded.fetch_add(1, Relaxed); } }
+                Ok(()) => {}
                 Err(_) => {
                     // supervision: the worker's state is discarded and rebuilt from source (a fresh reservation)
                     stats.restarts.fetch_add(1, Relaxed);
+                    stats.handled.fetch_add(1, Relaxed);
                     server = make();
                     hv = Vec::with_capacity(32); fv = Vec::with_capacity(32);
                     if let Some(id) = msg.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) { sh.replies.put(id, 500, b"{\"error\":\"worker failed and was restarted\"}"); }
@@ -386,36 +387,39 @@ fn worker(sh: Arc<Shared>, spec: Arc<Spec>, k: usize, i: usize) {
             }
         }
         stats.busy_ns.fetch_add(busy.elapsed().as_nanos() as u64, Relaxed);
-        stats.allocs.fetch_add((crate::alloc_count::allocs() - a0) as u64, Relaxed);
-        stats.handled.fetch_add(ends.len() as u64, Relaxed);
         stats.handler_ns.store(HANDLER_NS.with(|c| c.get()), Relaxed);
         publish(&server);
     }
 }
 
-/// Handle one message. Returns whether it was forwarded.
-fn handle(server: &mut Server, msg: &[u8], sh: &Shared, hv: &mut Vec<(&'static str, &'static str)>, fv: &mut Vec<(&'static str, &'static str)>) -> bool {
+/// Handle one message. Its counters are updated before it is answered or handed on, so a caller that has its answer
+/// sees every count of the request's path.
+fn handle(server: &mut Server, msg: &[u8], sh: &Shared, hv: &mut Vec<(&'static str, &'static str)>, fv: &mut Vec<(&'static str, &'static str)>, stats: &WStats, a0: usize) {
+    let done = |forwarded: bool| { stats.handled.fetch_add(1, Relaxed); if forwarded { stats.forwarded.fetch_add(1, Relaxed); } stats.allocs.fetch_add((crate::alloc_count::allocs() - a0) as u64, Relaxed); };
     let mut h = recycle(std::mem::take(hv));
     let mut f = recycle(std::mem::take(fv));
     let mut rd = Rd { b: msg, n: 0 };
     let parsed = (|| { let reply = rd.u32()?; let m = rd.s()?; let t = rd.s()?; let b = rd.s()?; rd.pairs(&mut h)?; rd.pairs(&mut f)?; Some((reply, m, t, b)) })();
-    let mut forwarded = false;
     match parsed {
-        None => { if let Some(id) = msg.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) { sh.replies.put(id, 400, b"{\"error\":\"malformed message\"}"); } }
+        None => { done(false); if let Some(id) = msg.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) { sh.replies.put(id, 400, b"{\"error\":\"malformed message\"}"); } }
         Some((reply, method, target, body)) => {
             let t0 = std::time::Instant::now();
             let code = server.handle_req(method, target, &StrFields(&h), body, &StrFields(&f));
             HANDLER_NS.with(|c| c.set(c.get() + t0.elapsed().as_nanos() as u64));
             if code != 0 {
+                done(false);
                 sh.replies.put(reply, code, server.response().as_bytes());
             } else {
                 let (kind, key) = server.pending_forward().expect("forward pending");
                 let dst = sh.base[kind] + key.rem_euclid(sh.counts[kind] as i64) as usize;
                 let headers = h.iter().map(|p| (p.0.as_bytes(), p.1.as_bytes()));
+                stats.handled.fetch_add(1, Relaxed); stats.forwarded.fetch_add(1, Relaxed); // counted before the next worker can answer
                 let sent = sh.boxes[dst].send(|slot| encode(slot, reply, method, target, body, headers, server.forward_fields()));
+                if sent.is_err() { stats.forwarded.fetch_sub(1, Relaxed); }
                 server.finish_forward(sent.is_ok()); // commit only if the request was handed on
+                stats.allocs.fetch_add((crate::alloc_count::allocs() - a0) as u64, Relaxed);
                 match sent {
-                    Ok(()) => forwarded = true,
+                    Ok(()) => {}
                     Err(SendErr::TooBig) => sh.replies.put(reply, 413, b"{\"error\":\"forwarded request does not fit a mailbox slot\"}"),
                     Err(SendErr::Full) => sh.replies.put(reply, 503, b"{\"error\":\"the next worker is busy\"}"),
                     Err(SendErr::Closed) => sh.replies.put(reply, 503, b"{\"error\":\"shutting down\"}"),
@@ -424,7 +428,6 @@ fn handle(server: &mut Server, msg: &[u8], sh: &Shared, hv: &mut Vec<(&'static s
         }
     }
     *hv = recycle(h); *fv = recycle(f);
-    forwarded
 }
 
 // ---------------------------------------------------------------- socket front end

@@ -200,18 +200,6 @@ impl SystemBackend {
         SystemBackend { sys: Some(sys), notes, compiled }
     }
     fn sys(&self) -> &crate::system::System { self.sys.as_ref().unwrap() }
-    /// Workers count a message just after answering it: wait until the counters stop moving (nothing else is in flight).
-    fn settled(&self) -> Vec<crate::system::WorkerReport> {
-        let key = |r: &[crate::system::WorkerReport]| r.iter().map(|w| (w.handled, w.allocs, w.forwarded, w.restarts)).collect::<Vec<_>>();
-        let mut last = self.sys().report();
-        for _ in 0..1000 {
-            std::thread::sleep(std::time::Duration::from_micros(500));
-            let now = self.sys().report();
-            if key(&now) == key(&last) { return now; }
-            last = now;
-        }
-        last
-    }
 }
 impl Drop for SystemBackend { fn drop(&mut self) { if let Some(s) = self.sys.take() { s.shutdown(); } } }
 impl Backend for SystemBackend {
@@ -225,11 +213,11 @@ impl Backend for SystemBackend {
     fn set_marks(&mut self, _: usize, _: usize) { panic!("marks are set per worker kind in the system file"); }
     fn state(&self) -> Vec<String> { Vec::new() }
     fn stats(&self) -> String {
-        self.settled().iter().map(|w| format!("{}{} handled={} forwarded={} restarts={}", w.name, w.index, w.handled, w.forwarded, w.restarts)).collect::<Vec<_>>().join(" | ")
+        self.sys().report().iter().map(|w| format!("{}{} handled={} forwarded={} restarts={}", w.name, w.index, w.handled, w.forwarded, w.restarts)).collect::<Vec<_>>().join(" | ")
     }
     fn notes(&self) -> Vec<String> { self.notes.clone() }
     fn no_alloc(&self) -> bool { self.compiled }
-    fn allocs(&self) -> usize { self.settled().iter().map(|w| w.allocs as usize).sum() } // counted inside the workers
+    fn allocs(&self) -> usize { self.sys().report().iter().map(|w| w.allocs as usize).sum() } // counted inside the workers, before each answer
 }
 
 /// Run a case's script; returns the log, and the heap allocations made by warm successful requests (every successful

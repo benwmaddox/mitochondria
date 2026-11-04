@@ -1,0 +1,20 @@
+// What a pool costs on its own: add and remove with no tree, for comparison with ordered.mito.
+struct KV { k: i64; v: i64; }
+struct Loc { leaf: u32; }
+struct P { items: pool<KV, 1048576> checked; locs: pool<Loc, 1048576>; }
+state p: P;
+@post("/fill/{n}")
+fn fill(n: i64 in 1..1048576) -> Response<{ size: i64 }> {
+    each i in 0..n { let e = p.items.add(); e.k = i; }
+    return ok({ "size": p.items.count() });
+}
+@post("/fill2/{n}")
+fn fill2(n: i64 in 1..1048576) -> Response<{ size: i64 }> {
+    each i in 0..n { let e = p.items.add(); e.k = i; let l = p.locs.add(); l.leaf = 7; }
+    return ok({ "size": p.items.count() });
+}
+@delete("/clear/{from}/{n}")
+fn clear(from: i64, n: i64 in 1..16384) -> Response<{ size: i64 }> {
+    each i in from..from + n { p.items.remove(p.items[i]); }
+    return ok({ "size": p.items.count() });
+}

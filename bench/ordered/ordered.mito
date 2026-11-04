@@ -80,3 +80,29 @@ fn delete(x: i64, count: i64 in 1..32768) -> Response<{ x: i64, size: i64 }> {
 fn stats() -> Response<{ committed_kb: i64, live_kb: i64, reserved_kb: i64 }> {
     return ok({ "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb"), "reserved_kb": stat("reserved_kb") });
 }
+
+// Steady-state churn: a FIFO window of live keys. `y` is the sequence state of the oldest key, `x` of the newest; each
+// step deletes the oldest key and inserts the next new one (a random position in the order). Both states are returned.
+@post("/churn/{x}/{y}/{count}")
+fn churn(x: i64, y: i64, count: i64 in 1..8192) -> Response<{ x: i64, y: i64, size: i64 }> {
+    var nx = x; var ny = y;
+    each i in 0..count {
+        ny = ny * 48271 % 2147483647;
+        var hit = -1;
+        each e in b.m from ny * 2 limit 1 { if e.k == ny * 2 { hit = slot(e); } }
+        if hit >= 0 { b.m.remove(b.m.get(hit)); }
+        nx = nx * 48271 % 2147483647;
+        let it = b.m.add(nx * 2); it.v = nx;
+    }
+    return ok({ "x": nx, "y": ny, "size": b.m.size() });
+}
+// where the first key stands: how far a lookup of the oldest keys must go (the cost of lookups after churn)
+@get("/probe/{y}/{ops}")
+fn probe(y: i64, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var ny = y; var s = 0;
+    each i in 0..ops {
+        ny = ny * 48271 % 2147483647;
+        each e in b.m from ny * 2 limit 1 { if e.k == ny * 2 { s = s + e.v; } }
+    }
+    return ok({ "sum": s });
+}

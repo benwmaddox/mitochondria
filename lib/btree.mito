@@ -1,0 +1,325 @@
+// Up to N items of struct T, kept in order of their field `key` (an i64): the same interface as `sorted`, built as a
+// B+tree for speed. Items with equal keys stay in the order they were added. Change an item's key with set_key (the key
+// is read-only outside this module); other fields are the program's. Walk it with `each item in instance [from key] [reverse] ...`.
+//
+// Items stay in their pool slots; the tree holds copies of their keys, so a search reads a few nodes of 16 keys (each
+// searched by halving) and touches no item until it has found the one it wants. Leaves hold up to 16 keys and the
+// slots of their items and are linked in order; inner nodes hold up to 16 children and a key between each pair (the
+// smallest key reachable through the child on its right). A node is split into 9 and 8 when a 17th entry arrives. A
+// removed item leaves its leaf; a leaf left empty is freed, and a leaf is merged with a neighbour when the two fit in
+// one leaf. Only leaves with the same parent merge, so a long run of removals can leave many sparse leaves: the pools
+// are sized for N/2 leaves and N/4 inner nodes, and running out is an ordinary error (507), not a wrong answer.
+// Nodes are numbered by slot + 1; 0 is none. Every item remembers its leaf, and every node its parent, so a removal
+// does not search. Equal keys can span leaves: a search for the first key at least a target goes to the leftmost leaf
+// that can hold it, an insert to the rightmost. (Local names are never a single letter: module code is resolved
+// through the instance's path, and a local named like the program's state would hide it.)
+module btree<T: struct, N: count, key: field of T>
+struct Leaf { count: u32; keys: i64[17]; slots: u32[17]; next: u32; prev: u32; parent: u32; }
+struct Inner { count: u32; keys: i64[16]; kids: u32[17]; parent: u32; }
+struct Loc { leaf: u32; }
+struct Head { root: u32; height: u32; first: u32; last: u32; }
+// what an instance holds
+state {
+    items: pool<T, N> checked;
+    locs: pool<Loc, N>;
+    leaves: pool<Leaf, N / 2 + 8>;
+    inners: pool<Inner, N / 4 + 8>;
+    head: Head;
+}
+
+pub fn add(new_key) {
+    let item = self.items.add();
+    let loc = self.locs.add();
+    if slot(loc) != slot(item) { fail 500 "btree: items and locations out of step"; }
+    item.key = new_key;
+    self.place(slot(item));
+    return item;
+}
+pub fn remove(item) {
+    self.unplace(slot(item));
+    self.locs.remove(self.locs[slot(item)]);
+    self.items.remove(item);
+}
+pub fn set_key(item, new_key) {
+    if self.locs[slot(item)].leaf == 0 { fail 404 "this item was removed"; }
+    self.unplace(slot(item));
+    item.key = new_key;
+    self.place(slot(item));
+}
+pub fn size() { return self.items.count(); }
+// nodes in use, to watch how sparse the tree gets over time
+pub fn leaf_count() { return self.leaves.count(); }
+pub fn inner_count() { return self.inners.count(); }
+pub fn room() { return N - self.items.count(); }
+pub fn get(item_slot) { return self.items[item_slot]; }
+pub fn first() {
+    let leaf = self.head.first;
+    if leaf == 0 { return null; }
+    return self.items[self.leaves[leaf - 1].slots[0]];
+}
+pub fn last() {
+    let leaf = self.head.last;
+    if leaf == 0 { return null; }
+    return self.items[self.leaves[leaf - 1].slots[self.leaves[leaf - 1].count - 1]];
+}
+
+// ---- searching
+// In leaf `leaf` (its id): the first position whose key is above target (`above`) or at least target (not `above`), 0..count.
+fn leaf_pos(leaf, target, above) {
+    let node = self.leaves[leaf - 1];
+    var pos = 0;
+    each at in 0..17 while at < node.count && (node.keys[at] < target || (above && node.keys[at] == target)) { pos = at + 1; }
+    return pos;
+}
+// In inner node `node_id` (its id): which child holds keys from target on: the number of separators below target (at or
+// below when `above`).
+fn kid_pos(node_id, target, above) {
+    let node = self.inners[node_id - 1];
+    var pos = 0;
+    each at in 0..16 while at < node.count - 1 && (node.keys[at] < target || (above && node.keys[at] == target)) { pos = at + 1; }
+    return pos;
+}
+// The leaf (its id) where a search for target ends, 0 if the tree is empty.
+fn descend(target, above) {
+    var node = self.head.root;
+    each level in 0..self.head.height { node = self.inners[node - 1].kids[self.kid_pos(node, target, above)]; }
+    return node;
+}
+
+// ---- inserting
+fn new_leaf() { let made = self.leaves.add(); return slot(made) + 1; }
+// put item slot item_slot in the tree, after the items with keys up to its own
+fn place(item_slot) {
+    let new_key = self.items[item_slot].key;
+    if self.head.root == 0 {
+        let only = self.new_leaf();
+        self.head.root = only;
+        self.head.first = only;
+        self.head.last = only;
+        self.head.height = 0;
+    }
+    let leaf = self.descend(new_key, true);
+    let pos = self.leaf_pos(leaf, new_key, true);
+    var at = self.leaves[leaf - 1].count;
+    each step in 0..17 while at > pos {
+        self.leaves[leaf - 1].keys[at] = self.leaves[leaf - 1].keys[at - 1];
+        self.leaves[leaf - 1].slots[at] = self.leaves[leaf - 1].slots[at - 1];
+        at = at - 1;
+    }
+    self.leaves[leaf - 1].keys[pos] = new_key;
+    self.leaves[leaf - 1].slots[pos] = item_slot;
+    self.leaves[leaf - 1].count = self.leaves[leaf - 1].count + 1;
+    self.locs[item_slot].leaf = leaf;
+    if self.leaves[leaf - 1].count == 17 { self.split_leaf(leaf); }
+}
+// leaf `leaf` holds 17: the first 9 stay, the last 8 move to a new leaf after it
+fn split_leaf(leaf) {
+    let right = self.new_leaf();
+    each offset in 0..8 {
+        let moved = self.leaves[leaf - 1].slots[9 + offset];
+        self.leaves[right - 1].keys[offset] = self.leaves[leaf - 1].keys[9 + offset];
+        self.leaves[right - 1].slots[offset] = moved;
+        self.locs[moved].leaf = right;
+    }
+    self.leaves[right - 1].count = 8;
+    self.leaves[leaf - 1].count = 9;
+    let after = self.leaves[leaf - 1].next;
+    self.leaves[right - 1].next = after;
+    self.leaves[right - 1].prev = leaf;
+    self.leaves[leaf - 1].next = right;
+    if after != 0 { self.leaves[after - 1].prev = right; } else { self.head.last = right; }
+    self.insert_up(leaf, right, self.leaves[right - 1].keys[0], 0);
+}
+// node `right_node` (at level `first_level`: 0 leaves, 1 their parents, ...) now follows node `left_node`, and its keys
+// start at `separator`: record that in the left node's parent, splitting parents that overflow
+fn insert_up(left_node, right_node, separator, first_level) {
+    var left = left_node;
+    var right = right_node;
+    var up_key = separator;
+    var level = first_level;
+    var going = 1;
+    each step in 0..20 while going == 1 {
+        let parent = self.parent_of(left, level);
+        if parent == 0 {
+            // left was the root: a new root above both
+            let made = self.inners.add();
+            let root = slot(made) + 1;
+            self.inners[root - 1].count = 2;
+            self.inners[root - 1].keys[0] = up_key;
+            self.inners[root - 1].kids[0] = left;
+            self.inners[root - 1].kids[1] = right;
+            self.set_parent(left, level, root);
+            self.set_parent(right, level, root);
+            self.head.root = root;
+            self.head.height = self.head.height + 1;
+            going = 0;
+        } else {
+            let at = self.kid_index(parent, left);
+            var shifted = self.inners[parent - 1].count;
+            each shift in 0..18 while shifted > at + 1 {
+                self.inners[parent - 1].kids[shifted] = self.inners[parent - 1].kids[shifted - 1];
+                self.inners[parent - 1].keys[shifted - 1] = self.inners[parent - 1].keys[shifted - 2];
+                shifted = shifted - 1;
+            }
+            self.inners[parent - 1].kids[at + 1] = right;
+            self.inners[parent - 1].keys[at] = up_key;
+            self.inners[parent - 1].count = self.inners[parent - 1].count + 1;
+            self.set_parent(right, level, parent);
+            if self.inners[parent - 1].count < 17 {
+                going = 0;
+            } else {
+                // the parent holds 17 children: the first 9 stay, the key after them goes up, the last 8 move to a new node
+                let made = self.inners.add();
+                let sibling = slot(made) + 1;
+                each offset in 0..8 {
+                    let kid = self.inners[parent - 1].kids[9 + offset];
+                    self.inners[sibling - 1].kids[offset] = kid;
+                    self.set_parent(kid, level, sibling);
+                }
+                each offset in 0..7 { self.inners[sibling - 1].keys[offset] = self.inners[parent - 1].keys[9 + offset]; }
+                self.inners[sibling - 1].count = 8;
+                let promoted = self.inners[parent - 1].keys[8];
+                self.inners[parent - 1].count = 9;
+                left = parent;
+                right = sibling;
+                up_key = promoted;
+                level = level + 1;
+            }
+        }
+    }
+}
+// the parent of a node at the given level (0 for a leaf), 0 for the root
+fn parent_of(node, level) { if level == 0 { return self.leaves[node - 1].parent; } return self.inners[node - 1].parent; }
+fn set_parent(node, level, parent) { if level == 0 { self.leaves[node - 1].parent = parent; } else { self.inners[node - 1].parent = parent; } }
+// the position of child `child` in inner node `node`
+fn kid_index(node, child) {
+    var index = 0;
+    each step in 0..17 while self.inners[node - 1].kids[index] != child { index = index + 1; }
+    return index;
+}
+
+// ---- removing
+// take item slot item_slot out of the tree
+fn unplace(item_slot) {
+    let leaf = self.locs[item_slot].leaf;
+    var index = 0;
+    each step in 0..17 while self.leaves[leaf - 1].slots[index] != item_slot { index = index + 1; }
+    let count = self.leaves[leaf - 1].count;
+    each at in index..count - 1 {
+        self.leaves[leaf - 1].keys[at] = self.leaves[leaf - 1].keys[at + 1];
+        self.leaves[leaf - 1].slots[at] = self.leaves[leaf - 1].slots[at + 1];
+    }
+    self.leaves[leaf - 1].count = count - 1;
+    self.locs[item_slot].leaf = 0;
+    if count == 1 { self.drop_leaf(leaf); } else { self.merge_leaf(leaf); }
+}
+// leaf `leaf` is empty: out of the list and the tree
+fn drop_leaf(leaf) {
+    let before = self.leaves[leaf - 1].prev;
+    let after = self.leaves[leaf - 1].next;
+    if before != 0 { self.leaves[before - 1].next = after; } else { self.head.first = after; }
+    if after != 0 { self.leaves[after - 1].prev = before; } else { self.head.last = before; }
+    let parent = self.leaves[leaf - 1].parent;
+    self.leaves.remove(self.leaves[leaf - 1]);
+    if parent == 0 { self.head.root = 0; self.head.height = 0; } else { self.drop_kid(parent, leaf); }
+}
+// child `gone` of inner node `first_node` is already freed: take it out; a node left without children goes too, and
+// a root left with one child gives way to it
+fn drop_kid(first_node, gone) {
+    var node = first_node;
+    var child = gone;
+    var going = 1;
+    each step in 0..20 while going == 1 {
+        let index = self.kid_index(node, child);
+        let count = self.inners[node - 1].count;
+        each at in index..count - 1 { self.inners[node - 1].kids[at] = self.inners[node - 1].kids[at + 1]; }
+        if count > 1 {
+            // the separator between the removed child and its neighbour goes with it (the one on its left, else on its right)
+            var key_at = 0;
+            if index > 0 { key_at = index - 1; }
+            each at in key_at..count - 2 { self.inners[node - 1].keys[at] = self.inners[node - 1].keys[at + 1]; }
+        }
+        self.inners[node - 1].count = count - 1;
+        if count == 1 {
+            let above = self.inners[node - 1].parent;
+            self.inners.remove(self.inners[node - 1]);
+            if above == 0 { self.head.root = 0; self.head.height = 0; going = 0; } else { child = node; node = above; }
+        } else {
+            going = 0;
+        }
+    }
+    self.collapse_root();
+}
+// a root with one child is replaced by it, as often as that holds
+fn collapse_root() {
+    each step in 0..20 while self.head.height > 0 && self.inners[self.head.root - 1].count == 1 {
+        let old_root = self.head.root;
+        let only = self.inners[old_root - 1].kids[0];
+        if self.head.height == 1 { self.leaves[only - 1].parent = 0; } else { self.inners[only - 1].parent = 0; }
+        self.head.root = only;
+        self.head.height = self.head.height - 1;
+        self.inners.remove(self.inners[old_root - 1]);
+    }
+}
+// leaf `leaf` lost an item: when it and a neighbour under the same parent fit in one leaf, they become one (across
+// parents the separator between them would no longer hold)
+fn merge_leaf(leaf) {
+    let count = self.leaves[leaf - 1].count;
+    let after = self.leaves[leaf - 1].next;
+    let before = self.leaves[leaf - 1].prev;
+    let parent = self.leaves[leaf - 1].parent;
+    if after != 0 && self.leaves[after - 1].parent == parent && count + self.leaves[after - 1].count <= 16 {
+        self.absorb(leaf, after);
+    } else if before != 0 && self.leaves[before - 1].parent == parent && count + self.leaves[before - 1].count <= 16 {
+        self.absorb(before, leaf);
+    }
+}
+// leaf `later` (the one after leaf `earlier`) moves its items into `earlier` and is freed
+fn absorb(earlier, later) {
+    let earlier_count = self.leaves[earlier - 1].count;
+    let later_count = self.leaves[later - 1].count;
+    each offset in 0..later_count {
+        let moved = self.leaves[later - 1].slots[offset];
+        self.leaves[earlier - 1].keys[earlier_count + offset] = self.leaves[later - 1].keys[offset];
+        self.leaves[earlier - 1].slots[earlier_count + offset] = moved;
+        self.locs[moved].leaf = earlier;
+    }
+    self.leaves[earlier - 1].count = earlier_count + later_count;
+    self.leaves[later - 1].count = 0;
+    self.drop_leaf(later);
+}
+
+// ---- iteration: a cursor is leaf id * 32 + position, -1 for none
+// the first item at or after position `pos` of leaf `leaf`, over the leaf boundary
+fn from_pos(leaf, pos) {
+    if leaf == 0 { return -1; }
+    if pos < self.leaves[leaf - 1].count { return leaf * 32 + pos; }
+    let after = self.leaves[leaf - 1].next;
+    if after == 0 { return -1; }
+    return after * 32;
+}
+fn iter_first(from) {
+    if self.head.root == 0 { return -1; }
+    if from == null { return self.head.first * 32; }
+    let leaf = self.descend(from, false);
+    return self.from_pos(leaf, self.leaf_pos(leaf, from, false));
+}
+fn iter_next(cur) { return self.from_pos(cur / 32, cur % 32 + 1); }
+fn iter_last(from) {
+    if self.head.root == 0 { return -1; }
+    if from == null { let end = self.head.last; return end * 32 + self.leaves[end - 1].count - 1; }
+    let leaf = self.descend(from, true);
+    let pos = self.leaf_pos(leaf, from, true);
+    if pos > 0 { return leaf * 32 + pos - 1; }
+    let before = self.leaves[leaf - 1].prev;
+    if before == 0 { return -1; }
+    return before * 32 + self.leaves[before - 1].count - 1;
+}
+fn iter_prev(cur) {
+    let leaf = cur / 32;
+    if cur % 32 > 0 { return cur - 1; }
+    let before = self.leaves[leaf - 1].prev;
+    if before == 0 { return -1; }
+    return before * 32 + self.leaves[before - 1].count - 1;
+}
+fn iter_item(cur) { return self.items[self.leaves[cur / 32 - 1].slots[cur % 32]]; }

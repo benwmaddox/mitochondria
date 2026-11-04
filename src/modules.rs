@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 /// The standard library: module name, source.
-pub const STDLIB: &[(&str, &str)] = &[("bag", include_str!("../lib/bag.mito")), ("sorted", include_str!("../lib/sorted.mito"))];
+pub const STDLIB: &[(&str, &str)] = &[("bag", include_str!("../lib/bag.mito")), ("sorted", include_str!("../lib/sorted.mito")), ("btree", include_str!("../lib/btree.mito"))];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PKind { Struct, Count, Field }

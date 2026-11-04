@@ -9,7 +9,7 @@ import http.client, json, statistics, subprocess, sys, time, os
 
 here = os.path.dirname(os.path.abspath(__file__))
 n, ops, rounds = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
-mito = sys.argv[4] if len(sys.argv) > 4 else os.path.join(here, "ordered.exe")
+mito = os.path.abspath(sys.argv[4]) if len(sys.argv) > 4 else os.path.join(here, "ordered.exe")
 rust = os.path.join(here, "..", "btree-rust", "target", "release", "btree-rust.exe")
 port = 18080
 
@@ -31,8 +31,8 @@ def private_kb(pid):
     return int(float(out.strip()))
 
 
-def run_mito():
-    p = subprocess.Popen([mito, "--port", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def run_mito(extra=()):
+    p = subprocess.Popen([mito, "--port", str(port), *extra], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
             try:
@@ -50,7 +50,7 @@ def run_mito():
         res["range100"] = call("GET", f"/range/{n}/{ops // 10}")[0] * 1e9 / (ops // 10)
         x, done, spent = 20261104, 0, 0.0
         while done < n:
-            c = min(32768, n - done)
+            c = min(16384, n - done)
             dt, a = call("DELETE", f"/delete/{x}/{c}")
             x, done, spent = a["x"], done + c, spent + dt
         res["delete"] = spent * 1e9 / n
@@ -81,3 +81,36 @@ for k in names:
     m = statistics.median(r[k] for r in M); r_ = statistics.median(r[k] for r in R)
     print(f"{k:<12}{m:>10.1f}{r_:>10.1f}{m / r_:>11.2f}   " + " ".join(f"{r[k]:.0f}" for r in M) + " | " + " ".join(f"{r[k]:.0f}" for r in R))
 print(f"memory after insert, KB: Mito committed {statistics.median(r['committed_kb'] for r in M):.0f}, live {statistics.median(r['live_kb'] for r in M):.0f}, process private {statistics.median(r['private_kb'] for r in M):.0f}; Rust private {statistics.median(r['private_kb_after_insert'] for r in R):.0f}")
+
+
+def memory_phases(extra):
+    """Live vs committed KB after inserting n, then after removing all n (logical removal), with or without a trim policy."""
+    p = subprocess.Popen([mito, "--port", str(port), *extra], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            try:
+                call("GET", "/stats"); break
+            except OSError:
+                time.sleep(0.05)
+        call("POST", f"/insert/{n}")
+        full = call("GET", "/stats")[1]
+        x, done = 20261104, 0
+        while done < n:
+            c = min(16384, n - done)
+            x = call("DELETE", f"/delete/{x}/{c}")[1]["x"]; done += c
+        out = [full]
+        for _ in range(3):
+            out.append(call("GET", "/stats")[1])
+        return out
+    finally:
+        p.kill(); p.wait()
+
+
+def show(label, rows):
+    print(f"  {label}: after insert committed {rows[0]['committed_kb']} / live {rows[0]['live_kb']}; after removing all: " + ", ".join(f"committed {r['committed_kb']} / live {r['live_kb']}" for r in rows[1:]))
+
+
+if os.environ.get("MITO_MEMORY_PHASES"):
+    print("memory (KB), remove = logical (slots free, pages stay committed); trim = pages given back to the OS")
+    show("no trim policy", memory_phases(()))
+    show("trim policy (--soft 1 MB)", memory_phases(("--soft", "1", "--hard", "100000")))

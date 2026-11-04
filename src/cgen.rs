@@ -62,6 +62,7 @@ struct H {
     int (*input)(Ctx *, int, const char *, u32, int, i64, i64, Val *); /* a typed input of the endpoint (src, name, kind, lo, hi) */
     int (*fields)(Ctx *, const char *, u32);                   /* the body's fields are among these (NUL-separated) */
     int (*json_id)(Ctx *, u32, u32);                           /* an item written as its id: "slot.generation" or the slot */
+    int (*wr_int)(Ctx *, u64, u32, i64);                       /* an integer of `size` bytes at a byte offset (the value already known to fit) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -90,16 +91,21 @@ struct H {
 #define DEREF(t, s, g, out) c->h->deref(c, (t), (s), (g), (out))
 #define OVERFLOW_ FAIL(500, "integer overflow", 16)
 #ifdef __clang__
-#define ADD(r, x, y) i64 r; if (__builtin_add_overflow((x), (y), &r)) OVERFLOW_
-#define SUB(r, x, y) i64 r; if (__builtin_sub_overflow((x), (y), &r)) OVERFLOW_
-#define MUL(r, x, y) i64 r; if (__builtin_mul_overflow((x), (y), &r)) OVERFLOW_
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define UNLIKELY(x) (x)
+#endif
+#ifdef __clang__
+#define ADD(r, x, y) i64 r; if (UNLIKELY(__builtin_add_overflow((x), (y), &r))) OVERFLOW_
+#define SUB(r, x, y) i64 r; if (UNLIKELY(__builtin_sub_overflow((x), (y), &r))) OVERFLOW_
+#define MUL(r, x, y) i64 r; if (UNLIKELY(__builtin_mul_overflow((x), (y), &r))) OVERFLOW_
 #else
 #define ADD(r, x, y) i64 r; if (((y) > 0 && (x) > I64MAX - (y)) || ((y) < 0 && (x) < I64MIN - (y))) OVERFLOW_; r = (x) + (y)
 #define SUB(r, x, y) i64 r; if (((y) < 0 && (x) > I64MAX + (y)) || ((y) > 0 && (x) < I64MIN + (y))) OVERFLOW_; r = (x) - (y)
 #define MUL(r, x, y) i64 r; if ((x) > 0 ? ((y) > 0 ? (x) > I64MAX / (y) : (y) < I64MIN / (x)) : ((y) > 0 ? (x) < I64MIN / (y) : ((x) != 0 && (y) < I64MAX / (x)))) OVERFLOW_; r = (x) * (y)
 #endif
-#define DIV(r, x, y) i64 r; if ((y) == 0) FAIL(500, "division by zero", 16); if ((x) == I64MIN && (y) == -1) OVERFLOW_; r = (x) / (y)
-#define MOD(r, x, y) i64 r; if ((y) == 0) FAIL(500, "division by zero", 16); if ((x) == I64MIN && (y) == -1) OVERFLOW_; r = (x) % (y)
+#define DIV(r, x, y) i64 r; if (UNLIKELY((y) == 0)) FAIL(500, "division by zero", 16); if (UNLIKELY((x) == I64MIN && (y) == -1)) OVERFLOW_; r = (x) / (y)
+#define MOD(r, x, y) i64 r; if (UNLIKELY((y) == 0)) FAIL(500, "division by zero", 16); if (UNLIKELY((x) == I64MIN && (y) == -1)) OVERFLOW_; r = (x) % (y)
 #define NEG(r, x) i64 r; if ((x) == I64MIN) OVERFLOW_; r = -(x)
 "#;
 
@@ -308,6 +314,7 @@ struct G<'p> {
     specs: &'p std::cell::RefCell<Vec<Spec>>,            // C functions generated for recursive functions
     dep: bool,                                           // generating a C function: its call depth is the parameter `dep`
     inl: u32,                                            // inlined calls the code being generated is nested in
+    bounds: Vec<(String, i64, i64)>,                     // loop counters with constant bounds [lo, hi): in range for a fixed array of that size
     or_dead: Option<String>,                             // inside or()/exists(): where a dead reference or slot not live goes
 }
 type R<T> = Result<T, String>;
@@ -708,7 +715,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, recursive, specs, dep: false, inl: 0, or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, recursive, specs, dep: false, inl: 0, bounds: Vec::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -956,6 +963,82 @@ impl<'p> G<'p> {
         if ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"].contains(&t.as_str()) { format!("{}_{}", p, self.n) } else { t } // never a type's name
     }
     fn line(&mut self, s: &str) { for _ in 0..self.depth + 1 { self.body.push_str("    "); } self.body.push_str(s); self.body.push('\n'); }
+    /// Check that array position `k` is in 0..n: nothing for a constant in range, else a comparison in line, with the
+    /// helper (which builds the error) only when it fails.
+    fn elem_check(&mut self, k: &str, n: u64) {
+        if let Some(v) = k.strip_suffix("LL").and_then(|d| d.parse::<u64>().ok()) { if v < n { return; } }
+        if self.bounds.iter().any(|(name, lo, hi)| name == k && *lo >= 0 && *hi as u64 <= n) { return; }
+        self.line(&format!("if (UNLIKELY({k} < 0 || {k} >= {n}LL)) {{"));
+        self.depth += 1;
+        self.call(&format!("c->h->elem(c, {}, {})", k, n));
+        self.depth -= 1;
+        self.line("}");
+    }
+    /// Store the integer `v` in an integer column of item `idx` (element `k` of an array column when `k` is given): a
+    /// typed store in line when the value is known to be an integer, with the generic helper only for a value that does
+    /// not fit the column (which makes the error). Returns false when it does not apply.
+    fn int_store(&mut self, c: usize, idx: &str, ci: usize, k: Option<&str>, v: &CV, slow: &str) -> R<bool> {
+        let CV::Int(e) = v else { return Ok(false) };
+        let col = &self.prog.colls[c].cols[ci];
+        let s = match &col.kind { CKind::Scalar(s) => *s, CKind::Arr(s, _) => *s, _ => return Ok(false) };
+        let code = plain_code(&Ty::Scalar(s)).map_or(0, |x| x.0);
+        if !(1..=8).contains(&code) { return Ok(false); }
+        let (size, lo, hi): (u64, Option<&str>, Option<&str>) = match code {
+            1 => (1, Some("-128"), Some("127")), 2 => (2, Some("-32768"), Some("32767")), 3 => (4, Some("(-2147483647LL - 1)"), Some("2147483647")),
+            4 => (8, None, None), 5 => (1, Some("0"), Some("255")), 6 => (2, Some("0"), Some("65535")), 7 => (4, Some("0"), Some("4294967295LL")), _ => (8, Some("0"), None),
+        };
+        let (off, whole) = (col.off, col.kind.size());
+        let w = self.tmp("w");
+        self.open("{");
+        self.line(&format!("i64 {} = {};", w, e));
+        let addr = match k { Some(k) => format!("{}ULL + (u64)({}) * {}ULL + (u64)({}) * {}ULL", off, idx, whole, k, size), None => format!("{}ULL + (u64)({}) * {}ULL", off, idx, whole) };
+        let cond = match (lo, hi) {
+            (Some(l), Some(h)) => Some(format!("{w} < {l} || {w} > {h}")),
+            (Some(l), None) => Some(format!("{w} < {l}")),
+            _ => None,
+        };
+        match cond {
+            Some(cond) => {
+                self.line(&format!("if (UNLIKELY({})) {{", cond));
+                self.depth += 1;
+                let vv = self.val(CV::Int(w.clone()))?;
+                self.call(&slow.replace("@VAL", &vv));
+                self.depth -= 1;
+                self.line("} else {");
+                self.depth += 1;
+                self.call(&format!("c->h->wr_int(c, {}, {}, {})", addr, size, w));
+                self.depth -= 1;
+                self.line("}");
+            }
+            None => self.call(&format!("c->h->wr_int(c, {}, {}, {})", addr, size, w)),
+        }
+        self.close("}");
+        Ok(true)
+    }
+    /// The item index of position `k` in collection `c`, instance `inst`, in a new `u32` (its name is returned). A pool
+    /// is checked in line from its layout (in range, below the high-water mark, live bit set: what `h_index` checks); a
+    /// failure, or a list, goes through the helper, which finds the position not live and says so.
+    fn index_of(&mut self, c: usize, inst: &str, k: &str) -> String {
+        let t = self.tmp("i");
+        self.line(&format!("u32 {};", t));
+        let coll = &self.prog.colls[c];
+        if let Kind::Pool(_) = coll.kind {
+            let (cap, hdr, live, words) = (coll.cap, coll.hdr, coll.live, coll.words());
+            let q = self.tmp("q");
+            self.open("{");
+            self.line(&format!("i64 {} = {};", q, k));
+            self.line(&format!("if (UNLIKELY({q} < 0 || {q} >= {cap}LL || {q} >= (i64)LD_U32({hdr}, {inst}) || !((LD_U64({live}, (i64)({inst}) * {words} + ({q} >> 6)) >> ({q} & 63)) & 1))) {{"));
+            self.depth += 1;
+            self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, q, t));
+            self.depth -= 1;
+            self.line("}");
+            self.line(&format!("{} = (u32)((u64)({}) * {}ULL + (u64){});", t, inst, cap, q));
+            self.close("}");
+        } else {
+            self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, k, t));
+        }
+        t
+    }
     /// Call a helper that returns 0 or -1.
     fn call(&mut self, s: &str) {
         match self.or_dead.clone() { Some(l) => self.line(&format!("CALL_OR_DEAD({}, {});", s, l)), None => self.line(&format!("CALL({});", s)) }
@@ -1024,8 +1107,10 @@ impl<'p> G<'p> {
                 };
                 self.may_write_col(c, &path)?;
                 let v = self.expr(rhs, env, None)?;
-                let vv = self.val(v)?;
-                self.call(&format!("c->h->store(c, {}, {}, {}, &{})", c, idx, ci, vv));
+                if !self.int_store(c, &idx, ci, None, &v, &format!("c->h->store(c, {}, {}, {}, &@VAL)", c, idx, ci))? {
+                    let vv = self.val(v)?;
+                    self.call(&format!("c->h->store(c, {}, {}, {}, &{})", c, idx, ci, vv));
+                }
             }
             Stmt::Assign(Expr::Index(base, k), rhs) => {
                 let bv = self.expr(base, env, None)?;
@@ -1036,24 +1121,24 @@ impl<'p> G<'p> {
                     CV::ArrCol(c, idx, ci) => {
                         self.may_write_col(c, &self.prog.colls[c].cols[ci].path.clone())?;
                         let CKind::Arr(_, n) = self.prog.colls[c].cols[ci].kind else { unreachable!() };
-                        self.call(&format!("c->h->elem(c, {}, {})", k, n));
+                        self.elem_check(&k, n as u64);
                         let v = self.expr(rhs, env, None)?;
-                        let vv = self.val(v)?;
-                        self.call(&format!("c->h->store_elem(c, {}, {}, {}, {}, &{})", c, idx, ci, k, vv));
+                        if !self.int_store(c, &idx, ci, Some(&k), &v, &format!("c->h->store_elem(c, {}, {}, {}, {}, &@VAL)", c, idx, ci, k))? {
+                            let vv = self.val(v)?;
+                            self.call(&format!("c->h->store_elem(c, {}, {}, {}, {}, &{})", c, idx, ci, k, vv));
+                        }
                     }
                     CV::PlainArr(off, e, n) => {
                         self.may_write_plain(off)?;
                         let Some((code, cap)) = plain_code(&e) else { return no("assigning an element of this array not compiled yet") };
-                        self.call(&format!("c->h->elem(c, {}, {})", k, n));
+                        self.elem_check(&k, n as u64);
                         let v = self.expr(rhs, env, None)?;
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, self.prog.plain_size(&e).0, code, cap, vv));
                     }
                     CV::Coll(c, inst) => {
                         self.may_write_col(c, "")?;
-                        let t = self.tmp("i");
-                        self.line(&format!("u32 {};", t));
-                        self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, k, t));
+                        let t = self.index_of(c, &inst, &k);
                         let coll = &self.prog.colls[c];
                         let plain = if coll.children.iter().any(|x| x.0.is_empty()) { None } else { coll.cols.iter().position(|x| x.path.is_empty()) };
                         let Some(ci) = plain else { self.fail(500, "only an item that is a plain value can be assigned; assign its fields"); return Ok(()); };
@@ -1290,20 +1375,18 @@ impl<'p> G<'p> {
                 let k = self.int_or(kv, 400, "an index must be an integer");
                 match bv {
                     CV::Coll(c, inst) => {
-                        let t = self.tmp("i");
-                        self.line(&format!("u32 {};", t));
-                        self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, k, t));
+                        let t = self.index_of(c, &inst, &k);
                         self.item_value(c, t, dead)
                     }
                     CV::ArrCol(c, idx, ci) => {
                         let (off, CKind::Arr(sc, n)) = (self.prog.colls[c].cols[ci].off, self.prog.colls[c].cols[ci].kind.clone()) else { unreachable!() };
                         let k = self.hold_int(k);
-                        self.call(&format!("c->h->elem(c, {}, {})", k, n));
+                        self.elem_check(&k, n as u64);
                         self.load(&off.to_string(), &format!("(i64)({}) * {} + {}", idx, n, k), sc)
                     }
                     CV::PlainArr(off, Ty::Scalar(sc), n) => {
                         let k = self.hold_int(k);
-                        self.call(&format!("c->h->elem(c, {}, {})", k, n));
+                        self.elem_check(&k, n as u64);
                         self.load(&off.to_string(), &k, sc)
                     }
                     _ => { self.fail(500, "cannot index this value"); Ok(CV::Null) }
@@ -1810,6 +1893,8 @@ impl<'p> G<'p> {
         }
         if let Some(l) = &lim { self.line(&format!("if ({} >= {}) break;", hits, l)); }
         env[it.slot as usize] = Some(CV::Int(k.clone()));
+        let lit = |s: &str| s.strip_suffix("LL").and_then(|d| d.parse::<i64>().ok());
+        let bounded = match (lit(&lo), lit(&hi)) { (Some(a), Some(b)) => { self.bounds.push((k.clone(), a, b)); true } _ => false };
         if let Some(w) = &it.whil { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) break;", wc)); }
         if let Some(w) = &it.wher {
             let wv = self.expr(w, env, None)?;
@@ -1818,6 +1903,7 @@ impl<'p> G<'p> {
         }
         self.line(&format!("{}++;", hits));
         body(self, env, &hits)?;
+        if bounded { self.bounds.pop(); }
         self.close("}");
         self.close("}");
         Ok(())
@@ -1921,7 +2007,7 @@ impl<'p> G<'p> {
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
     let t = ctoks(body);
-    const CALLS: [&str; 21] = ["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: [&str; 22] = ["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];

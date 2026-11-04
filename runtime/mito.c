@@ -242,14 +242,14 @@ static double exact_double(const u8 *dig, u32 nd, i64 exp10) {
 #define EVER 3
 #define RETRY_AFTER_SHRINKS 256ULL
 
-typedef struct { u64 off, n, pos; } JEnt;
 typedef struct {
     const MitoProg *prog;
     u8 *base; u64 reserved, npages, cpages;
     u8 *committed;       /* one flag per page */
     u8 *livepg;          /* trim's scratch: one flag per page */
     u64 *shrinks;        /* per collection (top level): bumped whenever something in it is freed or cleared */
-    Grow jb, je; int jon;
+    Grow jb; int jon;
+    u8 *dirty;           /* one bit per 64-byte line of the reservation: set once the request has saved the line */
 } Mem;
 
 static const MitoColl *coll(Mem *m, u32 c) { return &m->prog->colls[c]; }
@@ -261,29 +261,44 @@ static void ensure(Mem *m, u64 a, u64 b) {
             u64 s = p;
             while (p <= last && !m->committed[p]) p++;
             if (!os_commit(m->base + s * PAGE, (p - s) * PAGE)) fatal("commit failed");
+            { u64 d0 = s * (PAGE / 64 / 8) & ~(PAGE - 1), d1 = up(p * (PAGE / 64 / 8), PAGE); if (!os_commit(m->dirty + d0, d1 - d0)) fatal("commit failed"); } /* the dirty map: 8 bytes per page */
             for (u64 q = s; q < p; q++) m->committed[q] = 1;
             m->cpages += p - s;
         } else p++;
     }
 }
 static u64 rd(Mem *m, u64 off, u32 n) { u64 v = 0; memcpy(&v, m->base + off, n); return v; }
+/* The undo log of a request: the first write to each 64-byte line saves the whole line (its address, then 64 bytes);
+   `dirty` marks the lines saved, so later writes to a saved line cost one bit test. Rollback puts the lines back. */
+#define LINE 64ULL
 static void save(Mem *m, u64 a, u64 n) {
 #ifdef MITO_MEASURE_NO_JOURNAL /* for measuring what journaling costs only: failed requests are then not rolled back */
     return;
 #endif
     if (!m->jon || !n) return;
-    u64 pos = m->jb.len;
-    if (!grow_to(&m->jb, pos + n) || !grow_to(&m->je, (m->je.len + 1) * sizeof(JEnt))) fatal("journal full");
-    memcpy(m->jb.p + pos, m->base + a, n); m->jb.len += n;
-    JEnt e = { a, n, pos }; memcpy(m->je.p + m->je.len * sizeof(JEnt), &e, sizeof e); m->je.len++;
+    for (u64 l = a / LINE, last = (a + n - 1) / LINE; l <= last; l++) {
+        u8 bit = (u8)(1u << (l & 7));
+        if (m->dirty[l >> 3] & bit) continue;
+        m->dirty[l >> 3] |= bit;
+        u64 pos = m->jb.len, end = pos + 8 + LINE;
+        if (UNLIKELY(end > m->jb.committed) && !grow_to(&m->jb, end)) fatal("journal full");
+        u64 at = l * LINE; memcpy(m->jb.p + pos, &at, 8); memcpy(m->jb.p + pos + 8, m->base + at, LINE);
+        m->jb.len = end;
+    }
 }
 static void wr(Mem *m, u64 off, u32 n, u64 v) { ensure(m, off, off + n); save(m, off, n); memcpy(m->base + off, &v, n); }
 static void put(Mem *m, u64 off, const u8 *b, u64 n) { ensure(m, off, off + n); save(m, off, n); if (n) memcpy(m->base + off, b, n); }
 static void zero(Mem *m, u64 off, u64 n) { if (!n) return; ensure(m, off, off + n); save(m, off, n); memset(m->base + off, 0, n); }
-static void begin(Mem *m) { m->jon = 1; m->jb.len = 0; m->je.len = 0; }
-static void commit_changes(Mem *m) { m->jon = 0; m->jb.len = 0; m->je.len = 0; }
+static void begin(Mem *m) { m->jon = 1; m->jb.len = 0; }
+static void commit_changes(Mem *m) {
+    for (u64 pos = 0; pos < m->jb.len; pos += 8 + LINE) { u64 at; memcpy(&at, m->jb.p + pos, 8); u64 l = at / LINE; m->dirty[l >> 3] &= (u8)~(1u << (l & 7)); }
+    m->jon = 0; m->jb.len = 0;
+}
 static void rollback(Mem *m) {
-    for (u64 k = m->je.len; k-- > 0;) { JEnt e; memcpy(&e, m->je.p + k * sizeof(JEnt), sizeof e); memcpy(m->base + e.off, m->jb.p + e.pos, e.n); }
+    for (u64 pos = m->jb.len; pos > 0;) {
+        pos -= 8 + LINE;
+        u64 at; memcpy(&at, m->jb.p + pos, 8); memcpy(m->base + at, m->jb.p + pos + 8, LINE);
+    }
     commit_changes(m);
 }
 
@@ -362,10 +377,14 @@ static u64 push_item(Mem *m, u32 c, u64 inst) {
     u64 word = (slot / 64) * 64 < hw ? rd(m, wa, 8) : 0; /* words wholly above hw may be uncommitted; their bits are zero */
     wr(m, wa, 8, word | (1ULL << (slot % 64)));
     u64 idx = inst * cap + slot;
-    zero_item(m, c, idx);
+    u64 ever = hget(m, c, EVER, inst);
+    if (slot >= ever && k->nkids == 0) {
+        /* never used: the memory is zero already (fresh pages, or restored to zero by a rollback), it only needs committing */
+        for (u32 i = 0; i < k->ncols; i++) if (k->cols[i].kind != 3) ensure(m, k->cols[i].off + idx * k->cols[i].size, k->cols[i].off + (idx + 1) * k->cols[i].size);
+    } else zero_item(m, c, idx);
     if (k->checked) { u64 ga = gaddr(m, c, idx); ensure(m, ga, ga + 4); }
     u64 nhw = hw > slot + 1 ? hw : slot + 1;
-    u64 ever = hget(m, c, EVER, inst); if (nhw > ever) ever = nhw;
+    if (nhw > ever) ever = nhw;
     hset(m, c, HW, inst, nhw); hset(m, c, COUNT, inst, cnt + 1); hset(m, c, HINT, inst, slot + 1); hset(m, c, EVER, inst, ever);
     return idx;
 }
@@ -1011,6 +1030,8 @@ static int h_binop(Ctx *c, int op, const Val *l, const Val *r, Val *out) {
     return fail(m, 500, "operator does not fit these values");
 }
 static int h_truthy(Ctx *c, const Val *v, int *out) { if (v->tag == 3) { *out = v->i != 0; return 0; } if (v->tag == 0) { *out = 0; return 0; } return fail(M_(c), 500, "condition is not a boolean"); }
+/* An integer of `size` bytes (the generated code has checked it fits the column) at byte offset `off`. */
+static int h_wr_int(Ctx *c, u64 off, u32 size, i64 v) { wr(&M_(c)->mem, off, size, (u64)v); return 0; }
 static int h_store(Ctx *c, u32 cid, u32 idx, u32 ci, const Val *v) { return store_col(M_(c), cid, idx, ci, -1, v); }
 static int h_store_elem(Ctx *c, u32 cid, u32 idx, u32 ci, i64 k, const Val *v) { return store_col(M_(c), cid, idx, ci, k, v); }
 /* A plain value at `off`: code 1..11 a scalar, 20 a string<cap>, 30 a reference to top-level pool `cap`. */
@@ -1214,7 +1235,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_int,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */
@@ -1230,13 +1251,15 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     mem->reserved = up(pg->total ? pg->total : 1, PAGE);
     mem->base = (u8 *)os_reserve(mem->reserved);
     mem->npages = mem->reserved / PAGE;
+    mem->dirty = (u8 *)os_reserve(up(mem->npages * (PAGE / 64 / 8), PAGE));
+    if (!mem->dirty) return 0;
     u64 small = up(mem->npages * 2 + (pg->ncolls + 1) * 16, PAGE);
     u8 *s = (u8 *)VirtualAlloc(0, small, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!mem->base || !s) return 0;
     mem->committed = s; mem->livepg = s + mem->npages;
     mem->shrinks = (u64 *)(s + up(mem->npages * 2, 8));
     m->pr.stuck = mem->shrinks + pg->ncolls + 1;
-    if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&mem->je, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
+    if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
     m->areas = (u8 *)VirtualAlloc(0, TEXT_CAP + RESPONSE_CAP, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!m->areas) return 0;
     m->text.p = m->areas; m->text.cap = TEXT_CAP; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
@@ -1246,7 +1269,7 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     for (u32 c = 0; c < pg->ncolls; c++) { const MitoColl *k = &pg->colls[c]; if (k->parent < 0) ensure(mem, k->hdr, k->hdr + hdr_fields(k) * 4); }
     return m;
 }
-MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.jb.p); os_release(m->mem.je.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }
+MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.dirty); os_release(m->mem.jb.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
 MITO_API void MITO(set_marks)(void *mp_, u64 soft, u64 hard) { Mito *m = (Mito *)mp_;
     m->pr.on = 1; m->pr.soft = soft; m->pr.hard = hard; m->pr.refusing = 0; m->pr.trims = m->pr.full_trims = m->pr.freed = 0;

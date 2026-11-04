@@ -1,0 +1,15 @@
+// Driven by tests/ordmap/model.py: random put, get, add_to, del and range_sum on lib/ordmap.mito against a Python dict.
+struct S { m: ordmap<3000>; }
+state om: S;
+@post("/put/{k}/{v}")
+fn put(k: i64, v: i64) -> Response<{}> { om.m.put(k, v); return ok({}); }
+@get("/get/{k}")
+fn get(k: i64) -> Response<{ v: i64 }> { return ok({ "v": om.m.get_or(k, -999999) }); }
+@post("/addto/{k}/{d}")
+fn addto(k: i64, d: i64) -> Response<{ done: bool }> { return ok({ "done": om.m.add_to(k, d) }); }
+@post("/del/{k}")
+fn del(k: i64) -> Response<{ done: bool }> { return ok({ "done": om.m.del(k) }); }
+@get("/range/{k}/{n}")
+fn range(k: i64, n: i64 in 0..100000) -> Response<{ sum: i64 }> { return ok({ "sum": om.m.range_sum(k, n) }); }
+@get("/size")
+fn size() -> Response<{ n: i64, leaves: i64, inners: i64 }> { return ok({ "n": om.m.size(), "leaves": om.m.leaf_count(), "inners": om.m.inner_count() }); }

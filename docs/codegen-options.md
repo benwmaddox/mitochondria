@@ -8,6 +8,26 @@ installed. TinyCC 0.9.27's library crashes while reporting a compile error to an
 checked with the bundled `tcc.exe` in a child process. Results are in docs/measurements.md, Round 7. The comparison
 below is how the choice was made.
 
+## The C safety profile (enforced)
+Generated endpoint bodies use a strict subset of C, built from a few macros in the prelude, and `cgen::check_profile`
+checks every function before it is compiled; a body that breaks a rule is not compiled (the endpoint stays interpreted
+and the note names the rule). The rules, and the kind of bug each one rules out:
+
+| Rule | Rules out |
+|---|---|
+| Memory is read only through `LD_*(offset, index)` from items reached by live iteration, a checked index or a followed reference; no other dereference, no indexing except constant-size argument arrays | reads outside the declared layout or of uncommitted pages |
+| Nothing writes memory except helpers; assignments only to locals or their fields | writes that skip the journal (rollback) |
+| Loads use `memcpy` under clang (one instruction) and plain loads under TinyCC | strict-aliasing undefined behaviour when reading bytes the runtime wrote |
+| Integer arithmetic on language values only via `ADD`, `SUB`, `MUL`, `DIV`, `MOD`, `NEG`, which check before the operation | signed overflow and division by zero (undefined in C) |
+| Every helper call wrapped in `CALL` (error checked), `TAIL`, `FAIL` or `DEREF`; `c->h->helper` is the only member access; no other calls (no libc, no recursion) | ignored errors, unwinding through C, unbounded stack |
+| `if` and bounded `for` only (no `while`, `do`, `switch`, empty-condition `for`); `goto` only forward; `return` only of a status | non-terminating or tangled control flow |
+| No preprocessor, `static`, `extern`, `sizeof`, `asm`, `volatile`, unions | globals (reentrancy across workers), hidden effects |
+
+The checker is token-based: it trusts the generator for the types of index arithmetic (unsigned, bounded), which it
+cannot see. Planned with the clang path: build with `-Wall -Werror -fno-strict-aliasing`, and run the differential test
+under `-fsanitize=undefined,address`. The profile costs nothing: under TinyCC the macros expand to the code generated
+before (GET messages 5.1 us, POST message 0.9 us).
+
 ## Options considered
 
 Measured starting point (`exp json`, GET of a room's newest 50 messages, 8.7 KB of JSON): the interpreter takes 14.7 us;

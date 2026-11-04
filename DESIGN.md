@@ -195,7 +195,9 @@ is the layer above it. Details and the comparison with arenas, garbage collectio
 Every concept above, and the worker system, is built and tested (29 tests). Known differences:
 - Endpoints are bound once at load (slots, resolved names and calls, cached field positions). With `--compile` they are
   generated as C and compiled in memory with the bundled TinyCC; known items and columns become constant-offset loads and
-  dynamic operations call helpers that run the interpreter's code. Not compiled yet (those endpoints stay interpreted):
+  dynamic operations call helpers that run the interpreter's code. Generated C follows an enforced safety profile
+  (docs/codegen-options.md): loads only through checked macros, no writes except helpers, checked arithmetic, every
+  helper result checked, bounded loops, forward gotos, no globals or libc. Not compiled yet (those endpoints stay interpreted):
   `each ... order by`, floats in literals, list indexing, fixed-array fields, nested-struct fields of items, recursion,
   loops whose body allocates. The clang release path is designed (same C, built to a DLL) but not built: clang is not
   installed on this machine. Types in `fn` signatures are parsed but not checked.

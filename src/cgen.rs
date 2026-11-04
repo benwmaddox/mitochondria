@@ -46,6 +46,36 @@ struct H {
     int (*crash)(Ctx *);
     int (*builtin)(Ctx *, int, const Val *, u32, Val *);
 };
+/* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
+   through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
+   defined behaviour whatever the aliasing rules; TinyCC does no alias analysis, so a plain load is the same thing there. */
+#define AT(off, idx, size) (b + (off) + (i64)(idx) * (size))
+#ifdef __clang__
+#define LD_(T, off, idx, size) ({ T v_; __builtin_memcpy(&v_, AT(off, idx, size), size); v_; })
+#else
+#define LD_(T, off, idx, size) (*(const T *)AT(off, idx, size))
+#endif
+#define LD_I64(off, idx) LD_(i64, off, idx, 8)
+#define LD_U64(off, idx) LD_(u64, off, idx, 8)
+#define LD_I32(off, idx) LD_(int, off, idx, 4)
+#define LD_U32(off, idx) LD_(u32, off, idx, 4)
+#define LD_I16(off, idx) LD_(short, off, idx, 2)
+#define LD_U16(off, idx) LD_(unsigned short, off, idx, 2)
+#define LD_I8(off, idx) LD_(signed char, off, idx, 1)
+#define LD_U8(off, idx) LD_(u8, off, idx, 1)
+#define LD_F32(off, idx) LD_(float, off, idx, 4)
+#define LD_F64(off, idx) LD_(double, off, idx, 8)
+#define CALL(x) do { if ((st = (x)) != 0) return st; } while (0)
+#define TAIL(x) return (x)
+#define FAIL(code, msg, n) return c->h->fail(c, (code), (msg), (n))
+#define DEREF(t, s, g, out) c->h->deref(c, (t), (s), (g), (out))
+#define OVERFLOW_ FAIL(500, "integer overflow", 16)
+#define ADD(r, x, y) i64 r; if (((y) > 0 && (x) > I64MAX - (y)) || ((y) < 0 && (x) < I64MIN - (y))) OVERFLOW_; r = (x) + (y)
+#define SUB(r, x, y) i64 r; if (((y) < 0 && (x) > I64MAX + (y)) || ((y) > 0 && (x) < I64MIN + (y))) OVERFLOW_; r = (x) - (y)
+#define MUL(r, x, y) i64 r; if ((x) > 0 ? ((y) > 0 ? (x) > I64MAX / (y) : (y) < I64MIN / (x)) : ((y) > 0 ? (x) < I64MIN / (y) : ((x) != 0 && (y) < I64MAX / (x)))) OVERFLOW_; r = (x) * (y)
+#define DIV(r, x, y) i64 r; if ((y) == 0) FAIL(500, "division by zero", 16); if ((x) == I64MIN && (y) == -1) OVERFLOW_; r = (x) / (y)
+#define MOD(r, x, y) i64 r; if ((y) == 0) FAIL(500, "division by zero", 16); if ((x) == I64MIN && (y) == -1) OVERFLOW_; r = (x) % (y)
+#define NEG(r, x) i64 r; if ((x) == I64MIN) OVERFLOW_; r = -(x)
 "#;
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
@@ -113,7 +143,7 @@ pub fn generate(prog: &Program, api: &Api) -> Generated {
     for (k, ep) in api.eps.iter().enumerate() {
         let mut g = G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new() };
         let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
-        match g.block(&ep.body, &mut env) {
+        match g.block(&ep.body, &mut env).and_then(|_| check_profile(&g.body).map_err(|e| format!("C safety profile: {}", e))) {
             Ok(()) => {
                 let name = format!("ep{}", k);
                 src += &format!("\n// {}\nint {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b;\n{}    return 0;\n}}\n", ep.text, name, g.body);
@@ -151,8 +181,8 @@ impl<'p> G<'p> {
     fn tmp(&mut self, p: &str) -> String { self.n += 1; format!("{}{}", p, self.n) }
     fn line(&mut self, s: &str) { for _ in 0..self.depth + 1 { self.body.push_str("    "); } self.body.push_str(s); self.body.push('\n'); }
     /// Call a helper that returns 0 or -1.
-    fn call(&mut self, s: &str) { self.line(&format!("if ((st = {}) != 0) return st;", s)); }
-    fn fail(&mut self, code: u16, m: &str) { self.line(&format!("return c->h->fail(c, {}, {}, {});", code, c_lit(m.as_bytes()), m.len())); }
+    fn call(&mut self, s: &str) { self.line(&format!("CALL({});", s)); }
+    fn fail(&mut self, code: u16, m: &str) { self.line(&format!("FAIL({}, {}, {});", code, c_lit(m.as_bytes()), m.len())); }
     fn open(&mut self, head: &str) { self.line(head); self.depth += 1; }
     fn close(&mut self, tail: &str) { self.depth -= 1; self.line(tail); }
 
@@ -182,7 +212,7 @@ impl<'p> G<'p> {
                     }
                     CV::Ref(t, s, k) => {
                         let Some(ci) = self.prog.colls[t].cols.iter().position(|x| x.path == *f && !matches!(x.kind, CKind::StrBytes(_))) else { return no(format!("assigning `.{}` not compiled yet", f)) };
-                        self.line(&format!("if ({} == 0) return c->h->dead(c);", s));
+                        self.line(&format!("if ({} == 0) TAIL(c->h->dead(c));", s));
                         let v = self.expr(rhs, env, None)?;
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store(c, {}, {}, {}, &{})", t, k, ci, vv));
@@ -214,7 +244,7 @@ impl<'p> G<'p> {
             }
             Stmt::Free(e) => match self.expr(e, env, None)? {
                 CV::Item(c, i) => self.call(&format!("c->h->free_(c, {}, {})", c, i)),
-                CV::Ref(t, s, k) => self.line(&format!("if ({} != 0) {{ if ((st = c->h->free_(c, {}, {})) != 0) return st; }}", s, t, k)),
+                CV::Ref(t, s, k) => self.line(&format!("if ({} != 0) {{ CALL(c->h->free_(c, {}, {})); }}", s, t, k)),
                 CV::Null => {}
                 _ => return no("free of this value not compiled yet"),
             },
@@ -234,7 +264,7 @@ impl<'p> G<'p> {
                     let vv = self.val(v)?;
                     self.call(&format!("c->h->fwd_put(c, {}, {}, &{})", c_lit(name.as_bytes()), name.len(), vv));
                 }
-                self.line(&format!("return c->h->forward(c, {}, {}, {});", c_lit(kind.as_bytes()), kind.len(), k));
+                self.line(&format!("TAIL(c->h->forward(c, {}, {}, {}));", c_lit(kind.as_bytes()), kind.len(), k));
             }
             Stmt::Do(e) => { self.expr(e, env, None)?; }
             Stmt::Alloc { slot, coll, try_, .. } => {
@@ -371,7 +401,7 @@ impl<'p> G<'p> {
             Expr::Un(op, x) => {
                 let v = self.expr(x, env, dead)?;
                 if *op == '!' { let c = self.cond(v)?; return Ok(CV::Bool(format!("!({})", c))); }
-                match v { CV::Int(e) => { let e = self.hold_int(e); self.line(&format!("if ({} == I64MIN) return c->h->fail(c, 500, \"integer overflow\", 16);", e)); Ok(CV::Int(format!("(-{})", e))) } _ => no("negating something other than an integer") }
+                match v { CV::Int(e) => { let e = self.hold_int(e); let r = self.tmp("v"); self.line(&format!("NEG({}, {});", r, e)); Ok(CV::Int(r)) } _ => no("negating something other than an integer") }
             }
             Expr::Bin(op, a, b) => self.bin(op, a, b, env, dead),
             Expr::Call(n, args, res) => self.callx(n, args, *res, env, dead),
@@ -382,20 +412,22 @@ impl<'p> G<'p> {
     fn plain(&mut self, off: usize, t: &Ty) -> R<CV> {
         Ok(match t {
             Ty::Struct(s) => CV::Plain(*s, off),
-            Ty::Scalar(s) => self.load(&format!("(b + {})", off), *s)?,
+            Ty::Scalar(s) => self.load(&off.to_string(), "0", *s)?,
             Ty::Str(_) => { let x = self.tmp("t"); self.line(&format!("Txt {};", x)); self.call(&format!("c->h->plain_txt(c, {}, &{})", off, x)); CV::Txt(x) }
             _ => return no("a plain value of this kind"),
         })
     }
-    fn load(&mut self, at: &str, s: Scalar) -> R<CV> {
+    /// A scalar of item `idx` in the column (or plain value) at `off`, through the profile's load macros.
+    fn load(&mut self, off: &str, idx: &str, s: Scalar) -> R<CV> {
         use Scalar::*;
+        let ld = |m: &str| format!("LD_{}({}, {})", m, off, idx);
         Ok(match s {
-            I64 => CV::Int(format!("*(i64 *){}", at)), U64 => CV::Int(format!("(i64)*(u64 *){}", at)),
-            I32 => CV::Int(format!("(i64)*(int *){}", at)), U32 => CV::Int(format!("(i64)*(u32 *){}", at)),
-            I16 => CV::Int(format!("(i64)*(short *){}", at)), U16 => CV::Int(format!("(i64)*(unsigned short *){}", at)),
-            I8 => CV::Int(format!("(i64)*(signed char *){}", at)), U8 => CV::Int(format!("(i64)*(u8 *){}", at)),
-            Bool => CV::Bool(format!("(*(u8 *){} != 0)", at)),
-            F32 | F64 => { let t = self.tmp("v"); self.line(&format!("Val {} = {{ 2, 0, 0, 0, (double)*({} *){} }};", t, if s == F32 { "float" } else { "double" }, at)); CV::Any(t) }
+            I64 => CV::Int(ld("I64")), U64 => CV::Int(format!("(i64){}", ld("U64"))),
+            I32 => CV::Int(format!("(i64){}", ld("I32"))), U32 => CV::Int(format!("(i64){}", ld("U32"))),
+            I16 => CV::Int(format!("(i64){}", ld("I16"))), U16 => CV::Int(format!("(i64){}", ld("U16"))),
+            I8 => CV::Int(format!("(i64){}", ld("I8"))), U8 => CV::Int(format!("(i64){}", ld("U8"))),
+            Bool => CV::Bool(format!("({} != 0)", ld("U8"))),
+            F32 | F64 => { let t = self.tmp("v"); self.line(&format!("Val {} = {{ 2, 0, 0, 0, (double){} }};", t, ld(if s == F32 { "F32" } else { "F64" }))); CV::Any(t) }
         })
     }
 
@@ -404,7 +436,7 @@ impl<'p> G<'p> {
             CV::Item(c, idx) => (c, idx),
             CV::Ref(t, s, k) => {
                 // reading through a null reference is a dead reference, as in the interpreter
-                let on_dead = match dead { Some(l) => format!("goto {};", l), None => "return c->h->dead(c);".into() };
+                let on_dead = match dead { Some(l) => format!("goto {};", l), None => "TAIL(c->h->dead(c));".into() };
                 self.line(&format!("if ({} == 0) {}", s, on_dead));
                 (t, k)
             }
@@ -415,22 +447,21 @@ impl<'p> G<'p> {
                 if ty.is_coll() { return Ok(CV::Coll(self.prog.plain_coll(off, sid, f).ok_or("plain collection")?, "0".into())); }
                 return self.plain(off + sd.offs[k], &ty);
             }
-            CV::Null => { match dead { Some(l) => self.line(&format!("goto {};", l)), None => self.line("return c->h->dead(c);") } return Ok(CV::Null); }
+            CV::Null => { match dead { Some(l) => self.line(&format!("goto {};", l)), None => self.line("TAIL(c->h->dead(c));") } return Ok(CV::Null); }
             _ => return no(format!("`.{}` on this kind of value is not compiled yet", f)),
         };
         let coll = &self.prog.colls[c];
         if let Some(k) = coll.children.iter().find(|x| x.0 == f) { return Ok(CV::Coll(k.1, idx)); }
         let Some(ci) = coll.cols.iter().position(|x| x.path == f && !matches!(x.kind, CKind::StrBytes(_))) else { return no(format!("field `{}` (nested struct fields are not compiled yet)", f)) };
         let col = coll.cols[ci].clone();
-        let at = |sz: usize| format!("(b + {} + (i64)({}) * {})", col.off, idx, sz);
         Ok(match col.kind {
-            CKind::Scalar(s) => self.load(&at(s.size()), s)?,
+            CKind::Scalar(s) => self.load(&col.off.to_string(), &idx, s)?,
             CKind::StrLen => CV::StateStr(c, idx, ci),
             CKind::Ref(t) => {
                 let (s, gv, k) = (self.tmp("r"), self.tmp("g"), self.tmp("i"));
-                self.line(&format!("u32 {} = *(u32 *){}, {} = *(u32 *)({} + 4), {} = 0;", s, at(8), gv, at(8), k));
-                let on_dead = match dead { Some(l) => format!("goto {};", l), None => "return c->h->dead(c);".into() };
-                self.line(&format!("if ({} != 0 && !c->h->deref(c, {}, {} - 1, {}, &{})) {}", s, t, s, gv, k, on_dead));
+                self.line(&format!("u32 {} = LD_U32({}, (i64)({}) * 2), {} = LD_U32({}, (i64)({}) * 2), {} = 0;", s, col.off, idx, gv, col.off + 4, idx, k));
+                let on_dead = match dead { Some(l) => format!("goto {};", l), None => "TAIL(c->h->dead(c));".into() };
+                self.line(&format!("if ({} != 0 && !DEREF({}, {} - 1, {}, &{})) {}", s, t, s, gv, k, on_dead));
                 CV::Ref(t, s, k)
             }
             CKind::Arr(..) => return no(format!("array field `{}` not compiled yet", f)),
@@ -469,20 +500,11 @@ impl<'p> G<'p> {
         }
         if let (CV::Int(x), CV::Int(y)) = (&l, &r) {
             let (x, y) = (self.hold_int(x.clone()), self.hold_int(y.clone()));
-            let ov = "return c->h->fail(c, 500, \"integer overflow\", 16);";
+            let r = self.tmp("v");
+            let mac = match op { "+" => "ADD", "-" => "SUB", "*" => "MUL", "/" => "DIV", "%" => "MOD", _ => "" };
             match op {
                 "<" | "<=" | ">" | ">=" => return Ok(CV::Bool(format!("({} {} {})", x, op, y))),
-                "+" => { self.line(&format!("if (({} > 0 && {} > I64MAX - {}) || ({} < 0 && {} < I64MIN - {})) {}", y, x, y, y, x, y, ov)); return Ok(CV::Int(format!("({} + {})", x, y))); }
-                "-" => { self.line(&format!("if (({} < 0 && {} > I64MAX + {}) || ({} > 0 && {} < I64MIN + {})) {}", y, x, y, y, x, y, ov)); return Ok(CV::Int(format!("({} - {})", x, y))); }
-                "*" => {
-                    self.line(&format!("if ({x} > 0 ? ({y} > 0 ? {x} > I64MAX / {y} : {y} < I64MIN / {x}) : ({y} > 0 ? {x} < I64MIN / {y} : ({x} != 0 && {y} < I64MAX / {x}))) {ov}", x = x, y = y, ov = ov));
-                    return Ok(CV::Int(format!("({} * {})", x, y)));
-                }
-                "/" | "%" => {
-                    self.line(&format!("if ({} == 0) return c->h->fail(c, 500, \"division by zero\", 16);", y));
-                    self.line(&format!("if ({} == I64MIN && {} == -1) {}", x, y, ov));
-                    return Ok(CV::Int(format!("({} {} {})", x, op, y)));
-                }
+                "+" | "-" | "*" | "/" | "%" => { self.line(&format!("{}({}, {}, {});", mac, r, x, y)); return Ok(CV::Int(r)); }
                 _ => {}
             }
         }
@@ -594,14 +616,14 @@ impl<'p> G<'p> {
                 let Some(CV::Coll(c, inst)) = a.first() else { return no("count(collection)") };
                 let col = &self.prog.colls[*c];
                 let f = if col.is_list() { 0 } else { 1 };
-                CV::Int(format!("(i64)*(u32 *)(b + {} + 4 * ({} * {} + (i64)({})))", col.hdr, f, col.mult, inst))
+                CV::Int(format!("(i64)LD_U32({}, {})", col.hdr + 4 * f * col.mult, inst))
             }
             B::Capacity => { let Some(CV::Coll(c, _)) = a.first() else { return no("capacity(collection)") }; CV::Int(format!("{}LL", self.prog.colls[*c].cap)) }
             B::Slot => match a.first() {
                 Some(CV::Item(c, i)) => CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)),
                 _ => return no("slot(item)"),
             },
-            B::Crash => { self.line("return c->h->crash(c);"); CV::Null }
+            B::Crash => { self.line("TAIL(c->h->crash(c));"); CV::Null }
             _ => unreachable!("handled above"),
         })
     }
@@ -658,21 +680,21 @@ impl<'p> G<'p> {
         let coll = self.prog.colls[c].clone();
         if coll.cols.iter().any(|x| x.path.is_empty()) || coll.children.iter().any(|x| x.0.is_empty()) { return no("each over a collection of plain values not compiled yet"); }
         let lim = match &it.limit { Some(e) => match self.expr(e, env, None)? { CV::Int(x) => Some(self.hold_int(x)), _ => return no("limit must be an integer") }, None => None };
-        if let Some(l) = &lim { self.line(&format!("if ({} < 0) return c->h->fail(c, 400, \"bad limit\", 9);", l)); }
+        if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
         let (k, m, hits) = (self.tmp("k"), self.tmp("m"), self.tmp("hits"));
         self.open("{");
         self.line(&format!("u32 {} = 0;", hits));
         if coll.is_list() {
             let (len, head) = (self.tmp("len"), self.tmp("head"));
-            self.line(&format!("u32 {} = *(u32 *)(b + {} + 4 * (0 * {} + (i64)({}))), {} = *(u32 *)(b + {} + 4 * (1 * {} + (i64)({})));", len, coll.hdr, coll.mult, inst, head, coll.hdr, coll.mult, inst));
+            self.line(&format!("u32 {} = LD_U32({}, {}), {} = LD_U32({}, {});", len, coll.hdr, inst, head, coll.hdr + 4 * coll.mult, inst));
             self.open(&format!("for (u32 {} = 0; {} < {}; {}++) {{", k, k, len, k));
             let pos = if it.reverse { format!("({} + {} - 1 - {})", head, len, k) } else { format!("({} + {})", head, k) };
             self.line(&format!("u32 {} = (u32)((i64)({}) * {} + {} % {});", m, inst, coll.cap, pos, coll.cap));
         } else {
             let hw = self.tmp("hw");
-            self.line(&format!("u32 {} = *(u32 *)(b + {} + 4 * (0 * {} + (i64)({})));", hw, coll.hdr, coll.mult, inst));
+            self.line(&format!("u32 {} = LD_U32({}, {});", hw, coll.hdr, inst));
             if it.reverse { self.open(&format!("for (u32 {} = {}; {}-- > 0;) {{", k, hw, k)); } else { self.open(&format!("for (u32 {} = 0; {} < {}; {}++) {{", k, k, hw, k)); }
-            self.line(&format!("if (!((*(u64 *)(b + {} + 8 * ((i64)({}) * {} + {} / 64)) >> ({} % 64)) & 1)) continue;", coll.live, inst, coll.words(), k, k));
+            self.line(&format!("if (!((LD_U64({}, (i64)({}) * {} + {} / 64) >> ({} % 64)) & 1)) continue;", coll.live, inst, coll.words(), k, k));
             self.line(&format!("u32 {} = (u32)((i64)({}) * {} + {});", m, inst, coll.cap, k));
         }
         if let Some(l) = &lim { self.line(&format!("if ((i64){} >= {}) break;", hits, l)); }
@@ -705,7 +727,7 @@ impl<'p> G<'p> {
             Json::Arr(it, inner) => {
                 self.out("[");
                 self.each(it, env, |g, env, hits| {
-                    g.line(&format!("if ({} > 1) {{ if ((st = c->h->out(c, \",\", 1)) != 0) return st; }}", hits));
+                    g.line(&format!("if ({} > 1) {{ CALL(c->h->out(c, \",\", 1)); }}", hits));
                     g.json(inner, env)
                 })?;
                 self.out("]");
@@ -735,15 +757,187 @@ impl<'p> G<'p> {
     fn write(&mut self, v: CV) -> R<()> {
         match v {
             CV::Int(e) => self.call(&format!("c->h->json_i64(c, {})", e)),
-            CV::Bool(e) => self.line(&format!("if ((st = ({} ? c->h->out(c, \"true\", 4) : c->h->out(c, \"false\", 5))) != 0) return st;", e)),
+            CV::Bool(e) => self.line(&format!("CALL({} ? c->h->out(c, \"true\", 4) : c->h->out(c, \"false\", 5));", e)),
             CV::Lit(s) => { let j = json_lit(&s); self.out(&j); }
-            CV::Txt(t) => self.line(&format!("if ((st = ({}.present ? c->h->json_txt(c, &{}) : c->h->out(c, \"null\", 4))) != 0) return st;", t, t)),
+            CV::Txt(t) => self.line(&format!("CALL({}.present ? c->h->json_txt(c, &{}) : c->h->out(c, \"null\", 4));", t, t)),
             CV::Any(v) => self.call(&format!("c->h->json_val(c, &{})", v)),
             CV::StateStr(c, idx, ci) => self.call(&format!("c->h->json_col(c, {}, {}, {})", c, idx, ci)),
             CV::Null => self.out("null"),
-            CV::Ref(_, s, _) => { self.line(&format!("if ({} == 0) {{ if ((st = c->h->out(c, \"null\", 4)) != 0) return st; }}", s)); self.line(&format!("else return c->h->fail(c, 500, {}, 30);", c_lit(b"cannot write this value as JSON"))); }
+            CV::Ref(_, s, _) => { self.line(&format!("if ({} == 0) {{ CALL(c->h->out(c, \"null\", 4)); }}", s)); self.line("else FAIL(500, \"cannot write this value as JSON\", 30);"); }
             CV::Item(..) | CV::Coll(..) | CV::Plain(..) => self.fail(500, "cannot write this value as JSON"),
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------- the C safety profile
+
+/// Check a generated endpoint body against the safety profile. The generator is meant to emit only these shapes; the
+/// check makes a generator bug fall back to the interpreter instead of running unsafe C. Rules:
+///
+/// 1. Memory is read only through `LD_*(offset, index)`; there is no other dereference (no unary `*`), and no
+///    indexing except constant-size argument arrays. Nothing writes memory except helpers, so every state write is
+///    journaled; assignments go only to local variables (or their fields).
+/// 2. Integer arithmetic on language values goes through `ADD`/`SUB`/`MUL`/`DIV`/`MOD`/`NEG`, which check overflow and
+///    division before the operation (signed overflow is undefined in C). Index arithmetic in loads and loops is on
+///    bounded unsigned values.
+/// 3. Every helper is called through `CALL(...)` (its error is checked), `TAIL(...)` (returned), `FAIL` or `DEREF`;
+///    `c->h->name` is the only member access. No other functions are called: no libc, no recursion.
+/// 4. Control flow: `if`, `for` with a bound (no `while`, `do`, empty-condition `for`, `switch`), `goto` only forward,
+///    `return` only of a status (a number or `st`).
+/// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
+pub fn check_profile(body: &str) -> Result<(), String> {
+    let t = ctoks(body);
+    const CALLS: [&str; 20] = ["if", "for", "CALL", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
+    const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
+        "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
+    const TYPES: [&str; 5] = ["i64", "u32", "int", "Val", "Txt"];
+    let is_id = |s: &str| s.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_');
+    let is_num = |s: &str| s.chars().next().map_or(false, |c| c.is_ascii_digit());
+    let mut declared: Vec<&str> = vec!["st", "b", "c"];
+    let mut owners: Vec<&str> = Vec::new(); // what each open parenthesis belongs to
+    let mut labels_seen: Vec<&str> = Vec::new();
+    let err = |i: usize, m: &str| Err(format!("{} (near `{}`)", m, t[i.saturating_sub(3)..(i + 3).min(t.len())].join(" ")));
+    let mut i = 0;
+    while i < t.len() {
+        let tok = t[i].as_str();
+        let prev = if i > 0 { t[i - 1].as_str() } else { ";" };
+        let next = t.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+        if tok.starts_with('#') { return err(i, "preprocessor line"); }
+        if FORBIDDEN.contains(&tok) || tok == "longjmp" { return err(i, "forbidden word"); }
+        if is_id(tok) && TYPES.contains(&tok) && is_id(next) && !TYPES.contains(&next) {
+            // a declaration: `T a = ..., b = ...;` declares every name after T or after a top-level comma
+            let mut j = i + 1;
+            let mut depth = 0;
+            loop {
+                let x = t.get(j).map(|s| s.as_str()).unwrap_or(";");
+                if depth == 0 && is_id(x) && (j == i + 1 || t[j - 1] == ",") { declared.push(&t[j]); }
+                match x { "(" | "{" | "[" => depth += 1, ")" | "}" | "]" => depth -= 1, _ => {} }
+                if (x == ";" && depth == 0) || depth < 0 { break; }
+                j += 1;
+            }
+        }
+        if ["ADD", "SUB", "MUL", "DIV", "MOD", "NEG"].contains(&tok) && next == "(" { if let Some(r) = t.get(i + 2) { declared.push(r); } }
+        if is_id(tok) && next == "(" {
+            let member = prev == "->";
+            if member {
+                if !(i >= 4 && t[i - 4] == "c" && t[i - 3] == "->" && t[i - 2] == "h") { return err(i, "member call other than c->h->helper"); }
+                if !owners.iter().any(|o| ["CALL", "TAIL", "DEREF"].contains(o)) { return err(i, "helper called without CALL, TAIL or DEREF"); }
+            } else if !CALLS.contains(&tok) && !MORE_CALLS.contains(&tok) && tok != "return" && !TYPES.contains(&tok) {
+                return err(i, "call of something other than a helper or profile macro");
+            }
+        }
+        if tok == "->" {
+            let ok = (prev == "c" && next == "h" && t.get(i + 2).map(|s| s.as_str()) == Some("->")) || (prev == "h" && i >= 2 && t[i - 2] == "->");
+            if !ok { return err(i, "member access other than c->h->helper"); }
+        }
+        match tok {
+            "(" => owners.push(if is_id(prev) && prev != "return" { t[i - 1].as_str() } else { "" }),
+            ")" => { owners.pop(); }
+            "*" => {
+                let unary = ["(", "=", ",", ";", "{", "}", "return", "?", ":", "!", "&&", "||", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*"].contains(&prev);
+                if unary || next == ")" { return err(i, "pointer dereference or pointer type"); }
+            }
+            "&" => {
+                let unary = ["(", "=", ",", "?", ":"].contains(&prev);
+                if unary && !(is_id(next) && declared.contains(&next)) { return err(i, "address of something that is not a local"); }
+            }
+            "[" => {
+                let ok = prev.starts_with("argv") && is_num(next) && t.get(i + 2).map(|s| s.as_str()) == Some("]");
+                if !ok { return err(i, "indexing (only constant-size argument arrays are allowed)"); }
+            }
+            "=" => {
+                let argv_decl = prev == "]" && i >= 4 && t[i - 4].starts_with("argv") && i >= 5 && t[i - 5] == "Val";
+                let ok = argv_decl || is_id(prev) && (i < 2 || t[i - 2] != "->") && (i < 2 || t[i - 2] != "." || (i >= 3 && is_id(&t[i - 3]) && (i < 4 || (t[i - 4] != "." && t[i - 4] != "->"))));
+                if !ok { return err(i, "assignment to something other than a local"); }
+            }
+            "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "|=" | "^=" => return err(i, "compound assignment"),
+            "++" | "--" => if !(is_id(prev) || is_id(next)) { return err(i, "increment of something other than a local"); },
+            "goto" => { if labels_seen.contains(&next) { return err(i, "backward goto"); } }
+            "return" => { if !((is_num(next) || next == "st") && t.get(i + 2).map(|s| s.as_str()) == Some(";")) { return err(i, "return of something other than a status"); } }
+            "for" => {
+                // for ( init ; cond ; step ): the condition must not be empty
+                let mut j = i + 2;
+                while j < t.len() && t[j] != ";" { j += 1; }
+                if t.get(j + 1).map(|s| s.as_str()) == Some(";") { return err(i, "for loop without a bound"); }
+            }
+            ":" => { if is_id(prev) && i >= 2 && [";", "{", "}"].contains(&t[i - 2].as_str()) { labels_seen.push(&t[i - 1]); } }
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// C tokens: identifiers, numbers, string literals (kept whole), and punctuation.
+fn ctoks(s: &str) -> Vec<String> {
+    let c: Vec<char> = s.chars().collect();
+    let (mut i, mut out) = (0, Vec::new());
+    while i < c.len() {
+        let ch = c[i];
+        if ch.is_whitespace() { i += 1; }
+        else if ch == '/' && c.get(i + 1) == Some(&'/') { while i < c.len() && c[i] != '\n' { i += 1; } }
+        else if ch == '/' && c.get(i + 1) == Some(&'*') { i += 2; while i + 1 < c.len() && !(c[i] == '*' && c[i + 1] == '/') { i += 1; } i += 2; }
+        else if ch == '#' { let st = i; while i < c.len() && c[i] != '\n' { i += 1; } out.push(c[st..i].iter().collect()); }
+        else if ch == '"' {
+            let st = i; i += 1;
+            while i < c.len() && c[i] != '"' { if c[i] == '\\' { i += 1; } i += 1; }
+            i += 1; out.push(c[st..i.min(c.len())].iter().collect());
+        }
+        else if ch.is_alphanumeric() || ch == '_' { let st = i; while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') { i += 1; } out.push(c[st..i].iter().collect()); }
+        else {
+            let three: String = c[i..(i + 3).min(c.len())].iter().collect();
+            let two: String = c[i..(i + 2).min(c.len())].iter().collect();
+            if ["<<=", ">>="].contains(&three.as_str()) { out.push(three); i += 3; }
+            else if ["->", "==", "!=", "<=", ">=", "&&", "||", "++", "--", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="].contains(&two.as_str()) { out.push(two); i += 2; }
+            else { out.push(ch.to_string()); i += 1; }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn generated_chat_code_meets_the_profile() {
+        for (state, api) in [(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")),
+                             (include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api")),
+                             (include_str!("../examples/chat-sharded/auth.mito"), include_str!("../examples/chat-sharded/auth.api"))] {
+            let prog = Program::parse(state).unwrap();
+            let mut api = crate::lang::parse(api).unwrap();
+            crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+            let g = generate(&prog, &api);
+            assert!(!g.notes.iter().any(|n| n.contains("profile")), "{:#?}", g.notes);
+            assert!(g.eps.iter().filter(|e| e.is_some()).count() >= 5);
+        }
+    }
+
+    #[test]
+    fn the_checker_rejects_each_kind_of_violation() {
+        let ok = "    i64 v1 = LD_I64(64, i2);\n    ADD(v3, v1, 1LL);\n    CALL(c->h->json_i64(c, v3));\n    return 200;\n";
+        assert_eq!(check_profile(ok), Ok(()));
+        for (bad, why) in [
+            ("    *(i64 *)(b + 8) = 1;\n", "pointer dereference"),
+            ("    i64 v = *(const i64 *)(b + 8);\n", "pointer dereference"),
+            ("    while (1) { }\n", "forbidden word"),
+            ("    for (u32 k = 0;; k++) { }\n", "without a bound"),
+            ("    c->h->out(c, \"x\", 1);\n", "without CALL"),
+            ("    CALL(ep1(c));\n", "call of something other"),
+            ("    CALL(memcpy(&v, b, 8));\n", "forbidden word"),
+            ("    u32 k = 0;\nL1: ;\n    goto L1;\n", "backward goto"),
+            ("    return 5 + 3;\n", "status"),
+            ("    CALL(c->h->lit(c, \"x\", 1, &b));\n    CALL(c->h->lit(c, \"x\", 1, &zz));\n", "address of"),
+            ("    i64 v = b[3];\n", "indexing"),
+            ("    i64 v = 1; v += 2;\n", "compound assignment"),
+            ("#include <stdio.h>\n", "preprocessor"),
+            ("    static i64 g;\n", "forbidden word"),
+            ("    i64 v = c->base;\n", "member access"),
+        ] {
+            let e = check_profile(bad).err().unwrap_or_default();
+            assert!(e.contains(why), "{:?}: {}", bad, e);
+        }
     }
 }

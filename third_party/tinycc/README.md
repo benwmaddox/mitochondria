@@ -16,4 +16,5 @@ Source of these files, and the corresponding source code:
 - binaries: https://download.savannah.gnu.org/releases/tinycc/tcc-0.9.27-win64-bin.zip
   (sha256 34a721949a2583fdff725312da092fa0f5f1f284b702e6f811c6954714faabb2)
 - source:   https://download.savannah.gnu.org/releases/tinycc/tcc-0.9.27.tar.bz2
-  (sha256 de23af78fca90ce32dff2dd45b3432b2334740bb9bb7b05bf60fdbfc396ceb9c)
+  (sha256 de23af78fca90ce32dff2dd45b3432b2334740bb9bb7b05bf60fdbfc396ceb9c), included unmodified as
+  `source/tcc-0.9.27.tar.bz2` so the corresponding source travels with the binaries.

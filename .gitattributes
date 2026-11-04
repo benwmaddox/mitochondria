@@ -2,3 +2,4 @@
 *.dll binary
 *.exe binary
 *.a binary
+*.bz2 binary

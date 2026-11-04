@@ -50,6 +50,7 @@ pub fn size() { return self.items.count(); }
 // nodes in use, to watch how sparse the tree gets over time
 pub fn leaf_count() { return self.leaves.count(); }
 pub fn inner_count() { return self.inners.count(); }
+pub fn height() { return self.head.height; }
 pub fn room() { return N - self.items.count(); }
 pub fn get(item_slot) { return self.items[item_slot]; }
 pub fn first() {

@@ -685,3 +685,54 @@ less padding. Two steps changed answers on purpose, case by case:
 - **Static kinds**: the endpoints whose only purpose was a `var` or a function changing kind (dynamic.case `/anyitem`,
   kinds.case `/describe` and `/mixed`) are load errors now, tested in cgen's unit tests.
 Compiling the shape of every answer found no wrong answer in the existing programs.
+
+## Round 18 (2026-11-04): an ordered map against Rust's BTreeMap, and what churn does over time
+Goal set by Ben: every workload within +20% of Rust's `BTreeMap<u64,u64>`. `bench/btree-rust` and `bench/ordered`
+(`ab.py`: alternating builds, best of rounds, because other work on the machine moves any single run by 2x) run the
+same eight workloads on the same MINSTD key sequence, present keys 2r, absent keys 2r+1. Windows, clang -O2.
+Batched 64-lane lookup has no Mito equivalent and is not reported.
+
+Where the time went, found by switching safety layers off one at a time (in a build used only for measuring):
+| 100,000 keys, lookup of a present key | ns |
+|---|---|
+| skip list as first written | 415 |
+| calls to the runtime's helpers made direct, overflow checks by compiler builtins | 380 |
+| `h_index` without two divisions, `below()` reading each link and key once | 230 |
+| B+tree, binary search in nodes | 207 |
+| nodes read once per search (`let node = ...`) | 169 |
+| pool liveness checked in line from the layout | 136 |
+| array bounds checked in line | 117 |
+| node search as a linear scan over a loop counter with constant bounds (no check emitted) | 70 |
+| Rust BTreeMap | 72 |
+Array bounds checks alone were 30% of a lookup even as a never-taken branch in a helper; a counter whose range is a
+compile-time constant needs none. Journaling costs nothing on reads.
+
+Final, best of rounds, ratio to Rust (the B+tree is `lib/btree.mito`, i64 keys; `sorted` is the skip list):
+| workload | B+tree 10k | B+tree 1M | skip list 1M |
+|---|---|---|---|
+| insert new keys | 4.5x | 2.2x | 6.7x |
+| lookup, hit | 0.95x | 0.73x | 7.8x |
+| lookup, miss | 0.92x | 1.20x | 8.3x |
+| lookup, 50% hits / 50% misses | 0.98x | 1.12x | 9.1x |
+| increment existing value | 1.05x | 0.83x | 9.5x |
+| range scan, up to 100 entries | 1.64x | 0.98x | 12.9x |
+| delete existing key | 4.1x | 4.5x | 9.6x |
+Reads are inside the target at 1M and at parity at 10k except the 10k range scan. Insert and delete are not: a write
+pays for a tagged-value store (now typed for integer columns), an undo-log entry (now the first write to each 64-byte
+line saves the line; later writes cost a bit test), and the generic allocator (about 55 ns per `add`, two adds per
+insert because each item has a location record).
+
+**Remove is logical; trim is separate.** Removing all 1,000,000 keys left committed memory unchanged at 44,508 KB
+(live fell to 3,906 KB): `remove` frees slots, pages stay committed. With a trim policy (`--soft 1`) committed went
+28,756, then 9,672, then 5,644 KB over the next three requests; each trim returns part of it. Without `--soft`, never.
+
+**Churn (steady state, 100,000 live keys, one key out and one in per step, each key replaced 40x; `churn.py`):**
+- memory is stable: B+tree committed 4,504 KB filled, 4,944 KB after 4,000,000 steps (skip list 11,472 -> 12,408 KB);
+  Rust's private bytes did not move (3,916 KB).
+- the tree stays the same shape: height 4, leaves 8,876 -> about 8,860, inner nodes 861 -> 1,168 (leaves merge only
+  under one parent, inner nodes never merge, so inner nodes creep up and plateau).
+- **lookups slow down with use**: the B+tree goes from 72-77 ns to about 128 ns between rounds 10 and 20 (4,000,000
+  steps: 126-130 ns) and stays there; the skip list from 315 to 450 ns. Rust stays at 80-84 ns. Loading the same live
+  keys into a fresh process gives 72 ns again (`fresh.py`), so the loss is in the layout left by reuse, not in the
+  amount of memory or the tree's shape. The cause is not found yet.
+- steps cost 1,000-2,000 ns in the B+tree against 195 ns in Rust.

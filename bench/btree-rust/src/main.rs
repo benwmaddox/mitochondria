@@ -8,8 +8,33 @@ use std::time::Instant;
 const SEED: u64 = 20261104;
 fn next(x: u64) -> u64 { x * 48271 % 2147483647 }
 
+// churn W C ROUNDS: a FIFO window of W live keys; each step removes the oldest key and inserts the next new one. Per
+// round: ns per step, ns per lookup of the live keys, and the process's private KB. Same key sequence as churn.py.
+fn churn(w: u64, c: u64, rounds: u64) {
+    let mut m: BTreeMap<u64, u64> = BTreeMap::new();
+    let (mut x, mut y) = (SEED, SEED);
+    for _ in 0..w { x = next(x); m.insert(x * 2, x); }
+    for r in 1..=rounds {
+        let t = Instant::now();
+        for _ in 0..c { y = next(y); m.remove(&(y * 2)); x = next(x); m.insert(x * 2, x); }
+        let step = t.elapsed().as_nanos() as f64 / c as f64;
+        let ops = 200_000u64;
+        let t = Instant::now();
+        let (mut z, mut sum) = (y, 0u64);
+        for j in 0..ops { if j % w == 0 { z = y; } z = next(z); if let Some(v) = m.get(&(z * 2)) { sum += *v; } }
+        black_box(sum);
+        let look = t.elapsed().as_nanos() as f64 / ops as f64;
+        println!("{r}	{step:.1}	{look:.1}	{}	{}", private_kb(), m.len());
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("churn") {
+        let n = |i: usize, d: u64| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+        churn(n(2, 100_000), n(3, 100_000), n(4, 40));
+        return;
+    }
     let n: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10_000);
     let ops: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
     let mut m: BTreeMap<u64, u64> = BTreeMap::new();

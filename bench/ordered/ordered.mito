@@ -106,3 +106,11 @@ fn probe(y: i64, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     }
     return ok({ "sum": s });
 }
+
+// Fill with the keys that follow sequence state `x`, in sequence order: the live window of a churned run, laid out fresh.
+@post("/insert_from/{x}/{n}")
+fn insert_from(x: i64, n: i64 in 1..1048576) -> Response<{ x: i64, size: i64 }> {
+    var nx = x;
+    each i in 0..n { nx = nx * 48271 % 2147483647; let e = b.m.add(nx * 2); e.v = nx; }
+    return ok({ "x": nx, "size": b.m.size() });
+}

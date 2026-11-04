@@ -166,7 +166,7 @@ mod tests {
             ("endpoint POST /a { var x = 1; x = b.get(0); free x; respond 200 {}; }", "`free` of a value whose kind is only known at run time"),
             ("endpoint POST /a { each s in b { b.remove(s); } respond 200 {}; }", "a loop over b calls a function that changes b"),
             ("endpoint GET /a { respond 200 { \"x\": [each s in b b.add()] }; }", "a loop over b calls a function that changes b"),
-            ("endpoint GET /a { respond 200 { \"x\": [each s in b from 1 order by s.n s.n] }; }", "b keeps its own order"),
+            ("endpoint GET /a { respond 200 { \"x\": [each s in b from 1 order by s.n s.n] }; }", "`order by` was removed"),
         ] {
             let e = load(api).err().unwrap_or_default();
             assert!(e.contains(want), "{} -> {}", api, e);

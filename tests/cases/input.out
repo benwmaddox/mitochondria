@@ -42,9 +42,10 @@ POST /rooms/0/messages -> 201 {"seq":31}
 GET /nope -> 404 {"error":"no such endpoint"}
 PUT /rooms -> 404 {"error":"no such endpoint"}
 GET /rooms/0/messages/extra -> 404 {"error":"no such endpoint"}
-state <plain values> 24
+state <plain values> 136
 state sessions 59
-state rooms 37
-state rooms.messages 166
-state rooms.typing 16
-memory reserved=36864 committed=28672 live=302
+state rooms.items 41
+state rooms.items.messages 166
+state rooms.items.typing 16
+state rooms.links 121
+memory reserved=40960 committed=32768 live=539

@@ -1,6 +1,9 @@
 # Proposal: modules with compile-time parameters, and a standard library
 
-Status: decided (2026-11-04), not built yet. Ben's decisions: one file per module; compile-time copies, one per use;
+Status: decided and built (2026-11-04); see DESIGN.md, "Modules and the standard library". Built differently from
+the sketch below: `sorted` is a skip list, not a B-tree (a B-tree's inner nodes need copies of keys, which items of
+string keys cannot hold, and separators would point at removed items); `self` is resolved by the binder rather than
+replaced by text (so no local of the module can shadow it); loops gained `while` for walks that stop early. Ben's decisions: one file per module; compile-time copies, one per use;
 keys read-only outside the module (changed with `set_key`); changing an instance inside a loop over it is a compile
 error; `order by` is removed once `sorted` exists, and the chat's rooms become a `sorted` instance.
 

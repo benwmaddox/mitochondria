@@ -6,7 +6,7 @@ POST /rooms -> 201 {"id":0,"name":"lobby"}
 POST /rooms -> 413 {"error":"string of 12 bytes does not fit string<8>"}
 POST /rooms -> 400 {"error":"name is required"}
 POST /rooms -> 201 {"id":1,"name":"r2"}
-POST /rooms -> 503 {"error":"capacity: rooms is full (2 of 2)"}
+POST /rooms -> 503 {"error":"capacity: rooms.items is full (2 of 2)"}
 GET /rooms -> 200 {"rooms":[{"id":0,"name":"lobby"},{"id":1,"name":"r2"}]}
 POST /rooms/0/messages -> 201 {"seq":1}
 POST /rooms/0/messages -> 201 {"seq":2}
@@ -38,7 +38,7 @@ DELETE /session -> 200 {"ok":true}
 GET /rooms/0/messages -> 200 {"room":"lobby","messages":[{"seq":8,"author":"bob \"b\"","at":1000,"body":"m7 é"},{"seq":7,"author":"[deleted]","at":1000,"body":"m6 é"},{"seq":6,"author":"bob \"b\"","at":1000,"body":"m5 é"},{"seq":5,"author":"[deleted]","at":1000,"body":"m4 é"},{"seq":4,"author":"bob \"b\"","at":1000,"body":"m3 é"}]}
 GET /rooms/0/messages -> 401 {"error":"session ended"}
 GET /rooms -> 401 {"error":"session ended"}
-GET /stats -> 200 {"sessions":1,"rooms":2,"messages":5,"next_seq":8,"committed_kb":28,"live_kb":0,"reserved_kb":36}
+GET /stats -> 200 {"sessions":1,"rooms":2,"messages":5,"next_seq":8,"committed_kb":32,"live_kb":0,"reserved_kb":40}
 POST /rooms/0/messages -> 201 {"seq":9}
 POST /rooms/0/messages -> 201 {"seq":10}
 POST /rooms/0/messages -> 201 {"seq":11}
@@ -80,9 +80,10 @@ POST /rooms/0/messages -> 429 {"error":"slow down"}
 POST /rooms/0/messages -> 429 {"error":"slow down"}
 POST /rooms/0/messages -> 429 {"error":"slow down"}
 GET /nope -> 404 {"error":"no such endpoint"}
-state <plain values> 24
+state <plain values> 136
 state sessions 95
-state rooms 55
-state rooms.messages 181
-state rooms.typing 72
-memory reserved=36864 committed=28672 live=427
+state rooms.items 63
+state rooms.items.messages 181
+state rooms.items.typing 72
+state rooms.links 218
+memory reserved=40960 committed=32768 live=765

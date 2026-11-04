@@ -11,5 +11,5 @@ struct Room {
     typing: pool<Typing, 256>;
 }
 global meta: Meta;
-global directory: pool<Dir, 256>;   // used on rooms[0] only
+global directory: sorted<Dir, 256, id>;   // in order of id; used on rooms[0] only
 global rooms: pool<Room, 32>;       // the rooms this shard owns

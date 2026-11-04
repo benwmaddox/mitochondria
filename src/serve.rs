@@ -248,13 +248,13 @@ const NO_FIELDS: StrFields<'static, 'static> = StrFields(&[]);
 pub struct SysInfo { pub kinds: Vec<(String, usize)>, pub me: (usize, usize) }
 
 /// Buffers reused by every request (allocated at startup, grown only if a request needs more).
-struct Bufs { vars: Vec<Value>, args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>, params: Vec<(usize, Txt)>, query: Vec<(Txt, Txt)>, json: Vec<(Txt, Value)>, sel: Vec<(f64, u32)> }
+struct Bufs { vars: Vec<Value>, args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, params: Vec<(usize, Txt)>, query: Vec<(Txt, Txt)>, json: Vec<(Txt, Value)>, sel: Vec<u32> }
 impl Bufs {
     /// Placeholder while a request holds the real buffers (allocates nothing).
-    fn empty() -> Bufs { Bufs { vars: Vec::new(), args: Vec::new(), frees: Vec::new(), idx: Vec::new(), keyed: Vec::new(), params: Vec::new(), query: Vec::new(), json: Vec::new(), sel: Vec::new() } }
+    fn empty() -> Bufs { Bufs { vars: Vec::new(), args: Vec::new(), frees: Vec::new(), idx: Vec::new(), params: Vec::new(), query: Vec::new(), json: Vec::new(), sel: Vec::new() } }
     fn startup() -> Bufs {
         Bufs { vars: Vec::with_capacity(256), args: Vec::with_capacity(64), frees: Vec::with_capacity(64), idx: (0..8).map(|_| Vec::with_capacity(1024)).collect(),
-            keyed: (0..4).map(|_| Vec::with_capacity(1024)).collect(), params: Vec::with_capacity(8), query: Vec::with_capacity(16), json: Vec::with_capacity(32), sel: Vec::with_capacity(4096) }
+            params: Vec::with_capacity(8), query: Vec::with_capacity(16), json: Vec::with_capacity(32), sel: Vec::with_capacity(4096) }
     }
 }
 
@@ -356,7 +356,7 @@ impl Server {
         let mut run = Run {
             inst, api, ep, headers, fwd, rng, sys: self.system.as_ref(), fwd_out: &mut self.fwd_out, params: &b.params, query: &b.query, json: &b.json, text, out, now,
             vars: { let mut v = std::mem::take(&mut b.vars); v.clear(); v.resize(ep.slots as usize, Value::Null); v }, frame: 0, depth: 0,
-            args: std::mem::take(&mut b.args), frees: std::mem::take(&mut b.frees), idx: std::mem::take(&mut b.idx), keyed: std::mem::take(&mut b.keyed),
+            args: std::mem::take(&mut b.args), frees: std::mem::take(&mut b.frees), idx: std::mem::take(&mut b.idx),
             sel: { let mut v = std::mem::take(&mut b.sel); v.clear(); v }, cerr: None, panicked: false,
         };
         let res = match cfn {
@@ -379,8 +379,8 @@ impl Server {
             Err(Ctl::Dead) => { Self::out_err(run.out, "reference is not live"); (404, false) }
             Err(Ctl::Forward(kind, key)) => { run.out.len = 0; self.pending = Some((kind, key)); (0, true) }
         };
-        let Run { vars, args, mut frees, idx, keyed, sel, .. } = run;
-        b.vars = vars; b.args = args; b.args.clear(); b.idx = idx; b.keyed = keyed; b.sel = sel; // ends the borrow of the endpoint code
+        let Run { vars, args, mut frees, idx, sel, .. } = run;
+        b.vars = vars; b.args = args; b.args.clear(); b.idx = idx; b.sel = sel; // ends the borrow of the endpoint code
         if code == 0 { self.pending_frees.clear(); self.pending_frees.extend_from_slice(&frees); } // decided by finish_forward
         else if ok { for &(c, i) in &frees { let _ = self.inst.free_item(c, i); } self.inst.commit_changes(); } else { self.inst.rollback(); }
         frees.clear(); b.frees = frees;
@@ -413,8 +413,8 @@ struct Run<'a> {
     text: &'a mut Area, out: &'a mut Area, now: i64,
     vars: Vec<Value>, // frames of local slots: the endpoint's, then one per active function call
     frame: usize, depth: usize,
-    args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>,
-    sel: Vec<(f64, u32)>, // items selected by compiled loops that collect before running their body: (order key, item)
+    args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>,
+    sel: Vec<u32>, // items collected by compiled loops before running their body
     rng: &'a std::cell::Cell<u64>,
     cerr: Option<Ctl<'a>>, // an error a helper stored for compiled code
     panicked: bool,
@@ -760,29 +760,25 @@ impl<'a> Run<'a> {
         Ok((lo, if hi > lo { (hi as i128 - lo as i128) as u64 } else { 0 }, limit))
     }
 
-    /// Items of `it.coll` passing `where`, in order (reversed if asked), ordered and limited. Give the vector back with `self.idx.push`.
+    /// Items of `it.coll` passing `where`, in order (reversed if asked) and limited. Give the vector back with `self.idx.push`.
     fn select(&mut self, it: &'a Iter) -> R<'a, (usize, Vec<usize>)> {
         let Value::Coll(c, inst) = self.eval(&it.coll)? else { return fail(500, "each needs a list or pool") };
         let limit = match &it.limit { Some(e) => match self.eval(e)? { Value::Int(n) if n >= 0 => Some(n as usize), _ => return fail(400, "bad limit") }, None => None };
         let mut items = self.idx.pop().unwrap_or_default();
         self.inst.items_into(c, inst, &mut items);
         if it.reverse { items.reverse(); }
-        if it.wher.is_none() && it.order.is_none() { if let Some(l) = limit { items.truncate(l); } return Ok((c, items)); }
-        let mut hits = self.keyed.pop().unwrap_or_default();
-        hits.clear();
-        let mut res = Ok(());
-        for &idx in items.iter() {
+        if it.wher.is_none() { if let Some(l) = limit { items.truncate(l); } return Ok((c, items)); }
+        // the items passing `where`, kept in place; the body runs only after every item was tested
+        let mut kept = 0;
+        for k in 0..items.len() {
+            let idx = items[k];
             let v = self.item_value(c, idx)?; self.set_slot(it.slot, v);
-            let keep = match &it.wher { Some(w) => self.eval(w).and_then(|v| self.truthy(&v)), None => Ok(true) };
-            let key = match (&keep, &it.order) { (Ok(true), Some((k, _))) => match self.eval(k) { Ok(Value::Int(i)) => Ok(i as f64), Ok(Value::Float(f)) => Ok(f), Ok(_) => fail(500, "order by needs a number"), Err(e) => Err(e) }, _ => Ok(0.0) };
-            match (keep, key) { (Ok(true), Ok(k)) => hits.push((k, idx)), (Ok(false), _) => continue, (Err(e), _) | (_, Err(e)) => { res = Err(e); break; } }
-            if it.order.is_none() && limit.map_or(false, |l| hits.len() >= l) { break; }
+            let w = self.eval(it.wher.as_ref().unwrap());
+            match w.and_then(|v| self.truthy(&v)) { Ok(true) => { items[kept] = idx; kept += 1; } Ok(false) => continue, Err(e) => { self.idx.push(items); return Err(e); } }
+            if limit.map_or(false, |l| kept >= l) { break; }
         }
-        if let Some((_, desc)) = &it.order { let desc = *desc; hits.sort_by(|a, b| { let o = a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal); if desc { o.reverse() } else { o } }); } // stable: ties keep their order
-        if let Some(l) = limit { hits.truncate(l); }
-        items.clear(); items.extend(hits.iter().map(|h| h.1));
-        self.keyed.push(hits);
-        match res { Ok(()) => Ok((c, items)), Err(e) => { self.idx.push(items); Err(e) } }
+        items.truncate(kept);
+        Ok((c, items))
     }
 
     fn exec(&mut self, stmts: &'a [Stmt]) -> R<'a, ()> {
@@ -1166,7 +1162,7 @@ pub fn json_floor() {
     for _ in 0..reps { s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""); }
     let compiled = t.elapsed().as_nanos() as f64 / reps as f64 / 1000.0;
 
-    let mc = s.inst.prog.colls.iter().position(|c| c.name == "rooms.messages").unwrap();
+    let mc = s.inst.prog.colls.iter().position(|c| c.name == "rooms.items.messages").unwrap();
     let sc = s.inst.prog.coll_of("sessions").unwrap();
     let (cseq, cat, cauth, cbody) = (s.inst.col(mc, "seq").unwrap(), s.inst.col(mc, "at").unwrap(), s.inst.col(mc, "author").unwrap(), s.inst.col(mc, "body").unwrap());
     let cname = s.inst.col(sc, "name").unwrap();
@@ -1247,8 +1243,8 @@ struct Helpers {
     elem: extern "C" fn(*mut Ctx, i64, u32) -> i32,
     store_elem: extern "C" fn(*mut Ctx, u32, u32, u32, i64, *const CVal) -> i32,
     sel_mark: extern "C" fn(*mut Ctx, *mut u32) -> i32,
-    sel_add: extern "C" fn(*mut Ctx, f64, u32) -> i32,
-    sel_sort: extern "C" fn(*mut Ctx, u32, i32, i32, i64, *mut u32) -> i32,
+    sel_add: extern "C" fn(*mut Ctx, u32) -> i32,
+    sel_limit: extern "C" fn(*mut Ctx, u32, i64, *mut u32) -> i32,
     sel_get: extern "C" fn(*mut Ctx, u32, u32, *mut u32) -> i32,
     sel_end: extern "C" fn(*mut Ctx, u32) -> i32,
     field_val: extern "C" fn(*mut Ctx, *const CVal, *const u8, u32, *mut CVal) -> i32,
@@ -1261,7 +1257,7 @@ static HELPERS: Helpers = Helpers {
     deref: h_deref, fail: h_fail, dead: h_dead, col_txt: h_col_txt, plain_txt: h_plain_txt, binop: h_binop, truthy: h_truthy, store: h_store,
     store_plain: h_store_plain, alloc: h_alloc, free_: h_free, fwd_begin: h_fwd_begin, fwd_put: h_fwd_put, forward: h_forward, crash: h_crash, builtin: h_builtin,
     json_f64: h_json_f64, elem: h_elem, store_elem: h_store_elem,
-    sel_mark: h_sel_mark, sel_add: h_sel_add, sel_sort: h_sel_sort, sel_get: h_sel_get, sel_end: h_sel_end,
+    sel_mark: h_sel_mark, sel_add: h_sel_add, sel_limit: h_sel_limit, sel_get: h_sel_get, sel_end: h_sel_end,
     field_val: h_field_val, store_field: h_store_field, free_val: h_free_val, was_dead: h_was_dead,
 };
 
@@ -1362,19 +1358,17 @@ extern "C" fn h_was_dead(c: *mut Ctx) -> i32 {
     with_run(c, |r| Ok(match r.cerr { Some(Ctl::Dead) | Some(Ctl::Err(Error::NotLive(_))) | Some(Ctl::Err(Error::Stale(_))) => { r.cerr = None; 1 } _ => 0 }))
 }
 extern "C" fn h_sel_mark(c: *mut Ctx, out: *mut u32) -> i32 { with_run(c, |r| { unsafe { *out = r.sel.len() as u32 }; Ok(0) }) }
-extern "C" fn h_sel_add(c: *mut Ctx, key: f64, idx: u32) -> i32 { with_run(c, |r| { r.sel.push((key, idx)); Ok(0) }) }
-/// Order the items added since mark `h` as the interpreter does (a stable sort, so ties keep their order), keep at most
-/// `limit` (when not negative), and say how many there are.
-extern "C" fn h_sel_sort(c: *mut Ctx, h: u32, order: i32, desc: i32, limit: i64, out: *mut u32) -> i32 {
+extern "C" fn h_sel_add(c: *mut Ctx, idx: u32) -> i32 { with_run(c, |r| { r.sel.push(idx); Ok(0) }) }
+/// Keep at most `limit` (when not negative) of the items collected since mark `h`, and say how many there are.
+extern "C" fn h_sel_limit(c: *mut Ctx, h: u32, limit: i64, out: *mut u32) -> i32 {
     with_run(c, |r| {
         let h = h as usize;
-        if order != 0 { r.sel[h..].sort_by(|a, b| { let o = a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal); if desc != 0 { o.reverse() } else { o } }); }
         if limit >= 0 && r.sel.len() - h > limit as usize { r.sel.truncate(h + limit as usize); }
         unsafe { *out = (r.sel.len() - h) as u32 };
         Ok(0)
     })
 }
-extern "C" fn h_sel_get(c: *mut Ctx, h: u32, k: u32, out: *mut u32) -> i32 { with_run(c, |r| { unsafe { *out = r.sel[h as usize + k as usize].1 }; Ok(0) }) }
+extern "C" fn h_sel_get(c: *mut Ctx, h: u32, k: u32, out: *mut u32) -> i32 { with_run(c, |r| { unsafe { *out = r.sel[h as usize + k as usize] }; Ok(0) }) }
 extern "C" fn h_sel_end(c: *mut Ctx, h: u32) -> i32 { with_run(c, |r| { r.sel.truncate(h as usize); Ok(0) }) }
 extern "C" fn h_store_elem(c: *mut Ctx, cid: u32, idx: u32, ci: u32, k: i64, v: *const CVal) -> i32 {
     with_run(c, |r| { let l = r.inst.step_index(Loc::Field(cid as usize, idx as usize, ci as usize), k as usize, None)?; r.store(l, to_value(unsafe { &*v }))?; Ok(0) })

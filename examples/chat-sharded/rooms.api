@@ -10,8 +10,7 @@ endpoint POST /rooms {
     if fwd("id") == null {
         if len(name) == 0 { fail 400 "name is required"; }
         meta.next_room = meta.next_room + 1;
-        let d = alloc directory;
-        d.id = meta.next_room;
+        let d = directory.add(meta.next_room);
         d.name = name;
         forward rooms[d.id] { "user": fwd("user"), "name": fwd("name"), "id": d.id };
     }
@@ -23,7 +22,7 @@ endpoint POST /rooms {
 }
 
 endpoint GET /rooms {
-    respond 200 { "rooms": [each d in directory order by d.id { "id": d.id, "name": d.name }] };
+    respond 200 { "rooms": [each d in directory { "id": d.id, "name": d.name }] };
 }
 
 endpoint POST /rooms/{room}/messages {

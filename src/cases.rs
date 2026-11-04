@@ -409,7 +409,8 @@ mod tests {
     #[test]
     #[ignore]
     fn c_runtime_speed() {
-        let case = Case { name: "speed".into(), state: include_str!("../examples/chat/chat.mito").into(), api: include_str!("../examples/chat/chat.api").into(), requests: String::new(), system: None, files: Vec::new() };
+        let (state, api) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
+        let case = Case { name: "speed".into(), state, api, requests: String::new(), system: None, files: Vec::new() };
         let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("Rust runtime", Box::new(RustBackend::start(&case, true))), ("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
         if clang().is_some() {
             bes.push(("C runtime, clang -O2", Box::new(CBackend::start_with(&case, true))));

@@ -5,7 +5,7 @@ struct Session { name: string<32>; secret: i64; window: i64; sent: i64; }
 struct Msg { seq: i64; at: i64; author: ref<sessions>; body: string<2000>; }
 struct Typing { who: ref<sessions>; until: i64; }
 struct Room { name: string<8>; created: i64; messages: list<Msg, 5> drop_oldest; typing: pool<Typing, 4>; }
-global meta: Meta; global sessions: pool<Session, 3> checked; global rooms: pool<Room, 2>;
+global meta: Meta; global sessions: pool<Session, 3> checked; global rooms: sorted<Room, 2, created>;
 --- api
 include examples/chat/chat.api
 --- requests

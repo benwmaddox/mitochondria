@@ -96,8 +96,10 @@ warm request makes no heap allocation; tests check this. The HTTP layer outside 
   visible until the request ends and is freed only if the request succeeds. A consequence: a slot freed in a request cannot be
   reused by an `alloc` in the same request, so a pool full of expired items still reports `Full` there (503).
 
-Iteration: `each x in collection where cond order by key [desc] limit n { ... }`, and `each x in list reverse limit n` for the
-newest items of a list. The same clause works inside a JSON array in `respond`.
+Iteration: `each x in collection where cond limit n { ... }`, and `each x in list reverse limit n` for the newest items of a
+list; `each i in lo..hi` counts (with `reverse`, `where`, `limit`, and `while cond` to stop early). The same clauses work
+inside a JSON array in `respond`. Order is kept in the data, not computed when read: a list is in arrival order, and a
+`sorted` collection (below) is in key order. Every loop is bounded by a capacity or a range, so every loop ends.
 
 ### 9. Commit and trim policy
 Pages are committed when first written. `trim` returns pages that hold no live byte. Trimming is scoped (one global or one field,
@@ -113,6 +115,22 @@ costing only that part) and driven by pressure, not by schedule:
 A collection whose trim released nothing is skipped until 256 of its items have been freed, popped or cleared since: growth adds
 live pages, only shrinking creates dead ones, so this keeps a steady state from rescanning. Marks are given in megabytes
 (`--soft`, `--hard`). Not done: marks as fractions of the budget, and machine-level free memory as an input.
+
+## Modules and the standard library (built from concepts 1 to 8)
+A module is one file in `lib/` with parameters, state and functions (docs/proposals/modules.md). A use,
+`global scores: sorted<Score, 10000, points>;`, is expanded when the program is compiled into ordinary state (the
+instance's own structs and collections, under its name) and functions (`scores.add(...)`), one copy per use, so the
+memory model is unchanged: an instance's pools are reserved, committed, trimmed and rolled back like any others, and
+`ref<scores>` points into its items. In module code `self` is the instance. The instance's state changes only through
+its functions: outside them, writing its private state, `alloc` or `free` of its items, assigning its key, and calling
+its private functions are load errors. A module that defines `iter_first`/`iter_next`/`iter_item` (and `iter_last`/
+`iter_prev`) can be walked: `each s in scores [from k] [reverse] ...`, in at most its capacity of steps; a loop that changes
+the instance it walks does not load.
+
+The standard library so far: `sorted<T, N, key>` (lib/sorted.mito), up to N items in order of a field, equal keys in the
+order added, written in the language as a skip list over two pools in step (items and their links): `add(k)`,
+`remove(it)`, `set_key(it, k)`, `first()`, `last()`, `get(slot)`, walks from a key either way; and `bag<T, N>`, the smallest
+module, used to test the mechanism.
 
 ## Workers and mailboxes (built from concepts 3, 7, 8 and 9)
 A **system** runs several programs as **workers**, each on its own OS thread with its own reservation, commit tracking and

@@ -497,7 +497,7 @@ typedef struct Mito {
     u32 njson; JField json[MAX_JSON];
     int ekind; int ecode; Area emsg; u8 ebuf[1024];
     Grow frees; /* (collection, item) pairs, u32 each */
-    Grow sel;   /* (key, item) pairs collected by loops */
+    Grow sel;   /* items collected by loops (u32 each) */
     int crashed;
 } Mito;
 
@@ -970,35 +970,19 @@ static int h_store_field(Ctx *c, const Val *base, const char *p, u32 n, const Va
 static int h_was_dead(Ctx *c) { Mito *m = M_(c); if (m->ekind == E_DEAD || m->ekind == E_NOTLIVE || m->ekind == E_STALE) { m->ekind = E_NONE; return 1; } return 0; }
 
 /* ---- loops that collect their items first ---- */
-typedef struct { double key; u32 idx, pad; } Sel;
-static Sel *sel_at(Mito *m, u64 i) { return (Sel *)(m->sel.p + i * sizeof(Sel)); }
+static u32 *sel_at(Mito *m, u64 i) { return (u32 *)(m->sel.p + i * 4); }
 static int h_sel_mark(Ctx *c, u32 *out) { *out = (u32)M_(c)->sel.len; return 0; }
-static int h_sel_add(Ctx *c, double key, u32 idx) {
+static int h_sel_add(Ctx *c, u32 idx) {
     Mito *m = M_(c);
-    if (!grow_to(&m->sel, (m->sel.len + 1) * sizeof(Sel))) return fail(m, 507, "a loop collected too many items");
-    Sel s = { key, idx, 0 }; *sel_at(m, m->sel.len) = s; m->sel.len++; return 0;
+    if (!grow_to(&m->sel, (m->sel.len + 1) * 4)) return fail(m, 507, "a loop collected too many items");
+    *sel_at(m, m->sel.len) = idx; m->sel.len++; return 0;
 }
-/* the interpreter's order: a < b, equal when neither is (NaN keys compare equal to everything) */
-static int sel_before(const Sel *a, const Sel *b, int desc) { return desc ? b->key < a->key : a->key < b->key; }
-static int h_sel_sort(Ctx *c, u32 h, int order, int desc, i64 limit, u32 *out) {
+static int h_sel_limit(Ctx *c, u32 h, i64 limit, u32 *out) {
     Mito *m = M_(c); u64 n = m->sel.len - h;
-    if (order && n > 1) { /* a stable merge sort through the free space after the items */
-        if (!grow_to(&m->sel, (m->sel.len + n) * sizeof(Sel))) return fail(m, 507, "a loop collected too many items");
-        Sel *a = sel_at(m, h), *t = sel_at(m, m->sel.len);
-        for (u64 w = 1; w < n; w *= 2) {
-            for (u64 lo = 0; lo < n; lo += 2 * w) {
-                u64 mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n, i = lo, j = mid, k = lo;
-                while (i < mid && j < hi) t[k++] = sel_before(&a[j], &a[i], desc) ? a[j++] : a[i++];
-                while (i < mid) t[k++] = a[i++];
-                while (j < hi) t[k++] = a[j++];
-            }
-            memcpy(a, t, n * sizeof(Sel));
-        }
-    }
     if (limit >= 0 && n > (u64)limit) { m->sel.len = h + (u64)limit; n = (u64)limit; }
     *out = (u32)n; return 0;
 }
-static int h_sel_get(Ctx *c, u32 h, u32 k, u32 *out) { *out = sel_at(M_(c), (u64)h + k)->idx; return 0; }
+static int h_sel_get(Ctx *c, u32 h, u32 k, u32 *out) { *out = *sel_at(M_(c), (u64)h + k); return 0; }
 static int h_sel_end(Ctx *c, u32 h) { M_(c)->sel.len = h; return 0; }
 
 /* ---- builtins (cgen BUILTINS order) ---- */
@@ -1073,7 +1057,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_sort, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */
@@ -1095,7 +1079,7 @@ MITO_API Mito *mito_start(u64 budget, u64 seed) {
     mem->committed = s; mem->livepg = s + mem->npages;
     mem->shrinks = (u64 *)(s + up(mem->npages * 2, 8));
     m->pr.stuck = mem->shrinks + pg->ncolls + 1;
-    if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&mem->je, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 2 * sizeof(Sel))) return 0;
+    if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&mem->je, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
     m->areas = (u8 *)VirtualAlloc(0, TEXT_CAP + RESPONSE_CAP, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!m->areas) return 0;
     m->text.p = m->areas; m->text.cap = TEXT_CAP; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;

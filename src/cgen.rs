@@ -52,8 +52,8 @@ struct H {
     int (*elem)(Ctx *, i64, u32);                              /* check index k into a fixed array of n */
     int (*store_elem)(Ctx *, u32, u32, u32, i64, const Val *); /* journaled write of element k of array column (coll, idx, col) */
     int (*sel_mark)(Ctx *, u32 *);                             /* start collecting items for a loop: a mark to come back to */
-    int (*sel_add)(Ctx *, double, u32);                        /* collect an item with its order key */
-    int (*sel_sort)(Ctx *, u32, int, int, i64, u32 *);         /* order (if asked, stable; desc) and limit what was collected */
+    int (*sel_add)(Ctx *, u32);                                /* collect an item */
+    int (*sel_limit)(Ctx *, u32, i64, u32 *);                  /* keep at most `limit` of what was collected; how many */
     int (*sel_get)(Ctx *, u32, u32, u32 *);                    /* the k-th collected item */
     int (*sel_end)(Ctx *, u32);                                /* drop what was collected since the mark */
     int (*field_val)(Ctx *, const Val *, const char *, u32, Val *); /* field `name` of an item held as a value */
@@ -378,7 +378,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); calls(t, out); calls(e, out); }
-                Stmt::Each(it, b) => { ex(&it.coll, out); if let Some(h) = &it.hi { ex(h, out); } if let Some(w) = &it.wher { ex(w, out); } if let Some((o, _)) = &it.order { ex(o, out); } if let Some(l) = &it.limit { ex(l, out); } calls(b, out); }
+                Stmt::Each(it, b) => { ex(&it.coll, out); if let Some(h) = &it.hi { ex(h, out); } if let Some(w) = &it.wher { ex(w, out); } if let Some(l) = &it.limit { ex(l, out); } calls(b, out); }
                 Stmt::Respond(_, j) => json_calls(j, out),
                 Stmt::Forward { key, fields, .. } => { ex(key, out); for f in fields { ex(&f.1, out); } }
                 _ => {}
@@ -826,7 +826,7 @@ impl<'p> G<'p> {
                     let n = &self.prog.globals[*g as usize].name;
                     if changes_instance(self.api, n, body) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
-                let collect = it.order.is_some() || allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
+                let collect = allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
                 self.each(it, env, collect, |g, env, _| g.block(body, env))?;
             }
             Stmt::Free(e) => match self.expr(e, env, None)? {
@@ -1405,9 +1405,9 @@ impl<'p> G<'p> {
         Ok(out)
     }
 
-    /// Emit a loop over a list or pool instance (with `reverse`, `where`, `order by` and `limit`), running `body` with the
-    /// item bound. With `collect`, the items passing `where` are collected (with their order keys) before any body runs,
-    /// then ordered and limited, as the interpreter's `select` does; otherwise filtering and the body run in one pass.
+    /// Emit a loop over a list or pool instance (with `reverse`, `where` and `limit`), running `body` with the item bound.
+    /// With `collect`, the items passing `where` are collected before any body runs, then limited, as the interpreter's
+    /// `select` does; otherwise filtering and the body run in one pass.
     fn each(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
         if let Some(v) = it.via { return self.walk(it, v, env, body); }
         if let Some(hi) = &it.hi { return self.range_loop(it, hi, env, body); }
@@ -1447,27 +1447,12 @@ impl<'p> G<'p> {
             self.close("}");
             return Ok(());
         }
-        let key = match &it.order {
-            None => "0.0".to_string(),
-            Some((e, _)) => match self.expr(e, env, None)? {
-                CV::Int(x) => format!("(double)({})", x),
-                CV::Flt(x) => x,
-                CV::Any(v) => {
-                    let t = self.tmp("key");
-                    self.line(&format!("double {} = 0;", t));
-                    self.line(&format!("if ({}.tag == 1) {} = (double){}.i; else if ({}.tag == 2) {} = {}.f; else FAIL(500, \"order by needs a number\", 23);", v, t, v, v, t, v));
-                    t
-                }
-                _ => { self.fail(500, "order by needs a number"); "0.0".to_string() }
-            },
-        };
-        self.call(&format!("c->h->sel_add(c, {}, {})", key, m));
-        if it.order.is_none() { if let Some(l) = &lim { self.line(&format!("if ((i64){} >= {}) break;", hits, l)); } }
+        self.call(&format!("c->h->sel_add(c, {})", m));
+        if let Some(l) = &lim { self.line(&format!("if ((i64){} >= {}) break;", hits, l)); }
         self.close("}");
         let (n, q, m2) = (self.tmp("n"), self.tmp("q"), self.tmp("m"));
         self.line(&format!("u32 {};", n));
-        let desc = matches!(it.order, Some((_, true)));
-        self.call(&format!("c->h->sel_sort(c, {}, {}, {}, {}, &{})", h, it.order.is_some() as i32, desc as i32, lim.clone().unwrap_or("-1".into()), n));
+        self.call(&format!("c->h->sel_limit(c, {}, {}, &{})", h, lim.clone().unwrap_or("-1".into()), n));
         self.open(&format!("for (u32 {} = 0; {} < {}; {}++) {{", q, q, n, q));
         self.line(&format!("u32 {};", m2));
         self.call(&format!("c->h->sel_get(c, {}, {}, &{})", h, q, m2));
@@ -1573,7 +1558,7 @@ impl<'p> G<'p> {
                     let n = &self.prog.globals[*g as usize].name;
                     if changes_instance(self.api, n, &[Stmt::Respond(200, (**inner).clone())]) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
-                self.each(it, env, it.order.is_some(), |g, env, hits| {
+                self.each(it, env, false, |g, env, hits| {
                     g.line(&format!("if ({} > 1) {{ CALL(c->h->out(c, \",\", 1)); }}", hits));
                     g.json(inner, env)
                 })?;
@@ -1761,8 +1746,9 @@ mod profile_tests {
         for (state, api) in [(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")),
                              (include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api")),
                              (include_str!("../examples/chat-sharded/auth.mito"), include_str!("../examples/chat-sharded/auth.api"))] {
-            let prog = Program::parse(state).unwrap();
-            let mut api = crate::lang::parse(api).unwrap();
+            let (state, api) = crate::modules::expand(state, api).unwrap();
+            let prog = Program::parse(&state).unwrap();
+            let mut api = crate::lang::parse(&api).unwrap();
             crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
             let g = generate(&prog, &api);
             assert!(!g.notes.iter().any(|n| n.contains("profile")), "{:#?}", g.notes);
@@ -1772,13 +1758,13 @@ mod profile_tests {
 
     #[test]
     fn emitted_files_compile_on_their_own_and_cite_their_source() {
-        let (state, api) = (include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api"));
-        let prog = Program::parse(state).unwrap();
-        let mut a = crate::lang::parse(api).unwrap();
+        let (state, api) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
+        let prog = Program::parse(&state).unwrap();
+        let mut a = crate::lang::parse(&api).unwrap();
         crate::lang::bind(&mut a, &|n| prog.global(n)).unwrap();
-        let c = emit(&prog, &a, ("chat.api", api)).unwrap();
+        let c = emit(&prog, &a, ("chat.api", &api)).unwrap();
         crate::tcc::Unit::check(&c).unwrap();
-        assert!(c.contains("coll 2 rooms.messages: list cap 1000 drop_oldest"), "{}", &c[..800]);
+        assert!(c.contains("rooms.items.messages: list cap 1000 drop_oldest"), "{}", &c[..1500]);
         for ep in &a.eps { assert!(c.contains(&format!("// chat.api:{}-{}", ep.lines.0, ep.lines.1))); }
         assert!(c.contains("//   | endpoint DELETE /session {"));
     }

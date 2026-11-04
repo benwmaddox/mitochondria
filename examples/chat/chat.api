@@ -1,5 +1,5 @@
 fn me() -> ref<sessions> { return auth(sessions); }
-fn room_param() -> ref<rooms> { return rooms[int(param("room"))]; }
+fn room_param() -> ref<rooms> { return rooms.get(int(param("room"))); }
 fn typing_until(t: i64) -> i64 { return t + max(meta.typing_ttl, 5000); }
 
 endpoint POST /sessions {
@@ -21,15 +21,14 @@ endpoint POST /rooms {
     let who = me();
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
-    let r = alloc rooms;
+    let r = rooms.add(now());
     r.name = name;
-    r.created = now();
     respond 201 { "id": slot(r), "name": r.name };
 }
 
 endpoint GET /rooms {
     let who = me();
-    respond 200 { "rooms": [each r in rooms order by r.created { "id": slot(r), "name": r.name }] };
+    respond 200 { "rooms": [each r in rooms { "id": slot(r), "name": r.name }] };
 }
 
 endpoint POST /rooms/{room}/messages {
@@ -90,7 +89,7 @@ endpoint GET /stats {
     var messages = 0;
     each r in rooms { messages = messages + count(r.messages); }
     respond 200 {
-        "sessions": count(sessions), "rooms": count(rooms), "messages": messages, "next_seq": meta.next_seq,
+        "sessions": count(sessions), "rooms": rooms.size(), "messages": messages, "next_seq": meta.next_seq,
         "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb"), "reserved_kb": stat("reserved_kb")
     };
 }

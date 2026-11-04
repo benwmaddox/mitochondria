@@ -48,13 +48,13 @@ pub enum Expr {
     Bin(String, Box<Expr>, Box<Expr>),
 }
 
-/// `each m in room.messages reverse where ... order by ... desc limit n`
+/// `each m in room.messages reverse where ... limit n`
 #[derive(Debug, Clone)]
 /// `each var in coll ...`, or with `hi`, a range of integers `each var in coll..hi ...` (from `coll`, the low bound,
 /// up to but not including `hi`).
 /// `from`: where a loop over a module instance starts. `via`: that instance's iteration functions (set by the binder).
 /// `whil`: `while cond` ends the loop as soon as `cond` is false (tested before `where` and the body).
-pub struct Iter { pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub whil: Option<Expr>, pub wher: Option<Expr>, pub order: Option<(Expr, bool)>, pub limit: Option<Expr>, pub via: Option<Via> }
+pub struct Iter { pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub whil: Option<Expr>, pub wher: Option<Expr>, pub limit: Option<Expr>, pub via: Option<Via> }
 
 /// A module instance's iteration functions: a cursor from `first(from)` (or `last(from)` for reverse), the next from
 /// `next(cur)` (or `prev`), the item at it from `item(cur)`; a null cursor ends the loop.
@@ -198,9 +198,9 @@ impl P {
         let reverse = if self.is_kw("reverse") { self.i += 1; true } else { false };
         let whil = if self.is_kw("while") { self.i += 1; Some(self.expr()?) } else { None };
         let wher = if self.is_kw("where") { self.i += 1; Some(self.expr()?) } else { None };
-        let order = if self.is_kw("order") { self.i += 1; self.kw("by")?; let e = self.expr()?; let desc = if self.is_kw("desc") { self.i += 1; true } else { false }; Some((e, desc)) } else { None };
+        if self.is_kw("order") { return Err("`order by` was removed: keep the data in order with a sorted collection (lib/sorted.mito)".into()); }
         let limit = if self.is_kw("limit") { self.i += 1; Some(self.expr()?) } else { None };
-        Ok(Iter { var, slot: 0, coll, hi, from, reverse, whil, wher, order, limit, via: None })
+        Ok(Iter { var, slot: 0, coll, hi, from, reverse, whil, wher, limit, via: None })
     }
 
     fn stmt(&mut self) -> R<Stmt> {
@@ -360,13 +360,11 @@ impl Binder<'_> {
     fn iter_head(&mut self, it: &mut Iter) -> R<()> {
         self.expr(&mut it.coll)?;
         if let Some(h) = &mut it.hi { self.expr(h)?; }
-        if it.hi.is_some() && it.order.is_some() { return Err(format!("`each {} in a..b order by`: a range is already in order", it.var)); }
         // a loop over a module instance walks it with the instance's iteration functions
         if let Expr::Var(n, VarRes::Global(_)) = &it.coll {
             let n = if n == "self" { self.owner.clone().unwrap_or_default() } else { n.clone() };
             let f = |x: &str| self.fns.iter().position(|g| g.0 == format!("{}.{}", n, x)).map(|k| k as u32);
             if let (Some(first), Some(next), Some(item)) = (f("iter_first"), f("iter_next"), f("iter_item")) {
-                if it.order.is_some() { return self.err(format!("`each {} in {} order by`: {} keeps its own order", it.var, n, n)); }
                 if it.reverse && (f("iter_last").is_none() || f("iter_prev").is_none()) { return self.err(format!("{} cannot be walked in reverse", n)); }
                 it.via = Some(Via { first, next, item, last: f("iter_last"), prev: f("iter_prev") });
             }
@@ -376,7 +374,6 @@ impl Binder<'_> {
         it.slot = self.declare(&it.var, false);
         if let Some(w) = &mut it.whil { if it.hi.is_none() && it.via.is_none() { return self.err(format!("`each {} in ... while`: only ranges and module instances stop early; a list or pool is walked whole", it.var)); } self.expr(w)?; }
         if let Some(w) = &mut it.wher { self.expr(w)?; }
-        if let Some((o, _)) = &mut it.order { self.expr(o)?; }
         Ok(())
     }
     fn stmt(&mut self, s: &mut Stmt) -> R<()> {

@@ -1,0 +1,16 @@
+POST /items -> 201 {"slot":0}
+POST /items -> 201 {"slot":1}
+POST /items -> 201 {"slot":2}
+GET /firsts -> 200 {"calls":9,"first":"a"}
+POST /double -> 200 {"n":6}
+GET /list -> 200 {"x":["a:3","b:0","c:5","a2:6","b2:0","c2:10"]}
+POST /boxes -> 201 {"n":3,"scores":[30,50,60]}
+POST /double -> 200 {"n":12}
+POST /zero -> 200 {"visited":8}
+GET /list -> 200 {"x":["a:0","b:0","c:0","a2:0","b2:0","c2:0","a2:0","b2:0","c2:0","a22:0","b22:0","c22:0"]}
+GET /firsts -> 200 {"calls":0,"first":"-"}
+state <plain values> 0
+state items 192
+state boxes 24
+state boxes.items 64
+memory reserved=12288 committed=12288 live=280

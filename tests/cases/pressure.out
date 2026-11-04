@@ -8,9 +8,10 @@ GET /rooms/0/messages -> 200 {"room":"r","messages":[{"seq":1,"author":"ann","at
 stats refusing=true full_trims=1
 POST /rooms/0/messages -> 201 {"seq":2}
 stats refusing=false full_trims=0
-state <plain values> 24
+state <plain values> 136
 state sessions 59
-state rooms 37
-state rooms.messages 66
-state rooms.typing 16
-memory reserved=36864 committed=20480 live=202
+state rooms.items 41
+state rooms.items.messages 66
+state rooms.items.typing 16
+state rooms.links 121
+memory reserved=40960 committed=24576 live=439

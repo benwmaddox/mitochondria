@@ -13,4 +13,4 @@ struct Room {
 
 global meta: Meta;
 global sessions: pool<Session, 2000> checked;
-global rooms: pool<Room, 64>;
+global rooms: sorted<Room, 64, created>;   // kept in order of creation (lib/sorted.mito)

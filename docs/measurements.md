@@ -552,3 +552,13 @@ recorded, so failed requests are not rolled back; for measuring only). Two runs,
 journaling on 0.18 / 0.18 us, off 0.19 / 0.17 us. No measurable difference: a POST message journals about 12 writes,
 some 110 bytes, which is a few copies into a buffer that is already committed. Skipping the journal where the compiler
 proves nothing can fail after a write (the "hybrid" option) would buy nothing for this workload.
+
+## Round 12 (2026-11-04): modules, a sorted collection in the language, `order by` removed
+Modules (lib/*.mito, expanded per use when compiling) and the first two: `bag<T, N>` and `sorted<T, N, key>`, a skip list
+written in the language itself (about 90 lines), with no new runtime code: both runtimes run it as ordinary state and
+functions. Checked by `sorted.case` (ties in the order added, walks from a key both ways, string keys, capacity, a
+failed request rolled back including its links) and by a model test: 4000 random adds, key changes and removes on 48
+items, the whole order and walks from random keys compared after every step, on the compiled Rust runtime and the
+clang-built C runtime. `order by` is gone: the chat's rooms are `sorted<Room, 64, created>`, the sharded chat's
+directory `sorted<Dir, 256, id>`. The collect-then-run loops remain for bodies that allocate or change what `where`
+tests (collect.case), now without sort keys.

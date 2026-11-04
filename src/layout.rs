@@ -20,9 +20,18 @@ pub enum Ty {
     Str(usize),            // string<N>: u32 length, then N bytes of capacity
     List(Box<Ty>, usize),  // list<T, N>: u32 length, then N elements of capacity
     Arr(Box<Ty>, usize),   // T[N]: exactly N elements, all always present
+    Table(Box<Ty>, usize), // table<Struct, N>: same data as list<Struct, N>, stored one column per field
     Struct(usize),
     Named(String),         // only before resolution
 }
+
+/// One column of a table. Strings and lists take two: a length column and a data column.
+#[derive(Clone, Debug)]
+pub enum CKind { Scalar(Scalar), Arr(Scalar, usize), StrLen, StrBytes(usize), ListLen, ListData(Scalar, usize) }
+#[derive(Clone, Debug)]
+pub struct TCol { pub path: String, pub kind: CKind, pub off: usize } // off is relative to the table start
+
+pub const TABLE_HEADER: usize = 16;
 
 pub struct StructDef { pub name: String, pub fields: Vec<(String, Ty, usize)>, pub size: usize, pub align: usize, done: bool, visiting: bool }
 pub struct Program { pub structs: Vec<StructDef>, pub globals: Vec<(String, Ty, usize)>, pub total: usize }
@@ -36,9 +45,43 @@ impl Program {
             Ty::Str(n) => (up(4 + n, 4), 4),
             Ty::List(e, n) => { let (es, ea) = self.size_align(e); let a = ea.max(4); (up(up(4, ea) + es * n, a), a) }
             Ty::Arr(e, n) => { let (es, ea) = self.size_align(e); (es * n, ea) }
+            Ty::Table(row, n) => (self.table_cols(row, *n).unwrap().1, 8),
             Ty::Struct(i) => (self.structs[*i].size, self.structs[*i].align),
             Ty::Named(_) => unreachable!(),
         }
+    }
+
+    /// Columns of `table<row, n>` and the table's total size. Rows may hold scalars, scalar arrays,
+    /// strings, lists of scalars, and nested structs of those.
+    pub fn table_cols(&self, row: &Ty, n: usize) -> Result<(Vec<TCol>, usize), String> {
+        let mut fields = Vec::new();
+        self.flatten(row, "", &mut fields)?;
+        let (mut cols, mut off) = (Vec::new(), TABLE_HEADER);
+        let mut place = |path: &str, kind: CKind, align: usize, bytes: usize, off: &mut usize, cols: &mut Vec<TCol>| {
+            *off = up(*off, align); cols.push(TCol { path: path.to_string(), kind, off: *off }); *off += bytes;
+        };
+        for (path, t) in fields {
+            match t {
+                Ty::Scalar(s) => place(&path, CKind::Scalar(s), s.size(), n * s.size(), &mut off, &mut cols),
+                Ty::Arr(e, k) => { let Ty::Scalar(s) = *e else { unreachable!() }; place(&path, CKind::Arr(s, k), s.size(), n * k * s.size(), &mut off, &mut cols) }
+                Ty::Str(m) => { place(&path, CKind::StrLen, 4, n * 4, &mut off, &mut cols); place(&path, CKind::StrBytes(m), 1, n * m, &mut off, &mut cols) }
+                Ty::List(e, m) => { let Ty::Scalar(s) = *e else { unreachable!() }; place(&path, CKind::ListLen, 4, n * 4, &mut off, &mut cols); place(&path, CKind::ListData(s, m), s.size(), n * m * s.size(), &mut off, &mut cols) }
+                _ => unreachable!(),
+            }
+        }
+        Ok((cols, up(off, 8)))
+    }
+    fn flatten(&self, t: &Ty, prefix: &str, out: &mut Vec<(String, Ty)>) -> Result<(), String> {
+        match t {
+            Ty::Struct(i) => for f in &self.structs[*i].fields {
+                let p = if prefix.is_empty() { f.0.clone() } else { format!("{}.{}", prefix, f.0) };
+                self.flatten(&f.1, &p, out)?;
+            },
+            Ty::Scalar(_) | Ty::Str(_) => out.push((prefix.to_string(), t.clone())),
+            Ty::Arr(e, _) | Ty::List(e, _) if matches!(**e, Ty::Scalar(_)) => out.push((prefix.to_string(), t.clone())),
+            _ => return Err(format!("table rows cannot hold `{}` at `{}`: use scalars, scalar arrays, strings, lists of scalars, or structs of those", self.show(t), prefix)),
+        }
+        Ok(())
     }
     /// Bytes before the first element of a list: the length, padded to element alignment.
     pub fn list_header(&self, e: &Ty) -> usize { up(4, self.size_align(e).1) }
@@ -46,7 +89,7 @@ impl Program {
     pub fn all_live(&self, t: &Ty) -> bool {
         match t {
             Ty::Scalar(_) => true,
-            Ty::Str(_) | Ty::List(..) => false,
+            Ty::Str(_) | Ty::List(..) | Ty::Table(..) => false,
             Ty::Arr(e, _) => self.all_live(e),
             Ty::Struct(i) => self.structs[*i].fields.iter().all(|f| self.all_live(&f.1)),
             Ty::Named(_) => unreachable!(),
@@ -58,6 +101,7 @@ impl Program {
             Ty::Str(n) => format!("string<{}>", n),
             Ty::List(e, n) => format!("list<{}, {}>", self.show(e), n),
             Ty::Arr(e, n) => format!("{}[{}]", self.show(e), n),
+            Ty::Table(e, n) => format!("table<{}, {}>", self.show(e), n),
             Ty::Struct(i) => self.structs[*i].name.clone(),
             Ty::Named(n) => n.clone(),
         }
@@ -100,6 +144,7 @@ impl Program {
             Ty::Named(n) => { let i = *names.get(&n).ok_or(format!("unknown type `{}`", n))?; self.layout_struct(i, names)?; Ty::Struct(i) }
             Ty::List(e, n) => Ty::List(Box::new(self.resolve(*e, names)?), n),
             Ty::Arr(e, n) => Ty::Arr(Box::new(self.resolve(*e, names)?), n),
+            Ty::Table(e, n) => { let e = self.resolve(*e, names)?; if !matches!(e, Ty::Struct(_)) { return Err("table<T, N> needs a struct T".into()); } self.table_cols(&e, n)?; Ty::Table(Box::new(e), n) }
             o => o,
         })
     }
@@ -144,6 +189,7 @@ impl P {
         let mut t = if let Some(s) = Scalar::parse(&n) { Ty::Scalar(s) }
         else if n == "string" { self.eat("<")?; let k = self.num()?; self.eat(">")?; Ty::Str(k) }
         else if n == "list" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.num()?; self.eat(">")?; Ty::List(Box::new(e), k) }
+        else if n == "table" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.num()?; self.eat(">")?; Ty::Table(Box::new(e), k) }
         else { Ty::Named(n) };
         while self.peek() == Some("[") { self.i += 1; let k = self.num()?; self.eat("]")?; t = Ty::Arr(Box::new(t), k); }
         Ok(t)

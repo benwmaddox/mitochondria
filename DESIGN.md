@@ -47,6 +47,23 @@ Language so far: `struct`, `global`, scalars, `string<N>`, `list<T,N>`, `T[N]`, 
 - **After clear + trim:** released 12.2 MB; committed 0.074 MB.
 - **Finding (important):** 200,000 items have only 3.05 MB live but 12.2 MB committed, 4x. Each 64-byte item slot is mostly dead capacity (an empty 8-slot tag list, a 16-byte name), and every page contains some live bytes, so page trimming cannot reclaim the dead parts. Stasis solves this layout problem by lowering struct arrays to structure-of-arrays (one contiguous column per field). Doing that here puts all `tags` capacity together and all `name` capacity together, so dead space forms whole pages that `trim` can release. Next step.
 
+## Prototype 3: `table<Struct, N>` (structure-of-arrays by type change)
+`list<Item, N>` stores one record after another. `table<Item, N>` stores the same struct, with the same source, as one contiguous column per field (nested structs flatten to `pos.x`, `pos.y`; a `string<M>` becomes a length column plus a bytes column; a `list<scalar, M>` likewise). Table rows may hold scalars, scalar arrays, strings, lists of scalars and structs of those; anything else is a compile error for now. See `examples/soa.mito`.
+
+**Access cost model.** For a field of row `i`: `column_base + i * field_size`. `column_base` is a compile-time constant offset from the global's fixed address, so there is no pointer to load. The only runtime check is liveness, `i < len`, one load of the table length; a loop over live rows (`0..len`) needs no per-access check at all. Nested strings and lists add one more load and compare (`j < row's length`). Growth operations (`push`) also check that the page is committed; reads never do, because live implies committed. That is the same shape as Stasis structure-of-arrays access plus one liveness compare.
+
+**Measured (1M rows, same data in both layouts, native loop, `cargo run --release -- examples/soa.mito examples/soa.script`):**
+| Sum of one field | `list<Item>` (64 B records) | `table<Item>` (column) |
+|---|---|---|
+| `hp` (f32) | 4.15 ns/row | 0.72 ns/row |
+| `id` (i32) | 3.63 ns/row | 0.56 ns/row |
+
+About 5.8-6.5x faster, as expected from reading 4 bytes per row instead of a 64-byte record. Memory: the list committed 68.7 MB for 22.9 MB live; the table committed about 22.9 MB for 22.9 MB live, because the name and tags columns only commit pages that hold a non-empty value. The third result of the earlier "finding" is therefore confirmed: SoA lets dead capacity form whole pages.
+
+**Caveat.** That works because almost every name and tag list in the test is empty. If every row has a name averaging half its capacity, every page of the name column has live bytes and nothing is released; the dead half stays. Per-field page reclaim only helps sparse fields. `swap_remove` keeps rows dense but changes row order; stable ids for tables are not built.
+
+Logic tests (`cargo test --release`): table/list agree, typed Full and not-live errors, swap-remove moving strings, and recommit after trim.
+
 ## Gaps and risks (honest list)
 - Pool id tables (`slot_of`, `gen`, ...) are not in a region yet; they should be a `fixed` region sized from the pool declaration.
 - Fixed-size records only. The size-class idea for suspend records is untested.
@@ -56,7 +73,7 @@ Language so far: `struct`, `global`, scalars, `string<N>`, `list<T,N>`, `T[N]`, 
 - No language yet: no parser, layout compiler, or interpreter.
 
 ## Next
-0. Lower `list<Struct>` to structure-of-arrays columns so dead capacity clusters (see Prototype 2 finding).
+0. Done for scalar-ish rows (`table`). Next: stable ids and generation checks for tables; rows holding lists of structs; a `foreach` over live rows that proves bounds checks away; automatic choice of list vs table from a compiler hint.
 1. Move pool id tables into regions; add `seq`, `text`, `fixed`, sparse pool; a Linux backend.
 2. Measure re-fault cost after trim and pick default slack policy.
 3. Tiny frontend: parse a `state { ... }` tree with capacities, compute layout, fail over budget, print `inspect`.

@@ -1,0 +1,25 @@
+fill world.rows 1000000
+fill world.cols 1000000
+set world.rows[0].hp 2.5
+set world.cols[0].hp 2.5
+set world.cols[5].name "five"
+set world.cols[5].pos.x 1.5
+push world.cols[5].tags
+set world.cols[5].tags[0] 77
+get world.cols[5].name
+get world.cols[5].pos.x
+get world.cols[5].tags[0]
+# same field, same data, two layouts
+sum world.rows hp
+sum world.cols hp
+sum world.rows id
+sum world.cols id
+inspect
+# remove a row: last row moves into slot 5
+set world.cols[999999].name "last"
+remove world.cols 5
+get world.cols[5].name
+get world.cols
+# give back what is not live
+trim
+inspect

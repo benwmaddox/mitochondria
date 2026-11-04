@@ -63,3 +63,32 @@ pub fn run() {
     println!("  stack each (1 page min):     OS commit {:+.2} MB, resident {:+.2} MB", pc, rs);
     drop(stacks);
 }
+
+/// How much does `trim` cost, and what does touching released pages cost afterwards?
+pub fn trim_cost() {
+    use crate::layout::Program;
+    use crate::runtime::Instance;
+    const SRC: &str = "struct I { id: i32; name: string<16>; } global w: table<I, 1000000>;";
+    println!("table<I,1M>, name column = 16 MB = 4096 pages (256 rows each). Every row gets a name, then all but every Nth are cleared.");
+    println!("  {:>9} {:>8} | {:>9} {:>9} | {:>8} {:>9} {:>8} | {:>9} {:>14}", "kept rows", "pages", "scan ms", "ranges", "OS calls", "OS ms", "us/call", "freed MB", "recommit us/pg");
+    for stride in [1usize, 255, 256, 1000, 100_000, 1_000_000] {
+        let mut i = Instance::start(Program::parse(SRC).unwrap(), 1 << 30).unwrap();
+        for _ in 0..1_000_000 { i.push("w").unwrap(); }
+        for r in 0..1_000_000 { i.set(&format!("w[{}].name", r), "abcdefgh").unwrap(); }
+        let full = i.committed();
+        for r in 0..1_000_000 { if r % stride != 0 { i.set(&format!("w[{}].name", r), "").unwrap(); } }
+        let freed = i.trim();
+        let t = i.last_trim;
+        let after = i.committed();
+        // write a name into every 256th row: one write per page, each page that trim released must be committed again
+        let t0 = Instant::now();
+        for r in (0..1_000_000).step_by(256) { i.set(&format!("w[{}].name", r), "z").unwrap(); }
+        let back = (i.committed() - after) / 4096;
+        let rt = if back > 0 { t0.elapsed().as_secs_f64() * 1e6 / back as f64 } else { 0.0 };
+        println!("  {:>9} {:>8} | {:>9.2} {:>9} | {:>8} {:>9.3} {:>8.2} | {:>9.2} {:>14.2}", 1_000_000 / stride + (1_000_000 % stride != 0) as usize, (full - after) / 4096, t.scan_ns as f64 / 1e6, t.ranges, t.os_calls, t.os_ns as f64 / 1e6,
+            if t.os_calls > 0 { t.os_ns as f64 / 1e3 / t.os_calls as f64 } else { 0.0 }, freed as f64 / MB as f64, rt);
+        i.trim();
+        let t2 = i.last_trim;
+        println!("  {:>9}   second trim: scan {:.2} ms, OS calls {}", "", t2.scan_ns as f64 / 1e6, t2.os_calls);
+    }
+}

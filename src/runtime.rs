@@ -7,7 +7,12 @@ pub struct Instance {
     base: *mut u8,
     reserved: usize,
     committed: Vec<bool>, // one flag per page
+    pub last_trim: TrimStats,
 }
+
+/// What the last `trim` cost: live ranges scanned, OS release calls made, time in each phase.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct TrimStats { pub ranges: usize, pub os_calls: usize, pub scan_ns: u128, pub os_ns: u128 }
 
 /// Where a path points. Strings and lists inside table rows keep their length in a separate column.
 enum Loc { Mem(usize, Ty), Str { len: usize, bytes: usize, cap: usize }, List { len: usize, data: usize, cap: usize, elem: Scalar } }
@@ -23,7 +28,7 @@ impl Instance {
     pub fn start(prog: Program, budget: usize) -> Result<Instance, String> {
         if prog.total > budget { return Err(format!("over budget: layout needs {} bytes, budget is {}", prog.total, budget)); }
         let reserved = up(prog.total.max(1), PAGE);
-        let mut inst = Instance { base: os::reserve(reserved), reserved, committed: vec![false; reserved / PAGE], prog };
+        let mut inst = Instance { base: os::reserve(reserved), reserved, committed: vec![false; reserved / PAGE], prog, last_trim: TrimStats::default() };
         let mut r = Vec::new();
         for (_, ty, off) in &inst.prog.globals { inst.ranges(ty, *off, true, &mut r); }
         for (a, b) in r { inst.ensure(a, b); }
@@ -93,20 +98,27 @@ impl Instance {
 
     /// Return pages that hold no live byte to the OS. Returns bytes released.
     pub fn trim(&mut self) -> usize {
+        let t0 = std::time::Instant::now();
         let mut r = Vec::new();
         for (_, ty, off) in &self.prog.globals { self.ranges(ty, *off, false, &mut r); }
         let mut live = vec![false; self.committed.len()];
+        let mut st = TrimStats { ranges: r.len(), ..Default::default() };
         for (a, b) in r { if b > a { for p in a / PAGE..=(b - 1) / PAGE { live[p] = true; } } }
+        st.scan_ns = t0.elapsed().as_nanos();
+        let t1 = std::time::Instant::now();
         let (mut freed, mut p) = (0, 0);
         while p < live.len() {
             if self.committed[p] && !live[p] {
                 let s = p;
                 while p < live.len() && self.committed[p] && !live[p] { p += 1; }
                 os::decommit(unsafe { self.base.add(s * PAGE) }, (p - s) * PAGE);
+                st.os_calls += 1;
                 for q in s..p { self.committed[q] = false; }
                 freed += (p - s) * PAGE;
             } else { p += 1; }
         }
+        st.os_ns = t1.elapsed().as_nanos();
+        self.last_trim = st;
         freed
     }
 

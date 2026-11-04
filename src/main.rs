@@ -9,7 +9,7 @@ const MB: usize = 1 << 20;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(|s| s.as_str()) == Some("exp") { return exp::run(); }
+    if args.first().map(|s| s.as_str()) == Some("exp") { return if args.get(1).map(|s| s.as_str()) == Some("trim") { exp::trim_cost() } else { exp::run() }; }
     let mut budget = 1024 * MB;
     let mut files = Vec::new();
     let mut it = args.iter();
@@ -38,7 +38,7 @@ fn main() {
             "clear" => inst.clear(a),
             "set" => inst.set(a, b.trim()),
             "get" => inst.get(a).map(|v| println!("  {}", v)),
-            "trim" => { let f = inst.trim(); println!("  released {:.3} MB", mb(f)); Ok(()) }
+            "trim" => { let f = inst.trim(); let t = inst.last_trim; println!("  released {:.3} MB: scanned {} live ranges in {:.2} ms, {} OS calls in {:.2} ms", mb(f), t.ranges, t.scan_ns as f64 / 1e6, t.os_calls, t.os_ns as f64 / 1e6); Ok(()) }
             "inspect" => { inspect(&inst, base); Ok(()) }
             _ => Err(Error::Bad(format!("unknown command `{}`", cmd))),
         };

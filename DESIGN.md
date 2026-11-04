@@ -125,3 +125,24 @@ What they share: items are mostly **identified by an index or id**, the **maximu
 
 ### Possible later: debug-only reachability check
 A development mode that reports rows no id field in the program refers to (orphans), the way a leak detector would, without changing how release builds run. Not a collector: it only reports. Useful because the only real hazard of declared liveness is forgetting to remove.
+
+## Cost of `trim` (measured: `cargo run --release -- exp trim`, Windows 11, one thread)
+Item removal itself never touches the OS: `remove` and `pop` only change a length (and swap-remove moves one row). The OS is involved only in `trim`, which is batched by **page run**, not by item. Test: `table<I, 1M>` with a 16 MB `name` column (4096 pages, 256 rows per page); every row gets a name, then all but every Nth are cleared, then `trim`.
+
+| Names kept | Pages freed | Scan | OS calls | OS time | Notes |
+|---|---|---|---|---|---|
+| 1,000,000 (all) | 0 | 8.6 ms | 0 | 0 | scan is ~9 ns per live string |
+| 3,907 (one per page) | 0 | 0.7 ms | 0 | 0 | 99.9% of the column is dead, nothing can be released |
+| 1,000 | 2907 (11.4 MB) | 0.8 ms | 1000 | 3.2 ms | ~3 us per call on 3-page runs |
+| 10 | 3897 (15.2 MB) | 1.1 ms | 10 | 2.2 ms | ~0.55 us per page on long runs |
+| 1 | 3906 (15.3 MB) | 0.7 ms | 1 | 2.1 ms | one call, still ~0.5 us per page |
+
+A second `trim` right after (nothing to free) costs just the scan, 0.5-9 ms depending on live strings.
+
+**Reading the numbers**
+- **Scan:** about 9 ns per live string or list (one range each), near zero for dense scalar columns (one range per column). 1M live strings is about 9 ms.
+- **Release:** roughly 0.5 us per page plus about 2.5 us per OS call. The worst case is alternating live and dead pages, one call per dead page; coalescing already merges adjacent dead pages.
+- **Re-touch:** writing into a released page commits and zeroes it again: about 4 us per page in the test (this includes the interpreter's path lookup, so the OS part is lower). Trimming memory you will reuse soon costs more than it saved, so keep slack and trim at epoch boundaries or idle time, not in the hot path.
+- **Page granularity is the real limit:** one live 8-byte name per 256-row page keeps the whole 4 KB page. The fix is layout (denser columns), not a faster trim.
+
+**Cost controls to add (not built):** skip dead runs shorter than a threshold (for example 16 pages) so tiny holes never reach the OS; keep a high-water slack that decays over several epochs; maintain per-page live counters on write so `trim` does not rescan live strings; run `trim` only at epoch end or when committed exceeds live by a set ratio. **Not measured:** multi-threaded decommit (it makes other cores flush their address-translation caches) and Linux `madvise` costs.

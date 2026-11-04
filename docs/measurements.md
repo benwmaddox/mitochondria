@@ -745,3 +745,40 @@ request with 15 ms stalls in the tail, which inflated insert and delete.) Both p
 Still not the same work: Mito has no direct `find`, so a lookup is `each x from key limit 1` and an equality test; a
 delete is a lookup and a remove; every request is atomic (undo log); an insert also allocates the item and its
 location record; its arithmetic is overflow-checked.
+
+## Round 19 (2026-11-04): a fair 0.9x attempt
+Target from Ben: Mitochondria at 0.9x of Rust's time on every workload. What was made fair first:
+- Rust: `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"` (verified from the verbose build; rustc 1.92.0),
+  the standard `BTreeMap` and allocator. Mitochondria: clang 23.1.5 `-O3` (now the default of `mitochondria build`; `--cflag -O2`
+  selects the old level), whole program in one translation unit, `-fno-strict-aliasing`. Neither uses `-march=native`; Rust built
+  with `target-cpu=native` measured the same within noise, so it was not adopted. The tighter Rust profile moved range scan at
+  10k 246 -> 213 ns and delete 74 -> 69 ns, nothing else.
+- The operations match: `btree` gained `find(key)` and `remove_key(key)`, and the benchmark calls them, so a lookup is one call
+  (Rust `get`), an increment a find and a write (`get_mut`), a delete one call (`remove`). Both processes are pinned to the same
+  core (CPU 10) and timed inside their own process (`--timing`).
+- Rows count as 0.9x only when best-of and median are both at or under it.
+
+Ratios to Rust (Mitochondria / Rust; `btree` = items in their own pool with stable slots, merged; `ordmap` = values inside the
+leaves, an unmerged prototype on branch `ordmap`):
+| workload | btree 10k | ordmap 10k | btree 1M | ordmap 1M |
+|---|---|---|---|---|
+| Insert new keys | 2.60x | 1.57x | 1.89x | 1.27x |
+| Lookup: hit | 0.83x | 0.82x | 0.81x | 0.89x (median 1.02x) |
+| Lookup: miss | 0.80x | 0.80x | 0.60x | 0.57x |
+| Lookup: 50% hits, 50% misses | 0.86x | 0.84x | 0.79x | 0.77x |
+| Batched lookup, 64 lanes | n/a | n/a | n/a | n/a |
+| Increment existing value | 0.93x | 0.89x | 0.80x | 0.86x |
+| Range scan, up to 100 entries | 1.79x | 0.81x | 1.09x | 0.45x |
+| Delete existing key | 2.05x | 1.37x | 2.02x | 1.68x |
+At or under 0.9x on best-of and median: `btree` hit, miss and mixed at both sizes and increment at 1M; `ordmap` hit, miss, mixed, increment
+and range scan at 10k, and miss, mixed, increment and range scan at 1M. Not reached by either: insert and delete (and `ordmap` hit at 1M by median).
+
+Why insert and delete stop short: with the undo log switched off (a measuring-only build) `ordmap` insert is 88 ns against
+Rust's 71 and delete 74 against 69, and the undo log itself costs 35 ns per insert and 22 ns per delete. So a request that is
+atomic (a failed request leaves nothing behind) cannot be within 0.9x on writes with this design; the remaining cost beyond
+the undo log is the search (about 25-30 ns), the stores and the leaf splits.
+
+Other findings: SIMD (AVX2 compare of four 64-bit keys, `array.count_below`) is not faster than the early-exit loop for nodes of
+about 11 keys (hit 41 ns with the loop, 45 with count_below); it is kept as a language operation and opt-in build flag. A hit at
+1M costs more than a miss because the value is a second array in the leaf, a second cache line. `-O3` over `-O2` on `ordmap` at
+10k: range scan 1.10x -> 0.81x, increment 0.92x -> 0.88x, insert 1.71x -> 1.56x.

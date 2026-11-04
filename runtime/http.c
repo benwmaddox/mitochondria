@@ -32,6 +32,8 @@ static void *(*ws_socket)(int, int, int);
 static int (*ws_startup)(unsigned short, void *), (*ws_bind)(void *, const void *, int), (*ws_listen)(void *, int), (*ws_close)(void *);
 static void *(*ws_accept)(void *, void *, int *);
 static int (*ws_recv)(void *, char *, int, int), (*ws_send)(void *, const char *, int, int), (*ws_opt)(void *, int, int, const char *, int);
+typedef struct { u32 len; char *buf; } WsBuf;
+static int (*ws_sendv)(void *, WsBuf *, u32, u32 *, u32, void *, void *);
 #define BAD_SOCKET ((void *)~0ULL)
 static int ws_load(void) {
     void *w = LoadLibraryA("ws2_32.dll");
@@ -41,7 +43,8 @@ static int ws_load(void) {
     ws_accept = (void *(*)(void *, void *, int *))GetProcAddress(w, "accept"); ws_recv = (int (*)(void *, char *, int, int))GetProcAddress(w, "recv");
     ws_send = (int (*)(void *, const char *, int, int))GetProcAddress(w, "send"); ws_close = (int (*)(void *))GetProcAddress(w, "closesocket");
     ws_opt = (int (*)(void *, int, int, const char *, int))GetProcAddress(w, "setsockopt");
-    if (!(ws_startup && ws_socket && ws_bind && ws_listen && ws_accept && ws_recv && ws_send && ws_close && ws_opt)) return 0;
+    ws_sendv = (int (*)(void *, WsBuf *, u32, u32 *, u32, void *, void *))GetProcAddress(w, "WSASend");
+    if (!(ws_startup && ws_socket && ws_bind && ws_listen && ws_accept && ws_recv && ws_send && ws_close && ws_opt && ws_sendv)) return 0;
     u8 wsa[512]; return ws_startup(0x0202, wsa) == 0;
 }
 
@@ -103,7 +106,18 @@ static void trim(const u8 *s, u32 *a, u32 *b) {
     }
 }
 
-typedef struct { void *app; void *listener; u8 *data, *head, *body, *out; MitoPair *pairs; } Conn;
+/* A connection's buffer: reserved at its largest when the server starts, committed in 64 KB steps as requests reach
+   further into it, and kept at that high-water mark. */
+typedef struct { u8 *p; u64 committed, cap; } Res;
+static int res_init(Res *r, u64 cap) { r->p = (u8 *)VirtualAlloc(0, cap, 0x2000, 4); r->committed = 0; r->cap = cap; return r->p != 0; } /* MEM_RESERVE */
+static int res_ensure(Res *r, u64 n) {
+    if (n <= r->committed) return 1;
+    if (n > r->cap) return 0;
+    u64 c = (n + 65535) / 65536 * 65536; if (c > r->cap) c = r->cap;
+    if (!VirtualAlloc(r->p, c, 0x1000, 4)) return 0; /* MEM_COMMIT */
+    r->committed = c; return 1;
+}
+typedef struct { void *app; void *listener; Res data, head, body, pairs; u8 *out; } Conn;
 /* the head search stops past 64 KB (at most one more 4 KB read), the body read past Content-Length (at most 1 MB) */
 #define HEAD_MAX (64 * 1024 + 4096)
 #define DATA_CAP (HEAD_MAX + 4 + (1 << 20) + 4096)
@@ -112,21 +126,30 @@ typedef struct { void *app; void *listener; u8 *data, *head, *body, *out; MitoPa
 #define OUT_CAP (300 * 1024)
 
 static void send_all(void *c, const char *p, u32 n) { while (n) { int k = ws_send(c, p, (int)n, 0); if (k <= 0) return; p += k; n -= (u32)k; } }
+/* head and body in one call: two small sends can wait on the client's delayed acknowledgement of the first */
+static void send_two(void *c, const char *a, u32 an, const char *b, u32 bn) {
+    WsBuf v[2] = { { an, (char *)a }, { bn, (char *)b } }; u32 sent = 0;
+    if (ws_sendv(c, v, bn ? 2 : 1, &sent, 0, 0, 0) != 0) return;
+    if (sent < an) { send_all(c, a + sent, an - sent); send_all(c, b, bn); } else if (sent < an + bn) send_all(c, b + (sent - an), an + bn - sent);
+}
 static void serve_one(Conn *x, void *c) {
-    u32 to = 5000; ws_opt(c, 0xffff, 0x1006, (const char *)&to, 4); /* SO_RCVTIMEO: 5 s */
+    u32 to = 5000, one = 1; ws_opt(c, 0xffff, 0x1006, (const char *)&to, 4); /* SO_RCVTIMEO: 5 s */
+    ws_opt(c, 6, 1, (const char *)&one, 4); /* TCP_NODELAY: an answer goes out as soon as it is written */
     u32 len = 0, he = 0xFFFFFFFFu, from = 0;
     for (;;) {
-        for (u32 i = from; i + 4 <= len; i++) if (x->data[i] == '\r' && x->data[i + 1] == '\n' && x->data[i + 2] == '\r' && x->data[i + 3] == '\n') { he = i; break; }
+        for (u32 i = from; i + 4 <= len; i++) if (x->data.p[i] == '\r' && x->data.p[i + 1] == '\n' && x->data.p[i + 2] == '\r' && x->data.p[i + 3] == '\n') { he = i; break; }
         if (he != 0xFFFFFFFFu) break;
         if (len > 64 * 1024) break;
         from = len >= 3 ? len - 3 : 0;
-        int k = ws_recv(c, (char *)x->data + len, 4096, 0);
+        if (!res_ensure(&x->data, (u64)len + 4096)) break;
+        int k = ws_recv(c, (char *)x->data.p + len, 4096, 0);
         if (k <= 0) break;
         len += (u32)k;
     }
     if (he == 0xFFFFFFFFu) { const char *r = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; u32 n = 0; while (r[n]) n++; send_all(c, r, n); return; }
-    Buf head = { x->head, TEXT_CAP_, 0 };
-    b_lossy(&head, x->data, he);
+    if (!res_ensure(&x->head, 3ULL * he)) return; /* each byte is at most 3 bytes of text */
+    Buf head = { x->head.p, (u32)x->head.committed, 0 };
+    b_lossy(&head, x->data.p, he);
     /* lines (a trailing \r dropped), the request line split on spaces */
     const u8 *h = head.p; u32 hn = head.len, ls = 0, le = 0;
     while (le < hn && h[le] != '\n') le++;
@@ -142,10 +165,10 @@ static void serve_one(Conn *x, void *c) {
         u32 e = ls; while (e < hn && h[e] != '\n') e++;
         u32 ee = e < hn && e > ls && h[e - 1] == '\r' ? e - 1 : e;
         u32 col = ls; while (col < ee && h[col] != ':') col++;
-        if (col < ee && np < MAX_PAIRS) {
+        if (col < ee && np < MAX_PAIRS && res_ensure(&x->pairs, (np + 1) * (u64)sizeof(MitoPair))) {
             u32 ka = ls, kb = col, va = col + 1, vb = ee;
             trim(h, &ka, &kb); trim(h, &va, &vb);
-            MitoPair *p = &x->pairs[np++]; p->k = (const char *)h + ka; p->kn = kb - ka; p->v = (const char *)h + va; p->vn = vb - va;
+            MitoPair *p = &((MitoPair *)x->pairs.p)[np++]; p->k = (const char *)h + ka; p->kn = kb - ka; p->v = (const char *)h + va; p->vn = vb - va;
             const char *cl = "content-length";
             if (!have_len && p->kn == 14) {
                 u32 q = 0; for (; q < 14; q++) { char ch = p->k[q]; if (ch >= 'A' && ch <= 'Z') ch += 32; if (ch != cl[q]) break; }
@@ -160,17 +183,18 @@ static void serve_one(Conn *x, void *c) {
         ls = e < hn ? e + 1 : hn;
     }
     if (want > (1 << 20)) want = 1 << 20;
-    while ((u64)len < he + 4 + want) { int k = ws_recv(c, (char *)x->data + len, 4096, 0); if (k <= 0) break; len += (u32)k; }
-    Buf body = { x->body, TEXT_CAP_, 0 };
+    while ((u64)len < he + 4 + want && res_ensure(&x->data, (u64)len + 4096)) { int k = ws_recv(c, (char *)x->data.p + len, 4096, 0); if (k <= 0) break; len += (u32)k; }
     u32 bs = he + 4 < len ? he + 4 : len;
-    b_lossy(&body, x->data + bs, len - bs);
+    if (!res_ensure(&x->body, 3ULL * (len - bs) + 1)) return;
+    Buf body = { x->body.p, (u32)x->body.committed, 0 };
+    b_lossy(&body, x->data.p + bs, len - bs);
     int code; const char *resp; u32 rn;
 #ifdef HTTP_SINGLE
-    code = mito_handle(x->app, method, mn, target, tn, x->pairs, np, 0, 0, (const char *)body.p, body.len);
+    code = mito_handle(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, 0, 0, (const char *)body.p, body.len);
     resp = mito_response(x->app, &rn);
     if (!utf8_valid((const u8 *)resp, rn)) rn = 0; /* as the Rust server: a body that is not UTF-8 is sent empty */
 #else
-    code = mito_system_request(x->app, method, mn, target, tn, x->pairs, np, (const char *)body.p, body.len, 10000, (char *)x->out, OUT_CAP, &rn);
+    code = mito_system_request(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, (const char *)body.p, body.len, 10000, (char *)x->out, OUT_CAP, &rn);
     resp = (const char *)x->out;
 #endif
     char hd[200]; u32 n = 0; const char *r = reason(code);
@@ -180,17 +204,19 @@ static void serve_one(Conn *x, void *c) {
     HPUT(" "); HPUT(r); HPUT("\r\nContent-Type: application/json\r\nContent-Length: ");
     { u64 v = rn; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
     HPUT("\r\nConnection: close\r\n\r\n");
-    send_all(c, hd, n);
-    send_all(c, resp, rn);
+    send_two(c, hd, n, resp, rn);
     #undef HPUT
 }
 static Conn *conn_new(void *app, void *listener) {
     Conn *x = (Conn *)VirtualAlloc(0, sizeof(Conn), 0x3000, 4);
     if (!x) return 0;
     x->app = app; x->listener = listener;
-    x->data = (u8 *)VirtualAlloc(0, DATA_CAP, 0x3000, 4); x->head = (u8 *)VirtualAlloc(0, TEXT_CAP_, 0x3000, 4); x->body = (u8 *)VirtualAlloc(0, TEXT_CAP_, 0x3000, 4);
-    x->out = (u8 *)VirtualAlloc(0, OUT_CAP, 0x3000, 4); x->pairs = (MitoPair *)VirtualAlloc(0, sizeof(MitoPair) * MAX_PAIRS, 0x3000, 4);
-    return x->data && x->head && x->body && x->out && x->pairs ? x : 0;
+    if (!res_init(&x->data, DATA_CAP) || !res_init(&x->head, TEXT_CAP_) || !res_init(&x->body, TEXT_CAP_) || !res_init(&x->pairs, sizeof(MitoPair) * (u64)MAX_PAIRS)) return 0;
+#ifndef HTTP_SINGLE
+    x->out = (u8 *)VirtualAlloc(0, OUT_CAP, 0x3000, 4); /* the system copies an answer of any size up to this in one call */
+    if (!x->out) return 0;
+#endif
+    return x;
 }
 static u32 accept_loop(void *arg) {
     Conn *x = (Conn *)arg;

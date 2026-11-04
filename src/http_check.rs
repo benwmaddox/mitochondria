@@ -165,3 +165,84 @@ fn http_servers_match_their_record() {
         assert_eq!(log.len(), w.len(), "{}: {} lines, the record has {}", name, log.len(), w.len());
     }
 }
+
+/// One request on its own connection: the time to the last byte of the answer, and the answer.
+fn timed(port: u16, req: &[u8]) -> (Duration, Vec<u8>) {
+    let t = std::time::Instant::now();
+    let mut c = connect(port);
+    c.write_all(req).unwrap();
+    let mut out = Vec::with_capacity(16 * 1024);
+    let _ = c.read_to_end(&mut out);
+    (t.elapsed(), out)
+}
+
+/// `cargo test --release http_load -- --ignored --nocapture`: requests per second and latency of the chat executable
+/// (clang -O2, or TinyCC without clang) from client threads, one connection per request, for a small answer (`GET /rooms`)
+/// and a large one (the newest 50 of 1000 messages, about 8 KB). `MITO_LOAD_SECS` (default 1) per run, `MITO_LOAD_ROUNDS`
+/// (default 3). `MITO_LOAD_OTHER=file.c` also builds with that HTTP server instead of runtime/http.c, and alternates the
+/// two in every round, so a busy machine slows both alike.
+#[test]
+#[ignore]
+fn http_load() {
+    let (s, a) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
+    let prog = crate::layout::Program::parse(&s).unwrap();
+    let api = crate::cgen::check(&prog, &a).unwrap();
+    let tcc = crate::build::clang().is_none();
+    let mut variants = vec![("this http.c".to_string(), crate::cgen::program_exe(&prog, &api, None).unwrap())];
+    if let Ok(f) = std::env::var("MITO_LOAD_OTHER") {
+        let other = std::fs::read_to_string(&f).unwrap();
+        let mut u = crate::cgen::program_exe(&prog, &api, None).unwrap();
+        u[0] = u[0].replace(crate::cgen::HTTP, &other);
+        variants.push((f, u));
+    }
+    let secs: f64 = std::env::var("MITO_LOAD_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let rounds: usize = std::env::var("MITO_LOAD_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let mut servers = Vec::new();
+    for (k, (name, units)) in variants.iter().enumerate() {
+        let exe = std::env::temp_dir().join(format!("mito-load-{}-{}.exe", std::process::id(), k));
+        crate::build::exe(units, &exe, tcc, &[]).unwrap();
+        let port = free_port();
+        let server = start_exe(&exe, port);
+        // 1000 messages in room 0, from 40 sessions (each may send 30 a minute)
+        let mut tok = String::new();
+        for i in 0..40 {
+            let body = format!("{{\"name\":\"u{}\"}}", i);
+            let (_, out) = timed(port, format!("POST /sessions HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}", body.len(), body).as_bytes());
+            tok = String::from_utf8_lossy(&out).split("\"token\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+            if i == 0 { timed(port, format!("POST /rooms HTTP/1.1\r\nX-Session: {}\r\nContent-Length: 16\r\n\r\n{{\"name\":\"lobby\"}}", tok).as_bytes()); }
+            let m = "{\"body\":\"hello there, a message of ordinary length, about one line of chat text\"}";
+            for _ in 0..25 { timed(port, format!("POST /rooms/0/messages HTTP/1.1\r\nX-Session: {}\r\nContent-Length: {}\r\n\r\n{}", tok, m.len(), m).as_bytes()); }
+        }
+        servers.push((name.clone(), port, tok, server, exe));
+    }
+    println!("{} build; one connection per request; {} s per run, {} rounds", if tcc { "TinyCC" } else { "clang -O2" }, secs, rounds);
+    println!("  {:<14} {:<24} {:>7} {:>10} {:>9} {:>9} {:>9} {:>7}", "server", "request", "clients", "req/s", "p50 us", "p99 us", "max us", "bytes");
+    for round in 0..rounds {
+        println!("  round {}", round + 1);
+        for (name, target) in [("GET /rooms (small)", "/rooms"), ("GET 50 messages (8 KB)", "/rooms/0/messages?limit=50")] {
+            for clients in [1usize, 8, 32] {
+                for (sname, port, tok, _, _) in &servers {
+                    let (port, req) = (*port, format!("GET {} HTTP/1.1\r\nX-Session: {}\r\n\r\n", target, tok).into_bytes());
+                    let stop = std::time::Instant::now() + Duration::from_secs_f64(secs);
+                    let ts: Vec<_> = (0..clients).map(|_| { let req = req.clone(); std::thread::spawn(move || {
+                        let (mut lat, mut bad, mut bytes) = (Vec::new(), 0usize, 0usize);
+                        while std::time::Instant::now() < stop {
+                            let (d, out) = timed(port, &req);
+                            if !out.starts_with(b"HTTP/1.1 200") { bad += 1; }
+                            bytes = out.len();
+                            lat.push(d.as_micros() as u64);
+                        }
+                        (lat, bad, bytes)
+                    }) }).collect();
+                    let (mut lat, mut bad, mut bytes) = (Vec::new(), 0, 0);
+                    for t in ts { let (l, b, n) = t.join().unwrap(); lat.extend(l); bad += b; bytes = n; }
+                    lat.sort_unstable();
+                    let q = |p: usize| lat[(lat.len() * p / 100).min(lat.len() - 1)];
+                    let short = std::path::Path::new(sname).file_name().map_or(sname.clone(), |f| f.to_string_lossy().into_owned());
+                    println!("  {:<14} {:<24} {:>7} {:>10.0} {:>9} {:>9} {:>9} {:>7}{}", short, name, clients, lat.len() as f64 / secs, q(50), q(99), lat[lat.len() - 1], bytes, if bad > 0 { format!("  ({} not 200)", bad) } else { String::new() });
+                }
+            }
+        }
+    }
+    for (_, _, _, server, exe) in servers { drop(server); let _ = std::fs::remove_file(&exe); }
+}

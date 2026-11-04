@@ -658,7 +658,7 @@ impl<'p> G<'p> {
                     CV::Plain(sid, off) => {
                         let sd = &self.prog.structs[sid];
                         let Some(k) = sd.fields.iter().position(|x| x.0 == *f) else { return no(format!("no field `{}`", f)) };
-                        let (code, cap) = match &sd.fields[k].1 { Ty::Ref(p) => (30, self.prog.coll_of(p).ok_or("ref to an unknown pool")? as u32), t => plain_code(t).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))? };
+                        let (code, cap) = match &sd.fields[k].1 { Ty::Ref(p) => (30, self.prog.ref_pool(p).ok_or("ref to an unknown pool")? as u32), t => plain_code(t).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))? };
                         let at = off + sd.offs[k];
                         let v = self.expr(rhs, env, None)?;
                         let vv = self.val(v)?;
@@ -909,7 +909,7 @@ impl<'p> G<'p> {
             Expr::Var(n, VarRes::Global(g)) => {
                 let gl = &self.prog.globals[*g as usize];
                 if let Some(c) = gl.coll { return Ok(CV::Coll(c, "0".into())); }
-                self.plain(gl.off, &gl.ty.clone()).map_err(|_| format!("global `{}` of this kind not compiled yet", n))
+                self.plain(gl.off, &gl.ty.clone(), dead).map_err(|_| format!("global `{}` of this kind not compiled yet", n))
             }
             Expr::Var(n, VarRes::Unbound) => no(format!("`{}` was not bound", n)),
             Expr::Field(base, f, _) => { let bv = self.expr(base, env, dead)?; self.field(bv, f, dead) }
@@ -962,13 +962,13 @@ impl<'p> G<'p> {
     }
 
     /// A plain (record-style) value at offset `off`.
-    fn plain(&mut self, off: usize, t: &Ty) -> R<CV> {
+    fn plain(&mut self, off: usize, t: &Ty, dead: Option<&str>) -> R<CV> {
         Ok(match t {
             Ty::Struct(s) => CV::Plain(*s, off),
             Ty::Scalar(s) => self.load(&off.to_string(), "0", *s)?,
             Ty::Str(_) => { let x = self.tmp("t"); self.line(&format!("Txt {};", x)); self.call(&format!("c->h->plain_txt(c, {}, &{})", off, x)); CV::Txt(x) }
             Ty::Arr(e, n) => CV::PlainArr(off, (**e).clone(), *n),
-            Ty::Ref(p) => { let t = self.prog.coll_of(p).ok_or("ref to an unknown pool")?; self.load_ref(t, &off.to_string(), "0", None)? }
+            Ty::Ref(p) => { let t = self.prog.ref_pool(p).ok_or("ref to an unknown pool")?; self.load_ref(t, &off.to_string(), "0", dead)? }
             _ => return no("a plain value of this kind"),
         })
     }
@@ -1001,7 +1001,7 @@ impl<'p> G<'p> {
                 let Some(k) = sd.fields.iter().position(|x| x.0 == f) else { return no(format!("no field `{}`", f)) };
                 let ty = sd.fields[k].1.clone();
                 if ty.is_coll() { return Ok(CV::Coll(self.prog.plain_coll(off, sid, f).ok_or("plain collection")?, "0".into())); }
-                return self.plain(off + sd.offs[k], &ty);
+                return self.plain(off + sd.offs[k], &ty, dead);
             }
             CV::Null => { match dead { Some(l) => self.line(&format!("goto {};", l)), None => self.line("TAIL(c->h->dead(c));") } return Ok(CV::Null); }
             CV::Any(x) => {

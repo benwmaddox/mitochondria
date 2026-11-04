@@ -1,0 +1,24 @@
+GET /stats -> 200 {"added":0,"removed":0,"count":0,"others":0,"names":[]}
+POST /scores -> 201 {"slot":0,"size":1,"room":2}
+POST /scores -> 201 {"slot":1,"size":2,"room":1}
+POST /scores -> 201 {"slot":2,"size":3,"room":0}
+POST /scores -> 503 {"error":"capacity: scores.items is full (3 of 3)"}
+POST /scores -> 503 {"error":"capacity: scores.items is full (3 of 3)"}
+GET /scores/1 -> 200 {"name":"bob","points":20}
+GET /scores/7 -> 404 {"error":"slot 7 is not live"}
+POST /fav/1 -> 200 {}
+GET /fav -> 200 {"fav":"bob"}
+DELETE /scores/1 -> 200 {"size":3}
+GET /fav -> 200 {"fav":"-"}
+GET /scores/1 -> 404 {"error":"slot 1 is not live"}
+POST /scores -> 201 {"slot":1,"size":3,"room":0}
+GET /fav -> 200 {"fav":"-"}
+GET /stats -> 200 {"added":4,"removed":1,"count":3,"others":0,"names":["ann","eve","cy"]}
+POST /others -> 201 {"size":1}
+POST /others -> 201 {"size":2}
+POST /others -> 503 {"error":"capacity: others.items is full (2 of 2)"}
+GET /stats -> 200 {"added":4,"removed":1,"count":3,"others":2,"names":["ann","eve","cy"]}
+state <plain values> 40
+state scores.items 80
+state others.items 56
+memory reserved=12288 committed=12288 live=176

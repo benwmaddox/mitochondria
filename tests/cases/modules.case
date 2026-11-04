@@ -1,0 +1,46 @@
+// a module instance (lib/bag.mito): its functions, its state read from outside, and references to its items
+--- state
+struct Score { name: string<16>; points: i64; }
+struct Fav { s: ref<scores>; }
+global scores: bag<Score, 3>;
+global others: bag<Score, 2>;
+global fav: Fav;
+--- api
+endpoint POST /scores {
+    let s = scores.add();
+    s.name = body("name");
+    s.points = int(body("points"));
+    respond 201 { "slot": slot(s), "size": scores.size(), "room": scores.room() };
+}
+endpoint GET /scores/{k} { let s = scores.get(int(param("k"))); respond 200 { "name": s.name, "points": s.points }; }
+endpoint DELETE /scores/{k} { scores.remove(scores.get(int(param("k")))); respond 200 { "size": scores.size() }; }
+endpoint POST /fav/{k} { fav.s = scores.get(int(param("k"))); respond 200 {}; }
+endpoint GET /fav { respond 200 { "fav": or(fav.s.name, "-") }; }
+endpoint GET /stats {
+    respond 200 {
+        "added": scores.added(), "removed": scores.removed(), "count": count(scores.items),
+        "others": others.size(), "names": [each s in scores.items s.name]
+    };
+}
+endpoint POST /others { let o = others.add(); o.points = 1; respond 201 { "size": others.size() }; }
+--- requests
+GET /stats
+POST /scores {"name": "ann", "points": 10}
+POST /scores {"name": "bob", "points": 20}
+POST /scores {"name": "cy", "points": 30}
+POST /scores {"name": "dee", "points": 40}
+POST /scores {"name": "a name that is too long", "points": 1}
+GET /scores/1
+GET /scores/7
+POST /fav/1
+GET /fav
+DELETE /scores/1
+GET /fav
+GET /scores/1
+POST /scores {"name": "eve", "points": 50}
+GET /fav
+GET /stats
+POST /others
+POST /others
+POST /others
+GET /stats

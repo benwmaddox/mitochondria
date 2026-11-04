@@ -31,7 +31,9 @@ pub fn load(path: &std::path::Path) -> Case {
     }
     let get = |n: &str| sections.iter().find(|s| s.0 == n).map(|s| s.1.clone());
     let files = sections.iter().filter_map(|s| s.0.strip_prefix("file ").map(|f| (f.trim().to_string(), s.1.clone()))).collect();
-    Case { name: path.file_stem().unwrap().to_string_lossy().into_owned(), state: get("state").unwrap_or_default(), api: get("api").unwrap_or_default(),
+    // modules are expanded once here, so every backend compiles the same program
+    let (state, api) = crate::modules::expand(&get("state").unwrap_or_default(), &get("api").unwrap_or_default()).unwrap_or_else(|e| panic!("{}: {}", path.display(), e));
+    Case { name: path.file_stem().unwrap().to_string_lossy().into_owned(), state, api,
         requests: get("requests").unwrap_or_default(), system: get("system"), files }
 }
 

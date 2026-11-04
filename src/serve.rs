@@ -463,7 +463,7 @@ impl<'a> Run<'a> {
     fn ref_target(&self, l: &Loc) -> Option<usize> {
         match l {
             Loc::Field(c, _, ci) => match self.inst.col_kind(*c, *ci) { CKind::Ref(t) => Some(*t), _ => None },
-            Loc::Plain(_, Ty::Ref(n)) => self.inst.prog.coll_of(n),
+            Loc::Plain(_, Ty::Ref(n)) => self.inst.prog.ref_pool(n),
             _ => None,
         }
     }

@@ -62,6 +62,8 @@ pub fn parse_spec_with(src: &str, read: &dyn Fn(&str) -> Result<String, String>)
                     }
                     if next(&mut i)? != ";" { return Err(format!("expected `;` after `{}`", key)); }
                 }
+                let (st, api) = crate::modules::expand(&k.state, &k.api).map_err(|e| format!("worker {}: {}", k.name, e))?;
+                k.state = st; k.api = api;
                 spec.kinds.push(k);
             }
             "entry" => { entry = next(&mut i)?; next(&mut i)?; }

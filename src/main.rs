@@ -3,6 +3,7 @@ mod alloc_count;
 mod cases;
 mod exp;
 mod lang;
+mod modules;
 mod layout;
 mod os;
 mod region;
@@ -41,9 +42,10 @@ fn main() {
     }
     if matches!(args.first().map(|s| s.as_str()), Some("serve") | Some("bench")) {
         let (state, api) = (args.get(1).expect("state file"), args.get(2).expect("api file"));
-        let prog = layout::Program::parse(&std::fs::read_to_string(state).expect("read state")).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
+        let (state, api) = modules::expand(&std::fs::read_to_string(state).expect("read state"), &std::fs::read_to_string(api).expect("read api")).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
+        let prog = layout::Program::parse(&state).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
         let inst = Instance::start(prog, 1024 * MB).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
-        let mut server = serve::Server::new(inst, &std::fs::read_to_string(api).expect("read api")).unwrap_or_else(|e| { eprintln!("error in api file: {}", e); std::process::exit(1) });
+        let mut server = serve::Server::new(inst, &api).unwrap_or_else(|e| { eprintln!("error in api file: {}", e); std::process::exit(1) });
         let opt = |name: &str, d: usize| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(d);
         if args.iter().any(|a| a == "--soft") { let p = runtime::Pressure::new(&server.inst, opt("--soft", 0) * MB, opt("--hard", usize::MAX / MB) * MB); server.pressure = Some(p); }
         // endpoints are compiled; `--interpret` runs them on the interpreter, the reference the tests compare against
@@ -99,6 +101,8 @@ fn emit_c(args: &[String]) {
     let files: Vec<&String> = args.iter().enumerate().filter(|(i, a)| *a != "-o" && (*i == 0 || args[i - 1] != "-o")).map(|(_, a)| a).collect();
     let read = |f: &str| std::fs::read_to_string(f).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
     let one = |state: &str, name: &str, text: &str| -> String {
+        let (state, text) = modules::expand(state, text).unwrap_or_else(|e| die(e));
+        let (state, text) = (state.as_str(), text.as_str());
         let prog = layout::Program::parse(state).unwrap_or_else(|e| die(e));
         let mut a = lang::parse(text).unwrap_or_else(|e| die(format!("{}: {}", name, e)));
         lang::bind(&mut a, &|n| prog.global(n)).unwrap_or_else(|e| die(format!("{}: {}", name, e)));

@@ -80,7 +80,9 @@ pub enum Seg { Lit(String), Param(String) }
 /// `lines`: first and last source line (1-based) of the endpoint, for comments in generated code.
 pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String, pub slots: u32, pub lines: (u32, u32) }
 #[derive(Debug, Clone)]
-pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt>, pub slots: u32 }
+/// A function. A module instance's functions are named `instance.name` (written by `modules::expand`); `public` ones
+/// (`pub fn`) can be called from outside the module.
+pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool }
 #[derive(Debug, Clone, Default)]
 pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 
@@ -129,14 +131,18 @@ pub fn parse(src: &str) -> R<Api> {
     let mut p = P { t, i: 0, lines };
     let mut api = Api::default();
     while p.i < p.t.len() {
+        let public = p.is_kw("pub");
+        if public { p.i += 1; if !p.is_kw("fn") { return Err(format!("expected `fn` after `pub`, found {}", p.here())); } }
         if p.is_kw("fn") {
             p.i += 1;
-            let name = p.id()?; p.eat("(")?;
+            let mut name = p.id()?;
+            while p.sym(".") { name = format!("{}.{}", name, p.id()?); } // instance.function, from module expansion
+            p.eat("(")?;
             let mut params = Vec::new();
             while !p.sym(")") { params.push(p.id()?); if p.sym(":") { p.skip_type()?; } p.sym(","); }
             if p.sym("->") { p.skip_type()?; }
             let body = p.block()?;
-            api.fns.push(Func { name, params, body, slots: 0 });
+            api.fns.push(Func { name, params, body, slots: 0, public });
             continue;
         }
         let first = p.lines.get(p.i).copied().unwrap_or(0);
@@ -269,7 +275,18 @@ impl P {
     fn postfix(&mut self) -> R<Expr> {
         let mut e = self.primary()?;
         loop {
-            if self.sym(".") { e = Expr::Field(Box::new(e), self.id()?, Cell::new(FieldHit::None)); }
+            if self.sym(".") {
+                let f = self.id()?;
+                // `instance.function(args)`: a call of a module instance's function
+                if let (Expr::Var(n, _), true) = (&e, matches!(self.peek(), Some(Tok::Sym(s)) if s == "(")) {
+                    self.i += 1;
+                    let mut a = Vec::new();
+                    while !self.sym(")") { a.push(self.expr()?); self.sym(","); }
+                    e = Expr::Call(format!("{}.{}", n, f), a, CallRes::Unbound);
+                    continue;
+                }
+                e = Expr::Field(Box::new(e), f, Cell::new(FieldHit::None));
+            }
             else if self.sym("[") { let i = self.expr()?; self.eat("]")?; e = Expr::Index(Box::new(e), Box::new(i)); }
             else { break; }
         }

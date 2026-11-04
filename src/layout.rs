@@ -79,7 +79,13 @@ impl Coll {
 
 pub struct Global { pub name: String, pub ty: Ty, pub off: usize, pub coll: Option<usize> }
 
+/// A module instance (`global scores: sorted<Score, 100, points>;`, expanded by `modules::expand`): its state is the
+/// plain global `name`; `key` is the field of its items it keeps ordered, if any.
+#[derive(Clone, Debug)]
+pub struct ModInst { pub name: String, pub module: String, pub key: Option<String> }
+
 pub struct Program {
+    pub instances: Vec<ModInst>,
     pub structs: Vec<StructDef>,
     pub globals: Vec<Global>,
     pub colls: Vec<Coll>,
@@ -117,12 +123,18 @@ impl Program {
     }
     pub fn global(&self, name: &str) -> Option<usize> { self.globals.iter().position(|g| g.name == name) }
     pub fn coll_of(&self, name: &str) -> Option<usize> { self.global(name).and_then(|g| self.globals[g].coll) }
+    /// The pool `ref<name>` points into: a top-level pool, or a module instance's items.
+    pub fn ref_pool(&self, name: &str) -> Option<usize> {
+        let c = self.coll_of(name).or_else(|| self.instances.iter().find(|m| m.name == name).and_then(|m| self.colls.iter().position(|c| c.name == format!("{}.items", m.name))));
+        c.filter(|c| matches!(self.colls[*c].kind, Kind::Pool(_)))
+    }
     pub fn plain_coll(&self, off: usize, sid: usize, field: &str) -> Option<usize> { self.plain_colls.iter().find(|p| p.0 == off && p.1 == sid && p.2 == field).map(|p| p.3) }
 
     pub fn parse(src: &str) -> Result<Program, String> {
         let mut p = P { t: tokenize(src), i: 0 };
         let mut structs: Vec<StructDef> = Vec::new();
         let mut globals: Vec<(String, Ty)> = Vec::new();
+        let mut instances: Vec<ModInst> = Vec::new();
         while p.i < p.t.len() {
             match p.ident()?.as_str() {
                 "struct" => {
@@ -133,10 +145,17 @@ impl Program {
                     structs.push(StructDef { name, fields, offs: Vec::new(), size: 0, align: 1, state: 0 });
                 }
                 "global" => { let n = p.ident()?; p.eat(":")?; let ty = p.ty()?; p.eat(";")?; globals.push((n, ty)); }
+                // written by module expansion: `instance scores of sorted key points;`
+                "instance" => {
+                    let name = p.ident()?; p.eat("of")?; let module = p.ident()?;
+                    let key = if p.word("key") { Some(p.ident()?) } else { None };
+                    p.eat(";")?;
+                    instances.push(ModInst { name, module, key });
+                }
                 o => return Err(format!("expected `struct` or `global`, found `{}`", o)),
             }
         }
-        let mut prog = Program { structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
+        let mut prog = Program { instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
             let fs = std::mem::take(&mut prog.structs[i].fields);
@@ -171,7 +190,7 @@ impl Program {
             }
         }
         for (cid, ci, name) in refs {
-            let Some(t) = prog.coll_of(&name).filter(|t| matches!(prog.colls[*t].kind, Kind::Pool(_))) else { return Err(format!("ref<{}>: `{}` is not a top-level pool", name, name)) };
+            let Some(t) = prog.ref_pool(&name) else { return Err(format!("ref<{}>: `{}` is not a top-level pool", name, name)) };
             prog.colls[cid].cols[ci].kind = CKind::Ref(t);
         }
         for g in &prog.globals { check_plain_refs(&prog, &g.ty)?; }
@@ -271,7 +290,7 @@ fn contains_coll(p: &Program, t: &Ty) -> bool {
 }
 fn check_plain_refs(p: &Program, t: &Ty) -> Result<(), String> {
     match t {
-        Ty::Ref(n) => if p.coll_of(n).map_or(false, |c| matches!(p.colls[c].kind, Kind::Pool(_))) { Ok(()) } else { Err(format!("ref<{}>: `{}` is not a top-level pool", n, n)) },
+        Ty::Ref(n) => if p.ref_pool(n).is_some() { Ok(()) } else { Err(format!("ref<{}>: `{}` is not a top-level pool", n, n)) },
         Ty::Arr(e, _) => check_plain_refs(p, e),
         Ty::Struct(i) => { for f in &p.structs[*i].fields { if !f.1.is_coll() { check_plain_refs(p, &f.1)?; } } Ok(()) }
         _ => Ok(()),
@@ -307,15 +326,29 @@ impl P {
     fn ident(&mut self) -> Result<String, String> { let s = self.peek().ok_or("unexpected end of file")?.to_string(); self.i += 1; Ok(s) }
     fn num(&mut self) -> Result<usize, String> { let s = self.ident()?; s.parse().map_err(|_| format!("expected a number, found `{}`", s)) }
     fn word(&mut self, w: &str) -> bool { if self.peek() == Some(w) { self.i += 1; true } else { false } }
+    /// A size known when the program is compiled: a number, or + - * / ( ) of them (modules size state from parameters).
+    fn count(&mut self) -> Result<usize, String> {
+        let mut v = self.term()?;
+        loop {
+            match self.peek() { Some("+") => { self.i += 1; v = v.checked_add(self.term()?).ok_or("size too large")?; } Some("-") => { self.i += 1; v = v.checked_sub(self.term()?).ok_or("size below zero")?; } _ => return Ok(v) }
+        }
+    }
+    fn term(&mut self) -> Result<usize, String> {
+        let mut v = self.atom()?;
+        loop {
+            match self.peek() { Some("*") => { self.i += 1; v = v.checked_mul(self.atom()?).ok_or("size too large")?; } Some("/") => { self.i += 1; let d = self.atom()?; if d == 0 { return Err("size divided by zero".into()); } v /= d; } _ => return Ok(v) }
+        }
+    }
+    fn atom(&mut self) -> Result<usize, String> { if self.peek() == Some("(") { self.i += 1; let v = self.count()?; self.eat(")")?; Ok(v) } else { self.num() } }
     fn ty(&mut self) -> Result<Ty, String> {
         let n = self.ident()?;
         let mut t = if let Some(s) = Scalar::parse(&n) { Ty::Scalar(s) }
-        else if n == "string" { self.eat("<")?; let k = self.num()?; self.eat(">")?; Ty::Str(k) }
+        else if n == "string" { self.eat("<")?; let k = self.count()?; self.eat(">")?; Ty::Str(k) }
         else if n == "ref" { self.eat("<")?; let p = self.ident()?; self.eat(">")?; Ty::Ref(p) }
-        else if n == "list" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.num()?; self.eat(">")?; let f = if self.word("drop_oldest") { Full::DropOldest } else { Full::Fail }; Ty::List(Box::new(e), k, f) }
-        else if n == "pool" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.num()?; self.eat(">")?; let c = self.word("checked"); Ty::Pool(Box::new(e), k, c) }
+        else if n == "list" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let f = if self.word("drop_oldest") { Full::DropOldest } else { Full::Fail }; Ty::List(Box::new(e), k, f) }
+        else if n == "pool" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let c = self.word("checked"); Ty::Pool(Box::new(e), k, c) }
         else { Ty::Named(n) };
-        while self.peek() == Some("[") { self.i += 1; let k = self.num()?; self.eat("]")?; t = Ty::Arr(Box::new(t), k); }
+        while self.peek() == Some("[") { self.i += 1; let k = self.count()?; self.eat("]")?; t = Ty::Arr(Box::new(t), k); }
         Ok(t)
     }
 }

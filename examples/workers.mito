@@ -3,7 +3,7 @@ struct Msg { kind: u8; from: u32; body: string<64>; }
 
 struct Worker {
     inbox: list<Msg, 64>;
-    scratch: table<Msg, 20000>;
+    scratch: pool<Msg, 20000>;
 }
 
 global w0: Worker;

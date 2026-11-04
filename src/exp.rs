@@ -68,8 +68,8 @@ pub fn run() {
 pub fn trim_cost() {
     use crate::layout::Program;
     use crate::runtime::Instance;
-    const SRC: &str = "struct I { id: i32; name: string<16>; } global w: table<I, 1000000>;";
-    println!("table<I,1M>, name column = 16 MB = 4096 pages (256 rows each). Every row gets a name, then all but every Nth are cleared.");
+    const SRC: &str = "struct I { id: i32; name: string<16>; } global w: pool<I, 1000000>;";
+    println!("pool<I,1M>, name column = 16 MB = 4096 pages (256 rows each). Every row gets a name, then all but every Nth are cleared.");
     println!("  {:>9} {:>8} | {:>9} {:>9} | {:>8} {:>9} {:>8} | {:>9} {:>14}", "kept rows", "pages", "scan ms", "ranges", "OS calls", "OS ms", "us/call", "freed MB", "recommit us/pg");
     for stride in [1usize, 255, 256, 1000, 100_000, 1_000_000] {
         let mut i = Instance::start(Program::parse(SRC).unwrap(), 1 << 30).unwrap();
@@ -97,7 +97,7 @@ pub fn trim_cost() {
 pub fn scoped_cost() {
     use crate::layout::Program;
     use crate::runtime::Instance;
-    const SRC: &str = "struct I { id: i32; name: string<16>; } global big: table<I, 1000000>; global worker: table<I, 50000>;";
+    const SRC: &str = "struct I { id: i32; name: string<16>; } global big: pool<I, 1000000>; global worker: pool<I, 50000>;";
     let mut i = Instance::start(Program::parse(SRC).unwrap(), 1 << 30).unwrap();
     for r in 0..1_000_000 { i.push("big").unwrap(); i.set(&format!("big[{}].name", r), "keepme").unwrap(); } // 1M live strings in a quiet region
     println!("\nscoped vs whole trim: `big` has 1M live strings and never changes; `worker` bursts to 50,000 rows with names, then clears");

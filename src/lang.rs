@@ -1,4 +1,5 @@
-//! The endpoint language: tokens, syntax tree and parser. Endpoints read request data, touch declared state, and respond.
+//! The endpoint language: tokens, syntax tree and parser.
+//! A file holds `fn` declarations and `endpoint` handlers. Types written in `fn` signatures are documentation for now.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok { Id(String), Int(i64), Flt(f64), Str(String), Sym(String) }
 
@@ -13,9 +14,9 @@ pub enum Expr {
     Bin(String, Box<Expr>, Box<Expr>),
 }
 
-/// `each m in messages where ... order by ... desc limit n`
+/// `each m in room.messages reverse where ... order by ... desc limit n`
 #[derive(Debug, Clone)]
-pub struct Iter { pub var: String, pub coll: String, pub wher: Option<Expr>, pub order: Option<(Expr, bool)>, pub limit: Option<Expr> }
+pub struct Iter { pub var: String, pub coll: Expr, pub reverse: bool, pub wher: Option<Expr>, pub order: Option<(Expr, bool)>, pub limit: Option<Expr> }
 
 #[derive(Debug, Clone)]
 pub enum Json { Obj(Vec<(String, Json)>), Arr(Iter, Box<Json>), E(Expr) }
@@ -23,19 +24,26 @@ pub enum Json { Obj(Vec<(String, Json)>), Arr(Iter, Box<Json>), E(Expr) }
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Let(String, Expr),
-    Alloc { var: String, coll: String, try_: bool },
+    Var(String, Expr),
+    Alloc { var: String, coll: Expr, try_: bool },
     Assign(Expr, Expr),
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     Each(Iter, Vec<Stmt>),
     Free(Expr),
     Fail(u16, String),
     Respond(u16, Json),
+    Return(Option<Expr>),
+    Do(Expr),
 }
 
 #[derive(Debug, Clone)]
 pub enum Seg { Lit(String), Param(String) }
 #[derive(Debug, Clone)]
 pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String }
+#[derive(Debug, Clone)]
+pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt> }
+#[derive(Debug, Clone, Default)]
+pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 
 pub fn lex(src: &str) -> Result<Vec<Tok>, String> {
     let c: Vec<char> = src.chars().collect();
@@ -61,7 +69,7 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, String> {
         }
         else {
             let two: String = c[i..(i + 2).min(c.len())].iter().collect();
-            if ["==", "!=", "<=", ">=", "&&", "||"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
+            if ["==", "!=", "<=", ">=", "&&", "||", "->"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
             else { out.push(Tok::Sym(ch.to_string())); i += 1; }
         }
     }
@@ -71,11 +79,20 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, String> {
 struct P { t: Vec<Tok>, i: usize }
 type R<T> = Result<T, String>;
 
-pub fn parse(src: &str) -> R<Vec<Endpoint>> {
+pub fn parse(src: &str) -> R<Api> {
     let mut p = P { t: lex(src)?, i: 0 };
-    let mut eps = Vec::new();
+    let mut api = Api::default();
     while p.i < p.t.len() {
-        let start = p.i;
+        if p.is_kw("fn") {
+            p.i += 1;
+            let name = p.id()?; p.eat("(")?;
+            let mut params = Vec::new();
+            while !p.sym(")") { params.push(p.id()?); if p.sym(":") { p.skip_type()?; } p.sym(","); }
+            if p.sym("->") { p.skip_type()?; }
+            let body = p.block()?;
+            api.fns.push(Func { name, params, body });
+            continue;
+        }
         p.kw("endpoint")?;
         let method = p.id()?;
         let mut segs = Vec::new();
@@ -84,10 +101,9 @@ pub fn parse(src: &str) -> R<Vec<Endpoint>> {
         }
         let body = p.block()?;
         let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(n) => format!("/{{{}}}", n) }).collect::<String>());
-        let _ = start;
-        eps.push(Endpoint { method, segs, body, text });
+        api.eps.push(Endpoint { method, segs, body, text });
     }
-    Ok(eps)
+    Ok(api)
 }
 
 impl P {
@@ -99,6 +115,13 @@ impl P {
     fn kw(&mut self, k: &str) -> R<()> { if self.is_kw(k) { self.i += 1; Ok(()) } else { Err(format!("expected `{}`, found {}", k, self.here())) } }
     fn id(&mut self) -> R<String> { match self.t.get(self.i) { Some(Tok::Id(x)) => { self.i += 1; Ok(x.clone()) } _ => Err(format!("expected a name, found {}", self.here())) } }
     fn int(&mut self) -> R<i64> { match self.t.get(self.i) { Some(Tok::Int(n)) => { self.i += 1; Ok(*n) } _ => Err(format!("expected a number, found {}", self.here())) } }
+    /// `name`, `name<...>` or `name[N]`: types in signatures are read but not checked yet.
+    fn skip_type(&mut self) -> R<()> {
+        self.id()?;
+        if self.sym("<") { let mut depth = 1; while depth > 0 { if self.sym("<") { depth += 1; } else if self.sym(">") { depth -= 1; } else if self.peek().is_none() { return Err("unfinished type".into()); } else { self.i += 1; } } }
+        while self.sym("[") { self.int()?; self.eat("]")?; }
+        Ok(())
+    }
 
     fn block(&mut self) -> R<Vec<Stmt>> {
         self.eat("{")?;
@@ -108,25 +131,29 @@ impl P {
     }
 
     fn iter(&mut self) -> R<Iter> {
-        let var = self.id()?; self.kw("in")?; let coll = self.id()?;
+        let var = self.id()?; self.kw("in")?; let coll = self.postfix()?;
+        let reverse = if self.is_kw("reverse") { self.i += 1; true } else { false };
         let wher = if self.is_kw("where") { self.i += 1; Some(self.expr()?) } else { None };
         let order = if self.is_kw("order") { self.i += 1; self.kw("by")?; let e = self.expr()?; let desc = if self.is_kw("desc") { self.i += 1; true } else { false }; Some((e, desc)) } else { None };
         let limit = if self.is_kw("limit") { self.i += 1; Some(self.expr()?) } else { None };
-        Ok(Iter { var, coll, wher, order, limit })
+        Ok(Iter { var, coll, reverse, wher, order, limit })
     }
 
     fn stmt(&mut self) -> R<Stmt> {
-        if self.is_kw("let") {
+        if self.is_kw("let") || self.is_kw("var") {
+            let is_var = self.is_kw("var");
             self.i += 1; let n = self.id()?; self.eat("=")?;
-            if self.is_kw("alloc") || self.is_kw("try_alloc") {
-                let try_ = self.is_kw("try_alloc"); self.i += 1; let coll = self.id()?; self.eat(";")?;
+            if !is_var && (self.is_kw("alloc") || self.is_kw("try_alloc")) {
+                let try_ = self.is_kw("try_alloc"); self.i += 1; let coll = self.postfix()?; self.eat(";")?;
                 return Ok(Stmt::Alloc { var: n, coll, try_ });
             }
-            let e = self.expr()?; self.eat(";")?; return Ok(Stmt::Let(n, e));
+            let e = self.expr()?; self.eat(";")?;
+            return Ok(if is_var { Stmt::Var(n, e) } else { Stmt::Let(n, e) });
         }
         if self.is_kw("if") { return self.if_stmt(); }
         if self.is_kw("each") { self.i += 1; let it = self.iter()?; let b = self.block()?; return Ok(Stmt::Each(it, b)); }
         if self.is_kw("free") { self.i += 1; let e = self.expr()?; self.eat(";")?; return Ok(Stmt::Free(e)); }
+        if self.is_kw("return") { self.i += 1; if self.sym(";") { return Ok(Stmt::Return(None)); } let e = self.expr()?; self.eat(";")?; return Ok(Stmt::Return(Some(e))); }
         if self.is_kw("fail") {
             self.i += 1; let code = self.int()? as u16;
             let msg = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err("fail needs a message string".into()) };
@@ -134,6 +161,7 @@ impl P {
         }
         if self.is_kw("respond") { self.i += 1; let code = self.int()? as u16; let j = self.json()?; self.eat(";")?; return Ok(Stmt::Respond(code, j)); }
         let lhs = self.expr()?;
+        if self.sym(";") { return Ok(Stmt::Do(lhs)); }
         self.eat("=")?;
         let rhs = self.expr()?; self.eat(";")?;
         Ok(Stmt::Assign(lhs, rhs))
@@ -193,12 +221,7 @@ impl P {
             Some(Tok::Sym(s)) if s == "(" => { self.i += 1; let e = self.expr()?; self.eat(")")?; Ok(e) }
             Some(Tok::Id(n)) => {
                 self.i += 1;
-                match n.as_str() {
-                    "true" => return Ok(Expr::Bool(true)),
-                    "false" => return Ok(Expr::Bool(false)),
-                    "null" => return Ok(Expr::Null),
-                    _ => {}
-                }
+                match n.as_str() { "true" => return Ok(Expr::Bool(true)), "false" => return Ok(Expr::Bool(false)), "null" => return Ok(Expr::Null), _ => {} }
                 if self.sym("(") {
                     let mut a = Vec::new();
                     while !self.sym(")") { a.push(self.expr()?); self.sym(","); }

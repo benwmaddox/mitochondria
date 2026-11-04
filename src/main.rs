@@ -53,15 +53,15 @@ fn main() {
             "inspect" => { inspect(&inst, base); Ok(()) }
             _ => Err(Error::Bad(format!("unknown command `{}`", cmd))),
         };
-        match r { Ok(()) => {}, Err(Error::Full(m)) => println!("  FULL: {}", m), Err(Error::TooLong(m)) => println!("  TOO LONG: {}", m), Err(Error::Bad(m)) => println!("  error: {}", m) }
+        match r { Ok(()) => {}, Err(Error::Full(m)) => println!("  FULL: {}", m), Err(Error::TooLong(m)) => println!("  TOO LONG: {}", m), Err(Error::NotLive(m)) => println!("  NOT LIVE: {}", m), Err(Error::Stale(m)) => println!("  STALE: {}", m), Err(Error::Bad(m)) => println!("  error: {}", m) }
     }
 }
 
 fn mb(n: usize) -> f64 { n as f64 / MB as f64 }
 
 fn inspect(inst: &Instance, base: os::OsMem) {
-    println!("  {:<22} {:<34} {:>10} {:>11} {:>11}", "path", "type", "offset", "reserved", "live");
-    for (p, t, o, r, l) in inst.inspect() { println!("  {:<22} {:<34} {:>10} {:>11} {:>11}", p, t, o, r, l); }
+    println!("  {:<24} {:<44} {:>10} {:>11} {:>11}", "path", "type", "start", "reserved", "live");
+    for (p, t, o, r, l) in inst.inspect() { println!("  {:<24} {:<44} {:>10} {:>11} {:>11}", p, t, o, r, l); }
     let now = os::os_mem();
     println!("  totals: reserved {:.3} MB, live {:.3} MB, committed {:.3} MB | OS commit {:+.3} MB, resident {:+.3} MB (since start)",
         mb(inst.reserved()), mb(inst.live_total()), mb(inst.committed()), mb(now.private) - mb(base.private), mb(now.resident) - mb(base.resident));

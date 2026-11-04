@@ -11,7 +11,7 @@ fill w0.inbox 5
 # worker 3 finishes its burst and goes idle: its mailbox is empty
 clear w3.scratch
 # trim only worker 3
-trim w3
+trim w3.scratch
 # trim everything (workers 0-2, 4-7 still hold their bursts, so little more to free)
 clear w5.scratch
 trim

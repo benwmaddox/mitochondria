@@ -1,6 +1,7 @@
 //! A running program: one reservation for the whole layout, pages committed only where bytes are live.
-use crate::layout::{up, CKind, Program, Scalar, TCol, Ty};
-use crate::os::{self, PAGE};
+//! Every write goes through `wr`/`put`/`zero`, which can record the old bytes, so a request can be rolled back exactly.
+use crate::layout::{up, CKind, Full, Kind, Program, Scalar, Ty, PAGE};
+use crate::os;
 
 pub struct Instance {
     pub prog: Program,
@@ -8,38 +9,47 @@ pub struct Instance {
     reserved: usize,
     committed: Vec<bool>, // one flag per page
     pub last_trim: TrimStats,
-    gcols: Vec<Option<(Vec<TCol>, u8)>>, // columns of each table/pool global, computed once
+    journal: Journal,
 }
+
+/// Old bytes of every write made while `on`, replayed backwards by `rollback`. Buffers are kept between requests.
+#[derive(Default)]
+struct Journal { on: bool, entries: Vec<(usize, usize, usize)>, bytes: Vec<u8> }
 
 /// What the last `trim` cost: live ranges scanned, OS release calls made, time in each phase.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct TrimStats { pub ranges: usize, pub os_calls: usize, pub scan_ns: u128, pub os_ns: u128 }
 
-/// Where a path points. Strings and lists inside table/pool rows keep their length in a separate column.
-enum Loc { Mem(usize, Ty), Str { len: usize, bytes: usize, cap: usize }, List { len: usize, data: usize, cap: usize, elem: Scalar } }
-
 #[derive(Debug)]
-pub enum Error { Full(String), TooLong(String), Bad(String) }
+pub enum Error { Full(String), TooLong(String), NotLive(String), Stale(String), Bad(String) }
 fn bad<T>(s: impl Into<String>) -> Result<T, Error> { Err(Error::Bad(s.into())) }
 
-type Rows = Vec<(String, String, usize, usize, usize)>;
-type Idx = Vec<(usize, Option<u32>)>; // [k] or [k@generation]
+/// A scalar, string or reference read from or written to state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Val { Int(i64), Float(f64), Bool(bool), Str(String), Ref(Option<(usize, u32)>) }
 
-// Pool header: high-water mark, live count, lowest-free hint, ever-allocated mark.
+/// Where a path points: a plain value, a collection instance, an item (with a partial field path), a column field, or an array element of one.
+#[derive(Clone, Debug)]
+pub enum Loc { Plain(usize, Ty), Coll(usize, usize), Item(usize, usize, String), Field(usize, usize, usize), Elem(usize, usize, usize, usize) }
+
+type Rows = Vec<(String, String, usize, usize, usize)>;
+
+// header fields
+const LEN: usize = 0;
+const HEAD: usize = 1;
 const HW: usize = 0;
-const COUNT: usize = 4;
-const HINT: usize = 8;
-const EVER: usize = 12;
+const COUNT: usize = 1;
+const HINT: usize = 2;
+const EVER: usize = 3;
 
 impl Instance {
-    /// Reserve the whole layout, refusing to start if it is over `budget` bytes.
+    /// Reserve the whole layout, refusing to start if it is over `budget` bytes. Commits the plain values and collection headers.
     pub fn start(prog: Program, budget: usize) -> Result<Instance, String> {
         if prog.total > budget { return Err(format!("over budget: layout needs {} bytes, budget is {}", prog.total, budget)); }
         let reserved = up(prog.total.max(1), PAGE);
-        let mut inst = Instance { base: os::reserve(reserved), reserved, committed: vec![false; reserved / PAGE], prog, last_trim: TrimStats::default(), gcols: Vec::new() };
-        inst.gcols = inst.prog.globals.iter().map(|g| inst.columnar(&g.1).map(|(_, c, k)| (c, k))).collect();
-        let mut r = Vec::new();
-        for (_, ty, off) in &inst.prog.globals { inst.ranges(ty, *off, true, &mut r); }
+        let mut inst = Instance { base: os::reserve(reserved), reserved, committed: vec![false; reserved / PAGE], prog, last_trim: TrimStats::default(), journal: Journal::default() };
+        let mut r = vec![(0, inst.prog.plain_end)];
+        for c in inst.prog.colls.iter().filter(|c| c.parent.is_none()) { r.push((c.hdr, c.hdr + c.hdr_fields() * 4)); } // nested headers commit with their parent item
         for (a, b) in r { inst.ensure(a, b); }
         Ok(inst)
     }
@@ -62,86 +72,452 @@ impl Instance {
     }
 
     fn rd(&self, off: usize, n: usize) -> u64 { let mut v = 0u64; unsafe { std::ptr::copy_nonoverlapping(self.base.add(off), &mut v as *mut u64 as *mut u8, n) }; v }
-    fn wr(&mut self, off: usize, n: usize, v: u64) { self.ensure(off, off + n); unsafe { std::ptr::copy_nonoverlapping(&v as *const u64 as *const u8, self.base.add(off), n) }; }
-    fn zero(&mut self, a: usize, n: usize) { self.ensure(a, a + n); unsafe { std::ptr::write_bytes(self.base.add(a), 0, n) }; }
-    fn cols(&self, row: &Ty, n: usize) -> Vec<TCol> { self.prog.table_cols(row, n).unwrap().0 }
-    /// Columns of a table or pool type: (capacity, columns, kind) where kind is 0 table, 1 pool, 2 checked pool.
-    fn columnar(&self, ty: &Ty) -> Option<(usize, Vec<TCol>, u8)> {
-        match ty {
-            Ty::Table(r, n) => Some((*n, self.prog.table_cols(r, *n).unwrap().0, 0)),
-            Ty::Pool(r, n, c) => Some((*n, self.prog.pool_cols(r, *n, *c).unwrap().0, 1 + *c as u8)),
-            _ => None,
+    fn bytes(&self, off: usize, n: usize) -> &[u8] { unsafe { std::slice::from_raw_parts(self.base.add(off), n) } }
+    fn save(&mut self, a: usize, n: usize) {
+        if !self.journal.on || n == 0 { return; }
+        let old = unsafe { std::slice::from_raw_parts(self.base.add(a), n) };
+        let pos = self.journal.bytes.len();
+        self.journal.bytes.extend_from_slice(old);
+        self.journal.entries.push((a, n, pos));
+    }
+    fn wr(&mut self, off: usize, n: usize, v: u64) { self.ensure(off, off + n); self.save(off, n); unsafe { std::ptr::copy_nonoverlapping(&v as *const u64 as *const u8, self.base.add(off), n) }; }
+    fn put(&mut self, off: usize, b: &[u8]) { self.ensure(off, off + b.len()); self.save(off, b.len()); unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), self.base.add(off), b.len()) }; }
+    fn zero(&mut self, off: usize, n: usize) { if n == 0 { return; } self.ensure(off, off + n); self.save(off, n); unsafe { std::ptr::write_bytes(self.base.add(off), 0, n) }; }
+
+    /// Start recording old bytes; `commit_changes` keeps the writes, `rollback` restores every recorded byte.
+    pub fn begin(&mut self) { self.journal.on = true; self.journal.entries.clear(); self.journal.bytes.clear(); }
+    pub fn commit_changes(&mut self) { self.journal.on = false; self.journal.entries.clear(); self.journal.bytes.clear(); }
+    pub fn rollback(&mut self) {
+        let j = std::mem::take(&mut self.journal);
+        for &(a, n, pos) in j.entries.iter().rev() { unsafe { std::ptr::copy_nonoverlapping(j.bytes[pos..].as_ptr(), self.base.add(a), n) }; }
+        self.journal = j;
+        self.commit_changes();
+    }
+    pub fn journal_bytes(&self) -> usize { self.journal.bytes.len() }
+
+    // ---- collection headers and live bits ----
+    fn haddr(&self, cid: usize, f: usize, inst: usize) -> usize { let c = &self.prog.colls[cid]; c.hdr + 4 * (f * c.mult + inst) }
+    fn hget(&self, cid: usize, f: usize, inst: usize) -> usize { self.rd(self.haddr(cid, f, inst), 4) as usize }
+    fn hset(&mut self, cid: usize, f: usize, inst: usize, v: usize) { let a = self.haddr(cid, f, inst); self.wr(a, 4, v as u64); }
+    fn waddr(&self, cid: usize, inst: usize, w: usize) -> usize { let c = &self.prog.colls[cid]; c.live + 8 * (inst * c.words() + w) }
+    fn bit(&self, cid: usize, inst: usize, s: usize) -> bool { (self.rd(self.waddr(cid, inst, s / 64), 8) >> (s % 64)) & 1 == 1 }
+    fn gaddr(&self, cid: usize, idx: usize) -> usize { self.prog.colls[cid].gen + 4 * idx }
+
+    pub fn cap(&self, cid: usize) -> usize { self.prog.colls[cid].cap }
+    pub fn is_list(&self, cid: usize) -> bool { self.prog.colls[cid].is_list() }
+    pub fn count(&self, cid: usize, inst: usize) -> usize { if self.is_list(cid) { self.hget(cid, LEN, inst) } else { self.hget(cid, COUNT, inst) } }
+    pub fn gen(&self, cid: usize, idx: usize) -> Option<u32> { if self.prog.colls[cid].checked() { Some(self.rd(self.gaddr(cid, idx), 4) as u32) } else { None } }
+
+    pub fn item_live(&self, cid: usize, idx: usize) -> bool {
+        let cap = self.cap(cid);
+        let (inst, s) = (idx / cap, idx % cap);
+        if inst >= self.prog.colls[cid].mult { return false; }
+        if self.is_list(cid) { (s + cap - self.hget(cid, HEAD, inst)) % cap < self.hget(cid, LEN, inst) }
+        else { s < self.hget(cid, HW, inst) && self.bit(cid, inst, s) }
+    }
+    /// Live items of one instance as item indexes: lists oldest to newest, pools in slot order.
+    pub fn items(&self, cid: usize, inst: usize) -> Vec<usize> {
+        let cap = self.cap(cid);
+        if self.is_list(cid) {
+            let (len, head) = (self.hget(cid, LEN, inst), self.hget(cid, HEAD, inst));
+            (0..len).map(|p| inst * cap + (head + p) % cap).collect()
+        } else {
+            (0..self.hget(cid, HW, inst)).filter(|&s| self.bit(cid, inst, s)).map(|s| inst * cap + s).collect()
         }
     }
-    /// Is slot `k` live? Only valid for k below the pool's high-water mark.
-    fn bit(&self, live_off: usize, k: usize) -> bool { (self.rd(live_off + (k / 64) * 8, 8) >> (k % 64)) & 1 == 1 }
+    /// Item at position `pos` of a list instance (0 = oldest).
+    pub fn list_at(&self, cid: usize, inst: usize, pos: usize) -> Option<usize> {
+        let cap = self.cap(cid);
+        if pos < self.hget(cid, LEN, inst) { Some(inst * cap + (self.hget(cid, HEAD, inst) + pos) % cap) } else { None }
+    }
 
-    /// Collect the byte ranges in use for `ty` placed at `off`. `fresh` treats every list/string as empty.
-    fn ranges(&self, ty: &Ty, off: usize, fresh: bool, out: &mut Vec<(usize, usize)>) {
-        let p = &self.prog;
-        if p.all_live(ty) { let (s, _) = p.size_align(ty); out.push((off, off + s)); return; }
-        match ty {
-            Ty::Str(_) => { let len = if fresh { 0 } else { self.rd(off, 4) as usize }; out.push((off, off + 4 + len)); }
-            Ty::List(e, _) => {
-                let len = if fresh { 0 } else { self.rd(off, 4) as usize };
-                let (es, _) = p.size_align(e); let h = p.list_header(e);
-                out.push((off, off + 4));
-                for i in 0..len { self.ranges(e, off + h + i * es, fresh, out); }
+    /// Append to a list (dropping the oldest if declared) or take the lowest free slot of a pool. Returns the new item.
+    pub fn push_item(&mut self, cid: usize, inst: usize) -> Result<usize, Error> {
+        let (cap, kind, name) = { let c = &self.prog.colls[cid]; (c.cap, c.kind, c.name.clone()) };
+        match kind {
+            Kind::List(policy) => {
+                let (len, head) = (self.hget(cid, LEN, inst), self.hget(cid, HEAD, inst));
+                if len < cap {
+                    let idx = inst * cap + (head + len) % cap;
+                    self.zero_item(cid, idx); self.hset(cid, LEN, inst, len + 1); Ok(idx)
+                } else if policy == Full::DropOldest {
+                    let idx = inst * cap + head;
+                    self.zero_item(cid, idx); self.hset(cid, HEAD, inst, (head + 1) % cap); Ok(idx)
+                } else { Err(Error::Full(format!("{} is full ({} of {})", name, len, cap))) }
             }
-            Ty::Table(..) | Ty::Pool(..) => self.columnar_ranges(ty, off, fresh, None, out),
-            Ty::Arr(e, n) => { let (es, _) = p.size_align(e); for i in 0..*n { self.ranges(e, off + i * es, fresh, out); } }
-            Ty::Struct(i) => for f in &p.structs[*i].fields { self.ranges(&f.1, off + f.2, fresh, out); },
-            _ => {}
-        }
-    }
-
-    /// Ranges in use for a table or pool; `only` restricts to one column path (for `inspect`).
-    fn columnar_ranges(&self, ty: &Ty, off: usize, fresh: bool, only: Option<&str>, out: &mut Vec<(usize, usize)>) {
-        let Some((_, cols, kind)) = self.columnar(ty) else { return };
-        let pool = kind > 0;
-        let (hw, ever) = if fresh { (0, 0) } else { (self.rd(off + HW, 4) as usize, if pool { self.rd(off + EVER, 4) as usize } else { 0 }) };
-        if only.is_none() { out.push((off, off + if pool { 16 } else { 4 })); }
-        let live_off = off + cols[0].off;
-        for (ci, c) in cols.iter().enumerate() {
-            if only.map_or(false, |o| o != c.path) { continue; }
-            let a = off + c.off;
-            let dead = |r: usize| pool && !self.bit(live_off, r);
-            match c.kind {
-                CKind::Live => out.push((a, a + hw.div_ceil(64) * 8)),
-                CKind::Gen => out.push((a, a + ever * 4)),
-                CKind::Scalar(s) => out.push((a, a + hw * s.size())),
-                CKind::Arr(s, k) => out.push((a, a + hw * k * s.size())),
-                CKind::StrLen | CKind::ListLen => out.push((a, a + hw * 4)),
-                CKind::StrBytes(m) => { let lc = off + cols[ci - 1].off; for r in 0..hw { if dead(r) { continue; } let l = self.rd(lc + 4 * r, 4) as usize; if l > 0 { out.push((a + r * m, a + r * m + l)); } } }
-                CKind::ListData(s, m) => { let lc = off + cols[ci - 1].off; for r in 0..hw { if dead(r) { continue; } let l = self.rd(lc + 4 * r, 4) as usize; if l > 0 { out.push((a + r * m * s.size(), a + (r * m + l) * s.size())); } } }
+            Kind::Pool(checked) => {
+                let (hw, count, hint) = (self.hget(cid, HW, inst), self.hget(cid, COUNT, inst), self.hget(cid, HINT, inst));
+                let mut slot = None;
+                let mut w = hint / 64;
+                while w * 64 < hw {
+                    let mut free = !self.rd(self.waddr(cid, inst, w), 8);
+                    if (w + 1) * 64 > hw { free &= (1u64 << (hw - w * 64)) - 1; }
+                    if w == hint / 64 { free &= !0u64 << (hint % 64); }
+                    if free != 0 { slot = Some(w * 64 + free.trailing_zeros() as usize); break; }
+                    w += 1;
+                }
+                let s = match slot { Some(s) => s, None => { if hw == cap { return Err(Error::Full(format!("{} is full ({} of {})", name, count, cap))); } hw } };
+                let wa = self.waddr(cid, inst, s / 64);
+                let word = if (s / 64) * 64 < hw { self.rd(wa, 8) } else { 0 }; // words wholly above hw may be uncommitted; their bits are zero
+                self.wr(wa, 8, word | (1u64 << (s % 64)));
+                let idx = inst * cap + s;
+                self.zero_item(cid, idx);
+                if checked { let ga = self.gaddr(cid, idx); self.ensure(ga, ga + 4); }
+                let nhw = hw.max(s + 1);
+                let ever = self.hget(cid, EVER, inst).max(nhw);
+                self.hset(cid, HW, inst, nhw); self.hset(cid, COUNT, inst, count + 1); self.hset(cid, HINT, inst, s + 1); self.hset(cid, EVER, inst, ever);
+                Ok(idx)
             }
         }
     }
 
-    pub fn live_of(&self, ty: &Ty, off: usize) -> usize { let mut r = Vec::new(); self.ranges(ty, off, false, &mut r); r.iter().map(|(a, b)| b - a).sum() }
-    pub fn live_total(&self) -> usize { self.prog.globals.iter().map(|(_, t, o)| self.live_of(t, *o)).sum() }
+    /// Zero an item's fixed columns and empty its nested collections. String bytes are left; their length is now 0.
+    fn zero_item(&mut self, cid: usize, idx: usize) {
+        let cols: Vec<(usize, usize)> = self.prog.colls[cid].cols.iter().filter(|c| !matches!(c.kind, CKind::StrBytes(_))).map(|c| (c.off + idx * c.kind.size(), c.kind.size())).collect();
+        for (a, n) in cols { self.zero(a, n); }
+        self.reset_children(cid, idx);
+    }
+    fn reset_children(&mut self, cid: usize, idx: usize) {
+        let kids: Vec<usize> = self.prog.colls[cid].children.iter().map(|k| k.1).collect();
+        for k in kids { self.reset_instance(k, idx); }
+    }
+    /// Empty one instance of a collection, including what its items hold.
+    fn reset_instance(&mut self, cid: usize, inst: usize) {
+        for f in 0..self.prog.colls[cid].hdr_fields() { let h = self.haddr(cid, f, inst); self.ensure(h, h + 4); } // a new parent's header may not be committed yet
+        if !self.prog.colls[cid].children.is_empty() { for it in self.items(cid, inst) { self.reset_children(cid, it); } }
+        if self.is_list(cid) { self.hset(cid, LEN, inst, 0); self.hset(cid, HEAD, inst, 0); return; }
+        let hw = self.hget(cid, HW, inst);
+        if self.prog.colls[cid].checked() { for it in self.items(cid, inst) { let ga = self.gaddr(cid, it); let g = self.rd(ga, 4); self.wr(ga, 4, g + 1); } }
+        let wa = self.waddr(cid, inst, 0);
+        self.zero(wa, hw.div_ceil(64) * 8);
+        for f in [HW, COUNT, HINT] { self.hset(cid, f, inst, 0); }
+    }
+
+    /// Remove the newest item of a list.
+    pub fn pop_item(&mut self, cid: usize, inst: usize) -> Result<(), Error> {
+        let len = self.hget(cid, LEN, inst);
+        if len == 0 { return bad("list is already empty"); }
+        let idx = self.list_at(cid, inst, len - 1).unwrap();
+        self.reset_children(cid, idx);
+        self.hset(cid, LEN, inst, len - 1); Ok(())
+    }
+    pub fn clear_items(&mut self, cid: usize, inst: usize) { self.reset_instance(cid, inst); }
+
+    /// Free a pool slot. Other slots do not move; the high-water mark falls if this was the top slot.
+    pub fn free_item(&mut self, cid: usize, idx: usize) -> Result<(), Error> {
+        if self.is_list(cid) { return bad("lists remove only their newest item (pop) or drop the oldest when full"); }
+        if !self.item_live(cid, idx) { return Err(Error::NotLive(format!("slot {} is not live", idx % self.cap(cid)))); }
+        let cap = self.cap(cid);
+        let (inst, s) = (idx / cap, idx % cap);
+        self.reset_children(cid, idx);
+        let wa = self.waddr(cid, inst, s / 64);
+        let word = self.rd(wa, 8);
+        self.wr(wa, 8, word & !(1u64 << (s % 64)));
+        if self.prog.colls[cid].checked() { let ga = self.gaddr(cid, idx); let g = self.rd(ga, 4); self.wr(ga, 4, g + 1); }
+        let (count, hint, hw) = (self.hget(cid, COUNT, inst), self.hget(cid, HINT, inst), self.hget(cid, HW, inst));
+        self.hset(cid, COUNT, inst, count - 1); self.hset(cid, HINT, inst, hint.min(s));
+        if s + 1 == hw {
+            let mut h = s;
+            while h > 0 {
+                let w = (h - 1) / 64;
+                let mut word = self.rd(self.waddr(cid, inst, w), 8);
+                let valid = h - w * 64;
+                if valid < 64 { word &= (1u64 << valid) - 1; }
+                if word == 0 { h = w * 64; } else { h = w * 64 + (64 - word.leading_zeros() as usize); break; }
+            }
+            self.hset(cid, HW, inst, h);
+        }
+        Ok(())
+    }
+
+    // ---- fields ----
+    pub fn col(&self, cid: usize, path: &str) -> Option<usize> { self.prog.colls[cid].cols.iter().position(|c| c.path == path && !matches!(c.kind, CKind::StrBytes(_))) }
+    pub fn child(&self, cid: usize, path: &str) -> Option<usize> { self.prog.colls[cid].children.iter().find(|k| k.0 == path).map(|k| k.1) }
+    pub fn col_kind(&self, cid: usize, ci: usize) -> &CKind { &self.prog.colls[cid].cols[ci].kind }
+    fn caddr(&self, cid: usize, idx: usize, ci: usize) -> usize { let c = &self.prog.colls[cid].cols[ci]; c.off + idx * c.kind.size() }
+
+    fn scalar_val(&self, a: usize, s: Scalar) -> Val {
+        match s {
+            Scalar::F32 => Val::Float(f32::from_bits(self.rd(a, 4) as u32) as f64),
+            Scalar::F64 => Val::Float(f64::from_bits(self.rd(a, 8))),
+            Scalar::Bool => Val::Bool(self.rd(a, 1) != 0),
+            s if s.signed() => { let sh = 64 - 8 * s.size() as u32; Val::Int(((self.rd(a, s.size()) << sh) as i64) >> sh) }
+            s => Val::Int(self.rd(a, s.size()) as i64),
+        }
+    }
+    fn store_scalar(&mut self, a: usize, s: Scalar, v: &Val) -> Result<(), Error> {
+        let bits = match (s, v) {
+            (Scalar::F32, Val::Float(f)) => (*f as f32).to_bits() as u64,
+            (Scalar::F32, Val::Int(i)) => (*i as f32).to_bits() as u64,
+            (Scalar::F64, Val::Float(f)) => f.to_bits(),
+            (Scalar::F64, Val::Int(i)) => (*i as f64).to_bits(),
+            (Scalar::Bool, Val::Bool(b)) => *b as u64,
+            (Scalar::F32 | Scalar::F64 | Scalar::Bool, _) => return bad("wrong type for this field"),
+            (_, Val::Int(i)) => *i as u64,
+            (_, Val::Bool(b)) => *b as u64,
+            _ => return bad("wrong type for this field"),
+        };
+        self.wr(a, s.size(), bits); Ok(())
+    }
+    fn store_str(&mut self, len_at: usize, bytes_at: usize, cap: usize, v: &Val) -> Result<(), Error> {
+        let Val::Str(s) = v else { return bad("expected a string") };
+        if s.len() > cap { return Err(Error::TooLong(format!("string of {} bytes does not fit string<{}>", s.len(), cap))); }
+        self.put(bytes_at, s.as_bytes()); self.wr(len_at, 4, s.len() as u64); Ok(())
+    }
+    fn read_ref(&self, a: usize) -> Val { let slot1 = self.rd(a, 4) as usize; Val::Ref(if slot1 == 0 { None } else { Some((slot1 - 1, self.rd(a + 4, 4) as u32)) }) }
+    fn store_ref(&mut self, a: usize, v: &Val) -> Result<(), Error> {
+        match v { Val::Ref(None) => { self.wr(a, 8, 0); Ok(()) } Val::Ref(Some((s, g))) => { self.wr(a, 4, *s as u64 + 1); self.wr(a + 4, 4, *g as u64); Ok(()) } _ => bad("expected a reference") }
+    }
+
+    pub fn field_get(&self, cid: usize, idx: usize, ci: usize) -> Result<Val, Error> {
+        let a = self.caddr(cid, idx, ci);
+        Ok(match self.col_kind(cid, ci).clone() {
+            CKind::Scalar(s) => self.scalar_val(a, s),
+            CKind::StrLen => { let CKind::StrBytes(_) = self.col_kind(cid, ci + 1) else { unreachable!() }; let b = self.caddr(cid, idx, ci + 1); Val::Str(String::from_utf8_lossy(self.bytes(b, self.rd(a, 4) as usize)).into_owned()) }
+            CKind::Ref(_) => self.read_ref(a),
+            _ => return bad("an array field needs an index"),
+        })
+    }
+    pub fn field_set(&mut self, cid: usize, idx: usize, ci: usize, v: &Val) -> Result<(), Error> {
+        let a = self.caddr(cid, idx, ci);
+        match self.col_kind(cid, ci).clone() {
+            CKind::Scalar(s) => self.store_scalar(a, s, v),
+            CKind::StrLen => { let CKind::StrBytes(m) = *self.col_kind(cid, ci + 1) else { unreachable!() }; let b = self.caddr(cid, idx, ci + 1); self.store_str(a, b, m, v) }
+            CKind::Ref(_) => self.store_ref(a, v),
+            _ => bad("an array field needs an index"),
+        }
+    }
+    fn elem_addr(&self, cid: usize, idx: usize, ci: usize, j: usize) -> (usize, Scalar) { let CKind::Arr(s, _) = *self.col_kind(cid, ci) else { unreachable!() }; (self.caddr(cid, idx, ci) + j * s.size(), s) }
+
+    pub fn plain_get(&self, off: usize, t: &Ty) -> Result<Val, Error> {
+        Ok(match t {
+            Ty::Scalar(s) => self.scalar_val(off, *s),
+            Ty::Str(_) => Val::Str(String::from_utf8_lossy(self.bytes(off + 4, self.rd(off, 4) as usize)).into_owned()),
+            Ty::Ref(_) => self.read_ref(off),
+            _ => return bad("not a scalar, string or reference"),
+        })
+    }
+    pub fn plain_set(&mut self, off: usize, t: &Ty, v: &Val) -> Result<(), Error> {
+        match t { Ty::Scalar(s) => self.store_scalar(off, *s, v), Ty::Str(n) => self.store_str(off, off + 4, *n, v), Ty::Ref(_) => self.store_ref(off, v), _ => bad("not a scalar, string or reference") }
+    }
+
+    /// Follow a reference into its pool. A freed slot is `NotLive`; a freed and reused slot of a checked pool is `Stale`.
+    pub fn deref(&self, target: usize, r: (usize, u32)) -> Result<usize, Error> {
+        let (slot, g) = r;
+        let c = &self.prog.colls[target];
+        if slot >= c.cap { return Err(Error::NotLive(format!("{} slot {} does not exist", c.name, slot))); }
+        let reused = c.checked() && slot < self.hget(target, EVER, 0) && self.rd(self.gaddr(target, slot), 4) as u32 != g;
+        if reused { return Err(Error::Stale(format!("{} slot {} was freed and reused", c.name, slot))); }
+        if !self.item_live(target, slot) { return Err(Error::NotLive(format!("{} slot {} is not live", c.name, slot))); }
+        Ok(slot)
+    }
+
+    // ---- paths: rooms[2].messages[5].body, units[7@2].hp ----
+    pub fn resolve(&self, path: &str) -> Result<Loc, Error> {
+        let mut loc: Option<Loc> = None;
+        for part in path.split('.') {
+            let (name, mut rest) = match part.find('[') { Some(i) => (&part[..i], &part[i..]), None => (part, "") };
+            loc = Some(match loc {
+                None => {
+                    let g = self.prog.global(name).ok_or_else(|| Error::Bad(format!("no global `{}`", name)))?;
+                    let g = &self.prog.globals[g];
+                    match g.coll { Some(c) => Loc::Coll(c, 0), None => Loc::Plain(g.off, g.ty.clone()) }
+                }
+                Some(l) => self.step_field(l, name)?,
+            });
+            while let Some(r) = rest.strip_prefix('[') {
+                let e = r.find(']').ok_or_else(|| Error::Bad("missing `]`".into()))?;
+                let (k, g) = match r[..e].split_once('@') { Some((k, g)) => (k, Some(g)), None => (&r[..e], None) };
+                let k: usize = k.parse().map_err(|_| Error::Bad("bad index".into()))?;
+                let g: Option<u32> = match g { Some(g) => Some(g.parse().map_err(|_| Error::Bad("bad generation".into()))?), None => None };
+                loc = Some(self.step_index(loc.unwrap(), k, g)?);
+                rest = &r[e + 1..];
+            }
+        }
+        loc.ok_or_else(|| Error::Bad("empty path".into()))
+    }
+    pub fn step_field(&self, l: Loc, name: &str) -> Result<Loc, Error> {
+        match l {
+            Loc::Plain(off, Ty::Struct(s)) => {
+                let sd = &self.prog.structs[s];
+                let k = sd.fields.iter().position(|f| f.0 == name).ok_or_else(|| Error::Bad(format!("no field `{}`", name)))?;
+                let t = sd.fields[k].1.clone();
+                if t.is_coll() { Ok(Loc::Coll(self.prog.plain_coll(off, s, name).unwrap(), 0)) } else { Ok(Loc::Plain(off + sd.offs[k], t)) }
+            }
+            Loc::Item(cid, idx, prefix) => {
+                let p = if prefix.is_empty() { name.to_string() } else { format!("{}.{}", prefix, name) };
+                if let Some(ci) = self.col(cid, &p) { return Ok(Loc::Field(cid, idx, ci)); }
+                if let Some(k) = self.child(cid, &p) { return Ok(Loc::Coll(k, idx)); }
+                let deeper = format!("{}.", p);
+                let c = &self.prog.colls[cid];
+                if c.cols.iter().any(|x| x.path.starts_with(&deeper)) || c.children.iter().any(|x| x.0.starts_with(&deeper)) { return Ok(Loc::Item(cid, idx, p)); }
+                bad(format!("no field `{}`", p))
+            }
+            _ => bad(format!("`.{}` needs a struct or an item", name)),
+        }
+    }
+    pub fn step_index(&self, l: Loc, k: usize, g: Option<u32>) -> Result<Loc, Error> {
+        if g.is_some() && !matches!(&l, Loc::Coll(c, _) if self.prog.colls[*c].checked()) { return bad("`[k@generation]` needs a checked pool"); }
+        match l {
+            Loc::Coll(cid, inst) => {
+                let cap = self.cap(cid);
+                if self.is_list(cid) { return self.list_at(cid, inst, k).map(|i| Loc::Item(cid, i, String::new())).ok_or_else(|| Error::NotLive(format!("position {} is past the end", k))); }
+                let idx = inst * cap + k;
+                if k < cap { if let Some(g) = g { let cur = self.gen(cid, idx).unwrap(); if k < self.hget(cid, EVER, inst) && cur != g { return Err(Error::Stale(format!("slot {} is now generation {}, not {}", k, cur, g))); } } }
+                if k >= cap || !self.item_live(cid, idx) { return Err(Error::NotLive(format!("slot {} is not live", k))); }
+                Ok(Loc::Item(cid, idx, String::new()))
+            }
+            Loc::Plain(off, Ty::Arr(e, n)) => { if k >= n { return bad(format!("index {} out of range (fixed size {})", k, n)); } let s = self.prog.plain_size(&e).0; Ok(Loc::Plain(off + k * s, *e)) }
+            Loc::Field(cid, idx, ci) => match *self.col_kind(cid, ci) { CKind::Arr(_, n) if k < n => Ok(Loc::Elem(cid, idx, ci, k)), CKind::Arr(_, n) => bad(format!("index {} out of range (fixed size {})", k, n)), _ => bad("not an array") },
+            _ => bad("cannot index here"),
+        }
+    }
+    pub fn loc_get(&self, l: &Loc) -> Result<Val, Error> {
+        match l {
+            Loc::Plain(off, t) => self.plain_get(*off, t),
+            Loc::Field(cid, idx, ci) => self.field_get(*cid, *idx, *ci),
+            Loc::Elem(cid, idx, ci, j) => { let (a, s) = self.elem_addr(*cid, *idx, *ci, *j); Ok(self.scalar_val(a, s)) }
+            _ => bad("not a value"),
+        }
+    }
+    pub fn loc_set(&mut self, l: &Loc, v: &Val) -> Result<(), Error> {
+        match l {
+            Loc::Plain(off, t) => self.plain_set(*off, &t.clone(), v),
+            Loc::Field(cid, idx, ci) => self.field_set(*cid, *idx, *ci, v),
+            Loc::Elem(cid, idx, ci, j) => { let (a, s) = self.elem_addr(*cid, *idx, *ci, *j); self.store_scalar(a, s, v) }
+            _ => bad("not a value"),
+        }
+    }
+
+    // ---- script commands by path ----
+    fn coll_at(&self, path: &str) -> Result<(usize, usize), Error> { match self.resolve(path)? { Loc::Coll(c, i) => Ok((c, i)), _ => bad(format!("`{}` is not a list or pool", path)) } }
+    /// Returns (position for lists / slot for pools, generation for checked pools).
+    pub fn push(&mut self, path: &str) -> Result<(usize, Option<u32>), Error> {
+        let (cid, inst) = self.coll_at(path)?;
+        let idx = self.push_item(cid, inst)?;
+        Ok(if self.is_list(cid) { (self.count(cid, inst) - 1, None) } else { (idx % self.cap(cid), self.gen(cid, idx)) })
+    }
+    pub fn pop(&mut self, path: &str) -> Result<(), Error> { let (c, i) = self.coll_at(path)?; if !self.is_list(c) { return bad("pop is for lists; free pool slots with remove"); } self.pop_item(c, i) }
+    pub fn clear(&mut self, path: &str) -> Result<(), Error> { let (c, i) = self.coll_at(path)?; self.clear_items(c, i); Ok(()) }
+    pub fn remove(&mut self, path: &str, spec: &str) -> Result<(), Error> {
+        let (k, g) = match spec.split_once('@') { Some((k, g)) => (k, g.parse::<u32>().ok()), None => (spec, None) };
+        let k: usize = k.trim().parse().map_err(|_| Error::Bad("expected a slot number".into()))?;
+        let (cid, inst) = self.coll_at(path)?;
+        match self.step_index(Loc::Coll(cid, inst), k, g)? { Loc::Item(c, idx, _) => self.free_item(c, idx), _ => unreachable!() }
+    }
+    pub fn set(&mut self, path: &str, val: &str) -> Result<(), Error> {
+        let l = self.resolve(path)?;
+        let v = match self.loc_get(&l)? {
+            Val::Str(_) => Val::Str(val.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(val).to_string()),
+            Val::Float(_) => Val::Float(val.parse().map_err(|_| Error::Bad("expected a number".into()))?),
+            Val::Bool(_) => Val::Bool(matches!(val, "true" | "1")),
+            Val::Int(_) => Val::Int(val.parse().map_err(|_| Error::Bad("expected an integer".into()))?),
+            Val::Ref(_) => return bad("set references from the endpoint language"),
+        };
+        self.loc_set(&l, &v)
+    }
+    pub fn get(&self, path: &str) -> Result<String, Error> {
+        match self.resolve(path)? {
+            Loc::Coll(c, i) => Ok(if self.is_list(c) { format!("len {}", self.count(c, i)) } else { format!("live {}, high-water {}", self.count(c, i), self.hget(c, HW, i)) }),
+            l => Ok(match self.loc_get(&l)? { Val::Str(s) => format!("{:?}", s), Val::Int(i) => i.to_string(), Val::Float(f) => f.to_string(), Val::Bool(b) => b.to_string(), Val::Ref(r) => format!("{:?}", r) }),
+        }
+    }
+
+    /// Sum a scalar field over every live item with a native loop. Returns (sum, live items, ns per slot scanned).
+    pub fn sum(&self, path: &str, field: &str, reps: usize) -> Result<(f64, usize, f64), Error> {
+        let (cid, inst) = self.coll_at(path)?;
+        let ci = self.col(cid, field).ok_or_else(|| Error::Bad(format!("no field `{}`", field)))?;
+        let CKind::Scalar(sc) = *self.col_kind(cid, ci) else { return bad("sum needs a scalar field") };
+        if !matches!(sc, Scalar::F32 | Scalar::I32 | Scalar::U32) { return bad("sum supports f32, i32, u32"); }
+        let cap = self.cap(cid);
+        let base = unsafe { self.base.add(self.prog.colls[cid].cols[ci].off + inst * cap * 4) };
+        let read = |r: usize| unsafe { let q = base.add(r * 4); match sc { Scalar::F32 => (q as *const f32).read_unaligned() as f64, Scalar::I32 => (q as *const i32).read_unaligned() as f64, _ => (q as *const u32).read_unaligned() as f64 } };
+        let list = self.is_list(cid);
+        let (len, head, hw) = if list { (self.hget(cid, LEN, inst), self.hget(cid, HEAD, inst), 0) } else { (0, 0, self.hget(cid, HW, inst)) };
+        let t = std::time::Instant::now();
+        let mut total = 0.0;
+        for _ in 0..reps {
+            let mut acc = 0.0f64;
+            if list { let end = (head + len).min(cap); for r in head..end { acc += read(r); } for r in 0..(head + len).saturating_sub(cap) { acc += read(r); } }
+            else { for r in 0..hw { if self.bit(cid, inst, r) { acc += read(r); } } }
+            total = std::hint::black_box(acc);
+        }
+        let scanned = if list { len } else { hw };
+        Ok((total, self.count(cid, inst), t.elapsed().as_nanos() as f64 / (reps * scanned.max(1)) as f64))
+    }
+
+    // ---- live ranges and trimming ----
+    /// Byte ranges in use by one collection (all instances, not its nested collections).
+    fn coll_ranges(&self, cid: usize, out: &mut Vec<(usize, usize)>) {
+        let c = &self.prog.colls[cid];
+        let cap = c.cap;
+        let mut runs: Vec<(usize, usize)> = Vec::with_capacity(2);
+        for inst in self.instances(cid) {
+            for f in 0..c.hdr_fields() { let a = self.haddr(cid, f, inst); out.push((a, a + 4)); }
+            runs.clear();
+            let pool = !c.is_list();
+            if pool {
+                let hw = self.hget(cid, HW, inst);
+                if c.checked() { let ever = self.hget(cid, EVER, inst); out.push((c.gen + 4 * inst * cap, c.gen + 4 * (inst * cap + ever))); }
+                if hw == 0 { continue; }
+                out.push((self.waddr(cid, inst, 0), self.waddr(cid, inst, 0) + hw.div_ceil(64) * 8));
+                runs.push((0, hw));
+            } else {
+                let (len, head) = (self.hget(cid, LEN, inst), self.hget(cid, HEAD, inst));
+                if len == 0 { continue; }
+                runs.push((head, (head + len).min(cap)));
+                if head + len > cap { runs.push((0, head + len - cap)); }
+            }
+            for (ci, col) in c.cols.iter().enumerate() {
+                let sz = col.kind.size();
+                if let CKind::StrBytes(m) = col.kind {
+                    let lc = &c.cols[ci - 1];
+                    for &(a, b) in &runs { for s in a..b {
+                        if pool && !self.bit(cid, inst, s) { continue; }
+                        let idx = inst * cap + s;
+                        let l = self.rd(lc.off + 4 * idx, 4) as usize;
+                        if l > 0 { out.push((col.off + idx * m, col.off + idx * m + l)); }
+                    } }
+                } else {
+                    for &(a, b) in &runs { out.push((col.off + (inst * cap + a) * sz, col.off + (inst * cap + b) * sz)); }
+                }
+            }
+        }
+    }
+    /// Instances of a collection that exist: one for a top-level collection, one per live item of the parent otherwise.
+    pub fn instances(&self, cid: usize) -> Vec<usize> {
+        match self.prog.colls[cid].parent { None => vec![0], Some(p) => self.instances(p).into_iter().flat_map(|i| self.items(p, i)).collect() }
+    }
+    fn descendants(&self, cid: usize, out: &mut Vec<usize>) { out.push(cid); for k in &self.prog.colls[cid].children { self.descendants(k.1, out); } }
+    fn all_ranges(&self) -> Vec<(usize, usize)> {
+        let mut r = vec![(0, self.prog.plain_end)];
+        for cid in 0..self.prog.colls.len() { self.coll_ranges(cid, &mut r); }
+        r
+    }
+    pub fn live_total(&self) -> usize { self.all_ranges().iter().map(|(a, b)| b - a).sum() }
+    pub fn coll_live(&self, cid: usize) -> usize { let mut r = Vec::new(); self.coll_ranges(cid, &mut r); r.iter().map(|(a, b)| b - a).sum() }
+    /// Committed bytes inside one collection's span (with its nested collections).
+    pub fn coll_committed(&self, cid: usize) -> usize { let c = &self.prog.colls[cid]; self.committed[c.start / PAGE..up(c.end, PAGE) / PAGE].iter().filter(|x| **x).count() * PAGE }
 
     /// Return pages that hold no live byte to the OS. Returns bytes released.
     pub fn trim(&mut self) -> usize {
         let t0 = std::time::Instant::now();
-        let mut r = Vec::new();
-        for (_, ty, off) in &self.prog.globals { self.ranges(ty, *off, false, &mut r); }
+        let r = self.all_ranges();
         let pages = self.committed.len();
         self.release_dead(r, 0, pages, t0)
     }
-
-    /// Trim only the pages wholly inside `path` (a global or a field of one). Cost follows the size of that part,
-    /// not the whole program. Pages shared with neighbours are left alone.
-    pub fn trim_path(&mut self, path: &str) -> Result<usize, Error> {
+    /// Trim one collection and its nested collections; cost follows their size, not the program's.
+    pub fn trim_coll(&mut self, cid: usize) -> usize {
         let t0 = std::time::Instant::now();
-        let Loc::Mem(off, ty) = self.resolve(path)? else { return bad("trim a list, table, pool, struct or array") };
-        let size = self.prog.size_align(&ty).0;
+        let mut ids = Vec::new(); self.descendants(cid, &mut ids);
         let mut r = Vec::new();
-        self.ranges(&ty, off, false, &mut r);
-        Ok(self.release_dead(r, up(off, PAGE) / PAGE, (off + size) / PAGE, t0))
+        for k in ids { self.coll_ranges(k, &mut r); }
+        let c = &self.prog.colls[cid];
+        let (lo, hi) = (c.start / PAGE, up(c.end, PAGE) / PAGE);
+        self.release_dead(r, lo, hi, t0)
     }
+    pub fn trim_path(&mut self, path: &str) -> Result<usize, Error> { let (cid, _) = self.coll_at(path)?; Ok(self.trim_coll(cid)) }
 
-    /// Decommit committed pages in `lo..hi` that no live range touches.
     fn release_dead(&mut self, ranges: Vec<(usize, usize)>, lo: usize, hi: usize, t0: std::time::Instant) -> usize {
         let mut live = vec![false; self.committed.len()];
         let mut st = TrimStats { ranges: ranges.len(), ..Default::default() };
@@ -164,484 +540,17 @@ impl Instance {
         freed
     }
 
-    // ---- paths: world.items[3].name, world.units[7@2].hp ----
-    fn resolve(&self, path: &str) -> Result<Loc, Error> {
-        let mut segs: Vec<(String, Idx)> = Vec::new();
-        for part in path.split('.') {
-            let (name, mut rest) = match part.find('[') { Some(i) => (&part[..i], &part[i..]), None => (part, "") };
-            let mut idx: Idx = Vec::new();
-            while let Some(r) = rest.strip_prefix('[') {
-                let e = r.find(']').ok_or_else(|| Error::Bad("missing `]`".into()))?;
-                let (k, g) = match r[..e].split_once('@') { Some((k, g)) => (k, Some(g)), None => (&r[..e], None) };
-                let bad_idx = || Error::Bad("bad index".into());
-                idx.push((k.parse().map_err(|_| bad_idx())?, match g { Some(g) => Some(g.parse().map_err(|_| bad_idx())?), None => None }));
-                rest = &r[e + 1..];
-            }
-            segs.push((name.to_string(), idx));
-        }
-        let (_, gty, goff) = self.prog.globals.iter().find(|g| g.0 == segs[0].0).ok_or_else(|| Error::Bad(format!("no global `{}`", segs[0].0)))?;
-        let (mut off, mut ty) = (*goff, gty.clone());
-        let mut si = 0;
-        while si < segs.len() {
-            let (name, idx) = &segs[si];
-            if si > 0 {
-                let Ty::Struct(i) = ty else { return bad(format!("`{}` is not a struct", name)) };
-                let f = self.prog.structs[i].fields.iter().find(|f| &f.0 == name).ok_or_else(|| Error::Bad(format!("no field `{}`", name)))?;
-                off += f.2; ty = f.1.clone();
-            }
-            let mut idx = idx.as_slice();
-            while let Some((&(k, g), more)) = idx.split_first() {
-                idx = more;
-                if g.is_some() && !matches!(ty, Ty::Pool(_, _, true)) { return bad("`[k@generation]` needs a `checked` pool"); }
-                match ty.clone() {
-                    Ty::Arr(e, n) => { if k >= n { return bad(format!("index {} out of range (fixed size {})", k, n)); } off += k * self.prog.size_align(&e).0; ty = *e; }
-                    Ty::List(e, _) => {
-                        let len = self.rd(off, 4) as usize;
-                        if k >= len { return bad(format!("index {} out of range (live length {})", k, len)); }
-                        off += self.prog.list_header(&e) + k * self.prog.size_align(&e).0; ty = *e;
-                    }
-                    Ty::Table(row, n) => {
-                        let len = self.rd(off, 4) as usize;
-                        if k >= len { return bad(format!("row {} out of range (live rows {})", k, len)); }
-                        return self.columnar_field(off, &self.cols(&row, n), k, &segs[si + 1..], idx);
-                    }
-                    Ty::Pool(row, n, checked) => {
-                        let cols = self.prog.pool_cols(&row, n, checked).unwrap().0;
-                        let hw = self.rd(off + HW, 4) as usize;
-                        if k >= hw || !self.bit(off + cols[0].off, k) { return bad(format!("slot {} is not live", k)); }
-                        if let Some(g) = g {
-                            let cur = self.rd(off + cols[1].off + 4 * k, 4) as u32;
-                            if cur != g { return bad(format!("stale handle: slot {} is now generation {}, not {}", k, cur, g)); }
-                        }
-                        return self.columnar_field(off, &cols, k, &segs[si + 1..], idx);
-                    }
-                    _ => return bad("cannot index here"),
-                }
-            }
-            si += 1;
-        }
-        Ok(match ty {
-            Ty::Str(cap) => Loc::Str { len: off, bytes: off + 4, cap },
-            t => Loc::Mem(off, t),
-        })
-    }
-
-    /// Locate field `rest` (e.g. `pos.x` or `name`) of row `k` of a table or pool with columns `cols`.
-    fn columnar_field(&self, toff: usize, cols: &[TCol], k: usize, rest: &[(String, Idx)], idx: &[(usize, Option<u32>)]) -> Result<Loc, Error> {
-        if !idx.is_empty() || rest.is_empty() { return bad("name a field of the row, e.g. items[3].hp"); }
-        if rest[..rest.len() - 1].iter().any(|r| !r.1.is_empty()) { return bad("cannot index inside a row"); }
-        let path = rest.iter().map(|r| r.0.as_str()).collect::<Vec<_>>().join(".");
-        let last_idx: Vec<usize> = rest[rest.len() - 1].1.iter().map(|x| x.0).collect();
-        let ci = cols.iter().position(|c| c.path == path).ok_or_else(|| Error::Bad(format!("row has no field `{}`", path)))?;
-        let c = &cols[ci];
-        let a = toff + c.off;
-        match c.kind {
-            CKind::Scalar(s) => if last_idx.is_empty() { Ok(Loc::Mem(a + k * s.size(), Ty::Scalar(s))) } else { bad("not an array") },
-            CKind::Arr(s, kk) => match last_idx.as_slice() {
-                [] => Ok(Loc::Mem(a + k * kk * s.size(), Ty::Arr(Box::new(Ty::Scalar(s)), kk))),
-                [j] => { if *j >= kk { return bad(format!("index {} out of range (fixed size {})", j, kk)); } Ok(Loc::Mem(a + (k * kk + j) * s.size(), Ty::Scalar(s))) }
-                _ => bad("too many indexes"),
-            },
-            CKind::StrLen => {
-                let CKind::StrBytes(m) = cols[ci + 1].kind else { unreachable!() };
-                Ok(Loc::Str { len: a + 4 * k, bytes: toff + cols[ci + 1].off + k * m, cap: m })
-            }
-            CKind::ListLen => {
-                let CKind::ListData(s, m) = cols[ci + 1].kind else { unreachable!() };
-                let (len_off, data) = (a + 4 * k, toff + cols[ci + 1].off + k * m * s.size());
-                match last_idx.as_slice() {
-                    [] => Ok(Loc::List { len: len_off, data, cap: m, elem: s }),
-                    [j] => { let l = self.rd(len_off, 4) as usize; if *j >= l { return bad(format!("index {} out of range (live length {})", j, l)); } Ok(Loc::Mem(data + j * s.size(), Ty::Scalar(s))) }
-                    _ => bad("too many indexes"),
-                }
-            }
-            _ => bad("internal column"),
-        }
-    }
-
-    /// Append to a list/table, or take the lowest free slot of a pool. Returns (index, generation for checked pools).
-    pub fn push(&mut self, path: &str) -> Result<(usize, Option<u32>), Error> {
-        match self.resolve(path)? {
-            Loc::Mem(off, Ty::List(e, cap)) => {
-                let len = self.rd(off, 4) as usize;
-                if len == cap { return Err(Error::Full(format!("{} is full ({} of {})", path, len, cap))); }
-                let eoff = off + self.prog.list_header(&e) + len * self.prog.size_align(&e).0;
-                let mut r = Vec::new(); self.ranges(&e, eoff, true, &mut r);
-                for (a, b) in r { self.zero(a, b - a); } // fresh element: zeroed, empty inside
-                self.wr(off, 4, len as u64 + 1);
-                Ok((len, None))
-            }
-            Loc::Mem(off, Ty::Table(row, cap)) => {
-                let len = self.rd(off, 4) as usize;
-                if len == cap { return Err(Error::Full(format!("{} is full ({} of {})", path, len, cap))); }
-                self.zero_row(off, &self.cols(&row, cap), len);
-                self.wr(off, 4, len as u64 + 1);
-                Ok((len, None))
-            }
-            Loc::Mem(off, Ty::Pool(row, cap, ch)) => self.pool_alloc(path, off, &row, cap, ch),
-            Loc::List { len, data, cap, elem } => {
-                let l = self.rd(len, 4) as usize;
-                if l == cap { return Err(Error::Full(format!("{} is full ({} of {})", path, l, cap))); }
-                self.zero(data + l * elem.size(), elem.size());
-                self.wr(len, 4, l as u64 + 1);
-                Ok((l, None))
-            }
-            _ => bad("not a list, table or pool"),
-        }
-    }
-
-    /// Zero the fixed columns of row `r` (scalars, arrays, string/list lengths). Byte columns stay as they are.
-    fn zero_row(&mut self, off: usize, cols: &[TCol], r: usize) {
-        for c in cols {
-            let a = off + c.off;
-            let (at, n) = match c.kind {
-                CKind::Scalar(s) => (a + r * s.size(), s.size()),
-                CKind::Arr(s, k) => (a + r * k * s.size(), k * s.size()),
-                CKind::StrLen | CKind::ListLen => (a + r * 4, 4),
-                _ => continue,
-            };
-            self.zero(at, n);
-        }
-    }
-
-    fn pool_alloc(&mut self, path: &str, off: usize, row: &Ty, n: usize, ch: bool) -> Result<(usize, Option<u32>), Error> {
-        let cols = self.prog.pool_cols(row, n, ch).unwrap().0;
-        let (hw, count, hint) = (self.rd(off + HW, 4) as usize, self.rd(off + COUNT, 4) as usize, self.rd(off + HINT, 4) as usize);
-        let live_off = off + cols[0].off;
-        // lowest free slot at or after the hint, below the high-water mark; otherwise the high-water mark itself
-        let mut slot = None;
-        let mut w = hint / 64;
-        while w * 64 < hw {
-            let mut free = !self.rd(live_off + w * 8, 8);
-            if (w + 1) * 64 > hw { free &= (1u64 << (hw - w * 64)) - 1; }
-            if w == hint / 64 { free &= !0u64 << (hint % 64); }
-            if free != 0 { slot = Some(w * 64 + free.trailing_zeros() as usize); break; }
-            w += 1;
-        }
-        let s = match slot { Some(s) => s, None => { if hw == n { return Err(Error::Full(format!("{} is full ({} of {})", path, count, n))); } hw } };
-        let waddr = live_off + (s / 64) * 8;
-        let word = if (s / 64) * 64 < hw { self.rd(waddr, 8) } else { 0 }; // words wholly above hw may be uncommitted; bits there are zero
-        self.wr(waddr, 8, word | (1u64 << (s % 64)));
-        self.zero_row(off, &cols, s);
-        let gen = if ch { let ga = off + cols[1].off + 4 * s; self.ensure(ga, ga + 4); Some(self.rd(ga, 4) as u32) } else { None };
-        let new_hw = hw.max(s + 1);
-        let ever = (self.rd(off + EVER, 4) as usize).max(new_hw);
-        self.wr(off + HW, 4, new_hw as u64); self.wr(off + COUNT, 4, count as u64 + 1); self.wr(off + HINT, 4, s as u64 + 1); self.wr(off + EVER, 4, ever as u64);
-        Ok((s, gen))
-    }
-
-    fn pool_free(&mut self, off: usize, row: &Ty, n: usize, ch: bool, k: usize, gen: Option<u32>) -> Result<(), Error> {
-        let cols = self.prog.pool_cols(row, n, ch).unwrap().0;
-        let hw = self.rd(off + HW, 4) as usize;
-        let live_off = off + cols[0].off;
-        if k >= hw || !self.bit(live_off, k) { return bad(format!("slot {} is not live", k)); }
-        if let Some(g) = gen {
-            if !ch { return bad("`[k@generation]` needs a `checked` pool"); }
-            let cur = self.rd(off + cols[1].off + 4 * k, 4) as u32;
-            if cur != g { return bad(format!("stale handle: slot {} is now generation {}, not {}", k, cur, g)); }
-        }
-        let waddr = live_off + (k / 64) * 8;
-        let word = self.rd(waddr, 8);
-        self.wr(waddr, 8, word & !(1u64 << (k % 64)));
-        if ch { let ga = off + cols[1].off + 4 * k; let g = self.rd(ga, 4); self.wr(ga, 4, g + 1); }
-        let (count, hint) = (self.rd(off + COUNT, 4), self.rd(off + HINT, 4));
-        self.wr(off + COUNT, 4, count - 1); self.wr(off + HINT, 4, hint.min(k as u64));
-        if k + 1 == hw { // the top slot went: lower the high-water mark to the highest live slot + 1
-            let mut h = k;
-            while h > 0 {
-                let w = (h - 1) / 64;
-                let mut word = self.rd(live_off + w * 8, 8);
-                let valid = h - w * 64;
-                if valid < 64 { word &= (1u64 << valid) - 1; }
-                if word == 0 { h = w * 64; } else { h = w * 64 + (64 - word.leading_zeros() as usize); break; }
-            }
-            self.wr(off + HW, 4, h as u64);
-        }
-        Ok(())
-    }
-
-    fn pool_clear(&mut self, off: usize, row: &Ty, n: usize, ch: bool) {
-        let cols = self.prog.pool_cols(row, n, ch).unwrap().0;
-        let hw = self.rd(off + HW, 4) as usize;
-        let live_off = off + cols[0].off;
-        if ch { for k in 0..hw { if self.bit(live_off, k) { let ga = off + cols[1].off + 4 * k; let g = self.rd(ga, 4); self.wr(ga, 4, g + 1); } } }
-        self.zero(live_off, hw.div_ceil(64) * 8);
-        for o in [HW, COUNT, HINT] { self.wr(off + o, 4, 0); }
-    }
-
-    fn len_slot(&self, path: &str) -> Result<usize, Error> {
-        match self.resolve(path)? {
-            Loc::Mem(off, Ty::List(..)) | Loc::Mem(off, Ty::Table(..)) | Loc::Mem(off, Ty::Str(_)) => Ok(off),
-            Loc::List { len, .. } | Loc::Str { len, .. } => Ok(len),
-            _ => bad("not a list, table or string"),
-        }
-    }
-    pub fn pop(&mut self, path: &str) -> Result<(), Error> {
-        let at = self.len_slot(path)?;
-        let len = self.rd(at, 4);
-        if len == 0 { return bad("already empty"); }
-        self.wr(at, 4, len - 1); Ok(())
-    }
-    pub fn clear(&mut self, path: &str) -> Result<(), Error> {
-        if let Loc::Mem(off, Ty::Pool(row, n, ch)) = self.resolve(path)? { self.pool_clear(off, &row, n, ch); return Ok(()); }
-        let at = self.len_slot(path)?; self.wr(at, 4, 0); Ok(())
-    }
-
-    /// Remove an item: swap-remove from a table (`remove t 5`), or free a pool slot (`remove p 5` or `remove p 5@2`).
-    pub fn remove(&mut self, path: &str, spec: &str) -> Result<(), Error> {
-        let (k, g) = match spec.split_once('@') { Some((k, g)) => (k, g.parse::<u32>().ok()), None => (spec, None) };
-        let k: usize = k.trim().parse().map_err(|_| Error::Bad("expected a row or slot number".into()))?;
-        match self.resolve(path)? {
-            Loc::Mem(off, Ty::Pool(row, n, ch)) => self.pool_free(off, &row, n, ch, k, g),
-            Loc::Mem(_, Ty::Table(..)) => self.swap_remove(path, k),
-            _ => bad("not a table or pool"),
-        }
-    }
-
-    /// Remove row `k` of a table by moving the last row into its place (rows stay dense; order changes).
-    pub fn swap_remove(&mut self, path: &str, k: usize) -> Result<(), Error> {
-        let Loc::Mem(off, Ty::Table(row, cap)) = self.resolve(path)? else { return bad("not a table") };
-        let len = self.rd(off, 4) as usize;
-        if k >= len { return bad(format!("row {} out of range (live rows {})", k, len)); }
-        let last = len - 1;
-        let cols = self.cols(&row, cap);
-        for (ci, c) in cols.iter().enumerate() {
-            let a = off + c.off;
-            let copy = |me: &mut Self, from: usize, to: usize, n: usize| { me.ensure(to, to + n); unsafe { std::ptr::copy(me.base.add(from), me.base.add(to), n) } };
-            match c.kind {
-                CKind::Scalar(s) => copy(self, a + last * s.size(), a + k * s.size(), s.size()),
-                CKind::Arr(s, kk) => copy(self, a + last * kk * s.size(), a + k * kk * s.size(), kk * s.size()),
-                CKind::StrLen | CKind::ListLen => copy(self, a + last * 4, a + k * 4, 4),
-                CKind::StrBytes(m) => { let l = self.rd(off + cols[ci - 1].off + 4 * last, 4) as usize; copy(self, a + last * m, a + k * m, l) }
-                CKind::ListData(s, m) => { let l = self.rd(off + cols[ci - 1].off + 4 * last, 4) as usize; copy(self, a + last * m * s.size(), a + k * m * s.size(), l * s.size()) }
-                CKind::Live | CKind::Gen => {}
-            }
-        }
-        self.wr(off, 4, last as u64); Ok(())
-    }
-
-    pub fn set(&mut self, path: &str, val: &str) -> Result<(), Error> {
-        match self.resolve(path)? {
-            Loc::Str { len, bytes, cap } => {
-                let s = val.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(val);
-                if s.len() > cap { return Err(Error::TooLong(format!("string of {} bytes does not fit string<{}>", s.len(), cap))); }
-                self.ensure(bytes, bytes + s.len());
-                unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), self.base.add(bytes), s.len()) };
-                self.wr(len, 4, s.len() as u64); Ok(())
-            }
-            Loc::Mem(off, Ty::Scalar(sc)) => {
-                let bits = match sc {
-                    Scalar::F32 => val.parse::<f32>().map(|f| f.to_bits() as u64).map_err(|e| e.to_string()),
-                    Scalar::F64 => val.parse::<f64>().map(|f| f.to_bits()).map_err(|e| e.to_string()),
-                    Scalar::Bool => match val { "true" | "1" => Ok(1), "false" | "0" => Ok(0), _ => Err("expected true or false".into()) },
-                    _ => val.parse::<i64>().map(|v| v as u64).map_err(|e| e.to_string()),
-                };
-                match bits { Ok(b) => { self.wr(off, sc.size(), b); Ok(()) } Err(e) => bad(e) }
-            }
-            _ => bad("can only set scalars and strings"),
-        }
-    }
-    pub fn get(&self, path: &str) -> Result<String, Error> {
-        Ok(match self.resolve(path)? {
-            Loc::Str { len, bytes, .. } => { let n = self.rd(len, 4) as usize; format!("{:?}", String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(self.base.add(bytes), n) })) }
-            Loc::List { len, .. } => format!("len {}", self.rd(len, 4)),
-            Loc::Mem(off, Ty::List(..)) | Loc::Mem(off, Ty::Table(..)) => format!("len {}", self.rd(off, 4)),
-            Loc::Mem(off, Ty::Pool(..)) => format!("live {}, high-water {}", self.rd(off + COUNT, 4), self.rd(off + HW, 4)),
-            Loc::Mem(off, Ty::Scalar(s)) => self.show_scalar(off, s),
-            _ => return bad("can only get scalars, strings and list lengths"),
-        })
-    }
-    fn show_scalar(&self, off: usize, s: Scalar) -> String {
-        match s {
-            Scalar::F32 => f32::from_bits(self.rd(off, 4) as u32).to_string(),
-            Scalar::F64 => f64::from_bits(self.rd(off, 8)).to_string(),
-            _ => { let v = self.rd(off, s.size()); let sh = 64 - 8 * s.size() as u32; if matches!(s, Scalar::I8 | Scalar::I16 | Scalar::I32 | Scalar::I64) { (((v << sh) as i64) >> sh).to_string() } else { v.to_string() } }
-        }
-    }
-
-    /// Sum a scalar field over every live row with a native loop. Returns (sum, live rows, ns per slot scanned).
-    /// Works on `list<Struct>` (strided), `table<Struct>` (contiguous column) and `pool<Struct>` (column plus a live-bit test per slot).
-    pub fn sum(&self, path: &str, field: &str, reps: usize) -> Result<(f64, usize, f64), Error> {
-        let Loc::Mem(off, ty) = self.resolve(path)? else { return bad("not a list, table or pool") };
-        let find = |cols: &[TCol]| -> Result<(usize, Scalar), Error> {
-            let c = cols.iter().find(|c| c.path == field).ok_or_else(|| Error::Bad(format!("no field `{}`", field)))?;
-            let CKind::Scalar(s) = c.kind else { return bad("sum needs a scalar field") };
-            Ok((c.off, s))
-        };
-        let (base, stride, len, sc, live, count) = match &ty {
-            Ty::Table(row, n) => { let (co, s) = find(&self.cols(row, *n))?; let l = self.rd(off, 4) as usize; (off + co, s.size(), l, s, None, l) }
-            Ty::Pool(row, n, ch) => {
-                let cols = self.prog.pool_cols(row, *n, *ch).unwrap().0;
-                let (co, s) = find(&cols)?;
-                (off + co, s.size(), self.rd(off + HW, 4) as usize, s, Some(off + cols[0].off), self.rd(off + COUNT, 4) as usize)
-            }
-            Ty::List(e, _) => {
-                let Ty::Struct(i) = &**e else { return bad("list of structs needed") };
-                let f = self.prog.structs[*i].fields.iter().find(|f| f.0 == field).ok_or_else(|| Error::Bad(format!("no field `{}`", field)))?;
-                let Ty::Scalar(s) = f.1 else { return bad("sum needs a scalar field") };
-                let l = self.rd(off, 4) as usize;
-                (off + self.prog.list_header(e) + f.2, self.prog.size_align(e).0, l, s, None, l)
-            }
-            _ => return bad("not a list, table or pool"),
-        };
-        if !matches!(sc, Scalar::F32 | Scalar::I32 | Scalar::U32) { return bad("sum supports f32, i32, u32"); }
-        let p = unsafe { self.base.add(base) };
-        let read = |r: usize| unsafe { let q = p.add(r * stride); match sc { Scalar::F32 => (q as *const f32).read_unaligned() as f64, Scalar::I32 => (q as *const i32).read_unaligned() as f64, _ => (q as *const u32).read_unaligned() as f64 } };
-        let t = std::time::Instant::now();
-        let mut total = 0.0;
-        for _ in 0..reps {
-            let mut acc = 0.0f64;
-            match live {
-                None => for r in 0..len { acc += read(r); },
-                Some(lo) => for r in 0..len { if self.bit(lo, r) { acc += read(r); } },
-            }
-            total = std::hint::black_box(acc);
-        }
-        let ns = t.elapsed().as_nanos() as f64 / (reps * len.max(1)) as f64;
-        Ok((total, count, ns))
-    }
-
-    /// Rows of (path, type, offset, reserved, live) for every list, table, pool, string and fixed array reachable through structs.
+    /// Rows of (path, type, start, reserved, live): plain values, then every collection.
     pub fn inspect(&self) -> Rows {
-        let mut rows = Vec::new();
-        for (n, ty, off) in &self.prog.globals { self.rows(n, ty, *off, &mut rows); }
+        let mut rows = vec![("<plain values>".to_string(), String::new(), 0, self.prog.plain_end, self.prog.plain_end)];
+        for (cid, c) in self.prog.colls.iter().enumerate() {
+            let own_end = c.children.first().map(|k| self.prog.colls[k.1].start).unwrap_or(c.end);
+            let (kind, opt) = match c.kind { Kind::List(Full::Fail) => ("list", ""), Kind::List(Full::DropOldest) => ("list", " drop_oldest"), Kind::Pool(false) => ("pool", ""), Kind::Pool(true) => ("pool", " checked") };
+            let ty = format!("{}<{}, {}>{}{}", kind, self.prog.show(&c.elem), c.cap, opt, if c.mult > 1 { format!(" x{}", c.mult) } else { String::new() });
+            rows.push((c.name.clone(), ty, c.start, own_end - c.start, self.coll_live(cid)));
+        }
         rows
     }
-    fn rows(&self, path: &str, ty: &Ty, off: usize, out: &mut Rows) {
-        let p = &self.prog;
-        let row = |out: &mut Rows| out.push((path.to_string(), p.show(ty), off, p.size_align(ty).0, self.live_of(ty, off)));
-        match ty {
-            Ty::Struct(i) => { row(out); for f in &p.structs[*i].fields { if !matches!(f.1, Ty::Scalar(_)) { self.rows(&format!("{}.{}", path, f.0), &f.1, off + f.2, out); } } }
-            Ty::Scalar(_) => {}
-            Ty::Table(..) | Ty::Pool(..) => {
-                row(out);
-                let (n, cols, _) = self.columnar(ty).unwrap();
-                let mut seen: Vec<&str> = Vec::new();
-                for c in &cols {
-                    if seen.contains(&c.path.as_str()) { continue; }
-                    seen.push(&c.path);
-                    let mut live = Vec::new();
-                    self.columnar_ranges(ty, off, false, Some(&c.path), &mut live);
-                    let res: usize = cols.iter().filter(|x| x.path == c.path).map(|x| match x.kind {
-                        CKind::Scalar(s) => n * s.size(), CKind::Arr(s, k) => n * k * s.size(), CKind::StrLen | CKind::ListLen => n * 4,
-                        CKind::StrBytes(m) => n * m, CKind::ListData(s, m) => n * m * s.size(), CKind::Live => up(n, 64) / 8, CKind::Gen => n * 4 }).sum();
-                    let kind = match c.kind { CKind::Scalar(s) => format!("{:?}", s).to_lowercase(), CKind::Arr(s, k) => format!("{:?}[{}]", s, k).to_lowercase(), CKind::StrLen => "string".into(), CKind::Live => "live bits".into(), CKind::Gen => "generations".into(), _ => "list".into() };
-                    out.push((format!("{}.{}", path, c.path), format!("  column {}", kind), off + c.off, res, live.iter().map(|(a, b)| b - a).sum()));
-                }
-            }
-            _ => row(out),
-        }
-    }
-}
-
-/// A scalar or string read from or written to state.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Val { Int(i64), Float(f64), Bool(bool), Str(String) }
-
-/// Typed access used by the endpoint interpreter: columns are cached per global, so a field access is a column lookup
-/// plus offset arithmetic, not a path parse.
-impl Instance {
-    pub fn gindex(&self, name: &str) -> Option<usize> { self.prog.globals.iter().position(|g| g.0 == name) }
-    /// (kind, checked): kind 0 list, 1 table, 2 pool.
-    pub fn coll_kind(&self, g: usize) -> Option<(u8, bool)> {
-        match &self.prog.globals[g].1 { Ty::List(..) => Some((0, false)), Ty::Table(..) => Some((1, false)), Ty::Pool(_, _, c) => Some((2, *c)), _ => None }
-    }
-    pub fn count(&self, g: usize) -> usize {
-        let off = self.prog.globals[g].2;
-        match self.coll_kind(g) { Some((2, _)) => self.rd(off + COUNT, 4) as usize, _ => self.rd(off, 4) as usize }
-    }
-    pub fn capacity(&self, g: usize) -> usize {
-        match &self.prog.globals[g].1 { Ty::List(_, n) | Ty::Table(_, n) | Ty::Pool(_, n, _) => *n, _ => 0 }
-    }
-    /// Live slots of a table or pool, in slot order.
-    pub fn slots(&self, g: usize) -> Vec<usize> {
-        let off = self.prog.globals[g].2;
-        match (self.coll_kind(g), &self.gcols[g]) {
-            (Some((2, _)), Some((cols, _))) => { let hw = self.rd(off + HW, 4) as usize; let lo = off + cols[0].off; (0..hw).filter(|&k| self.bit(lo, k)).collect() }
-            (Some((1, _)), _) => (0..self.rd(off, 4) as usize).collect(),
-            _ => vec![],
-        }
-    }
-    pub fn row_live(&self, g: usize, slot: usize) -> bool {
-        let off = self.prog.globals[g].2;
-        match (self.coll_kind(g), &self.gcols[g]) {
-            (Some((2, _)), Some((cols, _))) => slot < self.rd(off + HW, 4) as usize && self.bit(off + cols[0].off, slot),
-            (Some((1, _)), _) => slot < self.rd(off, 4) as usize,
-            _ => false,
-        }
-    }
-    pub fn row_gen(&self, g: usize, slot: usize) -> Option<u32> {
-        match (self.coll_kind(g), &self.gcols[g]) {
-            (Some((2, true)), Some((cols, _))) => Some(self.rd(self.prog.globals[g].2 + cols[1].off + 4 * slot, 4) as u32),
-            _ => None,
-        }
-    }
-    fn row_loc(&self, g: usize, slot: usize, field: &str) -> Result<Loc, Error> {
-        let Some((cols, _)) = &self.gcols[g] else { return bad("not a table or pool") };
-        if !self.row_live(g, slot) { return bad(format!("slot {} is not live", slot)); }
-        self.columnar_field(self.prog.globals[g].2, cols, slot, &[(field.to_string(), Vec::new())], &[])
-    }
-    fn loc_val(&self, loc: Loc) -> Result<Val, Error> {
-        match loc {
-            Loc::Str { len, bytes, .. } => { let n = self.rd(len, 4) as usize; Ok(Val::Str(String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(self.base.add(bytes), n) }).into_owned())) }
-            Loc::Mem(off, Ty::Scalar(s)) => Ok(match s {
-                Scalar::F32 => Val::Float(f32::from_bits(self.rd(off, 4) as u32) as f64),
-                Scalar::F64 => Val::Float(f64::from_bits(self.rd(off, 8))),
-                Scalar::Bool => Val::Bool(self.rd(off, 1) != 0),
-                Scalar::I8 | Scalar::I16 | Scalar::I32 | Scalar::I64 => { let sh = 64 - 8 * s.size() as u32; Val::Int(((self.rd(off, s.size()) << sh) as i64) >> sh) }
-                _ => Val::Int(self.rd(off, s.size()) as i64),
-            }),
-            _ => bad("not a scalar or string"),
-        }
-    }
-    fn loc_store(&mut self, loc: Loc, v: &Val) -> Result<(), Error> {
-        match (loc, v) {
-            (Loc::Str { len, bytes, cap }, Val::Str(s)) => {
-                if s.len() > cap { return Err(Error::TooLong(format!("string of {} bytes does not fit string<{}>", s.len(), cap))); }
-                self.ensure(bytes, bytes + s.len());
-                unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), self.base.add(bytes), s.len()) };
-                self.wr(len, 4, s.len() as u64); Ok(())
-            }
-            (Loc::Mem(off, Ty::Scalar(sc)), v) => {
-                let bits = match (sc, v) {
-                    (Scalar::F32, Val::Float(f)) => (*f as f32).to_bits() as u64,
-                    (Scalar::F32, Val::Int(i)) => (*i as f32).to_bits() as u64,
-                    (Scalar::F64, Val::Float(f)) => f.to_bits(),
-                    (Scalar::F64, Val::Int(i)) => (*i as f64).to_bits(),
-                    (Scalar::Bool, Val::Bool(b)) => *b as u64,
-                    (Scalar::F32 | Scalar::F64 | Scalar::Bool, _) => return bad("wrong type for this field"),
-                    (_, Val::Int(i)) => *i as u64,
-                    (_, Val::Float(f)) => *f as i64 as u64,
-                    (_, Val::Bool(b)) => *b as u64,
-                    _ => return bad("wrong type for this field"),
-                };
-                self.wr(off, sc.size(), bits); Ok(())
-            }
-            _ => bad("wrong type for this field"),
-        }
-    }
-    /// Field read by cached column: no path parse and no allocation for scalars. Strings allocate their result only.
-    pub fn row_get(&self, g: usize, slot: usize, field: &str) -> Result<Val, Error> {
-        if let Some((cols, _)) = &self.gcols[g] {
-            if let Some(ci) = cols.iter().position(|c| c.path == field) {
-                if self.row_live(g, slot) {
-                    let off = self.prog.globals[g].2;
-                    let a = off + cols[ci].off;
-                    match cols[ci].kind {
-                        CKind::Scalar(s) => return self.loc_val(Loc::Mem(a + slot * s.size(), Ty::Scalar(s))),
-                        CKind::StrLen => if let CKind::StrBytes(m) = cols[ci + 1].kind { return self.loc_val(Loc::Str { len: a + 4 * slot, bytes: off + cols[ci + 1].off + slot * m, cap: m }); },
-                        _ => {}
-                    }
-                }
-            }
-        }
-        let l = self.row_loc(g, slot, field)?; self.loc_val(l)
-    }
-    pub fn row_set(&mut self, g: usize, slot: usize, field: &str, v: &Val) -> Result<(), Error> { let l = self.row_loc(g, slot, field)?; self.loc_store(l, v) }
-    pub fn path_get(&self, path: &str) -> Result<Val, Error> { let l = self.resolve(path)?; self.loc_val(l) }
-    pub fn path_set(&mut self, path: &str, v: &Val) -> Result<(), Error> { let l = self.resolve(path)?; self.loc_store(l, v) }
-    pub fn alloc_row(&mut self, g: usize) -> Result<(usize, Option<u32>), Error> { let n = self.prog.globals[g].0.clone(); self.push(&n) }
-    pub fn free_row(&mut self, g: usize, slot: usize) -> Result<(), Error> { let n = self.prog.globals[g].0.clone(); self.remove(&n, &slot.to_string()) }
 }
 
 impl Drop for Instance { fn drop(&mut self) { os::release(self.base); } }
@@ -649,104 +558,131 @@ impl Drop for Instance { fn drop(&mut self) { os::release(self.base); } }
 #[cfg(test)]
 mod tests {
     use super::*;
-    const SRC: &str = "struct V { x: f32; y: f32; } struct I { id: i32; p: V; name: string<8>; tags: list<i32, 4>; } global w: table<I, 1000>; global l: list<I, 1000>;";
-    fn inst() -> Instance { Instance::start(Program::parse(SRC).unwrap(), 1 << 30).unwrap() }
-    const PSRC: &str = "struct U { hp: i32; name: string<8>; } global p: pool<U, 200>; global c: pool<U, 200> checked;";
-    fn pinst() -> Instance { Instance::start(Program::parse(PSRC).unwrap(), 1 << 30).unwrap() }
-
-    #[test]
-    fn table_and_list_hold_the_same_data() {
-        let mut i = inst();
-        for p in ["w", "l"] { i.push(p).unwrap(); i.push(p).unwrap(); }
-        i.set("l[1].id", "9").unwrap();
-        i.set("w[1].id", "9").unwrap(); i.set("w[1].p.y", "2.5").unwrap(); i.set("w[1].name", "abc").unwrap();
-        i.push("w[1].tags").unwrap(); i.set("w[1].tags[0]", "7").unwrap();
-        assert_eq!(i.get("w[1].id").unwrap(), "9");
-        assert_eq!(i.get("w[1].p.y").unwrap(), "2.5");
-        assert_eq!(i.get("w[1].name").unwrap(), "\"abc\"");
-        assert_eq!(i.get("w[1].tags[0]").unwrap(), "7");
-        assert_eq!(i.get("l[1].id").unwrap(), "9");
-    }
-
-    #[test]
-    fn limits_and_liveness_are_typed_errors() {
-        let mut i = inst();
-        i.push("w").unwrap();
-        assert!(matches!(i.set("w[0].name", "123456789"), Err(Error::TooLong(_))));
-        assert!(matches!(i.get("w[1].id"), Err(Error::Bad(_)))); // row 1 is not live
-        for _ in 0..4 { i.push("w[0].tags").unwrap(); }
-        assert!(matches!(i.push("w[0].tags"), Err(Error::Full(_))));
-        assert!(matches!(i.get("w[0].tags[4]"), Err(Error::Bad(_))));
-    }
-
-    #[test]
-    fn swap_remove_keeps_rows_dense_and_moves_strings() {
-        let mut i = inst();
-        for k in 0..3 { i.push("w").unwrap(); i.set(&format!("w[{}].id", k), &k.to_string()).unwrap(); i.set(&format!("w[{}].name", k), &format!("n{}", k)).unwrap(); }
-        i.swap_remove("w", 0).unwrap();
-        assert_eq!(i.get("w").unwrap(), "len 2");
-        assert_eq!(i.get("w[0].id").unwrap(), "2");
-        assert_eq!(i.get("w[0].name").unwrap(), "\"n2\"");
-        assert_eq!(i.get("w[1].name").unwrap(), "\"n1\"");
-    }
-
-    #[test]
-    fn committed_tracks_live_after_trim() {
-        let mut i = inst();
-        for _ in 0..1000 { i.push("w").unwrap(); }
-        i.set("w[3].name", "x").unwrap();
-        let before = i.committed();
-        i.clear("w").unwrap();
-        assert!(i.trim() > 0 && i.committed() < before);
-        i.push("w").unwrap();
-        i.set("w[0].name", "again").unwrap(); // re-commits what trim released
-        assert_eq!(i.get("w[0].name").unwrap(), "\"again\"");
-    }
+    fn inst(src: &str) -> Instance { Instance::start(Program::parse(src).unwrap(), 1 << 32).unwrap() }
+    const POOLS: &str = "struct U { hp: i32; name: string<8>; } global p: pool<U, 200>; global c: pool<U, 200> checked;";
 
     #[test]
     fn pool_reuses_the_lowest_free_slot_and_the_live_bit_guards_access() {
-        let mut i = pinst();
+        let mut i = inst(POOLS);
         for k in 0..5 { assert_eq!(i.push("p").unwrap().0, k); i.set(&format!("p[{}].hp", k), &(k * 10).to_string()).unwrap(); }
         i.remove("p", "1").unwrap(); i.remove("p", "3").unwrap();
-        assert!(matches!(i.get("p[1].hp"), Err(Error::Bad(_)))); // live bit says no
+        assert!(matches!(i.get("p[1].hp"), Err(Error::NotLive(_))));
         assert_eq!(i.get("p").unwrap(), "live 3, high-water 5");
-        assert_eq!(i.push("p").unwrap().0, 1); // lowest free first
+        assert_eq!(i.push("p").unwrap().0, 1);
         assert_eq!(i.push("p").unwrap().0, 3);
         assert_eq!(i.push("p").unwrap().0, 5);
-        assert_eq!(i.get("p[1].hp").unwrap(), "0"); // new item starts zeroed
-        assert_eq!(i.get("p[4].hp").unwrap(), "40"); // stable slots: others did not move
+        assert_eq!(i.get("p[1].hp").unwrap(), "0");
+        assert_eq!(i.get("p[4].hp").unwrap(), "40");
     }
 
     #[test]
-    fn unchecked_pool_accepts_the_stale_index_but_checked_rejects_it() {
-        let mut i = pinst();
-        i.push("p").unwrap(); i.set("p[0].hp", "111").unwrap();
-        i.remove("p", "0").unwrap(); i.push("p").unwrap(); i.set("p[0].hp", "222").unwrap();
-        assert_eq!(i.get("p[0].hp").unwrap(), "222"); // old index now means the new item (accepted)
+    fn checked_pool_rejects_stale_handles() {
+        let mut i = inst(POOLS);
         let (s, g) = i.push("c").unwrap(); let g = g.unwrap();
         i.remove("c", &format!("{}@{}", s, g)).unwrap();
         let (s2, g2) = i.push("c").unwrap();
-        assert_eq!((s2, g2), (s, Some(g + 1))); // same slot, new generation
-        assert!(matches!(i.get(&format!("c[{}@{}].hp", s, g)), Err(Error::Bad(m)) if m.contains("stale")));
+        assert_eq!((s2, g2), (s, Some(g + 1)));
+        assert!(matches!(i.get(&format!("c[{}@{}].hp", s, g)), Err(Error::Stale(_))));
         assert!(i.get(&format!("c[{}@{}].hp", s2, g + 1)).is_ok());
-        assert!(matches!(i.remove("c", &format!("{}@{}", s, g)), Err(Error::Bad(_))));
     }
 
     #[test]
     fn pool_full_high_water_and_trim() {
-        let mut i = pinst();
+        let mut i = inst(POOLS);
         for _ in 0..200 { i.push("p").unwrap(); }
         assert!(matches!(i.push("p"), Err(Error::Full(_))));
         i.remove("p", "50").unwrap();
-        assert_eq!(i.push("p").unwrap().0, 50); // a free slot below the mark is found even when the pool looks full by high-water
+        assert_eq!(i.push("p").unwrap().0, 50);
         for k in (100..200).rev() { i.remove("p", &k.to_string()).unwrap(); }
-        assert_eq!(i.get("p").unwrap(), "live 100, high-water 100"); // mark fell with the top slots
+        assert_eq!(i.get("p").unwrap(), "live 100, high-water 100");
         i.set("p[7].name", "keep").unwrap();
-        i.clear("c").unwrap();
         i.trim();
         assert_eq!(i.get("p[7].name").unwrap(), "\"keep\"");
-        i.clear("p").unwrap();
+        assert!(matches!(i.set("p[7].name", "123456789"), Err(Error::TooLong(_))));
+    }
+
+    #[test]
+    fn list_fails_when_full_unless_it_drops_the_oldest() {
+        let mut i = inst("struct M { n: i32; } global a: list<M, 3>; global r: list<M, 3> drop_oldest;");
+        for k in 0..3 { i.push("a").unwrap(); i.push("r").unwrap(); i.set(&format!("a[{}].n", k), &k.to_string()).unwrap(); i.set(&format!("r[{}].n", k), &k.to_string()).unwrap(); }
+        assert!(matches!(i.push("a"), Err(Error::Full(_))));
+        assert_eq!(i.push("r").unwrap().0, 2); // newest position
+        i.set("r[2].n", "3").unwrap();
+        assert_eq!((i.get("r[0].n").unwrap(), i.get("r[2].n").unwrap()), ("1".into(), "3".into())); // 0 was dropped
+        i.pop("r").unwrap();
+        assert_eq!(i.get("r").unwrap(), "len 2");
+        assert!(matches!(i.get("r[2].n"), Err(Error::NotLive(_))));
+    }
+
+    #[test]
+    fn nested_collections_are_per_parent_and_reset_with_their_parent() {
+        let mut i = inst("struct M { body: string<16>; } struct Room { name: string<8>; msgs: list<M, 4> drop_oldest; } global rooms: pool<Room, 3>;");
+        i.push("rooms").unwrap(); i.push("rooms").unwrap();
+        for k in 0..6 { i.push("rooms[1].msgs").unwrap(); let p = i.get("rooms[1].msgs").unwrap(); let n: usize = p[4..].parse().unwrap(); i.set(&format!("rooms[1].msgs[{}].body", n - 1), &format!("m{}", k)).unwrap(); }
+        i.push("rooms[0].msgs").unwrap();
+        assert_eq!(i.get("rooms[0].msgs").unwrap(), "len 1");
+        assert_eq!(i.get("rooms[1].msgs").unwrap(), "len 4");
+        assert_eq!(i.get("rooms[1].msgs[0].body").unwrap(), "\"m2\""); // m0, m1 dropped
+        assert_eq!(i.get("rooms[1].msgs[3].body").unwrap(), "\"m5\"");
+        i.remove("rooms", "1").unwrap();
+        assert_eq!(i.push("rooms").unwrap().0, 1); // slot reused
+        assert_eq!(i.get("rooms[1].msgs").unwrap(), "len 0"); // nested list came back empty
+    }
+
+    #[test]
+    fn refs_detect_freed_and_reused_targets() {
+        let mut i = inst("struct S { name: string<8>; } struct M { who: ref<s>; } global s: pool<S, 4> checked; global m: list<M, 4>;");
+        let cs = i.prog.coll_of("s").unwrap();
+        let idx = i.push_item(cs, 0).unwrap();
+        let r = (idx, i.gen(cs, idx).unwrap());
+        assert_eq!(i.deref(cs, r).unwrap(), idx);
+        i.free_item(cs, idx).unwrap();
+        assert!(matches!(i.deref(cs, r), Err(Error::Stale(_)))); // freed: generation moved on
+        let again = i.push_item(cs, 0).unwrap();
+        assert_eq!(again, idx);
+        assert!(matches!(i.deref(cs, r), Err(Error::Stale(_)))); // reused by someone else
+    }
+
+    #[test]
+    fn rollback_restores_every_write() {
+        let mut i = inst("struct M { n: i32; t: string<8>; } global r: list<M, 2> drop_oldest; global p: pool<M, 4>;");
+        i.push("r").unwrap(); i.set("r[0].n", "1").unwrap(); i.set("r[0].t", "one").unwrap();
+        i.push("r").unwrap(); i.set("r[1].n", "2").unwrap();
+        i.begin();
+        i.push("r").unwrap(); i.set("r[1].n", "3").unwrap(); i.set("r[0].t", "changed").unwrap(); // drops "one"
+        i.push("p").unwrap();
+        i.rollback();
+        assert_eq!(i.get("r[0].n").unwrap(), "1");
+        assert_eq!(i.get("r[0].t").unwrap(), "\"one\"");
+        assert_eq!(i.get("r[1].n").unwrap(), "2");
         assert_eq!(i.get("p").unwrap(), "live 0, high-water 0");
-        assert_eq!(i.push("p").unwrap().0, 0);
+    }
+
+    #[test]
+    fn layout_rejects_what_it_cannot_bound() {
+        assert!(Program::parse("struct A { b: B; } struct B { a: A; } global g: A;").is_err());
+        assert!(Program::parse("struct N { kids: list<N, 2>; } global g: pool<N, 2>;").is_err()); // nests forever
+        assert!(Program::parse("struct M { t: list<i32, 2>; } global g: list<M, 2> drop_oldest;").is_err());
+        assert!(Program::parse("struct M { who: ref<nope>; } global g: list<M, 2>;").is_err());
+        let p = Program::parse("struct M { t: i32; } struct R { m: list<M, 1000>; } global rooms: pool<R, 64>;").unwrap();
+        assert_eq!(p.colls[1].mult, 64);
+    }
+
+    #[test]
+    fn structs_holding_only_collections_stay_distinct() {
+        let mut i = inst("struct M { n: i32; } struct W { s: pool<M, 4>; } global w0: W; global w1: W;");
+        i.push("w1.s").unwrap();
+        assert_eq!(i.get("w0.s").unwrap(), "live 0, high-water 0");
+        assert_eq!(i.get("w1.s").unwrap(), "live 1, high-water 1");
+    }
+
+    #[test]
+    fn nested_headers_commit_with_their_parent_items() {
+        let mut i = inst("struct M { n: i32; } struct R { m: list<M, 8>; } global rs: pool<R, 100000>;");
+        assert!(i.committed() <= 3 * PAGE, "empty world committed {}", i.committed()); // not 100000 headers
+        i.push("rs").unwrap();
+        i.push("rs[0].m").unwrap();
+        assert_eq!(i.get("rs[0].m").unwrap(), "len 1");
+        assert!(i.committed() <= 8 * PAGE);
     }
 }

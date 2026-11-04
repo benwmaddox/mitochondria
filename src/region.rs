@@ -80,7 +80,6 @@ impl<const SZ: usize> DensePool<SZ> {
         assert!(cap * SZ <= r.reserved);
         DensePool { r, len: 0, cap, slot_of: vec![0; cap], gen: vec![0; cap], id_of_slot: vec![0; cap], free: (0..cap as u32).rev().collect() }
     }
-    pub fn len(&self) -> usize { self.len }
     pub fn live_bytes(&self) -> usize { self.len * SZ }
     pub fn insert(&mut self, item: &[u8; SZ]) -> Result<Id, Full> {
         if self.len == self.cap { return Err(Full); }

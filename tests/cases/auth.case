@@ -1,0 +1,34 @@
+// sessions: missing, wrong secret, ended, and a reused slot with a new generation
+--- state
+struct Meta { next_seq: i64; rate: i64; typing_ttl: i64; }
+struct Session { name: string<32>; secret: i64; window: i64; sent: i64; }
+struct Msg { seq: i64; at: i64; author: ref<sessions>; body: string<2000>; }
+struct Typing { who: ref<sessions>; until: i64; }
+struct Room { name: string<8>; created: i64; messages: list<Msg, 5> drop_oldest; typing: pool<Typing, 4>; }
+global meta: Meta; global sessions: pool<Session, 3> checked; global rooms: pool<Room, 2>;
+--- api
+include examples/chat/chat.api
+--- requests
+POST /sessions {"name":"ann"} => ann
+GET /rooms
+@X-Session: $ann
+GET /rooms
+@X-Session: 0.0.fe800d6569fa1b4c
+GET /rooms
+@X-Session: 0.0
+GET /rooms
+@X-Session: x.y.z
+GET /rooms
+@X-Session: 7.0.1
+GET /rooms
+@X-Session: $ann
+DELETE /session
+@X-Session: $ann
+GET /rooms
+POST /sessions {"name":"bob"} => bob
+@X-Session: $ann
+GET /rooms
+@X-Session: $bob
+GET /rooms
+@x-session: $bob
+GET /rooms

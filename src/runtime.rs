@@ -101,7 +101,6 @@ impl Instance {
         self.journal = j;
         self.commit_changes();
     }
-    pub fn journal_bytes(&self) -> usize { self.journal.bytes.len() }
 
     // ---- collection headers and live bits ----
     fn haddr(&self, cid: usize, f: usize, inst: usize) -> usize { let c = &self.prog.colls[cid]; c.hdr + 4 * (f * c.mult + inst) }
@@ -143,6 +142,12 @@ impl Instance {
     }
 
     /// Append to a list (dropping the oldest if declared) or take the lowest free slot of a pool. Returns the new item.
+    /// Would `push_item` fail because the instance is full? (A `drop_oldest` list never is.) Lets `try_alloc` skip
+    /// building the error's text.
+    pub fn is_full(&self, cid: usize, inst: usize) -> bool {
+        let c = &self.prog.colls[cid];
+        match c.kind { Kind::List(Full::DropOldest) => false, Kind::List(_) => self.hget(cid, LEN, inst) >= c.cap, Kind::Pool(_) => self.hget(cid, COUNT, inst) >= c.cap }
+    }
     pub fn push_item(&mut self, cid: usize, inst: usize) -> Result<usize, Error> {
         let (cap, kind) = { let c = &self.prog.colls[cid]; (c.cap, c.kind) };
         let full = |me: &Self, n: usize| Error::Full(format!("{} is full ({} of {})", me.prog.colls[cid].name, n, cap)); // built only on failure
@@ -355,6 +360,7 @@ impl Instance {
 
     /// Follow a reference into its pool. In a checked pool a reference whose generation has moved on (the slot was freed,
     /// whether or not it was reused since) is `Stale`; otherwise a slot that is not live is `NotLive`.
+    #[cfg(test)]
     pub fn deref(&self, target: usize, r: (usize, u32)) -> Result<usize, Error> {
         let (slot, g) = r;
         let c = &self.prog.colls[target];
@@ -514,7 +520,7 @@ impl Instance {
         for &inst in insts.as_deref().unwrap_or(&[0]) {
             for f in 0..c.hdr_fields() { let a = self.haddr(cid, f, inst); out.push((a, a + 4)); }
             let mut runs = [(0usize, 0usize); 2];
-            let mut nr = 0;
+            let mut nr;
             let pool = !c.is_list();
             if pool {
                 let hw = self.hget(cid, HW, inst);

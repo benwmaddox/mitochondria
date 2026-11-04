@@ -127,11 +127,11 @@ pub fn access_cost() {
 
     let aos: Vec<Item> = (0..N).map(|i| Item { id: i as i32, hp: 1.0, x: 2.0, y: 3.0, _pad: [0; 48] }).collect();
     let order = perm(&mut rnd);
-    let mut boxed_seq: Vec<Box<Item>> = (0..N).map(|i| Box::new(aos[i])).collect();      // heap in allocation order
+    let boxed_seq: Vec<Box<Item>> = (0..N).map(|i| Box::new(aos[i])).collect();      // heap in allocation order
     let mut boxed_aged: Vec<Option<Box<Item>>> = (0..N).map(|_| None).collect();          // heap allocated in shuffled order
     for &k in &order { boxed_aged[k as usize] = Some(Box::new(aos[k as usize])); }
     let boxed_aged: Vec<Box<Item>> = boxed_aged.into_iter().map(|b| b.unwrap()).collect();
-    let (id_c, hp_c, x_c, y_c): (Vec<i32>, Vec<f32>, Vec<f32>, Vec<f32>) = (aos.iter().map(|a| a.id).collect(), aos.iter().map(|a| a.hp).collect(), aos.iter().map(|a| a.x).collect(), aos.iter().map(|a| a.y).collect());
+    let (_id_c, hp_c, x_c, y_c): (Vec<i32>, Vec<f32>, Vec<f32>, Vec<f32>) = (aos.iter().map(|a| a.id).collect(), aos.iter().map(|a| a.hp).collect(), aos.iter().map(|a| a.x).collect(), aos.iter().map(|a| a.y).collect());
     let slot_of = perm(&mut rnd);                  // id -> row (rows were reshuffled by removals)
     let gen: Vec<u32> = vec![1; N];
     let q: Vec<u32> = (0..OPS).map(|_| (rnd() % N as u64) as u32).collect();

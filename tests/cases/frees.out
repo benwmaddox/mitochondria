@@ -1,0 +1,13 @@
+POST /t -> 201 {"slot":0}
+POST /t -> 201 {"slot":1}
+DELETE /t/0 -> 409 {"error":"changed my mind"}
+GET /count -> 200 {"n":2,"c":0}
+DELETE /t/1 -> 200 {"n":7}
+GET /count -> 200 {"n":1,"c":0}
+POST /t -> 201 {"slot":1}
+POST /swap -> 200 {"got":false}
+GET /count -> 200 {"n":0,"c":0}
+POST /f -> 500 {"error":"forward needs a system of workers"}
+GET /count -> 200 {"n":0,"c":0}
+state <plain values> 8
+state ts 16

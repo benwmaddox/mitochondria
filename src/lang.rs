@@ -82,8 +82,6 @@ pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt>
 #[derive(Debug, Clone, Default)]
 pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 
-pub fn lex(src: &str) -> Result<Vec<Tok>, String> { lex_lines(src).map(|t| t.0) }
-
 /// Tokens, and the source line each one starts on.
 fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
     let c: Vec<char> = src.chars().collect();

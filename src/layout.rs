@@ -234,7 +234,7 @@ impl Program {
         self.flatten(&elem, "", &mut leaves, &mut kids, name)?;
         if kind == Kind::List(Full::DropOldest) && !kids.is_empty() { return Err(format!("`{}`: a drop_oldest list cannot hold nested collections", name)); }
         for (path, t) in leaves {
-            let mut place = |k: CKind, o: &mut usize| { *o = up(*o, k.align().max(1)); let col = Col { path: path.clone(), kind: k.clone(), off: *o }; *o += items * k.size(); col };
+            let place = |k: CKind, o: &mut usize| { *o = up(*o, k.align().max(1)); let col = Col { path: path.clone(), kind: k.clone(), off: *o }; *o += items * k.size(); col };
             match t {
                 Ty::Scalar(s) => { let col = place(CKind::Scalar(s), &mut o); c.cols.push(col); }
                 Ty::Arr(e, k) => { let Ty::Scalar(s) = *e else { unreachable!() }; let col = place(CKind::Arr(s, k), &mut o); c.cols.push(col); }

@@ -60,7 +60,7 @@ impl std::fmt::Write for Area { fn write_str(&mut self, s: &str) -> std::fmt::Re
 /// infinity or NaN, so those are written as null.
 fn json_f64(out: &mut Area, f: f64) -> bool { if f.is_finite() { write!(out, "{}", f).is_ok() } else { out.push(b"null").is_some() } }
 
-pub(crate) fn escaped(out: &mut Area, s: &[u8]) -> bool {
+fn escaped(out: &mut Area, s: &[u8]) -> bool {
     if out.push(b"\"").is_none() { return false; }
     let mut start = 0;
     let mut i = 0;
@@ -83,63 +83,124 @@ pub(crate) fn escaped(out: &mut Area, s: &[u8]) -> bool {
     out.push(&s[start..]).is_some() && out.push(b"\"").is_some()
 }
 
-/// Flat JSON object of strings, numbers, booleans and null, with strings copied into the text area. Nested values end parsing.
-fn parse_json(s: &[u8], text: &mut Area, out: &mut Vec<(Txt, Value)>) -> bool {
+/// Why a request's input was refused.
+enum Bad { Json(&'static str), Full }
+
+/// A request body: empty, or one JSON object. Its fields' strings, numbers, booleans and nulls are kept (strings copied
+/// into the text area); nested arrays and objects are checked but read as null. The first of repeated keys wins.
+fn parse_json(s: &[u8], text: &mut Area, out: &mut Vec<(Txt, Value)>) -> Result<(), Bad> {
     out.clear();
-    let mut i = 0;
-    let ws = |i: &mut usize| while *i < s.len() && s[*i].is_ascii_whitespace() { *i += 1; };
-    ws(&mut i);
-    if s.get(i) != Some(&b'{') { return true; }
-    i += 1;
-    let string = |i: &mut usize, text: &mut Area| -> Option<Txt> {
-        if s.get(*i) != Some(&b'"') { return None; }
-        *i += 1;
-        let start = text.len;
-        while *i < s.len() && s[*i] != b'"' {
-            if s[*i] == b'\\' && *i + 1 < s.len() {
-                *i += 1;
-                if s[*i] == b'u' {
-                    let hex = |at: usize| s.get(at..at + 4).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u32::from_str_radix(h, 16).ok());
-                    let mut cp = hex(*i + 1)?; *i += 4;
-                    if (0xD800..0xDC00).contains(&cp) && s.get(*i + 1..*i + 3) == Some(b"\\u".as_slice()) { // surrogate pair
-                        if let Some(lo) = hex(*i + 3).filter(|lo| (0xDC00..0xE000).contains(lo)) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); *i += 6; }
+    let mut p = JsonIn { s, i: 0 };
+    p.ws();
+    if p.i == s.len() { return Ok(()); }
+    if p.peek() != Some(b'{') { return Err(Bad::Json("a JSON body must be an object")); }
+    p.i += 1; p.ws();
+    if p.peek() == Some(b'}') { p.i += 1; } else {
+        loop {
+            p.ws();
+            let k = p.string(text)?;
+            p.ws(); p.eat(b':')?; p.ws();
+            let v = match p.peek() {
+                Some(b'"') => Value::Str(p.string(text)?),
+                Some(b'{') | Some(b'[') => { let mark = text.len; p.skip(text, 0)?; text.len = mark; Value::Null }
+                _ => p.scalar()?,
+            };
+            out.push((k, v));
+            p.ws();
+            match p.peek() { Some(b',') => p.i += 1, Some(b'}') => { p.i += 1; break; } _ => return Err(Bad::Json("invalid JSON body")) }
+        }
+    }
+    p.ws();
+    if p.i != s.len() { return Err(Bad::Json("invalid JSON body")); }
+    Ok(())
+}
+
+struct JsonIn<'x> { s: &'x [u8], i: usize }
+impl JsonIn<'_> {
+    fn peek(&self) -> Option<u8> { self.s.get(self.i).copied() }
+    fn ws(&mut self) { while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) { self.i += 1; } }
+    fn eat(&mut self, c: u8) -> Result<(), Bad> { if self.peek() == Some(c) { self.i += 1; Ok(()) } else { Err(Bad::Json("invalid JSON body")) } }
+    /// A string, unescaped into the text area.
+    fn string(&mut self, text: &mut Area) -> Result<Txt, Bad> {
+        let bad = Bad::Json("invalid JSON body");
+        self.eat(b'"')?;
+        let (s, start) = (self.s, text.len);
+        loop {
+            let run = self.i;
+            while self.i < s.len() && s[self.i] != b'"' && s[self.i] != b'\\' && s[self.i] >= 0x20 { self.i += 1; }
+            text.push(&s[run..self.i]).ok_or(Bad::Full)?;
+            match self.peek() {
+                Some(b'"') => { self.i += 1; return Ok(text.since(start)); }
+                Some(b'\\') => {
+                    self.i += 1;
+                    let c = match self.peek() { Some(c) => c, None => return Err(bad) };
+                    self.i += 1;
+                    let one = match c { b'"' => b'"', b'\\' => b'\\', b'/' => b'/', b'b' => 8, b'f' => 12, b'n' => b'\n', b'r' => b'\r', b't' => b'\t', b'u' => 0, _ => return Err(bad) };
+                    if c != b'u' { text.push(&[one]).ok_or(Bad::Full)?; continue; }
+                    let hex = |at: usize| s.get(at..at + 4).filter(|h| h.iter().all(u8::is_ascii_hexdigit)).map(|h| u32::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap());
+                    let Some(mut cp) = hex(self.i) else { return Err(bad) };
+                    self.i += 4;
+                    if (0xD800..0xDC00).contains(&cp) && s.get(self.i..self.i + 2) == Some(b"\\u".as_slice()) { // a surrogate pair
+                        if let Some(lo) = hex(self.i + 2).filter(|lo| (0xDC00..0xE000).contains(lo)) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); self.i += 6; }
                     }
                     let mut b = [0u8; 4];
-                    text.push(char::from_u32(cp).unwrap_or('\u{FFFD}').encode_utf8(&mut b).as_bytes())?;
-                } else {
-                    let c = match s[*i] { b'n' => b'\n', b't' => b'\t', b'r' => b'\r', b'b' => 8, b'f' => 12, c => c };
-                    text.push(&[c])?;
+                    text.push(char::from_u32(cp).unwrap_or('\u{FFFD}').encode_utf8(&mut b).as_bytes()).ok_or(Bad::Full)?; // a lone surrogate becomes U+FFFD
                 }
-            } else {
-                let run = *i; while *i < s.len() && s[*i] != b'"' && s[*i] != b'\\' { *i += 1; }
-                text.push(&s[run..*i])?; continue;
+                _ => return Err(bad), // the end of the body, or a control character, inside a string
             }
-            *i += 1;
         }
-        *i += 1;
-        Some(text.since(start))
-    };
-    loop {
-        ws(&mut i);
-        let Some(k) = string(&mut i, text) else { break };
-        ws(&mut i); if s.get(i) != Some(&b':') { break; } i += 1; ws(&mut i);
-        let v = match s.get(i) {
-            Some(b'"') => match string(&mut i, text) { Some(t) => Value::Str(t), None => return false },
-            Some(c) if c.is_ascii_digit() || *c == b'-' => {
-                let st = i; i += 1; while i < s.len() && (s[i].is_ascii_digit() || s[i] == b'.') { i += 1; }
-                let t = std::str::from_utf8(&s[st..i]).unwrap_or("");
-                match t.parse::<i64>() { Ok(n) => Value::Int(n), Err(_) => t.parse::<f64>().map(Value::Float).unwrap_or(Value::Null) }
-            }
-            Some(b't') => { i += 4; Value::Bool(true) }
-            Some(b'f') => { i += 5; Value::Bool(false) }
-            Some(b'n') => { i += 4; Value::Null }
-            _ => break,
-        };
-        out.push((k, v));
-        ws(&mut i);
-        if s.get(i) == Some(&b',') { i += 1; } else { break; }
     }
-    true
+    /// A number, `true`, `false` or `null`. Integers that fit i64 are integers; others, fractions and exponents are floats.
+    fn scalar(&mut self) -> Result<Value, Bad> {
+        let (s, bad) = (self.s, Bad::Json("invalid JSON body"));
+        for (w, v) in [(&b"true"[..], Value::Bool(true)), (&b"false"[..], Value::Bool(false)), (&b"null"[..], Value::Null)] {
+            if s[self.i..].starts_with(w) { self.i += w.len(); return Ok(v); }
+        }
+        let st = self.i;
+        let digits = |me: &mut Self| { let a = me.i; while matches!(me.peek(), Some(b'0'..=b'9')) { me.i += 1; } me.i - a };
+        if self.peek() == Some(b'-') { self.i += 1; }
+        let int_at = self.i;
+        if digits(self) == 0 || (s[int_at] == b'0' && self.i - int_at > 1) { return Err(bad); }
+        let mut whole = true;
+        if self.peek() == Some(b'.') { self.i += 1; whole = false; if digits(self) == 0 { return Err(bad); } }
+        if matches!(self.peek(), Some(b'e' | b'E')) { self.i += 1; whole = false; if matches!(self.peek(), Some(b'+' | b'-')) { self.i += 1; } if digits(self) == 0 { return Err(bad); } }
+        let t = std::str::from_utf8(&s[st..self.i]).unwrap();
+        if whole { if let Ok(n) = t.parse::<i64>() { return Ok(Value::Int(n)); } }
+        Ok(Value::Float(t.parse::<f64>().map_err(|_| Bad::Json("invalid JSON body"))?))
+    }
+    /// Check a nested array or object (strings go through the text area, which the caller rewinds).
+    fn skip(&mut self, text: &mut Area, depth: u32) -> Result<(), Bad> {
+        if depth > 64 { return Err(Bad::Json("JSON body nested too deeply")); }
+        let close = if self.peek() == Some(b'{') { b'}' } else { b']' };
+        self.i += 1; self.ws();
+        if self.peek() == Some(close) { self.i += 1; return Ok(()); }
+        loop {
+            self.ws();
+            if close == b'}' { self.string(text)?; self.ws(); self.eat(b':')?; self.ws(); }
+            match self.peek() { Some(b'"') => { self.string(text)?; } Some(b'{') | Some(b'[') => self.skip(text, depth + 1)?, _ => { self.scalar()?; } }
+            self.ws();
+            match self.peek() { Some(b',') => self.i += 1, Some(c) if c == close => { self.i += 1; return Ok(()); } _ => return Err(Bad::Json("invalid JSON body")) }
+        }
+    }
+}
+
+/// Copy a path segment or query part into the text area, decoding `%XX` (and, in a query, `+` as a space). A `%` not
+/// followed by two hex digits is kept as it is.
+fn push_decoded(text: &mut Area, s: &[u8], plus: bool) -> Option<Txt> {
+    if !s.iter().any(|&c| c == b'%' || (plus && c == b'+')) { return text.push(s); }
+    let start = text.len;
+    let mut i = 0;
+    while i < s.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        let c = match s[i] {
+            b'%' if i + 2 < s.len() && hex(s[i + 1]).is_some() && hex(s[i + 2]).is_some() => { i += 2; (hex(s[i - 1]).unwrap() * 16 + hex(s[i]).unwrap()) as u8 }
+            b'+' if plus => b' ',
+            c => c,
+        };
+        text.push(&[c])?;
+        i += 1;
+    }
+    Some(text.since(start))
 }
 
 /// Request headers or forwarded fields: looked up by name, case-insensitively.
@@ -244,13 +305,19 @@ impl Server {
         b.params.clear(); b.query.clear();
         let mut fits = true;
         for (k, (s, p)) in ep.segs.iter().zip(path.split('/').filter(|s| !s.is_empty())).enumerate() {
-            if let Seg::Param(_) = s { match text.push(p.as_bytes()) { Some(t) => b.params.push((k, t)), None => fits = false } }
+            if let Seg::Param(_) = s { match push_decoded(text, p.as_bytes(), false) { Some(t) => b.params.push((k, t)), None => fits = false } }
         }
         for kv in qs.split('&').filter(|s| !s.is_empty()) {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            match (text.push(k.as_bytes()), text.push(v.as_bytes())) { (Some(k), Some(v)) => b.query.push((k, v)), _ => fits = false }
+            match (push_decoded(text, k.as_bytes(), true), push_decoded(text, v.as_bytes(), true)) { (Some(k), Some(v)) => b.query.push((k, v)), _ => fits = false }
         }
-        fits &= parse_json(body.as_bytes(), text, &mut b.json);
+        if fits {
+            match parse_json(body.as_bytes(), text, &mut b.json) {
+                Ok(()) => {}
+                Err(Bad::Full) => fits = false,
+                Err(Bad::Json(m)) => { Self::out_err(out, m); self.bufs = b; return 400; }
+            }
+        }
         if !fits { Self::out_err(out, "request too large for the request text area"); self.bufs = b; return 413; }
         let now = clock.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0));
         inst.begin();
@@ -667,6 +734,7 @@ impl<'a> Run<'a> {
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => { let v = self.eval(e)?; self.set_slot(*slot, v); }
             Stmt::Alloc { slot, coll, try_, .. } => {
                 let Value::Coll(c, inst) = self.eval(coll)? else { return fail(500, "alloc needs a list or pool") };
+                if *try_ && self.inst.is_full(c, inst) { self.set_slot(*slot, Value::Null); return Ok(()); }
                 match self.inst.push_item(c, inst) {
                     Ok(idx) => self.set_slot(*slot, Value::Item(c, idx)),
                     Err(Error::Full(_)) if *try_ => self.set_slot(*slot, Value::Null),
@@ -899,127 +967,6 @@ mod tests {
     use super::*;
     use crate::layout::Program;
 
-    const STATE: &str = "struct Meta { next_seq: i64; rate: i64; typing_ttl: i64; }
-        struct Session { name: string<32>; secret: i64; window: i64; sent: i64; }
-        struct Msg { seq: i64; at: i64; author: ref<sessions>; body: string<2000>; }
-        struct Typing { who: ref<sessions>; until: i64; }
-        struct Room { name: string<8>; created: i64; messages: list<Msg, 5> drop_oldest; typing: pool<Typing, 4>; }
-        global meta: Meta; global sessions: pool<Session, 3> checked; global rooms: pool<Room, 2>;";
-    thread_local! { static COMPILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-    /// Says which mode a failing test was in.
-    struct Mode(bool);
-    impl Drop for Mode { fn drop(&mut self) { if std::thread::panicking() { eprintln!("(failed with endpoints {})", if self.0 { "compiled" } else { "interpreted" }); } } }
-    fn mode(compiled: bool) -> Mode { COMPILED.with(|c| c.set(compiled)); Mode(compiled) }
-    fn chat(compiled: bool) -> Server {
-        let inst = Instance::start(Program::parse(STATE).unwrap(), 1 << 30).unwrap();
-        let mut s = Server::new(inst, include_str!("../examples/chat/chat.api")).unwrap();
-        s.clock = Some(1000);
-        if compiled { let (notes, _) = s.compile().unwrap(); assert!(notes.iter().all(|n| n.ends_with(": compiled")), "{:?}", notes); }
-        s
-    }
-    fn server() -> Server { chat(COMPILED.with(|c| c.get())) }
-    /// A server for a small test program, with every endpoint compiled when `compiled`.
-    fn small(state: &str, api: &str, compiled: bool) -> Server {
-        let mut s = Server::new(Instance::start(Program::parse(state).unwrap(), 1 << 20).unwrap(), api).unwrap();
-        if compiled { let (notes, _) = s.compile().unwrap(); assert!(notes.iter().all(|n| n.ends_with(": compiled")), "{:?}", notes); }
-        s
-    }
-    fn login(s: &mut Server, name: &str) -> Vec<(String, String)> {
-        let (c, b) = s.handle("POST", "/sessions", &[], &format!("{{\"name\":\"{}\"}}", name));
-        assert_eq!(c, 201, "{}", b);
-        vec![("X-Session".into(), token_of(&b))]
-    }
-
-    #[test]
-    fn auth_distinguishes_missing_wrong_secret_and_ended_sessions() {
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = server();
-            let mut h = login(&mut s, "ann");
-            assert_eq!(s.handle("GET", "/rooms", &[], "").0, 401);
-            assert_eq!(s.handle("GET", "/rooms", &h, "").0, 200);
-            let mut wrong = h.clone(); let last = h[0].1.pop().unwrap(); wrong[0].1 = format!("{}{}", h[0].1, if last == '0' { '1' } else { '0' }); h[0].1.push(last);
-            assert_eq!(s.handle("GET", "/rooms", &wrong, "").0, 403);
-            assert_eq!(s.handle("DELETE", "/session", &h, "").0, 200);
-            assert_eq!(s.handle("GET", "/rooms", &h, "").0, 401);
-            let h2 = login(&mut s, "bob"); // reuses slot 0 with a new generation
-            assert_eq!(s.handle("GET", "/rooms", &h, "").0, 401);
-            assert_eq!(s.handle("GET", "/rooms", &h2, "").0, 200);
-        }
-    }
-
-    #[test]
-    fn error_codes_and_rollback() {
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = server();
-            let h = login(&mut s, "ann");
-            assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"123456789\"}").0, 413); // string<8>: rolled back, no ghost room
-            assert_eq!(s.handle("POST", "/rooms", &h, "{}").0, 400);
-            assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"a\"}").0, 201);
-            assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"b\"}").0, 201);
-            assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"c\"}").0, 503);
-            assert_eq!(s.handle("GET", "/rooms/7/messages", &h, "").0, 404);
-            assert_eq!(s.handle("GET", "/rooms/x/messages", &h, "").0, 400);
-            let long = "x".repeat(2001);
-            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &format!("{{\"body\":\"{}\"}}", long)).0, 413);
-            let (_, b) = s.handle("GET", "/stats", &[], "");
-            assert!(b.contains("\"next_seq\":0"), "sequence number was rolled back: {}", b);
-        }
-    }
-
-    #[test]
-    fn room_list_drops_the_oldest_and_lists_newest_first() {
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = server();
-            let h = login(&mut s, "ann");
-            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-            for i in 1..=8 { assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &format!("{{\"body\":\"m{}\"}}", i)).0, 201); }
-            let (c, b) = s.handle("GET", "/rooms/0/messages?limit=10", &h, "");
-            assert_eq!(c, 200);
-            assert!(b.contains("\"body\":\"m8\"") && b.contains("\"body\":\"m4\"") && !b.contains("\"body\":\"m3\""), "{}", b);
-            assert!(b.find("m8").unwrap() < b.find("m7").unwrap());
-            assert!(b.contains("\"author\":\"ann\""));
-        }
-    }
-
-    #[test]
-    fn deleted_author_shows_as_deleted_instead_of_failing_the_listing() {
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = server();
-            let a = login(&mut s, "ann");
-            let b = login(&mut s, "bob");
-            s.handle("POST", "/rooms", &a, "{\"name\":\"r\"}");
-            s.handle("POST", "/rooms/0/messages", &a, "{\"body\":\"hi\"}");
-            s.handle("DELETE", "/session", &a, "");
-            let (c, body) = s.handle("GET", "/rooms/0/messages", &b, "");
-            assert_eq!(c, 200);
-            assert!(body.contains("[deleted]"), "{}", body);
-        }
-    }
-
-    #[test]
-    fn rate_limit_and_typing_upsert_and_expiry() {
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = server();
-            let h = login(&mut s, "ann");
-            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-            for _ in 0..30 { assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201); }
-            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 429);
-            s.clock = Some(1000 + 61_000);
-            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201);
-            s.handle("POST", "/rooms/0/typing", &h, "");
-            s.handle("POST", "/rooms/0/typing", &h, ""); // updates, does not add a second entry
-            let (_, b) = s.handle("GET", "/rooms/0/typing", &h, "");
-            assert_eq!(b.matches("ann").count(), 1, "{}", b);
-            s.clock = Some(1000 + 61_000 + 6_000);
-            assert!(!s.handle("GET", "/rooms/0/typing", &h, "").1.contains("ann"));
-        }
-    }
-
     #[test]
     fn fast_escaping_matches_a_byte_by_byte_reference() {
         fn reference(s: &[u8]) -> Vec<u8> {
@@ -1057,122 +1004,6 @@ mod tests {
         // shadowing and slot reuse across blocks still work
         let mut s = Server::new(st(), "endpoint GET /a { let x = 1; var t = 0; if true { let x = 10; t = t + x; } each k in [] {} respond 200 { \"x\": x, \"t\": t }; }".replace("each k in [] {} ", "").as_str()).unwrap();
         assert_eq!(s.handle("GET", "/a", &[], ""), (200, "{\"x\":1,\"t\":10}".to_string()));
-    }
-
-    #[test]
-    fn functions_and_vars() {
-        let inst = Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap();
-        let api = "fn double(x: i64) -> i64 { return x * 2; }
-            fn sum_to(n) { var t = 0; if n > 0 { t = n + sum_to(n - 1); } return t; }
-            endpoint GET /t { var a = double(21); a = a + 1; c.n = sum_to(10); respond 200 { \"a\": a, \"s\": c.n, \"j\": \"x\" + a }; }
-            endpoint GET /bad { let x = 1; x = 2; respond 200 { \"x\": x }; }";
-        let err = Server::new(Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap(), api).err().unwrap();
-        assert!(err.contains("`x` is a `let`"), "{}", err); // caught when the server loads, not at run time
-        let api = api.replace("x = 2;", "");
-        drop(inst);
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = small("struct C { n: i64; } global c: C;", &api, compiled);
-            assert_eq!(s.handle("GET", "/t", &[], ""), (200, "{\"a\":43,\"s\":55,\"j\":\"x43\"}".to_string()));
-            assert_eq!(s.handle("GET", "/bad", &[], ""), (200, "{\"x\":1}".to_string()));
-        }
-    }
-
-    #[test]
-    fn warm_requests_do_not_allocate() {
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = server();
-            let h = login(&mut s, "ann");
-            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-            let post = "{\"body\":\"hello \\\"there\\\"\"}";
-            for _ in 0..10 { s.handle_raw("POST", "/rooms/0/messages", &h, post); s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""); s.handle_raw("POST", "/rooms/0/typing", &h, ""); }
-            let a0 = crate::alloc_count::allocs();
-            assert_eq!(s.handle_raw("POST", "/rooms/0/messages", &h, post), 201);
-            assert_eq!(s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""), 200);
-            assert_eq!(s.handle_raw("POST", "/rooms/0/typing", &h, ""), 200);
-            assert_eq!(s.handle_raw("GET", "/rooms/0/typing", &h, ""), 200);
-            assert_eq!(crate::alloc_count::allocs() - a0, 0, "heap allocations in warm requests");
-            assert!(s.response().contains("ann"));
-        }
-    }
-
-    #[test]
-    fn pressure_refuses_writes_above_the_hard_mark_and_still_serves_reads() {
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = server();
-            let h = login(&mut s, "ann");
-            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-            s.pressure = Some(Pressure::new(&s.inst, 0, 0)); // every committed byte is over the marks
-            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201); // decided after this request
-            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"y\"}").0, 503);
-            assert_eq!(s.handle("GET", "/rooms/0/messages", &h, "").0, 200);
-            assert!(s.pressure.as_ref().unwrap().full_trims >= 1);
-        }
-    }
-
-    #[test]
-    fn json_input_escapes_and_unicode() {
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = server();
-            let h = login(&mut s, "ann");
-            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-            let bs = char::from(92); // a backslash, built at run time so the escapes below stay escapes in the request text
-            let body = format!("{{\"body\":\"caf{b}u00e9 {b}ud83d{b}ude00 tab{b}t {b}\"q{b}\"\"}}", b = bs);
-            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &body).0, 201);
-            let (_, out) = s.handle("GET", "/rooms/0/messages", &h, "");
-            let want = format!("caf{} {} tab{}t {}\"q{}\"", char::from_u32(0xE9).unwrap(), char::from_u32(0x1F600).unwrap(), bs, bs, bs);
-            assert!(out.contains(&want), "{}", out);
-        }
-    }
-
-    #[test]
-    fn forward_outside_a_system_is_a_clear_error_and_rolls_back() {
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = small("struct C { n: i64; } global c: C;", "endpoint POST /f { c.n = 5; forward other[1] { \"x\": 1 }; }", compiled);
-            let (code, body) = s.handle("POST", "/f", &[], "");
-            assert_eq!(code, 500, "{}", body);
-            assert_eq!(s.inst.get("c.n").unwrap(), "0");
-        }
-    }
-
-    #[test]
-    fn frees_happen_only_when_the_request_succeeds() {
-        let api = "endpoint POST /t { let t = alloc ts; t.n = 7; respond 201 { \"slot\": slot(t) }; }
-            endpoint DELETE /t/{k} { let t = ts[int(param(\"k\"))]; free t; if param(\"k\") == \"0\" { fail 409 \"changed my mind\"; } respond 200 { \"n\": t.n }; }
-            endpoint POST /swap { each t in ts { free t; } let u = try_alloc ts; respond 200 { \"got\": exists(u) }; }";
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = small("struct T { n: i32; } global ts: pool<T, 2>;", api, compiled);
-            assert_eq!(s.handle("POST", "/t", &[], ""), (201, "{\"slot\":0}".to_string()));
-            assert_eq!(s.handle("POST", "/t", &[], ""), (201, "{\"slot\":1}".to_string()));
-            assert_eq!(s.handle("DELETE", "/t/0", &[], "").0, 409); // failed: the free did not happen
-            assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 2);
-            assert_eq!(s.handle("DELETE", "/t/1", &[], ""), (200, "{\"n\":7}".to_string())); // still readable after `free` in the same request
-            assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 1);
-            // a slot freed in a request is not reusable by that request
-            assert_eq!(s.handle("POST", "/t", &[], "").0, 201);
-            assert_eq!(s.handle("POST", "/swap", &[], ""), (200, "{\"got\":false}".to_string()));
-            assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 0);
-        }
-    }
-
-    #[test]
-    fn lists_of_plain_values_index_and_loop_as_values() {
-        let api = "endpoint POST /u { let u = alloc us; let a = alloc u.tags; let b = alloc u.tags; respond 201 { \"n\": count(u.tags) }; }
-            endpoint GET /u { var sum = 0; each t in us[0].tags { sum = sum + t; } respond 200 { \"sum\": sum, \"all\": [each t in us[0].tags t] }; }";
-        for compiled in [false, true] {
-            let _m = mode(compiled);
-            let mut s = small("struct U { tags: list<i32, 4>; } global us: pool<U, 2>;", api, compiled);
-            assert_eq!(s.handle("POST", "/u", &[], "").0, 201);
-            s.inst.set("us[0].tags[0]", "5").unwrap();
-            s.inst.set("us[0].tags[1]", "6").unwrap();
-            assert_eq!(s.inst.get("us[0].tags[1]").unwrap(), "6");
-            assert_eq!(s.handle("GET", "/u", &[], ""), (200, "{\"sum\":11,\"all\":[5,6]}".to_string()));
-        }
     }
 }
 
@@ -1245,7 +1076,7 @@ pub fn json_floor() {
 use std::ffi::c_void;
 
 /// One compiled unit and the native entry point of each endpoint it covers (`None`: interpreted).
-pub struct Compiled { _unit: crate::tcc::Unit, eps: Vec<Option<unsafe extern "C" fn(*mut Ctx) -> i32>>, pub notes: Vec<String> }
+pub struct Compiled { _unit: crate::tcc::Unit, eps: Vec<Option<unsafe extern "C" fn(*mut Ctx) -> i32>> }
 
 /// What generated code receives: the reservation's base, the running request, and the helper table (see cgen::PRELUDE).
 #[repr(C)]
@@ -1416,7 +1247,7 @@ extern "C" fn h_store_plain(c: *mut Ctx, off: u32, code: u32, cap: u32, v: *cons
     })
 }
 extern "C" fn h_alloc(c: *mut Ctx, cid: u32, inst: u32, try_: i32, out: *mut u32) -> i32 {
-    with_run(c, |r| match r.inst.push_item(cid as usize, inst as usize) {
+    with_run(c, |r| match if try_ != 0 && r.inst.is_full(cid as usize, inst as usize) { Err(Error::Full(String::new())) } else { r.inst.push_item(cid as usize, inst as usize) } {
         Ok(i) => { unsafe { *out = i as u32 }; Ok(0) }
         Err(Error::Full(_)) if try_ != 0 => { unsafe { *out = u32::MAX }; Ok(0) }
         Err(e) => Err(e.into()),
@@ -1478,7 +1309,7 @@ impl Server {
         }
         let mut notes: Vec<String> = self.api.eps.iter().zip(&g.eps).filter(|(_, n)| n.is_some()).map(|(e, _)| format!("{}: compiled", e.text)).collect();
         notes.extend(g.notes.iter().cloned());
-        self.compiled = Some(Compiled { _unit: unit, eps, notes: notes.clone() });
+        self.compiled = Some(Compiled { _unit: unit, eps });
         Ok((notes, g.src))
     }
 }

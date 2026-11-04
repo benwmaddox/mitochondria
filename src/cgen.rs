@@ -1042,7 +1042,7 @@ impl<'p> G<'p> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn builtin(&mut self, bi: B, n: &str, args: &'p [Expr], a: Vec<CV>, lit: impl Fn(Option<&Expr>) -> Option<String>,
+    fn builtin(&mut self, bi: B, n: &str, _args: &'p [Expr], a: Vec<CV>, lit: impl Fn(Option<&Expr>) -> Option<String>,
         int_out: impl Fn(&mut Self, String) -> CV, txt_out: impl Fn(&mut Self, String) -> CV, val_out: impl Fn(&mut Self, String) -> CV) -> R<CV> {
         let _ = (&lit, &txt_out, &val_out);
         if let Some(code) = BUILTINS.iter().position(|x| *x == bi) {

@@ -1,0 +1,24 @@
+// frees happen only when the request succeeds; a slot freed in a request is not reused by it; forward needs a system
+--- state
+struct T { n: i32; }
+struct C { n: i64; }
+global ts: pool<T, 2>;
+global c: C;
+--- api
+endpoint POST /t { let t = alloc ts; t.n = 7; respond 201 { "slot": slot(t) }; }
+endpoint DELETE /t/{k} { let t = ts[int(param("k"))]; free t; if param("k") == "0" { fail 409 "changed my mind"; } respond 200 { "n": t.n }; }
+endpoint POST /swap { each t in ts { free t; } let u = try_alloc ts; respond 200 { "got": exists(u) }; }
+endpoint GET /count { respond 200 { "n": count(ts), "c": c.n }; }
+endpoint POST /f { c.n = 5; forward other[1] { "x": 1 }; }
+--- requests
+POST /t
+POST /t
+DELETE /t/0
+GET /count
+DELETE /t/1
+GET /count
+POST /t
+POST /swap
+GET /count
+POST /f
+GET /count

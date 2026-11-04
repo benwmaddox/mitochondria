@@ -1,0 +1,49 @@
+POST /sessions -> 201 {"token":"0.0.fe800d6569fa1b4d","slot":0}
+POST /rooms -> 201 {"id":0,"name":"r"}
+POST /rooms/0/messages -> 201 {"seq":1}
+POST /rooms/0/messages -> 201 {"seq":2}
+POST /rooms/0/messages -> 201 {"seq":3}
+POST /rooms/0/messages -> 201 {"seq":4}
+POST /rooms/0/messages -> 500 {"error":"len(text)"}
+POST /rooms/0/messages -> 400 {"error":"invalid JSON body"}
+POST /rooms/0/messages -> 400 {"error":"a JSON body must be an object"}
+POST /rooms/0/messages -> 400 {"error":"a JSON body must be an object"}
+GET /rooms/0/messages?limit=10 -> 200 {"room":"r","messages":[{"seq":4,"author":"ann","at":1000,"body":"dup"},{"seq":3,"author":"ann","at":1000,"body":"spaced"},{"seq":2,"author":"ann","at":1000,"body":"line\nbreak / \u0008\u000c\r"},{"seq":1,"author":"ann","at":1000,"body":"café 😀 tab\t \"q\" back\\slash"}]}
+GET /rooms/0/messages?limit=%32 -> 200 {"room":"r","messages":[{"seq":4,"author":"ann","at":1000,"body":"dup"},{"seq":3,"author":"ann","at":1000,"body":"spaced"}]}
+GET /rooms/0/messages?x=1&limit=1&limit=2 -> 200 {"room":"r","messages":[{"seq":4,"author":"ann","at":1000,"body":"dup"}]}
+GET /rooms/00/messages?limit=1 -> 200 {"room":"r","messages":[{"seq":4,"author":"ann","at":1000,"body":"dup"}]}
+POST /rooms/0/messages -> 201 {"seq":5}
+POST /rooms/0/messages -> 201 {"seq":6}
+POST /rooms/0/messages -> 201 {"seq":7}
+POST /rooms/0/messages -> 201 {"seq":8}
+POST /rooms/0/messages -> 201 {"seq":9}
+POST /rooms/0/messages -> 201 {"seq":10}
+POST /rooms/0/messages -> 201 {"seq":11}
+POST /rooms/0/messages -> 201 {"seq":12}
+POST /rooms/0/messages -> 201 {"seq":13}
+POST /rooms/0/messages -> 201 {"seq":14}
+POST /rooms/0/messages -> 201 {"seq":15}
+POST /rooms/0/messages -> 201 {"seq":16}
+POST /rooms/0/messages -> 201 {"seq":17}
+POST /rooms/0/messages -> 201 {"seq":18}
+POST /rooms/0/messages -> 201 {"seq":19}
+POST /rooms/0/messages -> 201 {"seq":20}
+POST /rooms/0/messages -> 201 {"seq":21}
+POST /rooms/0/messages -> 201 {"seq":22}
+POST /rooms/0/messages -> 201 {"seq":23}
+POST /rooms/0/messages -> 201 {"seq":24}
+POST /rooms/0/messages -> 201 {"seq":25}
+POST /rooms/0/messages -> 201 {"seq":26}
+POST /rooms/0/messages -> 201 {"seq":27}
+POST /rooms/0/messages -> 201 {"seq":28}
+POST /rooms/0/messages -> 201 {"seq":29}
+POST /rooms/0/messages -> 201 {"seq":30}
+POST /rooms/0/messages -> 201 {"seq":31}
+GET /nope -> 404 {"error":"no such endpoint"}
+PUT /rooms -> 404 {"error":"no such endpoint"}
+GET /rooms/0/messages/extra -> 404 {"error":"no such endpoint"}
+state <plain values> 24
+state sessions 59
+state rooms 37
+state rooms.messages 166
+state rooms.typing 16

@@ -1,0 +1,18 @@
+POST /sessions -> 201 {"token":"0.0.fe800d6569fa1b4d","slot":0}
+GET /rooms -> 401 {"error":"missing X-Session header"}
+GET /rooms -> 200 {"rooms":[]}
+GET /rooms -> 403 {"error":"bad session secret"}
+GET /rooms -> 401 {"error":"malformed session token"}
+GET /rooms -> 401 {"error":"malformed session token"}
+GET /rooms -> 401 {"error":"session ended"}
+DELETE /session -> 200 {"ok":true}
+GET /rooms -> 401 {"error":"session ended"}
+POST /sessions -> 201 {"token":"0.1.ce7c497a6b09c3b","slot":0}
+GET /rooms -> 401 {"error":"session ended"}
+GET /rooms -> 200 {"rooms":[]}
+GET /rooms -> 200 {"rooms":[]}
+state <plain values> 24
+state sessions 59
+state rooms 16
+state rooms.messages 0
+state rooms.typing 0

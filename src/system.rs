@@ -252,6 +252,7 @@ struct Shared { batch: usize, boxes: Vec<Mailbox>, base: Vec<usize>, counts: Vec
 
 pub struct System { shared: Arc<Shared>, threads: Vec<std::thread::JoinHandle<()>>, rr: AtomicUsize }
 
+#[allow(dead_code)] // every counter is kept for reports, not all are printed yet
 pub struct WorkerReport { pub name: String, pub index: usize, pub handled: u64, pub forwarded: u64, pub allocs: u64, pub restarts: u64, pub committed: usize, pub live: usize, pub refused: u64, pub busy_ns: u64, pub handler_ns: u64 }
 
 impl System {

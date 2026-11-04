@@ -1,13 +1,16 @@
 // a worker that crashes is rebuilt from its declarations (its state is lost) and keeps answering
 --- system
-worker w { state "w.mito"; api "w.api"; count 1; mailbox 64; slot 4096; }
-entry w;
-inflight 4;
-budget 1024;
+system {
+    worker w { program "w.mito"; count 1; mailbox 64; slot 4096; }
+    entry w;
+    inflight 4;
+    budget 1024;
+}
+
 --- file w.mito
 struct C { n: i64; }
 state c: C;
---- file w.api
+
 endpoint POST /inc { c.n = c.n + 1; respond 200 { "n": c.n }; }
 endpoint POST /crash { c.n = 99; __crash(); }
 --- requests

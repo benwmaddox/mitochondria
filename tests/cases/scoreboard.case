@@ -1,8 +1,7 @@
 // the tutorial's program (docs/tutorial.md): every output the tutorial shows comes from this log
---- state
+--- program
 include examples/scoreboard/score.mito
---- api
-include examples/scoreboard/score.api
+
 --- requests
 POST /players {"name": "ada"}
 POST /players {"name": "bo"}

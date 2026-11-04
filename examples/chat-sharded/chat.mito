@@ -1,0 +1,10 @@
+system {
+    // Chat sharded across worker threads. Every request enters at an auth shard (chosen by the session token),
+    // which checks the session and rate limit and forwards the request to the room's shard (room id % rooms count).
+    // Room ids and the room directory are owned by rooms[0].
+    worker auth  { program "auth.mito"; count 2; mailbox 1024; slot 4096; }
+    worker rooms { program "rooms.mito"; count 4; mailbox 1024; slot 4096; }
+    entry auth;
+    inflight 4096;
+    budget 8192;
+}

@@ -1,5 +1,5 @@
 // struct fields inside items: read, written, nested two deep, and in plain state
---- state
+--- program
 struct Pos { x: i64; y: i64; }
 struct Box { lo: Pos; hi: Pos; }
 struct Unit { name: string<8>; at: Pos; area: Box; }
@@ -9,7 +9,7 @@ struct App {
     units: pool<Unit, 3>;
 }
 state app: App;
---- api
+
 fn width(u) { return u.area.hi.x - u.area.lo.x; }
 endpoint POST /units {
     let u = alloc app.units;

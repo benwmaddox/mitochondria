@@ -2,8 +2,10 @@
 //! runtime built by TinyCC, by clang, and by clang with undefined-behaviour checks); the logs must match each other and
 //! the recorded `.out` file. `MITO_BLESS=1 cargo test cases` records the TinyCC build's log.
 //!
-//! A case is one program (`--- state`, `--- api`) or a system of workers (`--- system` holding a `.system` file, whose
-//! programs are `--- file name` sections). In any section, `include path` takes a file (relative to the repository).
+//! A case is one program (`--- program`, a `.mito` file) or a system of workers (`--- system` holding a system file,
+//! whose programs are `--- file name.mito` sections). In any section, `include path` takes a file (relative to the
+//! repository), and `include path code` only its functions and endpoints (so a case can pair a small state of its own
+//! with an example's code).
 //! Request script lines:
 //! `METHOD target [json body]`, optionally ending in `=> name` to remember the response's `"token"` as `$name`;
 //! `*N` before a request repeats it N times; `@Header: value` adds a header to the next request; `clock ms` sets the
@@ -21,7 +23,15 @@ pub fn load(path: &std::path::Path) -> Case {
         if let Some(name) = line.trim_end().strip_prefix("--- ") { sections.push((name.to_string(), String::new())); continue; }
         let Some(cur) = sections.last_mut() else { continue };
         match line.strip_prefix("include ") {
-            Some(f) if cur.0 != "requests" => cur.1 += &std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f.trim())).unwrap_or_else(|e| panic!("{}: {}", f, e)),
+            Some(f) if cur.0 != "requests" => {
+                let (f, part) = match f.trim().split_once(' ') { Some((f, p)) => (f, Some(p.trim())), None => (f.trim(), None) };
+                let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f)).unwrap_or_else(|e| panic!("{}: {}", f, e));
+                cur.1 += &match part {
+                    None => text,
+                    Some("code") => crate::source::split(&text).unwrap_or_else(|e| panic!("{}: {}", f, e)).1,
+                    Some(p) => panic!("include {} {}: expected `code` or nothing", f, p),
+                };
+            }
             _ => cur.1 += line,
         }
         cur.1.push('\n');
@@ -29,7 +39,7 @@ pub fn load(path: &std::path::Path) -> Case {
     let get = |n: &str| sections.iter().find(|s| s.0 == n).map(|s| s.1.clone());
     let files = sections.iter().filter_map(|s| s.0.strip_prefix("file ").map(|f| (f.trim().to_string(), s.1.clone()))).collect();
     // modules are expanded once here, so every backend compiles the same program
-    let (state, api) = crate::modules::expand(&get("state").unwrap_or_default(), &get("api").unwrap_or_default()).unwrap_or_else(|e| panic!("{}: {}", path.display(), e));
+    let (state, api) = match get("program") { Some(p) => crate::source::load(&p).unwrap_or_else(|e| panic!("{}: {}", path.display(), e)), None => (String::new(), String::new()) };
     Case { name: path.file_stem().unwrap().to_string_lossy().into_owned(), state, api,
         requests: get("requests").unwrap_or_default(), system: get("system"), files }
 }
@@ -406,7 +416,7 @@ mod tests {
     #[test]
     #[ignore]
     fn c_runtime_speed() {
-        let (state, api) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
+        let (state, api) = crate::source::load(include_str!("../examples/chat/chat.mito")).unwrap();
         let case = Case { name: "speed".into(), state, api, requests: String::new(), system: None, files: Vec::new() };
         let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
         if clang().is_some() {
@@ -442,8 +452,8 @@ mod tests {
     /// caller that gave up freed by its late answer; a forward that could not be sent rolls its handler back.
     #[test]
     fn c_system_parts_behave() {
-        let one = "worker w { state \"w.mito\"; api \"w.api\"; count 1; mailbox 4; slot 256; }\nentry w;\ninflight 2;\n";
-        let read = |f: &str| Ok(if f == "w.mito" { "struct C { n: i64; } state c: C;".to_string() } else { "endpoint GET /n { respond 200 { \"n\": c.n }; }".to_string() });
+        let one = "system {\n    worker w { program \"w.mito\"; count 1; mailbox 4; slot 256; }\n    entry w;\n    inflight 2;\n}\n";
+        let read = |_: &str| Ok("struct C { n: i64; } state c: C;\nendpoint GET /n { respond 200 { \"n\": c.n }; }\n".to_string());
         let spec = crate::spec::parse_spec_with(one, &read).unwrap();
         let mut units = crate::cgen::system_c(&spec).unwrap();
         *units.last_mut().unwrap() += r#"
@@ -574,8 +584,7 @@ MITO_API int t_reply(void *sp) {
     #[ignore]
     fn compile_times() {
         let sorted = load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/sorted.case"));
-        let (cs, ca) = (include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api"));
-        let progs: [(&str, &str, &str, bool); 2] = [("chat example", cs, ca, true), ("sorted.case (a module)", &sorted.state, &sorted.api, false)];
+        let progs: [(&str, &str, &str, bool); 2] = [("chat example", include_str!("../examples/chat/chat.mito"), "", true), ("sorted.case (a module)", &sorted.state, &sorted.api, false)];
         let med = |mut v: Vec<f64>| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] };
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
         for (name, state, api, raw) in progs {
@@ -583,7 +592,7 @@ MITO_API int t_reply(void *sp) {
             let (mut ep_lines, mut all_lines) = (0, 0);
             for _ in 0..5 {
                 let t = std::time::Instant::now();
-                let (st, ap) = if raw { crate::modules::expand(state, api).unwrap() } else { (state.to_string(), api.to_string()) };
+                let (st, ap) = if raw { crate::source::load(state).unwrap() } else { (state.to_string(), api.to_string()) };
                 let prog = Program::parse(&st).unwrap();
                 let mut a = crate::lang::parse(&ap).unwrap();
                 crate::lang::bind(&mut a, &|n| prog.global(n)).unwrap();

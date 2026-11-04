@@ -1,7 +1,7 @@
 // loops that collect their items before running the body: a body that allocates does not see what it adds, and a
 // where whose body changes what it tests sees the items as they were; also a function that returns from inside
 // such a loop, called many times
---- state
+--- program
 struct Item { score: i64; tag: string<8>; }
 struct Box { items: pool<Item, 8>; }
 struct App {
@@ -9,7 +9,7 @@ struct App {
     boxes: pool<Box, 2>;
 }
 state app: App;
---- api
+
 fn first_positive() { each i in app.items where i.score > 0 { i.score = i.score; return i.tag; } return "-"; }
 endpoint POST /items { let it = alloc app.items; it.score = int(body("score")); it.tag = body("tag"); respond 201 { "slot": slot(it) }; }
 endpoint POST /double { each i in app.items { let c = alloc app.items; c.score = i.score * 2; c.tag = i.tag + "2"; } respond 200 { "n": count(app.items) }; }

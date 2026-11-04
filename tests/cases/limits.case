@@ -1,12 +1,12 @@
 // the declared limits of a request, the same in every runtime: query parts, body fields, frees per request, and how
 // much of a value an error message quotes (64 bytes, invalid UTF-8 shown as U+FFFD); what int() trims
---- state
+--- program
 struct T { n: u8; }
 struct App {
     ts: pool<T, 70000>;
 }
 state app: App;
---- api
+
 endpoint GET /q { respond 200 { "q0": query("q0"), "q63": query("q63") }; }
 endpoint POST /f { respond 200 { "f0": body("f0"), "f255": body("f255") }; }
 endpoint GET /n/{x} { respond 200 { "n": int(param("x")) }; }

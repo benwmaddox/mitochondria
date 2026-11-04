@@ -7,6 +7,7 @@ mod lang;
 mod modules;
 mod layout;
 mod cgen;
+mod source;
 mod spec;
 // the in-memory compiler drives the tests; uild runs tcc.exe from the same directory
 #[cfg_attr(not(test), allow(dead_code))]
@@ -14,14 +15,14 @@ mod tcc;
 
 const USAGE: &str = "usage: mitochondria <command> <program> [options]
 
-A program is a state and an api (`app.mito app.api`) or a system of workers (`app.system`).
+A program is one `.mito` file: a program, or a system of workers (a file holding `system { ... }`).
 
   check  <program>                  report the first problem, or say it loads
   build  <program> [-o app.exe] [--tcc]
                                     an executable serving HTTP (clang -O2; --tcc builds in milliseconds, unoptimised)
   serve  <program> [--clang] [executable options]
                                     build with TinyCC (or clang) and run it at once
-  emit-c <state.mito> <api> [-o file.c]  |  emit-c <file.system> [-o dir]
+  emit-c <program> [-o file.c]       (a system: -o dir, one file per worker kind and system.c)
                                     the generated C, to read or build yourself
 
 Executable options: --port N (8080); --budget MB, --soft MB, --hard MB (one program's memory; soft and hard turn on
@@ -44,25 +45,28 @@ fn main() {
 /// The program files among `args`: everything before the first option.
 fn inputs(args: &[String]) -> Vec<&String> { args.iter().take_while(|a| !a.starts_with('-')).collect() }
 
+/// Read a program file: (its text, whether it is a system of workers).
+fn read_program(files: &[&String]) -> (String, String, bool) {
+    let [f] = files else { eprintln!("{}", USAGE); std::process::exit(2) };
+    let text = std::fs::read_to_string(f.as_str()).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
+    let system = source::is_system(&text);
+    (f.to_string(), text, system)
+}
+
 /// A program's C translation units for an executable, and a name for it.
 fn program(files: &[&String]) -> (Vec<String>, String) {
-    let read = |f: &str| std::fs::read_to_string(f).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
-    let stem = |f: &str| std::path::Path::new(f).file_stem().map_or("app".into(), |n| n.to_string_lossy().into_owned());
-    match files {
-        [sys] if sys.ends_with(".system") => {
-            let file = std::path::Path::new(sys.as_str());
-            let spec = spec::parse_spec(&read(sys), file.parent().unwrap_or(std::path::Path::new("."))).unwrap_or_else(|e| die(e));
-            (cgen::system_exe(&spec).unwrap_or_else(|e| die(e)), stem(sys))
-        }
-        [state, api] => {
-            let (s, text) = modules::expand(&read(state), &read(api)).unwrap_or_else(|e| die(e));
-            let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(e));
-            let src_name = std::path::Path::new(api.as_str()).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-            let a = cgen::check(&prog, &text).unwrap_or_else(|e| die(format!("{}: {}", src_name, e)));
-            (cgen::program_exe(&prog, &a, Some((&src_name, &text))).unwrap_or_else(|e| die(e)), stem(api))
-        }
-        _ => { eprintln!("{}", USAGE); std::process::exit(2) }
+    let (f, text, system) = read_program(files);
+    let path = std::path::Path::new(&f);
+    let name = path.file_stem().map_or("app".into(), |n| n.to_string_lossy().into_owned());
+    if system {
+        let spec = spec::parse_spec(&text, path.parent().unwrap_or(std::path::Path::new("."))).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
+        return (cgen::system_exe(&spec).unwrap_or_else(|e| die(e)), name);
     }
+    let file = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let (s, code) = source::load(&text).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
+    let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
+    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
+    (cgen::program_exe(&prog, &a, Some((&file, &code))).unwrap_or_else(|e| die(e)), name)
 }
 
 /// `build <program> [-o app.exe] [--tcc]`
@@ -87,33 +91,28 @@ fn serve(args: &[String]) {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// `emit-c <state.mito> <api> [-o file.c]`, or `emit-c <file.system> [-o dir]`: one file per worker kind and system.c.
+/// `emit-c <program> [-o file.c]`; for a system, `-o dir`: one file per worker kind, and system.c.
 fn emit_c(args: &[String]) {
     let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1)).cloned();
-    let read = |f: &str| std::fs::read_to_string(f).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
-    match inputs(args).as_slice() {
-        [sys] if sys.ends_with(".system") => {
-            let file = std::path::Path::new(sys.as_str());
-            let dir = file.parent().unwrap_or(std::path::Path::new("."));
-            let spec = spec::parse_spec(&read(sys), dir).unwrap_or_else(|e| die(e));
-            let to = std::path::PathBuf::from(out.unwrap_or_else(|| ".".into()));
-            // one file per worker kind (its program, interface prefixed k<n>_) and system.c: build them together
-            let units = cgen::system_c(&spec).unwrap_or_else(|e| die(e));
-            let names: Vec<String> = spec.kinds.iter().map(|k| format!("{}.c", k.name)).chain(["system.c".to_string()]).collect();
-            for (u, n) in units.iter().zip(&names) {
-                let p = to.join(n);
-                std::fs::write(&p, u).unwrap_or_else(|e| die(format!("{}: {}", p.display(), e)));
-                println!("wrote {}", p.display());
-            }
+    let (f, text, system) = read_program(&inputs(args));
+    let path = std::path::Path::new(&f);
+    if system {
+        let spec = spec::parse_spec(&text, path.parent().unwrap_or(std::path::Path::new("."))).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
+        let to = std::path::PathBuf::from(out.unwrap_or_else(|| ".".into()));
+        // one file per worker kind (its program, interface prefixed k<n>_) and system.c: build them together
+        let units = cgen::system_c(&spec).unwrap_or_else(|e| die(e));
+        let names: Vec<String> = spec.kinds.iter().map(|k| format!("{}.c", k.name)).chain(["system.c".to_string()]).collect();
+        for (u, n) in units.iter().zip(&names) {
+            let p = to.join(n);
+            std::fs::write(&p, u).unwrap_or_else(|e| die(format!("{}: {}", p.display(), e)));
+            println!("wrote {}", p.display());
         }
-        [state, api] => {
-            let name = std::path::Path::new(api.as_str()).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-            let (state, text) = modules::expand(&read(state), &read(api)).unwrap_or_else(|e| die(e));
-            let prog = layout::Program::parse(&state).unwrap_or_else(|e| die(e));
-            let a = cgen::check(&prog, &text).unwrap_or_else(|e| die(format!("{}: {}", name, e)));
-            let c = cgen::emit(&prog, &a, (&name, &text)).unwrap_or_else(|e| die(e));
-            match out { Some(p) => { std::fs::write(&p, c).unwrap_or_else(|e| die(format!("{}: {}", p, e))); println!("wrote {}", p); } None => print!("{}", c) }
-        }
-        _ => die("usage: emit-c <state.mito> <api> [-o file.c]  |  emit-c <file.system> [-o dir]".into()),
+        return;
     }
+    let file = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let (state, code) = source::load(&text).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
+    let prog = layout::Program::parse(&state).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
+    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
+    let c = cgen::emit(&prog, &a, (&file, &code)).unwrap_or_else(|e| die(e));
+    match out { Some(p) => { std::fs::write(&p, c).unwrap_or_else(|e| die(format!("{}: {}", p, e))); println!("wrote {}", p); } None => print!("{}", c) }
 }

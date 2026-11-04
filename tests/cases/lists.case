@@ -1,5 +1,5 @@
 // list indexing (oldest first, after drop_oldest wraps), lists and pools of plain values, loops whose body allocates
---- state
+--- program
 struct Ev { n: i64; who: string<8>; }
 struct Bag { nums: list<i32, 4> drop_oldest; flags: pool<bool, 4>; }
 struct App {
@@ -8,7 +8,7 @@ struct App {
     bags: pool<Bag, 2>;
 }
 state app: App;
---- api
+
 endpoint POST /evs { let e = alloc app.evs; e.n = int(body("n")); e.who = body("who"); respond 201 { "count": count(app.evs) }; }
 endpoint GET /evs/{k} { let e = app.evs[int(param("k"))]; respond 200 { "n": e.n, "who": e.who }; }
 endpoint GET /evs { respond 200 { "x": [each e in app.evs e.n], "r": [each e in app.evs reverse e.n], "first": app.evs[0].n }; }

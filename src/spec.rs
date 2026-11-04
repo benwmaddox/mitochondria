@@ -1,4 +1,5 @@
-//! `.system` files: the worker kinds of a system, how many of each, their mailboxes, and the system's limits.
+//! A system of workers: a `.mito` file holding one `system { ... }` block, naming each worker kind's program (a
+//! `.mito` file of its own), how many of each, their mailboxes, and the system's limits.
 
 const MB: usize = 1 << 20;
 
@@ -6,20 +7,22 @@ pub struct KindSpec { pub name: String, pub state: String, pub api: String, pub 
 /// `budget`: the most memory every worker's declared state may reserve together (checked when the system is built).
 pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usize, pub budget: usize }
 
-/// Parse a `.system` file. Paths in it are relative to `dir`.
+/// Parse a system file. Paths in it are relative to `dir`.
 ///
 /// ```text
-/// worker auth  { state "auth.mito";  api "auth.api";  count 2; mailbox 1024; }
-/// worker rooms { state "rooms.mito"; api "rooms.api"; count 4; mailbox 1024; slot 8192; soft 64; hard 256; }
-/// entry auth;
-/// inflight 4096;
-/// budget 4096;
+/// system {
+///     worker auth  { program "auth.mito";  count 2; mailbox 1024; }
+///     worker rooms { program "rooms.mito"; count 4; mailbox 1024; slot 8192; soft 64; hard 256; }
+///     entry auth;
+///     inflight 4096;
+///     budget 4096;
+/// }
 /// ```
 pub fn parse_spec(src: &str, dir: &std::path::Path) -> Result<Spec, String> {
     parse_spec_with(src, &|f| std::fs::read_to_string(dir.join(f)).map_err(|e| format!("{}: {}", f, e)))
 }
 
-/// Parse a `.system` file, reading the files it names with `read`.
+/// Parse a system file, reading the program files it names with `read`.
 pub fn parse_spec_with(src: &str, read: &dyn Fn(&str) -> Result<String, String>) -> Result<Spec, String> {
     let toks = tokens(src);
     let mut i = 0;
@@ -27,24 +30,30 @@ pub fn parse_spec_with(src: &str, read: &dyn Fn(&str) -> Result<String, String>)
     let mut entry = String::new();
     let next = |i: &mut usize| -> Result<String, String> { let t = toks.get(*i).cloned().ok_or("unexpected end of system file")?; *i += 1; Ok(t) };
     let num = |s: String| -> Result<usize, String> { s.parse().map_err(|_| format!("expected a number, found `{}`", s)) };
+    if next(&mut i)? != "system" || next(&mut i)? != "{" { return Err("a system file holds one `system { ... }` block".into()); }
+    let mut closed = false;
     while i < toks.len() {
+        if toks[i] == "}" { i += 1; if i < toks.len() { return Err(format!("unexpected `{}` after the system block", toks[i])); } closed = true; break; }
         match next(&mut i)?.as_str() {
             "worker" => {
                 let name = next(&mut i)?;
                 if next(&mut i)? != "{" { return Err("expected `{`".into()); }
                 let mut k = KindSpec { name, state: String::new(), api: String::new(), count: 1, mailbox: 1024, slot: 8192, soft: None, hard: None };
+                let mut program = false;
                 loop {
                     let key = next(&mut i)?;
                     if key == "}" { break; }
                     let v = next(&mut i)?;
                     match key.as_str() {
-                        "state" => k.state = read(&v)?, "api" => k.api = read(&v)?,
+                        "program" => { let (st, api) = crate::source::split(&read(&v)?).map_err(|e| format!("{}: {}", v, e))?; k.state = st; k.api = api; program = true; }
+                        "state" | "api" => return Err(format!("worker {}: a worker's program is one file now: `program \"{}.mito\";`", k.name, k.name)),
                         "count" => k.count = num(v)?.max(1), "mailbox" => k.mailbox = num(v)?.max(1), "slot" => k.slot = num(v)?.max(256),
                         "soft" => k.soft = Some(num(v)? * MB), "hard" => k.hard = Some(num(v)? * MB),
                         o => return Err(format!("unknown worker setting `{}`", o)),
                     }
                     if next(&mut i)? != ";" { return Err(format!("expected `;` after `{}`", key)); }
                 }
+                if !program { return Err(format!("worker {}: no `program \"file.mito\";`", k.name)); }
                 let (st, api) = crate::modules::expand(&k.state, &k.api).map_err(|e| format!("worker {}: {}", k.name, e))?;
                 k.state = st; k.api = api;
                 spec.kinds.push(k);
@@ -56,6 +65,7 @@ pub fn parse_spec_with(src: &str, read: &dyn Fn(&str) -> Result<String, String>)
             o => return Err(format!("expected `worker`, `entry`, `inflight` or `budget`, found `{}`", o)),
         }
     }
+    if !closed { return Err("the system block is not closed: expected `}`".into()); }
     spec.entry = spec.kinds.iter().position(|k| k.name == entry).ok_or(format!("entry `{}` is not a declared worker", entry))?;
     Ok(spec)
 }

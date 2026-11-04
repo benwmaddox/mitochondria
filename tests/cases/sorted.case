@@ -1,6 +1,6 @@
 // lib/sorted.mito: order by key kept as items change, ties in the order added, walks from a key either way,
 // string keys, capacity, rollback of a failed request, and many adds and removes in one request
---- state
+--- program
 struct Score { name: string<8>; points: i64; }
 struct Word { w: string<12>; n: i64; }
 struct Fav { s: ref<app.board>; }
@@ -10,7 +10,7 @@ struct App {
     fav: Fav;
 }
 state app: App;
---- api
+
 endpoint POST /add { let s = app.board.add(int(body("points"))); s.name = body("name"); respond 201 { "slot": slot(s), "size": app.board.size() }; }
 endpoint POST /set/{k} { app.board.set_key(app.board.get(int(param("k"))), int(body("points"))); respond 200 {}; }
 endpoint DELETE /x/{k} { app.board.remove(app.board.get(int(param("k")))); respond 200 { "size": app.board.size() }; }

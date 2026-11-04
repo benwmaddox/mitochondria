@@ -122,14 +122,14 @@ fn start_exe(path: &std::path::Path, port: u16) -> Exe {
 
 fn sharded_spec() -> crate::spec::Spec {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/chat-sharded");
-    crate::spec::parse_spec(&std::fs::read_to_string(dir.join("chat.system")).unwrap(), &dir).unwrap()
+    crate::spec::parse_spec(&std::fs::read_to_string(dir.join("chat.mito")).unwrap(), &dir).unwrap()
 }
 #[test]
 fn http_servers_match_their_record() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/http.record");
     let mut logs: Vec<(String, Vec<String>)> = Vec::new();
     let chat = || {
-        let (s, a) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
+        let (s, a) = crate::source::load(include_str!("../examples/chat/chat.mito")).unwrap();
         let prog = crate::layout::Program::parse(&s).unwrap();
         let mut api = crate::lang::parse(&a).unwrap();
         crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
@@ -184,7 +184,7 @@ fn timed(port: u16, req: &[u8]) -> (Duration, Vec<u8>) {
 #[test]
 #[ignore]
 fn http_load() {
-    let (s, a) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
+    let (s, a) = crate::source::load(include_str!("../examples/chat/chat.mito")).unwrap();
     let prog = crate::layout::Program::parse(&s).unwrap();
     let api = crate::cgen::check(&prog, &a).unwrap();
     let tcc = crate::build::clang().is_none();
@@ -265,7 +265,7 @@ fn connection_floor() {
             let _ = c.write_all(answer.as_bytes());
         }
     });
-    let (s, a) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
+    let (s, a) = crate::source::load(include_str!("../examples/chat/chat.mito")).unwrap();
     let prog = crate::layout::Program::parse(&s).unwrap();
     let api = crate::cgen::check(&prog, &a).unwrap();
     let exe = std::env::temp_dir().join(format!("mito-floor-{}.exe", std::process::id()));

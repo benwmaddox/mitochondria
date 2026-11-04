@@ -1,5 +1,5 @@
 // values whose kind changes: a var holding a reference, a var given another kind, functions returning different kinds
---- state
+--- program
 struct Node { name: string<8>; next: ref<app.nodes>; }
 struct App {
     nodes: pool<Node, 4> checked;
@@ -8,7 +8,6 @@ struct App {
 state app: App;
 struct Top { head: ref<app.nodes>; }
 
---- api
 fn find(name) { each n in app.nodes { if n.name == name { return n; } } return null; }
 fn describe(k) { if k == 0 { return "zero"; } if k < 0 { return null; } return k; }
 endpoint POST /nodes {

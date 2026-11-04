@@ -1,5 +1,5 @@
 // a module instance (lib/bag.mito): its functions, its state read from outside, and references to its items
---- state
+--- program
 struct Score { name: string<16>; points: i64; }
 struct Fav { s: ref<app.scores>; }
 struct App {
@@ -8,7 +8,7 @@ struct App {
     fav: Fav;
 }
 state app: App;
---- api
+
 endpoint POST /scores {
     let s = app.scores.add();
     s.name = body("name");

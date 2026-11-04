@@ -1804,10 +1804,8 @@ mod profile_tests {
 
     #[test]
     fn generated_chat_code_meets_the_profile() {
-        for (state, api) in [(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")),
-                             (include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api")),
-                             (include_str!("../examples/chat-sharded/auth.mito"), include_str!("../examples/chat-sharded/auth.api"))] {
-            let (state, api) = crate::modules::expand(state, api).unwrap();
+        for file in [include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/auth.mito")] {
+            let (state, api) = crate::source::load(file).unwrap();
             let prog = Program::parse(&state).unwrap();
             let mut api = crate::lang::parse(&api).unwrap();
             crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
@@ -1818,14 +1816,14 @@ mod profile_tests {
 
     #[test]
     fn emitted_files_compile_on_their_own_and_cite_their_source() {
-        let (state, api) = crate::modules::expand(include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api")).unwrap();
+        let (state, api) = crate::source::load(include_str!("../examples/chat/chat.mito")).unwrap();
         let prog = Program::parse(&state).unwrap();
         let mut a = crate::lang::parse(&api).unwrap();
         crate::lang::bind(&mut a, &|n| prog.global(n)).unwrap();
-        let c = emit(&prog, &a, ("chat.api", &api)).unwrap();
+        let c = emit(&prog, &a, ("chat.mito", &api)).unwrap();
         crate::tcc::Unit::check(&c).unwrap();
         assert!(c.contains("rooms.items.messages: list cap 1000 drop_oldest"), "{}", &c[..1500]);
-        for ep in &a.eps { assert!(c.contains(&format!("// chat.api:{}-{}", ep.lines.0, ep.lines.1))); }
+        for ep in &a.eps { assert!(c.contains(&format!("// chat.mito:{}-{}", ep.lines.0, ep.lines.1))); }
         assert!(c.contains("//   | endpoint DELETE /session {"));
     }
 

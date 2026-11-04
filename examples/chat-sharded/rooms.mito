@@ -16,3 +16,77 @@ struct Shard {
     rooms: pool<Room, 32>;   // the rooms this shard owns
 }
 state shard: Shard;
+
+fn room(id) {
+    each r in shard.rooms where r.id == id limit 1 { return r; }
+    fail 404 "no such room";
+}
+fn typing_until(t) { return t + max(shard.meta.typing_ttl, 5000); }
+
+// rooms[0] assigns the id and records the room in the directory, then forwards to the owning shard (id % count)
+endpoint POST /rooms {
+    let name = body("name");
+    if fwd("id") == null {
+        if len(name) == 0 { fail 400 "name is required"; }
+        shard.meta.next_room = shard.meta.next_room + 1;
+        let d = shard.directory.add(shard.meta.next_room);
+        d.name = name;
+        forward rooms[d.id] { "user": fwd("user"), "name": fwd("name"), "id": d.id };
+    }
+    let r = alloc shard.rooms;
+    r.id = int(fwd("id"));
+    r.name = name;
+    r.created = now();
+    respond 201 { "id": r.id, "name": r.name, "shard": worker_index() };
+}
+
+endpoint GET /rooms {
+    respond 200 { "rooms": [each d in shard.directory { "id": d.id, "name": d.name }] };
+}
+
+endpoint POST /rooms/{room}/messages {
+    let r = room(int(param("room")));
+    let text = body("body");
+    if len(text) == 0 { fail 400 "body is required"; }
+    shard.meta.next_seq = shard.meta.next_seq + 1;
+    let m = alloc r.messages;
+    m.seq = shard.meta.next_seq;
+    m.at = now();
+    m.user = fwd("user");
+    m.author = fwd("name");
+    m.body = text;
+    respond 201 { "seq": m.seq };
+}
+
+endpoint GET /rooms/{room}/messages {
+    let r = room(int(param("room")));
+    let n = min(int(or(query("limit"), "50")), 100);
+    respond 200 {
+        "room": r.name,
+        "messages": [each m in r.messages reverse limit n { "seq": m.seq, "author": m.author, "at": m.at, "body": m.body }]
+    };
+}
+
+endpoint POST /rooms/{room}/typing {
+    let r = room(int(param("room")));
+    let t = now();
+    let user = fwd("user");
+    var found = false;
+    each ty in r.typing {
+        if ty.user == user { ty.until = typing_until(t); found = true; }
+        else if ty.until < t { free ty; }
+    }
+    if !found {
+        let ty = alloc r.typing;
+        ty.user = user;
+        ty.name = fwd("name");
+        ty.until = typing_until(t);
+    }
+    respond 200 { "ok": true };
+}
+
+endpoint GET /rooms/{room}/typing {
+    let r = room(int(param("room")));
+    let t = now();
+    respond 200 { "typing": [each ty in r.typing where ty.until >= t { "name": ty.name }] };
+}

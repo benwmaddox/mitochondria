@@ -1,5 +1,5 @@
 // fixed arrays: in items and in plain state, read and written by index, bounds checked
---- state
+--- program
 struct Grid { cells: i32[4]; total: i64; }
 struct Player { hits: i16[3]; name: string<8>; }
 struct App {
@@ -7,7 +7,7 @@ struct App {
     players: pool<Player, 2>;
 }
 state app: App;
---- api
+
 endpoint POST /grid/{k} { app.grid.cells[int(param("k"))] = int(body("v")); app.grid.total = app.grid.total + int(body("v")); respond 200 { "cell": app.grid.cells[int(param("k"))] }; }
 endpoint GET /grid { respond 200 { "c0": app.grid.cells[0], "c3": app.grid.cells[3], "total": app.grid.total }; }
 endpoint GET /grid/{k} { respond 200 { "v": app.grid.cells[int(param("k"))] }; }

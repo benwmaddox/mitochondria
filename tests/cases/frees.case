@@ -1,5 +1,5 @@
 // frees happen only when the request succeeds; a slot freed in a request is not reused by it; forward needs a system
---- state
+--- program
 struct T { n: i32; }
 struct C { n: i64; }
 struct App {
@@ -7,7 +7,7 @@ struct App {
     c: C;
 }
 state app: App;
---- api
+
 endpoint POST /t { let t = alloc app.ts; t.n = 7; respond 201 { "slot": slot(t) }; }
 endpoint DELETE /t/{k} { let t = app.ts[int(param("k"))]; free t; if param("k") == "0" { fail 409 "changed my mind"; } respond 200 { "n": t.n }; }
 endpoint POST /swap { each t in app.ts { free t; } let u = try_alloc app.ts; respond 200 { "got": exists(u) }; }

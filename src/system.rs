@@ -20,7 +20,7 @@ const MB: usize = 1 << 20;
 // ---------------------------------------------------------------- spec
 
 pub struct KindSpec { pub name: String, pub state: String, pub api: String, pub count: usize, pub mailbox: usize, pub slot: usize, pub soft: Option<usize>, pub hard: Option<usize> }
-pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usize, pub budget: usize, pub spin: Duration, pub batch: usize }
+pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usize, pub budget: usize, pub spin: Duration, pub batch: usize, pub compile: bool }
 
 /// Parse a `.system` file. Paths in it are relative to `dir`.
 ///
@@ -34,7 +34,7 @@ pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usiz
 pub fn parse_spec(src: &str, dir: &Path) -> Result<Spec, String> {
     let toks = tokens(src);
     let mut i = 0;
-    let mut spec = Spec { kinds: Vec::new(), entry: usize::MAX, inflight: 4096, budget: 4096 * MB, spin: Duration::ZERO, batch: 32 }; // sleep at once by default: spinning only pays when there are idle cores
+    let mut spec = Spec { kinds: Vec::new(), entry: usize::MAX, inflight: 4096, budget: 4096 * MB, spin: Duration::ZERO, batch: 32, compile: false }; // sleep at once by default: spinning only pays when there are idle cores
     let mut entry = String::new();
     let next = |i: &mut usize| -> Result<String, String> { let t = toks.get(*i).cloned().ok_or("unexpected end of system file")?; *i += 1; Ok(t) };
     let num = |s: String| -> Result<usize, String> { s.parse().map_err(|_| format!("expected a number, found `{}`", s)) };
@@ -63,8 +63,9 @@ pub fn parse_spec(src: &str, dir: &Path) -> Result<Spec, String> {
             "inflight" => { spec.inflight = num(next(&mut i)?)?.max(1); next(&mut i)?; }
             "budget" => { spec.budget = num(next(&mut i)?)? * MB; next(&mut i)?; }
             "batch" => { spec.batch = num(next(&mut i)?)?.max(1); next(&mut i)?; }
+            "compile" => { spec.compile = match next(&mut i)?.as_str() { "tcc" => true, "off" => false, o => return Err(format!("compile `{}`: expected `tcc` or `off`", o)) }; next(&mut i)?; }
             "spin" => { spec.spin = Duration::from_micros(num(next(&mut i)?)? as u64); next(&mut i)?; }
-            o => return Err(format!("expected `worker`, `entry`, `inflight`, `budget`, `spin` or `batch`, found `{}`", o)),
+            o => return Err(format!("expected `worker`, `entry`, `inflight`, `budget`, `spin`, `batch` or `compile`, found `{}`", o)),
         }
     }
     spec.entry = spec.kinds.iter().position(|k| k.name == entry).ok_or(format!("entry `{}` is not a declared worker", entry))?;
@@ -324,6 +325,7 @@ fn worker(sh: Arc<Shared>, spec: Arc<Spec>, k: usize, i: usize) {
     let make = || -> Server {
         let inst = Instance::start(Program::parse(&ks.state).expect("checked at start"), usize::MAX).expect("reserve");
         let mut s = Server::new(inst, &ks.api).expect("checked at start");
+        if spec.compile { if let Err(e) = s.compile() { eprintln!("{}{}: compiling endpoints failed, they stay interpreted: {}", ks.name, i, e); } }
         s.system = Some(info.clone());
         if let Some(soft) = ks.soft { s.pressure = Some(Pressure::new(&s.inst, soft, ks.hard.unwrap_or(usize::MAX))); }
         s
@@ -451,7 +453,7 @@ fn xorshift(r: &mut u64) -> u64 { *r ^= *r << 13; *r ^= *r >> 7; *r ^= *r << 17;
 
 /// The sharded chat under load from `clients` threads, for each (auth, rooms) worker count in `configs`.
 /// Also measures one plain `Server` on one thread running the same mix (examples/chat), as the no-mailbox baseline.
-pub fn bench(src: &str, dir: &Path, clients: usize, configs: &[(usize, usize)], ops: usize, reps: usize, spin: Option<u64>, batch: Option<usize>) {
+pub fn bench(src: &str, dir: &Path, clients: usize, configs: &[(usize, usize)], ops: usize, reps: usize, spin: Option<u64>, batch: Option<usize>, compile: bool) {
     use std::time::Instant;
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     println!("logical cores: {}; client threads: {}; {} mixed requests per run (70% GET messages, 20% POST message, 5% POST typing, 5% GET typing); runs per config: {}", cores, clients, ops, reps);
@@ -486,7 +488,8 @@ pub fn bench(src: &str, dir: &Path, clients: usize, configs: &[(usize, usize)], 
             for k in &mut spec.kinds { if k.name == "auth" { k.count = a; } if k.name == "rooms" { k.count = r; } }
             if let Some(us) = spin { spec.spin = Duration::from_micros(us); }
             if let Some(b) = batch { spec.batch = b.max(1); }
-            if rep == 0 && a == configs[0].0 && r == configs[0].1 { println!("  spin before sleeping: {} us; batch: {} messages per lock", spec.spin.as_micros(), spec.batch); }
+            spec.compile = compile;
+            if rep == 0 && a == configs[0].0 && r == configs[0].1 { println!("  spin before sleeping: {} us; batch: {} messages per lock; endpoints {}", spec.spin.as_micros(), spec.batch, if spec.compile { "compiled with TinyCC" } else { "interpreted" }); }
             let sys = System::start(spec).expect("start");
             let to = Duration::from_secs(10);
             let toks: Vec<String> = (0..3000).map(|i| { let res = sys.request("POST", "/sessions", &[], &format!("{{\"name\":\"u{}\"}}", i), to); String::from_utf8_lossy(&res.1).split("\"token\":\"").nth(1).unwrap_or("").split('"').next().unwrap_or("").to_string() }).collect();
@@ -549,33 +552,37 @@ mod tests {
 
     #[test]
     fn forwards_reach_the_right_shard_in_order_and_each_request_is_answered_once() {
-        let front = kind("front", "struct M { n: i64; } global m: M;", "endpoint POST /inc/{k} { forward count[int(param(\"k\"))] { \"from\": worker_index() }; }", 2);
-        let count = kind("count", "struct C { n: i64; } global c: C;", "endpoint POST /inc/{k} { c.n = c.n + 1; respond 200 { \"shard\": worker_index(), \"n\": c.n, \"from\": int(fwd(\"from\")) }; }", 3);
-        let sys = System::start(Spec { kinds: vec![front, count], entry: 0, inflight: 16, budget: 1 << 30, spin: Duration::ZERO, batch: 8 }).unwrap();
-        for round in 1..=4 {
-            for k in 0..6 {
-                let r = sys.request("POST", &format!("/inc/{}", k), &[], "", T);
-                assert_eq!(r.0, 200, "{}", body(&r));
-                let b = body(&r);
-                assert!(b.contains(&format!("\"shard\":{}", k % 3)), "{}", b);
-                assert!(b.contains(&format!("\"n\":{}", round * 2 - if k < 3 { 1 } else { 0 })), "round {} key {}: {}", round, k, b); // keys k and k+3 share a shard
+        for compile in [false, true] {
+            let front = kind("front", "struct M { n: i64; } global m: M;", "endpoint POST /inc/{k} { forward count[int(param(\"k\"))] { \"from\": worker_index() }; }", 2);
+            let count = kind("count", "struct C { n: i64; } global c: C;", "endpoint POST /inc/{k} { c.n = c.n + 1; respond 200 { \"shard\": worker_index(), \"n\": c.n, \"from\": int(fwd(\"from\")) }; }", 3);
+            let sys = System::start(Spec { kinds: vec![front, count], entry: 0, inflight: 16, budget: 1 << 30, spin: Duration::ZERO, batch: 8, compile }).unwrap();
+            for round in 1..=4 {
+                for k in 0..6 {
+                    let r = sys.request("POST", &format!("/inc/{}", k), &[], "", T);
+                    assert_eq!(r.0, 200, "{}", body(&r));
+                    let b = body(&r);
+                    assert!(b.contains(&format!("\"shard\":{}", k % 3)), "{}", b);
+                    assert!(b.contains(&format!("\"n\":{}", round * 2 - if k < 3 { 1 } else { 0 })), "round {} key {}: {}", round, k, b); // keys k and k+3 share a shard
+                }
             }
+            let rep = sys.report();
+            assert_eq!(rep.iter().filter(|w| w.name == "front").map(|w| w.forwarded).sum::<u64>(), 24);
+            sys.shutdown();
         }
-        let rep = sys.report();
-        assert_eq!(rep.iter().filter(|w| w.name == "front").map(|w| w.forwarded).sum::<u64>(), 24);
-        sys.shutdown();
     }
 
     #[test]
     fn a_panicking_worker_is_restarted_with_fresh_state() {
-        let w = kind("w", "struct C { n: i64; } global c: C;", "endpoint POST /inc { c.n = c.n + 1; respond 200 { \"n\": c.n }; } endpoint POST /crash { c.n = 99; __crash(); }", 1);
-        let sys = System::start(Spec { kinds: vec![w], entry: 0, inflight: 4, budget: 1 << 30, spin: Duration::ZERO, batch: 8 }).unwrap();
-        assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":1}");
-        assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":2}");
-        assert_eq!(sys.request("POST", "/crash", &[], "", T).0, 500);
-        assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":1}"); // state was rebuilt
-        assert_eq!(sys.report()[0].restarts, 1);
-        sys.shutdown();
+        for compile in [false, true] {
+            let w = kind("w", "struct C { n: i64; } global c: C;", "endpoint POST /inc { c.n = c.n + 1; respond 200 { \"n\": c.n }; } endpoint POST /crash { c.n = 99; __crash(); }", 1);
+            let sys = System::start(Spec { kinds: vec![w], entry: 0, inflight: 4, budget: 1 << 30, spin: Duration::ZERO, batch: 8, compile }).unwrap();
+            assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":1}");
+            assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":2}");
+            assert_eq!(sys.request("POST", "/crash", &[], "", T).0, 500);
+            assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":1}"); // state was rebuilt
+            assert_eq!(sys.report()[0].restarts, 1);
+            sys.shutdown();
+        }
     }
 
     #[test]
@@ -621,29 +628,53 @@ mod tests {
 
     #[test]
     fn sharded_chat_end_to_end() {
-        let k = |n: &str, st: &str, api: &str, c| kind(n, st, api, c);
-        let auth = k("auth", include_str!("../examples/chat-sharded/auth.mito"), include_str!("../examples/chat-sharded/auth.api"), 2);
-        let rooms = k("rooms", include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api"), 3);
-        let sys = System::start(Spec { kinds: vec![auth, rooms], entry: 0, inflight: 64, budget: 4 << 30, spin: Duration::ZERO, batch: 8 }).unwrap();
-        let login = |n: &str| { let r = sys.request("POST", "/sessions", &[], &format!("{{\"name\":\"{}\"}}", n), T); assert_eq!(r.0, 201, "{}", body(&r)); body(&r).split("\"token\":\"").nth(1).unwrap().split('"').next().unwrap().to_string() };
-        let (ann, bob) = (login("ann"), login("bob"));
-        assert_ne!(ann.split('.').next(), bob.split('.').next(), "round-robin puts them on different auth shards");
-        fn h(t: &str) -> Vec<(&str, &str)> { vec![("X-Session", t)] }
-        let mut ids = Vec::new();
-        for name in ["a", "b", "c", "d"] { let r = sys.request("POST", "/rooms", &h(&ann), &format!("{{\"name\":\"{}\"}}", name), T); assert_eq!(r.0, 201, "{}", body(&r)); ids.push(body(&r).split("\"id\":").nth(1).unwrap().split(',').next().unwrap().to_string()); }
-        assert_eq!(ids, vec!["1", "2", "3", "4"]);
-        let list = sys.request("GET", "/rooms", &h(&bob), "", T);
-        assert!(body(&list).contains("\"name\":\"d\""), "{}", body(&list));
-        for (who, text) in [(&ann, "hi"), (&bob, "hello"), (&ann, "bye")] { assert_eq!(sys.request("POST", "/rooms/2/messages", &h(who), &format!("{{\"body\":\"{}\"}}", text), T).0, 201); }
-        let r = sys.request("GET", "/rooms/2/messages", &h(&bob), "", T);
-        let b = body(&r);
-        assert!(b.find("bye").unwrap() < b.find("hello").unwrap() && b.contains("\"author\":\"ann\""), "{}", b);
-        assert_eq!(sys.request("GET", "/rooms/9/messages", &h(&bob), "", T).0, 404);
-        assert_eq!(sys.request("POST", "/rooms/3/typing", &h(&ann), "", T).0, 200);
-        assert!(body(&sys.request("GET", "/rooms/3/typing", &h(&bob), "", T)).contains("ann"));
-        assert_eq!(sys.request("DELETE", "/session", &h(&ann), "", T).0, 200);
-        assert_eq!(sys.request("GET", "/rooms/2/messages", &h(&ann), "", T).0, 401);
-        assert_eq!(sys.request("GET", "/rooms", &[], "", T).0, 401);
-        sys.shutdown();
+        for compile in [false, true] {
+            let k = |n: &str, st: &str, api: &str, c| kind(n, st, api, c);
+            let auth = k("auth", include_str!("../examples/chat-sharded/auth.mito"), include_str!("../examples/chat-sharded/auth.api"), 2);
+            let rooms = k("rooms", include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api"), 3);
+            let sys = System::start(Spec { kinds: vec![auth, rooms], entry: 0, inflight: 64, budget: 4 << 30, spin: Duration::ZERO, batch: 8, compile }).unwrap();
+            let login = |n: &str| { let r = sys.request("POST", "/sessions", &[], &format!("{{\"name\":\"{}\"}}", n), T); assert_eq!(r.0, 201, "{}", body(&r)); body(&r).split("\"token\":\"").nth(1).unwrap().split('"').next().unwrap().to_string() };
+            let (ann, bob) = (login("ann"), login("bob"));
+            assert_ne!(ann.split('.').next(), bob.split('.').next(), "round-robin puts them on different auth shards");
+            fn h(t: &str) -> Vec<(&str, &str)> { vec![("X-Session", t)] }
+            let mut ids = Vec::new();
+            for name in ["a", "b", "c", "d"] { let r = sys.request("POST", "/rooms", &h(&ann), &format!("{{\"name\":\"{}\"}}", name), T); assert_eq!(r.0, 201, "{}", body(&r)); ids.push(body(&r).split("\"id\":").nth(1).unwrap().split(',').next().unwrap().to_string()); }
+            assert_eq!(ids, vec!["1", "2", "3", "4"]);
+            let list = sys.request("GET", "/rooms", &h(&bob), "", T);
+            assert!(body(&list).contains("\"name\":\"d\""), "{}", body(&list));
+            for (who, text) in [(&ann, "hi"), (&bob, "hello"), (&ann, "bye")] { assert_eq!(sys.request("POST", "/rooms/2/messages", &h(who), &format!("{{\"body\":\"{}\"}}", text), T).0, 201); }
+            let r = sys.request("GET", "/rooms/2/messages", &h(&bob), "", T);
+            let b = body(&r);
+            assert!(b.find("bye").unwrap() < b.find("hello").unwrap() && b.contains("\"author\":\"ann\""), "{}", b);
+            assert_eq!(sys.request("GET", "/rooms/9/messages", &h(&bob), "", T).0, 404);
+            assert_eq!(sys.request("POST", "/rooms/3/typing", &h(&ann), "", T).0, 200);
+            assert!(body(&sys.request("GET", "/rooms/3/typing", &h(&bob), "", T)).contains("ann"));
+            assert_eq!(sys.request("DELETE", "/session", &h(&ann), "", T).0, 200);
+            assert_eq!(sys.request("GET", "/rooms/2/messages", &h(&ann), "", T).0, 401);
+            assert_eq!(sys.request("GET", "/rooms", &[], "", T).0, 401);
+            sys.shutdown();
+        }
+    }
+}
+
+#[cfg(test)]
+mod compile_tests {
+    use super::*;
+    /// The worker tests run in both modes, but a worker whose compile fails only warns and stays interpreted;
+    /// this checks the sharded chat really compiles.
+    #[test]
+    fn sharded_chat_endpoints_compile() {
+        let info = SysInfo { kinds: vec![("auth".into(), 2), ("rooms".into(), 3)], me: (0, 0) };
+        for (state, api, want) in [
+            (include_str!("../examples/chat-sharded/auth.mito"), include_str!("../examples/chat-sharded/auth.api"), 9),
+            (include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api"), 5),
+        ] {
+            let inst = Instance::start(Program::parse(state).unwrap(), usize::MAX).unwrap();
+            let mut s = Server::new(inst, api).unwrap();
+            s.system = Some(info.clone());
+            let (notes, _) = s.compile().unwrap();
+            let n = notes.iter().filter(|x| x.ends_with(": compiled")).count();
+            assert_eq!(n, want, "{:#?}", notes);
+        }
     }
 }

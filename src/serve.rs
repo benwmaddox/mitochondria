@@ -170,6 +170,8 @@ pub struct Server {
     text: Area,
     bufs: Bufs,
     pub clock: Option<i64>, // fixed time in ms, for tests and benchmarks; otherwise the system clock
+    /// A random seed for `random()`, so two servers can be compared; 0 (the default) uses the operating system.
+    pub rng: std::cell::Cell<u64>,
     pub pressure: Option<Pressure>,
     pub system: Option<SysInfo>,
     /// Set when the last request forwarded: (worker kind, key). Its writes stay uncommitted until `finish_forward`.
@@ -194,7 +196,7 @@ impl Server {
         let mut scratch = Scratch::new(region);
         let out = scratch.alloc(RESPONSE_CAP).map_err(|_| "response area".to_string())?;
         let text = scratch.alloc(TEXT_CAP).map_err(|_| "text area".to_string())?;
-        Ok(Server { inst, api, out: Area { ptr: out, cap: RESPONSE_CAP, len: 0 }, text: Area { ptr: text, cap: TEXT_CAP, len: 0 }, bufs: Bufs::startup(), clock: None, pressure: None, system: None, pending: None, pending_frees: Vec::with_capacity(64), compiled: None, fwd_out: Vec::with_capacity(16), _scratch: scratch, _space: space })
+        Ok(Server { inst, api, out: Area { ptr: out, cap: RESPONSE_CAP, len: 0 }, text: Area { ptr: text, cap: TEXT_CAP, len: 0 }, bufs: Bufs::startup(), clock: None, rng: std::cell::Cell::new(0), pressure: None, system: None, pending: None, pending_frees: Vec::with_capacity(64), compiled: None, fwd_out: Vec::with_capacity(16), _scratch: scratch, _space: space })
     }
 
     /// The last response body.
@@ -233,7 +235,7 @@ impl Server {
         if self.pressure.as_ref().map_or(false, |p| p.refusing) && method != "GET" && method != "DELETE" { Self::out_err(&mut self.out, "memory pressure: try again later"); return 503; }
         let cfn = self.compiled.as_ref().and_then(|c| c.eps[ei]);
         let mut b = std::mem::replace(&mut self.bufs, Bufs::empty());
-        let Server { inst, api, out, text, clock, .. } = self;
+        let Server { inst, api, out, text, clock, rng, .. } = self;
         let ep = &api.eps[ei];
         b.params.clear(); b.query.clear();
         let mut fits = true;
@@ -249,7 +251,7 @@ impl Server {
         let now = clock.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0));
         inst.begin();
         let mut run = Run {
-            inst, api, ep, headers, fwd, sys: self.system.as_ref(), fwd_out: &mut self.fwd_out, params: &b.params, query: &b.query, json: &b.json, text, out, now,
+            inst, api, ep, headers, fwd, rng, sys: self.system.as_ref(), fwd_out: &mut self.fwd_out, params: &b.params, query: &b.query, json: &b.json, text, out, now,
             vars: { let mut v = std::mem::take(&mut b.vars); v.clear(); v.resize(ep.slots as usize, Value::Null); v }, frame: 0, depth: 0,
             args: std::mem::take(&mut b.args), frees: std::mem::take(&mut b.frees), idx: std::mem::take(&mut b.idx), keyed: std::mem::take(&mut b.keyed),
             cerr: None, panicked: false,
@@ -309,6 +311,7 @@ struct Run<'a> {
     vars: Vec<Value>, // frames of local slots: the endpoint's, then one per active function call
     frame: usize, depth: usize,
     args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>,
+    rng: &'a std::cell::Cell<u64>,
     cerr: Option<Ctl<'a>>, // an error a helper stored for compiled code
     panicked: bool,
 }
@@ -542,6 +545,12 @@ impl<'a> Run<'a> {
     fn call_with(&mut self, n: &'a str, res: CallRes, args: &'a [Expr], base: usize) -> R<'a, Value> {
         for x in args { let v = self.eval(x)?; self.args.push(v); }
         let b = match res { CallRes::User(k) => return self.call_fn(&self.api.fns[k as usize], base), CallRes::Builtin(b) => b, CallRes::Unbound => return fail(500, format!("`{}` was not bound", n)) };
+        self.apply(b, base)
+    }
+
+    /// A builtin applied to the arguments in `self.args[base..]`. Compiled code calls this too (through the `builtin`
+    /// helper), so both run the same code for every builtin it covers.
+    fn apply(&mut self, b: B, base: usize) -> R<'a, Value> {
         let key = |me: &Self| -> R<'a, Txt> { me.arg_txt(base, 0) };
         Ok(match b {
             B::Body => { let k = key(self)?; let k = self.text.get(k); self.json.iter().find(|x| self.text.get(x.0) == k).map(|x| x.1.clone()).unwrap_or(Value::Null) }
@@ -572,7 +581,7 @@ impl<'a> Run<'a> {
                 _ => return fail(500, "worker_count(\"kind\")"),
             },
             B::Crash => panic!("__crash() called: test hook for worker supervision"),
-            B::Random => Value::Int(os::random_u64() as i64),
+            B::Random => Value::Int(match self.rng.get() { 0 => os::random_u64(), mut x => { x ^= x << 13; x ^= x >> 7; x ^= x << 17; self.rng.set(x); x } } as i64),
             B::Min | B::Max => match (self.arg(base, 0), self.arg(base, 1)) { (Value::Int(p), Value::Int(q)) => Value::Int(if b == B::Min { p.min(q) } else { p.max(q) }), _ => return fail(500, "min/max need integers") },
             B::Count => match self.arg(base, 0) { Value::Coll(c, i) => Value::Int(self.inst.count(c, i) as i64), _ => return fail(500, "count(collection)") },
             B::Capacity => match self.arg(base, 0) { Value::Coll(c, _) => Value::Int(self.inst.cap(c) as i64), _ => return fail(500, "capacity(collection)") },
@@ -887,12 +896,19 @@ mod tests {
         struct Typing { who: ref<sessions>; until: i64; }
         struct Room { name: string<8>; created: i64; messages: list<Msg, 5> drop_oldest; typing: pool<Typing, 4>; }
         global meta: Meta; global sessions: pool<Session, 3> checked; global rooms: pool<Room, 2>;";
-    fn server() -> Server {
+    thread_local! { static COMPILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    /// Says which mode a failing test was in.
+    struct Mode(bool);
+    impl Drop for Mode { fn drop(&mut self) { if std::thread::panicking() { eprintln!("(failed with endpoints {})", if self.0 { "compiled" } else { "interpreted" }); } } }
+    fn mode(compiled: bool) -> Mode { COMPILED.with(|c| c.set(compiled)); Mode(compiled) }
+    fn chat(compiled: bool) -> Server {
         let inst = Instance::start(Program::parse(STATE).unwrap(), 1 << 30).unwrap();
         let mut s = Server::new(inst, include_str!("../examples/chat/chat.api")).unwrap();
         s.clock = Some(1000);
+        if compiled { let (notes, _) = s.compile().unwrap(); assert!(notes.iter().filter(|n| n.ends_with(": compiled")).count() >= 8, "{:?}", notes); }
         s
     }
+    fn server() -> Server { chat(COMPILED.with(|c| c.get())) }
     fn login(s: &mut Server, name: &str) -> Vec<(String, String)> {
         let (c, b) = s.handle("POST", "/sessions", &[], &format!("{{\"name\":\"{}\"}}", name));
         assert_eq!(c, 201, "{}", b);
@@ -901,77 +917,92 @@ mod tests {
 
     #[test]
     fn auth_distinguishes_missing_wrong_secret_and_ended_sessions() {
-        let mut s = server();
-        let mut h = login(&mut s, "ann");
-        assert_eq!(s.handle("GET", "/rooms", &[], "").0, 401);
-        assert_eq!(s.handle("GET", "/rooms", &h, "").0, 200);
-        let mut wrong = h.clone(); let last = h[0].1.pop().unwrap(); wrong[0].1 = format!("{}{}", h[0].1, if last == '0' { '1' } else { '0' }); h[0].1.push(last);
-        assert_eq!(s.handle("GET", "/rooms", &wrong, "").0, 403);
-        assert_eq!(s.handle("DELETE", "/session", &h, "").0, 200);
-        assert_eq!(s.handle("GET", "/rooms", &h, "").0, 401);
-        let h2 = login(&mut s, "bob"); // reuses slot 0 with a new generation
-        assert_eq!(s.handle("GET", "/rooms", &h, "").0, 401);
-        assert_eq!(s.handle("GET", "/rooms", &h2, "").0, 200);
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = server();
+            let mut h = login(&mut s, "ann");
+            assert_eq!(s.handle("GET", "/rooms", &[], "").0, 401);
+            assert_eq!(s.handle("GET", "/rooms", &h, "").0, 200);
+            let mut wrong = h.clone(); let last = h[0].1.pop().unwrap(); wrong[0].1 = format!("{}{}", h[0].1, if last == '0' { '1' } else { '0' }); h[0].1.push(last);
+            assert_eq!(s.handle("GET", "/rooms", &wrong, "").0, 403);
+            assert_eq!(s.handle("DELETE", "/session", &h, "").0, 200);
+            assert_eq!(s.handle("GET", "/rooms", &h, "").0, 401);
+            let h2 = login(&mut s, "bob"); // reuses slot 0 with a new generation
+            assert_eq!(s.handle("GET", "/rooms", &h, "").0, 401);
+            assert_eq!(s.handle("GET", "/rooms", &h2, "").0, 200);
+        }
     }
 
     #[test]
     fn error_codes_and_rollback() {
-        let mut s = server();
-        let h = login(&mut s, "ann");
-        assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"123456789\"}").0, 413); // string<8>: rolled back, no ghost room
-        assert_eq!(s.handle("POST", "/rooms", &h, "{}").0, 400);
-        assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"a\"}").0, 201);
-        assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"b\"}").0, 201);
-        assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"c\"}").0, 503);
-        assert_eq!(s.handle("GET", "/rooms/7/messages", &h, "").0, 404);
-        assert_eq!(s.handle("GET", "/rooms/x/messages", &h, "").0, 400);
-        let long = "x".repeat(2001);
-        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &format!("{{\"body\":\"{}\"}}", long)).0, 413);
-        let (_, b) = s.handle("GET", "/stats", &[], "");
-        assert!(b.contains("\"next_seq\":0"), "sequence number was rolled back: {}", b);
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = server();
+            let h = login(&mut s, "ann");
+            assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"123456789\"}").0, 413); // string<8>: rolled back, no ghost room
+            assert_eq!(s.handle("POST", "/rooms", &h, "{}").0, 400);
+            assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"a\"}").0, 201);
+            assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"b\"}").0, 201);
+            assert_eq!(s.handle("POST", "/rooms", &h, "{\"name\":\"c\"}").0, 503);
+            assert_eq!(s.handle("GET", "/rooms/7/messages", &h, "").0, 404);
+            assert_eq!(s.handle("GET", "/rooms/x/messages", &h, "").0, 400);
+            let long = "x".repeat(2001);
+            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &format!("{{\"body\":\"{}\"}}", long)).0, 413);
+            let (_, b) = s.handle("GET", "/stats", &[], "");
+            assert!(b.contains("\"next_seq\":0"), "sequence number was rolled back: {}", b);
+        }
     }
 
     #[test]
     fn room_list_drops_the_oldest_and_lists_newest_first() {
-        let mut s = server();
-        let h = login(&mut s, "ann");
-        s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-        for i in 1..=8 { assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &format!("{{\"body\":\"m{}\"}}", i)).0, 201); }
-        let (c, b) = s.handle("GET", "/rooms/0/messages?limit=10", &h, "");
-        assert_eq!(c, 200);
-        assert!(b.contains("\"body\":\"m8\"") && b.contains("\"body\":\"m4\"") && !b.contains("\"body\":\"m3\""), "{}", b);
-        assert!(b.find("m8").unwrap() < b.find("m7").unwrap());
-        assert!(b.contains("\"author\":\"ann\""));
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = server();
+            let h = login(&mut s, "ann");
+            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
+            for i in 1..=8 { assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &format!("{{\"body\":\"m{}\"}}", i)).0, 201); }
+            let (c, b) = s.handle("GET", "/rooms/0/messages?limit=10", &h, "");
+            assert_eq!(c, 200);
+            assert!(b.contains("\"body\":\"m8\"") && b.contains("\"body\":\"m4\"") && !b.contains("\"body\":\"m3\""), "{}", b);
+            assert!(b.find("m8").unwrap() < b.find("m7").unwrap());
+            assert!(b.contains("\"author\":\"ann\""));
+        }
     }
 
     #[test]
     fn deleted_author_shows_as_deleted_instead_of_failing_the_listing() {
-        let mut s = server();
-        let a = login(&mut s, "ann");
-        let b = login(&mut s, "bob");
-        s.handle("POST", "/rooms", &a, "{\"name\":\"r\"}");
-        s.handle("POST", "/rooms/0/messages", &a, "{\"body\":\"hi\"}");
-        s.handle("DELETE", "/session", &a, "");
-        let (c, body) = s.handle("GET", "/rooms/0/messages", &b, "");
-        assert_eq!(c, 200);
-        assert!(body.contains("[deleted]"), "{}", body);
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = server();
+            let a = login(&mut s, "ann");
+            let b = login(&mut s, "bob");
+            s.handle("POST", "/rooms", &a, "{\"name\":\"r\"}");
+            s.handle("POST", "/rooms/0/messages", &a, "{\"body\":\"hi\"}");
+            s.handle("DELETE", "/session", &a, "");
+            let (c, body) = s.handle("GET", "/rooms/0/messages", &b, "");
+            assert_eq!(c, 200);
+            assert!(body.contains("[deleted]"), "{}", body);
+        }
     }
 
     #[test]
     fn rate_limit_and_typing_upsert_and_expiry() {
-        let mut s = server();
-        let h = login(&mut s, "ann");
-        s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-        for _ in 0..30 { assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201); }
-        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 429);
-        s.clock = Some(1000 + 61_000);
-        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201);
-        s.handle("POST", "/rooms/0/typing", &h, "");
-        s.handle("POST", "/rooms/0/typing", &h, ""); // updates, does not add a second entry
-        let (_, b) = s.handle("GET", "/rooms/0/typing", &h, "");
-        assert_eq!(b.matches("ann").count(), 1, "{}", b);
-        s.clock = Some(1000 + 61_000 + 6_000);
-        assert!(!s.handle("GET", "/rooms/0/typing", &h, "").1.contains("ann"));
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = server();
+            let h = login(&mut s, "ann");
+            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
+            for _ in 0..30 { assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201); }
+            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 429);
+            s.clock = Some(1000 + 61_000);
+            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201);
+            s.handle("POST", "/rooms/0/typing", &h, "");
+            s.handle("POST", "/rooms/0/typing", &h, ""); // updates, does not add a second entry
+            let (_, b) = s.handle("GET", "/rooms/0/typing", &h, "");
+            assert_eq!(b.matches("ann").count(), 1, "{}", b);
+            s.clock = Some(1000 + 61_000 + 6_000);
+            assert!(!s.handle("GET", "/rooms/0/typing", &h, "").1.contains("ann"));
+        }
     }
 
     #[test]
@@ -1014,6 +1045,48 @@ mod tests {
     }
 
     #[test]
+    fn compiled_and_interpreted_servers_answer_alike() {
+        let mut ss = [chat(false), chat(true)];
+        for s in ss.iter_mut() { s.rng.set(0x1234_5678_9abc_def0); }
+        let mut log: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+        for (k, s) in ss.iter_mut().enumerate() {
+            let mut req = |s: &mut Server, m: &str, t: &str, h: &[(String, String)], b: &str| { let (c, r) = s.handle(m, t, h, b); log[k].push(format!("{} {} -> {} {}", m, t, c, r)); r };
+            let ann = token_of(&req(s, "POST", "/sessions", &[], "{\"name\":\"ann\"}"));
+            let bob = token_of(&req(s, "POST", "/sessions", &[], "{\"name\":\"bob \\\"b\\\"\"}"));
+            req(s, "POST", "/sessions", &[], "{}");
+            req(s, "POST", "/sessions", &[], "{\"name\":5}");
+            let (a, b) = (vec![("X-Session".to_string(), ann.clone())], vec![("X-Session".to_string(), bob.clone())]);
+            for body in ["{\"name\":\"lobby\"}", "{\"name\":\"way too long\"}", "{}", "{\"name\":\"r2\"}", "{\"name\":\"r3\"}"] { req(s, "POST", "/rooms", &a, body); }
+            req(s, "GET", "/rooms", &b, "");
+            for i in 0..8 { req(s, "POST", "/rooms/0/messages", if i % 2 == 0 { &a } else { &b }, &format!("{{\"body\":\"m{} \\u00e9\"}}", i)); }
+            req(s, "POST", "/rooms/0/messages", &a, "{}");
+            req(s, "POST", "/rooms/0/messages", &a, &format!("{{\"body\":\"{}\"}}", "x".repeat(2001)));
+            req(s, "POST", "/rooms/9/messages", &a, "{\"body\":\"x\"}");
+            for q in ["", "?limit=3", "?limit=0", "?limit=-1", "?limit=abc", "?limit=1000"] { req(s, "GET", &format!("/rooms/0/messages{}", q), &b, ""); }
+            req(s, "GET", "/rooms/x/messages", &b, "");
+            req(s, "GET", "/rooms/1/messages", &b, "");
+            req(s, "POST", "/rooms/0/typing", &a, ""); req(s, "POST", "/rooms/0/typing", &b, ""); req(s, "POST", "/rooms/0/typing", &a, "");
+            req(s, "GET", "/rooms/0/typing", &b, "");
+            s.clock = Some(1000 + 6000);
+            req(s, "GET", "/rooms/0/typing", &b, "");
+            req(s, "POST", "/rooms/0/typing", &b, "");
+            req(s, "GET", "/rooms/0/typing", &a, "");
+            req(s, "DELETE", "/session", &a, "");
+            req(s, "GET", "/rooms/0/messages", &b, "");
+            req(s, "GET", "/rooms/0/messages", &a, "");
+            req(s, "GET", "/rooms", &[("X-Session".to_string(), "0.9.ffff".to_string())], "");
+            req(s, "GET", "/stats", &[], "");
+            for _ in 0..40 { req(s, "POST", "/rooms/0/messages", &b, "{\"body\":\"flood\"}"); }
+            req(s, "GET", "/nope", &[], "");
+        }
+        for (x, y) in log[0].iter().zip(log[1].iter()) { assert_eq!(x, y, "interpreted vs compiled"); }
+        if std::env::var("MITO_SHOW_LOG").is_ok() { for l in &log[1] { println!("{}", &l[..l.len().min(150)]); } }
+        assert_eq!(log[0].len(), log[1].len());
+        let rows = |s: &Server| s.inst.inspect().into_iter().map(|r| (r.0, r.4)).collect::<Vec<_>>();
+        assert_eq!(rows(&ss[0]), rows(&ss[1]), "final state");
+    }
+
+    #[test]
     fn functions_and_vars() {
         let inst = Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap();
         let api = "fn double(x: i64) -> i64 { return x * 2; }
@@ -1030,43 +1103,52 @@ mod tests {
 
     #[test]
     fn warm_requests_do_not_allocate() {
-        let mut s = server();
-        let h = login(&mut s, "ann");
-        s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-        let post = "{\"body\":\"hello \\\"there\\\"\"}";
-        for _ in 0..10 { s.handle_raw("POST", "/rooms/0/messages", &h, post); s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""); s.handle_raw("POST", "/rooms/0/typing", &h, ""); }
-        let a0 = crate::alloc_count::allocs();
-        assert_eq!(s.handle_raw("POST", "/rooms/0/messages", &h, post), 201);
-        assert_eq!(s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""), 200);
-        assert_eq!(s.handle_raw("POST", "/rooms/0/typing", &h, ""), 200);
-        assert_eq!(s.handle_raw("GET", "/rooms/0/typing", &h, ""), 200);
-        assert_eq!(crate::alloc_count::allocs() - a0, 0, "heap allocations in warm requests");
-        assert!(s.response().contains("ann"));
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = server();
+            let h = login(&mut s, "ann");
+            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
+            let post = "{\"body\":\"hello \\\"there\\\"\"}";
+            for _ in 0..10 { s.handle_raw("POST", "/rooms/0/messages", &h, post); s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""); s.handle_raw("POST", "/rooms/0/typing", &h, ""); }
+            let a0 = crate::alloc_count::allocs();
+            assert_eq!(s.handle_raw("POST", "/rooms/0/messages", &h, post), 201);
+            assert_eq!(s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""), 200);
+            assert_eq!(s.handle_raw("POST", "/rooms/0/typing", &h, ""), 200);
+            assert_eq!(s.handle_raw("GET", "/rooms/0/typing", &h, ""), 200);
+            assert_eq!(crate::alloc_count::allocs() - a0, 0, "heap allocations in warm requests");
+            assert!(s.response().contains("ann"));
+        }
     }
 
     #[test]
     fn pressure_refuses_writes_above_the_hard_mark_and_still_serves_reads() {
-        let mut s = server();
-        let h = login(&mut s, "ann");
-        s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-        s.pressure = Some(Pressure::new(&s.inst, 0, 0)); // every committed byte is over the marks
-        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201); // decided after this request
-        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"y\"}").0, 503);
-        assert_eq!(s.handle("GET", "/rooms/0/messages", &h, "").0, 200);
-        assert!(s.pressure.as_ref().unwrap().full_trims >= 1);
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = server();
+            let h = login(&mut s, "ann");
+            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
+            s.pressure = Some(Pressure::new(&s.inst, 0, 0)); // every committed byte is over the marks
+            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"x\"}").0, 201); // decided after this request
+            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, "{\"body\":\"y\"}").0, 503);
+            assert_eq!(s.handle("GET", "/rooms/0/messages", &h, "").0, 200);
+            assert!(s.pressure.as_ref().unwrap().full_trims >= 1);
+        }
     }
 
     #[test]
     fn json_input_escapes_and_unicode() {
-        let mut s = server();
-        let h = login(&mut s, "ann");
-        s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
-        let bs = char::from(92); // a backslash, built at run time so the escapes below stay escapes in the request text
-        let body = format!("{{\"body\":\"caf{b}u00e9 {b}ud83d{b}ude00 tab{b}t {b}\"q{b}\"\"}}", b = bs);
-        assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &body).0, 201);
-        let (_, out) = s.handle("GET", "/rooms/0/messages", &h, "");
-        let want = format!("caf{} {} tab{}t {}\"q{}\"", char::from_u32(0xE9).unwrap(), char::from_u32(0x1F600).unwrap(), bs, bs, bs);
-        assert!(out.contains(&want), "{}", out);
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = server();
+            let h = login(&mut s, "ann");
+            s.handle("POST", "/rooms", &h, "{\"name\":\"r\"}");
+            let bs = char::from(92); // a backslash, built at run time so the escapes below stay escapes in the request text
+            let body = format!("{{\"body\":\"caf{b}u00e9 {b}ud83d{b}ude00 tab{b}t {b}\"q{b}\"\"}}", b = bs);
+            assert_eq!(s.handle("POST", "/rooms/0/messages", &h, &body).0, 201);
+            let (_, out) = s.handle("GET", "/rooms/0/messages", &h, "");
+            let want = format!("caf{} {} tab{}t {}\"q{}\"", char::from_u32(0xE9).unwrap(), char::from_u32(0x1F600).unwrap(), bs, bs, bs);
+            assert!(out.contains(&want), "{}", out);
+        }
     }
 
     #[test]
@@ -1187,23 +1269,43 @@ pub struct Compiled { _unit: crate::tcc::Unit, eps: Vec<Option<unsafe extern "C"
 pub struct Ctx { base: *mut u8, run: *mut c_void, h: *const Helpers }
 #[repr(C)]
 struct CTxt { off: u32, len: u32, present: i32 }
+/// A value of any kind, as generated code holds it. Tags as in cgen::PRELUDE.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CVal { tag: i32, a: u32, b: u32, i: i64, f: f64 }
+
 #[repr(C)]
 struct Helpers {
     out: extern "C" fn(*mut Ctx, *const u8, u32) -> i32,
     json_i64: extern "C" fn(*mut Ctx, i64) -> i32,
     json_col: extern "C" fn(*mut Ctx, u32, u32, u32) -> i32,
     json_txt: extern "C" fn(*mut Ctx, *const CTxt) -> i32,
+    json_val: extern "C" fn(*mut Ctx, *const CVal) -> i32,
     auth: extern "C" fn(*mut Ctx, u32, *mut u32) -> i32,
     index: extern "C" fn(*mut Ctx, u32, u32, i64, *mut u32) -> i32,
-    param: extern "C" fn(*mut Ctx, u32, *mut CTxt) -> i32,
-    query: extern "C" fn(*mut Ctx, *const u8, u32, *mut CTxt) -> i32,
     lit: extern "C" fn(*mut Ctx, *const u8, u32, *mut CTxt) -> i32,
-    to_int: extern "C" fn(*mut Ctx, *const CTxt, *mut i64) -> i32,
     deref: extern "C" fn(*mut Ctx, u32, u32, u32, *mut u32) -> i32,
     fail: extern "C" fn(*mut Ctx, i32, *const u8, u32) -> i32,
     dead: extern "C" fn(*mut Ctx) -> i32,
+    col_txt: extern "C" fn(*mut Ctx, u32, u32, u32, *mut CTxt) -> i32,
+    plain_txt: extern "C" fn(*mut Ctx, u32, *mut CTxt) -> i32,
+    binop: extern "C" fn(*mut Ctx, i32, *const CVal, *const CVal, *mut CVal) -> i32,
+    truthy: extern "C" fn(*mut Ctx, *const CVal, *mut i32) -> i32,
+    store: extern "C" fn(*mut Ctx, u32, u32, u32, *const CVal) -> i32,
+    store_plain: extern "C" fn(*mut Ctx, u32, u32, u32, *const CVal) -> i32,
+    alloc: extern "C" fn(*mut Ctx, u32, u32, i32, *mut u32) -> i32,
+    free_: extern "C" fn(*mut Ctx, u32, u32) -> i32,
+    fwd_begin: extern "C" fn(*mut Ctx, *const u8, u32) -> i32,
+    fwd_put: extern "C" fn(*mut Ctx, *const u8, u32, *const CVal) -> i32,
+    forward: extern "C" fn(*mut Ctx, *const u8, u32, i64) -> i32,
+    crash: extern "C" fn(*mut Ctx) -> i32,
+    builtin: extern "C" fn(*mut Ctx, i32, *const CVal, u32, *mut CVal) -> i32,
 }
-static HELPERS: Helpers = Helpers { out: h_out, json_i64: h_json_i64, json_col: h_json_col, json_txt: h_json_txt, auth: h_auth, index: h_index, param: h_param, query: h_query, lit: h_lit, to_int: h_to_int, deref: h_deref, fail: h_fail, dead: h_dead };
+static HELPERS: Helpers = Helpers {
+    out: h_out, json_i64: h_json_i64, json_col: h_json_col, json_txt: h_json_txt, json_val: h_json_val, auth: h_auth, index: h_index, lit: h_lit,
+    deref: h_deref, fail: h_fail, dead: h_dead, col_txt: h_col_txt, plain_txt: h_plain_txt, binop: h_binop, truthy: h_truthy, store: h_store,
+    store_plain: h_store_plain, alloc: h_alloc, free_: h_free, fwd_begin: h_fwd_begin, fwd_put: h_fwd_put, forward: h_forward, crash: h_crash, builtin: h_builtin,
+};
 
 /// Run a helper body on the request behind `c`. A stored error returns -1; a panic is caught here (it must not unwind
 /// through C frames), remembered, and re-raised by `handle_req` once the compiled code has returned.
@@ -1215,9 +1317,24 @@ fn with_run(c: *mut Ctx, f: impl FnOnce(&mut Run<'static>) -> R<'static, i32>) -
         Err(_) => { run.panicked = true; -1 }
     }
 }
-fn bytes<'x>(p: *const u8, n: u32) -> &'x [u8] { unsafe { std::slice::from_raw_parts(p, n as usize) } }
-fn to_txt(t: Txt, out: *mut CTxt) { unsafe { *out = CTxt { off: t.off, len: t.len, present: 1 }; } }
-fn absent(out: *mut CTxt) { unsafe { *out = CTxt { off: 0, len: 0, present: 0 }; } }
+fn bytes<'x>(p: *const u8, n: u32) -> &'x [u8] { if n == 0 { &[] } else { unsafe { std::slice::from_raw_parts(p, n as usize) } } }
+fn put_txt(t: Txt, out: *mut CTxt) { unsafe { *out = CTxt { off: t.off, len: t.len, present: 1 }; } }
+fn to_value(v: &CVal) -> Value {
+    match v.tag { 1 => Value::Int(v.i), 2 => Value::Float(v.f), 3 => Value::Bool(v.i != 0), 4 => Value::Str(Txt { off: v.a, len: v.b }), 5 => Value::Item(v.a as usize, v.b as usize), _ => Value::Null }
+}
+fn put_value<'x>(v: Value, out: *mut CVal) -> R<'x, i32> {
+    let c = match v {
+        Value::Null => CVal { tag: 0, a: 0, b: 0, i: 0, f: 0.0 },
+        Value::Int(i) => CVal { tag: 1, a: 0, b: 0, i, f: 0.0 },
+        Value::Float(f) => CVal { tag: 2, a: 0, b: 0, i: 0, f },
+        Value::Bool(b) => CVal { tag: 3, a: 0, b: 0, i: b as i64, f: 0.0 },
+        Value::Str(t) => CVal { tag: 4, a: t.off, b: t.len, i: 0, f: 0.0 },
+        Value::Item(c, i) => CVal { tag: 5, a: c as u32, b: i as u32, i: 0, f: 0.0 },
+        _ => return fail(500, "compiled code cannot hold this kind of value"),
+    };
+    unsafe { *out = c; }
+    Ok(0)
+}
 
 extern "C" fn h_out(c: *mut Ctx, p: *const u8, n: u32) -> i32 { with_run(c, |r| { r.out(bytes(p, n))?; Ok(0) }) }
 extern "C" fn h_json_i64(c: *mut Ctx, v: i64) -> i32 { with_run(c, |r| if write!(r.out, "{}", v).is_ok() { Ok(0) } else { fail(507, "response too large") }) }
@@ -1227,6 +1344,17 @@ extern "C" fn h_json_col(c: *mut Ctx, cid: u32, idx: u32, ci: u32) -> i32 {
 extern "C" fn h_json_txt(c: *mut Ctx, t: *const CTxt) -> i32 {
     with_run(c, |r| { let t = unsafe { &*t }; if escaped(r.out, r.text.get(Txt { off: t.off, len: t.len })) { Ok(0) } else { fail(507, "response too large") } })
 }
+/// A value written as JSON, exactly as the interpreter's `respond` writes it.
+extern "C" fn h_json_val(c: *mut Ctx, v: *const CVal) -> i32 {
+    with_run(c, |r| {
+        let ok = match to_value(unsafe { &*v }) {
+            Value::Int(i) => write!(r.out, "{}", i).is_ok(), Value::Float(f) => write!(r.out, "{}", f).is_ok(), Value::Bool(b) => write!(r.out, "{}", b).is_ok(),
+            Value::Str(t) => escaped(r.out, r.text.get(t)), Value::Null => r.out.push(b"null").is_some(),
+            _ => return fail(500, "cannot write this value as JSON"),
+        };
+        if ok { Ok(0) } else { fail(507, "response too large") }
+    })
+}
 extern "C" fn h_auth(c: *mut Ctx, cid: u32, out: *mut u32) -> i32 { with_run(c, |r| { let i = r.auth_item(cid as usize)?; unsafe { *out = i as u32 }; Ok(0) }) }
 extern "C" fn h_index(c: *mut Ctx, cid: u32, inst: u32, k: i64, out: *mut u32) -> i32 {
     with_run(c, |r| {
@@ -1234,24 +1362,79 @@ extern "C" fn h_index(c: *mut Ctx, cid: u32, inst: u32, k: i64, out: *mut u32) -
         match r.inst.step_index(Loc::Coll(cid as usize, inst as usize), k as usize, None)? { Loc::Item(_, i, _) => { unsafe { *out = i as u32 }; Ok(0) } _ => fail(500, "compiled index of a collection of plain values") }
     })
 }
-extern "C" fn h_param(c: *mut Ctx, seg: u32, out: *mut CTxt) -> i32 { with_run(c, |r| { match r.params.iter().find(|p| p.0 == seg as usize) { Some(p) => to_txt(p.1, out), None => absent(out) } Ok(0) }) }
-extern "C" fn h_query(c: *mut Ctx, p: *const u8, n: u32, out: *mut CTxt) -> i32 {
-    with_run(c, |r| { let k = bytes(p, n); match r.query.iter().find(|x| r.text.get(x.0) == k) { Some(x) => to_txt(x.1, out), None => absent(out) } Ok(0) })
-}
-extern "C" fn h_lit(c: *mut Ctx, p: *const u8, n: u32, out: *mut CTxt) -> i32 { with_run(c, |r| { let t = r.txt(bytes(p, n))?; to_txt(t, out); Ok(0) }) }
-extern "C" fn h_to_int(c: *mut Ctx, t: *const CTxt, out: *mut i64) -> i32 {
-    with_run(c, |r| {
-        let t = unsafe { &*t };
-        if t.present == 0 { return fail(400, "missing number"); }
-        let s = r.text.get(Txt { off: t.off, len: t.len });
-        match std::str::from_utf8(s).ok().and_then(|s| s.trim().parse::<i64>().ok()) { Some(i) => { unsafe { *out = i }; Ok(0) } None => fail(400, format!("`{}` is not a number", String::from_utf8_lossy(s))) }
-    })
-}
+extern "C" fn h_lit(c: *mut Ctx, p: *const u8, n: u32, out: *mut CTxt) -> i32 { with_run(c, |r| { let t = r.txt(bytes(p, n))?; put_txt(t, out); Ok(0) }) }
 extern "C" fn h_deref(c: *mut Ctx, target: u32, slot: u32, gen: u32, out: *mut u32) -> i32 {
     with_run(c, |r| Ok(match r.inst.deref_quiet(target as usize, (slot as usize, gen)) { Some(i) => { unsafe { *out = i as u32 }; 1 } None => 0 }))
 }
 extern "C" fn h_fail(c: *mut Ctx, code: i32, p: *const u8, n: u32) -> i32 { with_run(c, |_| fail(code as u16, String::from_utf8_lossy(bytes(p, n)).into_owned())) }
 extern "C" fn h_dead(c: *mut Ctx) -> i32 { with_run(c, |_| Err(Ctl::Dead)) }
+/// A string column of an item, copied into the text area (values never alias state, as in the interpreter).
+extern "C" fn h_col_txt(c: *mut Ctx, cid: u32, idx: u32, ci: u32, out: *mut CTxt) -> i32 {
+    with_run(c, |r| match r.read_str(&Loc::Field(cid as usize, idx as usize, ci as usize))? { Value::Str(t) => { put_txt(t, out); Ok(0) } _ => fail(500, "not a string") })
+}
+extern "C" fn h_plain_txt(c: *mut Ctx, off: u32, out: *mut CTxt) -> i32 {
+    with_run(c, |r| match r.read_str(&Loc::Plain(off as usize, Ty::Str(0)))? { Value::Str(t) => { put_txt(t, out); Ok(0) } _ => fail(500, "not a string") })
+}
+extern "C" fn h_binop(c: *mut Ctx, op: i32, a: *const CVal, b: *const CVal, out: *mut CVal) -> i32 {
+    with_run(c, |r| { let op = crate::cgen::OPS.get(op as usize).copied().unwrap_or("?"); let v = r.binop(op, to_value(unsafe { &*a }), to_value(unsafe { &*b }))?; put_value(v, out) })
+}
+extern "C" fn h_truthy(c: *mut Ctx, v: *const CVal, out: *mut i32) -> i32 { with_run(c, |r| { let t = r.truthy(&to_value(unsafe { &*v }))?; unsafe { *out = t as i32 }; Ok(0) }) }
+extern "C" fn h_store(c: *mut Ctx, cid: u32, idx: u32, ci: u32, v: *const CVal) -> i32 {
+    with_run(c, |r| { r.store(Loc::Field(cid as usize, idx as usize, ci as usize), to_value(unsafe { &*v }))?; Ok(0) })
+}
+extern "C" fn h_store_plain(c: *mut Ctx, off: u32, code: u32, cap: u32, v: *const CVal) -> i32 {
+    with_run(c, |r| { let Some(t) = crate::cgen::plain_ty(code, cap) else { return fail(500, "bad plain kind") }; r.store(Loc::Plain(off as usize, t), to_value(unsafe { &*v }))?; Ok(0) })
+}
+extern "C" fn h_alloc(c: *mut Ctx, cid: u32, inst: u32, try_: i32, out: *mut u32) -> i32 {
+    with_run(c, |r| match r.inst.push_item(cid as usize, inst as usize) {
+        Ok(i) => { unsafe { *out = i as u32 }; Ok(0) }
+        Err(Error::Full(_)) if try_ != 0 => { unsafe { *out = u32::MAX }; Ok(0) }
+        Err(e) => Err(e.into()),
+    })
+}
+extern "C" fn h_free(c: *mut Ctx, cid: u32, idx: u32) -> i32 {
+    with_run(c, |r| {
+        let (cid, idx) = (cid as usize, idx as usize);
+        if r.inst.is_list(cid) { return fail(500, "list items are not freed; lists drop their oldest or pop their newest"); }
+        if !r.frees.contains(&(cid, idx)) { r.frees.push((cid, idx)); }
+        Ok(0)
+    })
+}
+extern "C" fn h_fwd_begin(c: *mut Ctx, p: *const u8, n: u32) -> i32 {
+    with_run(c, |r| {
+        let kind = bytes(p, n);
+        let Some(s) = r.sys else { return fail(500, "forward needs a system of workers") };
+        if !s.kinds.iter().any(|x| x.0.as_bytes() == kind) { return fail(500, format!("no worker kind `{}`", String::from_utf8_lossy(kind))); }
+        r.fwd_out.clear();
+        Ok(0)
+    })
+}
+extern "C" fn h_fwd_put(c: *mut Ctx, p: *const u8, n: u32, v: *const CVal) -> i32 {
+    with_run(c, |r| {
+        let v = to_value(unsafe { &*v });
+        let kt = r.txt(bytes(p, n))?;
+        let start = r.text.len;
+        if !matches!(v, Value::Null) { r.show_into(&v)?; }
+        let t = r.text.since(start);
+        r.fwd_out.push((kt, t));
+        Ok(0)
+    })
+}
+extern "C" fn h_forward(c: *mut Ctx, p: *const u8, n: u32, key: i64) -> i32 {
+    with_run(c, |r| { let kind = bytes(p, n); let k = r.sys.and_then(|s| s.kinds.iter().position(|x| x.0.as_bytes() == kind)).unwrap_or(0); Err(Ctl::Forward(k, key)) })
+}
+extern "C" fn h_crash(c: *mut Ctx) -> i32 { with_run(c, |_| panic!("__crash() called: test hook for worker supervision")) }
+/// Any builtin in cgen::BUILTINS, computed by the interpreter's own `apply`.
+extern "C" fn h_builtin(c: *mut Ctx, code: i32, argv: *const CVal, n: u32, out: *mut CVal) -> i32 {
+    with_run(c, |r| {
+        let Some(&b) = crate::cgen::BUILTINS.get(code as usize) else { return fail(500, "unknown builtin code") };
+        let base = r.args.len();
+        for k in 0..n as usize { let v = to_value(unsafe { &*argv.add(k) }); r.args.push(v); }
+        let res = r.apply(b, base);
+        r.args.truncate(base);
+        put_value(res?, out)
+    })
+}
 
 impl Server {
     /// Compile what the generator handles to native code with TinyCC; the rest stays interpreted.

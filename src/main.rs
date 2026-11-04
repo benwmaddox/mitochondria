@@ -26,10 +26,11 @@ fn main() {
         let opt = |name: &str, d: usize| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(d);
         if args[0] == "bench-system" {
             let configs: Vec<(usize, usize)> = args.iter().position(|a| a == "--configs").and_then(|i| args.get(i + 1)).map(|s| s.split(',').filter_map(|c| c.split_once('x')).filter_map(|(a, r)| Some((a.parse().ok()?, r.parse().ok()?))).collect()).unwrap_or(vec![(1, 1), (1, 2), (2, 4), (4, 8)]);
-            system::bench(&src, dir, opt("--clients", 8), &configs, opt("--ops", 100_000), opt("--reps", 2), args.iter().position(|a| a == "--spin").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()), args.iter().position(|a| a == "--batch").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()));
+            system::bench(&src, dir, opt("--clients", 8), &configs, opt("--ops", 100_000), opt("--reps", 2), args.iter().position(|a| a == "--spin").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()), args.iter().position(|a| a == "--batch").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()), args.iter().any(|a| a == "--compile"));
         } else {
             let mut spec = system::parse_spec(&src, dir).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
             for k in &mut spec.kinds { if let Some(n) = args.iter().position(|a| *a == format!("--{}", k.name)).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()) { k.count = n; } }
+            if args.iter().any(|a| a == "--compile") { spec.compile = true; }
             let sys = system::System::start(spec).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1) });
             system::serve(std::sync::Arc::new(sys), opt("--port", 8080) as u16, opt("--conns", 16)).expect("serve");
         }
@@ -42,6 +43,7 @@ fn main() {
         let mut server = serve::Server::new(inst, &std::fs::read_to_string(api).expect("read api")).unwrap_or_else(|e| { eprintln!("error in api file: {}", e); std::process::exit(1) });
         let opt = |name: &str, d: usize| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(d);
         if args.iter().any(|a| a == "--soft") { let p = runtime::Pressure::new(&server.inst, opt("--soft", 0) * MB, opt("--hard", usize::MAX / MB) * MB); server.pressure = Some(p); }
+        if args.iter().any(|a| a == "--compile") { match server.compile() { Ok((notes, _)) => for n in notes { println!("  {}", n); }, Err(e) => eprintln!("compiling failed, endpoints stay interpreted: {}", e) } }
         if args[0] == "bench" { serve::bench(&mut server, opt("--n", 2000)); } else { serve::serve(&mut server, opt("--port", 8080) as u16).expect("serve"); }
         return;
     }

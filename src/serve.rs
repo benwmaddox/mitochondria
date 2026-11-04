@@ -56,9 +56,39 @@ impl Area {
 impl std::fmt::Write for Area { fn write_str(&mut self, s: &str) -> std::fmt::Result { self.push(s.as_bytes()).map(|_| ()).ok_or(std::fmt::Error) } }
 
 /// Write `s` as a JSON string.
-/// A float as JSON: the shortest text that reads back as the same number, never with an exponent; JSON has no
-/// infinity or NaN, so those are written as null.
-fn json_f64(out: &mut Area, f: f64) -> bool { if f.is_finite() { write!(out, "{}", f).is_ok() } else { out.push(b"null").is_some() } }
+/// A float as JSON: as `float_text`; JSON has no infinity or NaN, so those are written as null.
+fn json_f64(out: &mut Area, f: f64) -> bool { if f.is_finite() { float_text(out, f).is_ok() } else { out.push(b"null").is_some() } }
+
+/// A float as text, as JavaScript writes numbers: the fewest digits that read back as the same number, positional from
+/// 1e-6 up to (not including) 1e21, otherwise with an exponent (`1e+21`, `1.5e-7`); `0` for both zeros; `Infinity`,
+/// `-Infinity`, `NaN`. Allocates nothing.
+fn float_text(out: &mut impl std::fmt::Write, f: f64) -> std::fmt::Result {
+    if f.is_nan() { return out.write_str("NaN"); }
+    if f.is_infinite() { return out.write_str(if f > 0.0 { "Infinity" } else { "-Infinity" }); }
+    if f == 0.0 { return out.write_char('0'); }
+    if f < 0.0 { out.write_char('-')?; }
+    // Rust's `{:e}` writes the shortest round-trip digits as d.ddde<exp>
+    struct Buf { b: [u8; 40], n: usize }
+    impl std::fmt::Write for Buf { fn write_str(&mut self, s: &str) -> std::fmt::Result { let e = self.n + s.len(); if e > self.b.len() { return Err(std::fmt::Error); } self.b[self.n..e].copy_from_slice(s.as_bytes()); self.n = e; Ok(()) } }
+    let mut b = Buf { b: [0; 40], n: 0 };
+    write!(b, "{:e}", f.abs())?;
+    let t = std::str::from_utf8(&b.b[..b.n]).map_err(|_| std::fmt::Error)?;
+    let (mant, exp) = t.split_once('e').ok_or(std::fmt::Error)?;
+    let exp: i32 = exp.parse().map_err(|_| std::fmt::Error)?;
+    let mut d = [0u8; 20];
+    let mut k = 0;
+    for c in mant.bytes().filter(u8::is_ascii_digit) { d[k] = c; k += 1; }
+    let digits = std::str::from_utf8(&d[..k]).map_err(|_| std::fmt::Error)?;
+    let (k, n) = (k as i32, exp + 1); // the value is 0.digits * 10^n
+    if k <= n && n <= 21 { out.write_str(digits)?; for _ in 0..n - k { out.write_char('0')?; } Ok(()) }
+    else if 0 < n && n <= 21 { out.write_str(&digits[..n as usize])?; out.write_char('.')?; out.write_str(&digits[n as usize..]) }
+    else if -6 < n && n <= 0 { out.write_str("0.")?; for _ in 0..-n { out.write_char('0')?; } out.write_str(digits) }
+    else {
+        out.write_str(&digits[..1])?;
+        if k > 1 { out.write_char('.')?; out.write_str(&digits[1..])?; }
+        write!(out, "e{}{}", if n - 1 >= 0 { "+" } else { "-" }, (n - 1).abs())
+    }
+}
 
 fn escaped(out: &mut Area, s: &[u8]) -> bool {
     if out.push(b"\"").is_none() { return false; }
@@ -556,7 +586,7 @@ impl<'a> Run<'a> {
 
     /// Append a value's text to the text area.
     fn show_into(&mut self, v: &Value) -> R<'a, ()> {
-        let ok = match v { Value::Str(t) => self.text.dup(*t).is_some(), Value::Int(i) => write!(self.text, "{}", i).is_ok(), Value::Float(f) => write!(self.text, "{}", f).is_ok(), Value::Bool(b) => write!(self.text, "{}", b).is_ok(), Value::Null => self.text.push(b"null").is_some(), _ => return fail(500, "cannot show this value") };
+        let ok = match v { Value::Str(t) => self.text.dup(*t).is_some(), Value::Int(i) => write!(self.text, "{}", i).is_ok(), Value::Float(f) => float_text(self.text, *f).is_ok(), Value::Bool(b) => write!(self.text, "{}", b).is_ok(), Value::Null => self.text.push(b"null").is_some(), _ => return fail(500, "cannot show this value") };
         if ok { Ok(()) } else { fail(507, "request text area is full") }
     }
 
@@ -968,6 +998,19 @@ pub fn bench(s: &mut Server, mixed: usize) {
 mod tests {
     use super::*;
     use crate::layout::Program;
+
+    #[test]
+    fn floats_are_written_as_javascript_writes_numbers() {
+        // expected texts are JavaScript's String(x)
+        for (x, want) in [(0.0, "0"), (-0.0, "0"), (1.0, "1"), (-1.5, "-1.5"), (0.1 + 0.2, "0.30000000000000004"), (123456789.0, "123456789"),
+            (1e20, "100000000000000000000"), (1e21, "1e+21"), (1.5e21, "1.5e+21"), (0.000001, "0.000001"), (0.0000001, "1e-7"), (1.25e-7, "1.25e-7"),
+            (5e-324, "5e-324"), (1.7976931348623157e308, "1.7976931348623157e+308"), (2.0f64.powi(53), "9007199254740992"), (0.1f32 as f64, "0.10000000149011612"),
+            (f64::INFINITY, "Infinity"), (f64::NEG_INFINITY, "-Infinity"), (f64::NAN, "NaN"), (100.0, "100"), (1.0e-6 * 1.5, "0.0000015"), (12.5, "12.5")] {
+            let mut s = String::new();
+            float_text(&mut s, x).unwrap();
+            assert_eq!(s, want, "{:e}", x);
+        }
+    }
 
     #[test]
     fn fast_escaping_matches_a_byte_by_byte_reference() {

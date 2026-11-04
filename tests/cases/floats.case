@@ -15,6 +15,7 @@ endpoint GET /math {
         "big": 1000000000000000000000.0 + 1.0, "tiny": 0.000001, "inf": 1.0 / 0.0
     };
 }
+endpoint GET /text { respond 200 { "s": str(0.0000001) + " " + str(1.0 / 0.0) + " " + str(0.0 - 1.0 / 0.0) + " " + str(0.0 / 0.0) + " " + str(123456789012345680000.0 * 10.0) + " " + str(0.0 - 0.0), "n": 0.0000001 * 3.0, "e": 0.0000015 }; }
 endpoint GET /cmp/{x} { let x = int(param("x")) + 0.5; respond 200 { "gt": x > 2, "max": x >= 10.5 }; }
 --- requests
 GET /mean
@@ -33,6 +34,7 @@ POST /add {"x": 1e}
 GET /mean
 POST /small {"x": 0.1}
 GET /math
+GET /text
 GET /cmp/2
 GET /cmp/10
 GET /cmp/1

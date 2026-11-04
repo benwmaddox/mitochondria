@@ -501,3 +501,8 @@ helper call inside `or()`'s first argument now takes the fallback on a dead refe
 interpreter does. The interpreter itself wrapped `-(i64 minimum)` silently (now 500, integer overflow, as compiled) and
 stored `true` into integer fields as 1 (now refused, as a float there is). A program the compiler refuses no longer loads
 at all, so the two modes cannot disagree about which programs run.
+
+Floats are now written as JavaScript writes numbers (Ben's choice): the fewest digits that read back exactly,
+positional from 1e-6 up to 1e21 and with an exponent outside that (`1e+21`, `1e-7`); `0` for both zeros; in text
+`Infinity` and `NaN`, in JSON `null`. Before, Rust's form never used an exponent (1e300 printed 301 digits). The C runtime
+reproduces this with a shortest-digits formatter of its own.

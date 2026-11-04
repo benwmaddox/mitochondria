@@ -193,8 +193,12 @@ is the layer above it. Details and the comparison with arenas, garbage collectio
 
 ## Status: prototype vs this design (2026-11-03)
 Every concept above, and the worker system, is built and tested (29 tests). Known differences:
-- Endpoints are bound once at load (slots, resolved names and calls, cached field positions), then interpreted.
-  Types in `fn` signatures are parsed but not checked; values are dynamically typed.
+- Endpoints are bound once at load (slots, resolved names and calls, cached field positions). With `--compile` they are
+  generated as C and compiled in memory with the bundled TinyCC; known items and columns become constant-offset loads and
+  dynamic operations call helpers that run the interpreter's code. Not compiled yet (those endpoints stay interpreted):
+  `each ... order by`, floats in literals, list indexing, fixed-array fields, nested-struct fields of items, recursion,
+  loops whose body allocates. The clang release path is designed (same C, built to a DLL) but not built: clang is not
+  installed on this machine. Types in `fn` signatures are parsed but not checked.
 - `ref<...>` targets top-level pools only. Nested-struct fields inside items (`m.pos.x`) take a slower path that allocates.
 - The pressure policy's marks are absolute, not fractions of the budget; machine free memory is not consulted.
 - Workers: mailboxes are a mutex and a condition variable, not lock-free; only `forward` exists (no one-way `send`/`on` messages,
@@ -206,8 +210,7 @@ Every concept above, and the worker system, is built and tested (29 tests). Know
 Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat-api-findings.md.
 
 ## Next
-1. A compiler for endpoints (bind columns, compile `each ... where` to column loops). Measured as the main cost of workers too:
-   the room handler is 18-35 us per message, the handoff a few microseconds per hop (docs/measurements.md, Round 5).
+1. Finish the compiler: `order by`, the remaining constructs, and the clang path for release builds (needs clang installed).
 2. Long uneven text (the deferred 92% waste): `text<N>` fields packed into a per-collection text area, a ring for `drop_oldest` lists.
 3. Placing items on shards by load rather than `id % count` (20 rooms over 8 shards left workers 35-98% busy).
 4. Worker messages beyond `forward`: one-way `send` with `on Msg` handlers, fan-out with gathered replies, links and monitors.

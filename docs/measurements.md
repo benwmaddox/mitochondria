@@ -416,3 +416,43 @@ both paths by about 3 us.
 **What is left:** the interpreter spends about 10.5 us per request beyond the native floor of about 4.2 us (3.4x). That is
 evaluating ~250 expressions per request one tree node at a time: building and matching values, following references,
 copying strings into the text area for `or(...)`. Removing it needs generated code.
+
+## Round 7 (2026-11-04): endpoints compiled to C with TinyCC
+Endpoints are now generated as C (`src/cgen.rs`) and compiled in memory with the bundled TinyCC (`third_party/tinycc`,
+LGPL-2.1, loaded at run time). Known items and collections become loads at constant offsets from the reservation's base;
+integer arithmetic (with the interpreter's overflow and division errors), comparisons and list/pool loops are inline;
+everything dynamic (request values, strings, conditions on them, builtins) goes through a table of Rust helpers that run
+the interpreter's own code, so both modes answer alike. An endpoint using something not compiled yet stays interpreted
+(only `each ... order by` in the chat APIs). `--compile` turns it on for `serve`, `bench`, `system` and `bench-system`.
+
+**Correctness checks:** the chat tests run in both modes (8 tests, twice); a differential test sends one scripted session
+of 70+ requests (successes, 400/401/404/413/429/500/503 failures, rate limiting, typing expiry, deleted authors) to an
+interpreted and a compiled server with the same random seed and compares every status, body and the final state; the
+worker tests (forwarding, restart after a panic, sharded chat) run in both modes; the zero-allocation test passes compiled.
+A crash in TinyCC 0.9.27's library on compile errors is avoided by checking the C with the bundled `tcc.exe` first.
+
+**One server, one thread** (`bench ... --n 20000`, us per request; 0 heap allocations per request in both modes):
+
+| Endpoint | Interpreted | Compiled |
+|---|---|---|
+| GET messages, limit 50 | 15.1 | **5.3** |
+| POST message, mixed | 1.7 | **0.9** |
+| POST message, store full | 1.5 | **0.8** |
+| POST typing | 1.5 | **0.7** |
+| GET typing | 1.2 | **0.5** |
+| POST /sessions | 0.8 | 0.6 |
+
+`exp json`: the 50-message GET compiled takes 4.97 us against 4.8-5.4 us for hand-written native Rust producing the same
+8.7 KB; most of what is left is escaping and copying in the shared helpers. Compiling the chat API takes about 100 ms
+(about 16 ms of it TinyCC, the rest the `tcc.exe` check).
+
+**Worker system** (`bench-system ... --clients 32 --ops 100000`, two alternating rounds, req/s):
+
+| auth x rooms | Interpreted | Compiled | room handler, us per message (interpreted -> compiled) |
+|---|---|---|---|
+| 1 x 1 | 70,230 / 70,570 | **144,131 / 144,805** | 12.2 -> 4.9-5.0 |
+| 2 x 4 | 175,528 / 157,214 | **375,129 / 378,390** | 17.3-18.1 -> 6.6-6.7 |
+| 4 x 8 | 121,066 / 147,102 | **473,012 / 479,730** | 27.0-27.8 -> 8.7 |
+
+GET messages p99 at 4 x 8: 1,124-1,624 us interpreted, 213-215 us compiled. Compiled runs varied far less between rounds.
+Against the original single interpreted server in the same session (about 71k req/s), 4 x 8 compiled is about 6.7x.

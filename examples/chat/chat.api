@@ -1,0 +1,96 @@
+endpoint POST /sessions {
+    let name = body("name");
+    if len(name) == 0 { fail 400 "name is required"; }
+    let s = alloc sessions;
+    s.name = name;
+    s.secret = random();
+    s.window = now();
+    s.sent = 0;
+    respond 201 { "token": token(s), "slot": slot(s) };
+}
+
+endpoint DELETE /session {
+    let me = auth(sessions);
+    free me;
+    respond 200 { "ok": true };
+}
+
+endpoint POST /rooms {
+    let me = auth(sessions);
+    let name = body("name");
+    if len(name) == 0 { fail 400 "name is required"; }
+    let r = alloc rooms;
+    r.name = name;
+    r.created = now();
+    respond 201 { "id": slot(r), "name": r.name };
+}
+
+endpoint GET /rooms {
+    let me = auth(sessions);
+    respond 200 { "rooms": [each r in rooms order by r.created { "id": slot(r), "name": r.name }] };
+}
+
+endpoint POST /rooms/{room}/messages {
+    let me = auth(sessions);
+    let room = rooms[int(param("room"))];
+    let text = body("body");
+    if len(text) == 0 { fail 400 "body is required"; }
+    if len(text) > 2000 { fail 413 "message too long"; }
+    let t = now();
+    if t - me.window > 60000 { me.window = t; me.sent = 0; }
+    if me.sent >= max(meta.rate, 30) { fail 429 "slow down"; }
+    me.sent = me.sent + 1;
+    if count(messages) >= capacity(messages) {
+        each old in messages order by old.seq limit 1 { free old; }
+    }
+    let m = alloc messages;
+    let seq = meta.next_seq + 1;
+    meta.next_seq = seq;
+    m.room = slot(room);
+    m.author = slot(me);
+    m.author_name = me.name;
+    m.seq = seq;
+    m.at = t;
+    m.body = text;
+    respond 201 { "id": slot(m), "seq": seq };
+}
+
+endpoint GET /rooms/{room}/messages {
+    let me = auth(sessions);
+    let room = rooms[int(param("room"))];
+    let n = min(int(or(query("limit"), "50")), 100);
+    respond 200 {
+        "room": room.name,
+        "messages": [each m in messages where m.room == slot(room) order by m.seq desc limit n {
+            "id": slot(m), "seq": m.seq, "author": m.author_name, "at": m.at, "body": m.body
+        }]
+    };
+}
+
+endpoint POST /rooms/{room}/typing {
+    let me = auth(sessions);
+    let room = rooms[int(param("room"))];
+    let t = now();
+    each old in typing where old.until < t || (old.who == slot(me) && old.room == slot(room)) { free old; }
+    let ty = alloc typing;
+    ty.room = slot(room);
+    ty.who = slot(me);
+    ty.name = me.name;
+    ty.until = t + max(meta.typing_ttl, 5000);
+    respond 200 { "ok": true };
+}
+
+endpoint GET /rooms/{room}/typing {
+    let me = auth(sessions);
+    let room = rooms[int(param("room"))];
+    let t = now();
+    respond 200 { "typing": [each ty in typing where ty.room == slot(room) && ty.until >= t { "name": ty.name }] };
+}
+
+endpoint GET /stats {
+    respond 200 {
+        "sessions": count(sessions), "rooms": count(rooms), "messages": count(messages), "typing": count(typing),
+        "next_seq": meta.next_seq,
+        "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb"), "reserved_kb": stat("reserved_kb")
+    };
+}

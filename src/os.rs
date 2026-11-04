@@ -65,3 +65,16 @@ pub fn decommit(p: *mut u8, size: usize) {
 pub fn release(p: *mut u8) {
     unsafe { VirtualFree(p as _, 0, MEM_RELEASE) };
 }
+
+#[link(name = "bcrypt")]
+extern "system" {
+    fn BCryptGenRandom(alg: *mut c_void, buf: *mut u8, len: u32, flags: u32) -> i32;
+}
+
+/// Random bytes from the operating system (never our own generator): used for session secrets.
+pub fn random_u64() -> u64 {
+    let mut b = [0u8; 8];
+    let st = unsafe { BCryptGenRandom(std::ptr::null_mut(), b.as_mut_ptr(), 8, 2) }; // 2 = use the system-preferred generator
+    assert!(st >= 0, "OS random failed");
+    u64::from_le_bytes(b)
+}

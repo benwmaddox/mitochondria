@@ -22,6 +22,9 @@ cargo run --release -- examples/world.mito --budget 16     # refused: over budge
 cargo run --release -- exp                                  # the earlier region experiments
 ```
 
+Endpoints: `mitochondria serve examples/chat/chat.mito examples/chat/chat.api --port 8080` runs a chat server's hot state and API;
+`mitochondria bench ...` runs it in-process. See [docs/chat-api-findings.md](docs/chat-api-findings.md) for what worked and what did not.
+
 Windows only for now. Design, results and gaps: [DESIGN.md](DESIGN.md).
 
 ## License

@@ -183,3 +183,24 @@ pub fn access_cost() {
     let r = time(&mut || { let mut h = handles[0]; let mut dead = 0u32; for _ in 0..OPS { if gen[h.0 as usize] != h.1 { dead += 1; } h = handles[h.0 as usize]; } (h.0 + dead) as f64 });
     println!("    {:<46} {:>7.1}", "ids + generation check (8 B handles)", r);
 }
+
+/// Native baseline for `GET /rooms/{r}/messages?limit=50`: the same scan, filter, sort and take, over columns, no interpreter.
+pub fn chat_scan() {
+    use std::hint::black_box;
+    const N: usize = 20_000;
+    let room: Vec<i32> = (0..N).map(|i| (i * 7 % 20) as i32).collect();
+    let seq: Vec<i64> = (0..N as i64).collect();
+    let reps = 20_000;
+    let t = Instant::now();
+    let mut total = 0usize;
+    for rep in 0..reps {
+        let r = (rep % 20) as i32;
+        let mut hits: Vec<(i64, usize)> = Vec::new();
+        for k in 0..N { if room[k] == r { hits.push((seq[k], k)); } }
+        hits.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        hits.truncate(50);
+        total += hits.len();
+    }
+    black_box(total);
+    println!("native scan + sort + top 50 over {} messages (columns, no interpreter): {:.1} us per request", N, t.elapsed().as_nanos() as f64 / reps as f64 / 1000.0);
+}

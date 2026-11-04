@@ -8,6 +8,7 @@ pub struct Instance {
     reserved: usize,
     committed: Vec<bool>, // one flag per page
     pub last_trim: TrimStats,
+    gcols: Vec<Option<(Vec<TCol>, u8)>>, // columns of each table/pool global, computed once
 }
 
 /// What the last `trim` cost: live ranges scanned, OS release calls made, time in each phase.
@@ -18,7 +19,7 @@ pub struct TrimStats { pub ranges: usize, pub os_calls: usize, pub scan_ns: u128
 enum Loc { Mem(usize, Ty), Str { len: usize, bytes: usize, cap: usize }, List { len: usize, data: usize, cap: usize, elem: Scalar } }
 
 #[derive(Debug)]
-pub enum Error { Full(String), Bad(String) }
+pub enum Error { Full(String), TooLong(String), Bad(String) }
 fn bad<T>(s: impl Into<String>) -> Result<T, Error> { Err(Error::Bad(s.into())) }
 
 type Rows = Vec<(String, String, usize, usize, usize)>;
@@ -35,7 +36,8 @@ impl Instance {
     pub fn start(prog: Program, budget: usize) -> Result<Instance, String> {
         if prog.total > budget { return Err(format!("over budget: layout needs {} bytes, budget is {}", prog.total, budget)); }
         let reserved = up(prog.total.max(1), PAGE);
-        let mut inst = Instance { base: os::reserve(reserved), reserved, committed: vec![false; reserved / PAGE], prog, last_trim: TrimStats::default() };
+        let mut inst = Instance { base: os::reserve(reserved), reserved, committed: vec![false; reserved / PAGE], prog, last_trim: TrimStats::default(), gcols: Vec::new() };
+        inst.gcols = inst.prog.globals.iter().map(|g| inst.columnar(&g.1).map(|(_, c, k)| (c, k))).collect();
         let mut r = Vec::new();
         for (_, ty, off) in &inst.prog.globals { inst.ranges(ty, *off, true, &mut r); }
         for (a, b) in r { inst.ensure(a, b); }
@@ -422,7 +424,7 @@ impl Instance {
         match self.resolve(path)? {
             Loc::Str { len, bytes, cap } => {
                 let s = val.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(val);
-                if s.len() > cap { return Err(Error::Full(format!("string of {} bytes does not fit string<{}>", s.len(), cap))); }
+                if s.len() > cap { return Err(Error::TooLong(format!("string of {} bytes does not fit string<{}>", s.len(), cap))); }
                 self.ensure(bytes, bytes + s.len());
                 unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), self.base.add(bytes), s.len()) };
                 self.wr(len, 4, s.len() as u64); Ok(())
@@ -532,6 +534,116 @@ impl Instance {
     }
 }
 
+/// A scalar or string read from or written to state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Val { Int(i64), Float(f64), Bool(bool), Str(String) }
+
+/// Typed access used by the endpoint interpreter: columns are cached per global, so a field access is a column lookup
+/// plus offset arithmetic, not a path parse.
+impl Instance {
+    pub fn gindex(&self, name: &str) -> Option<usize> { self.prog.globals.iter().position(|g| g.0 == name) }
+    /// (kind, checked): kind 0 list, 1 table, 2 pool.
+    pub fn coll_kind(&self, g: usize) -> Option<(u8, bool)> {
+        match &self.prog.globals[g].1 { Ty::List(..) => Some((0, false)), Ty::Table(..) => Some((1, false)), Ty::Pool(_, _, c) => Some((2, *c)), _ => None }
+    }
+    pub fn count(&self, g: usize) -> usize {
+        let off = self.prog.globals[g].2;
+        match self.coll_kind(g) { Some((2, _)) => self.rd(off + COUNT, 4) as usize, _ => self.rd(off, 4) as usize }
+    }
+    pub fn capacity(&self, g: usize) -> usize {
+        match &self.prog.globals[g].1 { Ty::List(_, n) | Ty::Table(_, n) | Ty::Pool(_, n, _) => *n, _ => 0 }
+    }
+    /// Live slots of a table or pool, in slot order.
+    pub fn slots(&self, g: usize) -> Vec<usize> {
+        let off = self.prog.globals[g].2;
+        match (self.coll_kind(g), &self.gcols[g]) {
+            (Some((2, _)), Some((cols, _))) => { let hw = self.rd(off + HW, 4) as usize; let lo = off + cols[0].off; (0..hw).filter(|&k| self.bit(lo, k)).collect() }
+            (Some((1, _)), _) => (0..self.rd(off, 4) as usize).collect(),
+            _ => vec![],
+        }
+    }
+    pub fn row_live(&self, g: usize, slot: usize) -> bool {
+        let off = self.prog.globals[g].2;
+        match (self.coll_kind(g), &self.gcols[g]) {
+            (Some((2, _)), Some((cols, _))) => slot < self.rd(off + HW, 4) as usize && self.bit(off + cols[0].off, slot),
+            (Some((1, _)), _) => slot < self.rd(off, 4) as usize,
+            _ => false,
+        }
+    }
+    pub fn row_gen(&self, g: usize, slot: usize) -> Option<u32> {
+        match (self.coll_kind(g), &self.gcols[g]) {
+            (Some((2, true)), Some((cols, _))) => Some(self.rd(self.prog.globals[g].2 + cols[1].off + 4 * slot, 4) as u32),
+            _ => None,
+        }
+    }
+    fn row_loc(&self, g: usize, slot: usize, field: &str) -> Result<Loc, Error> {
+        let Some((cols, _)) = &self.gcols[g] else { return bad("not a table or pool") };
+        if !self.row_live(g, slot) { return bad(format!("slot {} is not live", slot)); }
+        self.columnar_field(self.prog.globals[g].2, cols, slot, &[(field.to_string(), Vec::new())], &[])
+    }
+    fn loc_val(&self, loc: Loc) -> Result<Val, Error> {
+        match loc {
+            Loc::Str { len, bytes, .. } => { let n = self.rd(len, 4) as usize; Ok(Val::Str(String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(self.base.add(bytes), n) }).into_owned())) }
+            Loc::Mem(off, Ty::Scalar(s)) => Ok(match s {
+                Scalar::F32 => Val::Float(f32::from_bits(self.rd(off, 4) as u32) as f64),
+                Scalar::F64 => Val::Float(f64::from_bits(self.rd(off, 8))),
+                Scalar::Bool => Val::Bool(self.rd(off, 1) != 0),
+                Scalar::I8 | Scalar::I16 | Scalar::I32 | Scalar::I64 => { let sh = 64 - 8 * s.size() as u32; Val::Int(((self.rd(off, s.size()) << sh) as i64) >> sh) }
+                _ => Val::Int(self.rd(off, s.size()) as i64),
+            }),
+            _ => bad("not a scalar or string"),
+        }
+    }
+    fn loc_store(&mut self, loc: Loc, v: &Val) -> Result<(), Error> {
+        match (loc, v) {
+            (Loc::Str { len, bytes, cap }, Val::Str(s)) => {
+                if s.len() > cap { return Err(Error::TooLong(format!("string of {} bytes does not fit string<{}>", s.len(), cap))); }
+                self.ensure(bytes, bytes + s.len());
+                unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), self.base.add(bytes), s.len()) };
+                self.wr(len, 4, s.len() as u64); Ok(())
+            }
+            (Loc::Mem(off, Ty::Scalar(sc)), v) => {
+                let bits = match (sc, v) {
+                    (Scalar::F32, Val::Float(f)) => (*f as f32).to_bits() as u64,
+                    (Scalar::F32, Val::Int(i)) => (*i as f32).to_bits() as u64,
+                    (Scalar::F64, Val::Float(f)) => f.to_bits(),
+                    (Scalar::F64, Val::Int(i)) => (*i as f64).to_bits(),
+                    (Scalar::Bool, Val::Bool(b)) => *b as u64,
+                    (Scalar::F32 | Scalar::F64 | Scalar::Bool, _) => return bad("wrong type for this field"),
+                    (_, Val::Int(i)) => *i as u64,
+                    (_, Val::Float(f)) => *f as i64 as u64,
+                    (_, Val::Bool(b)) => *b as u64,
+                    _ => return bad("wrong type for this field"),
+                };
+                self.wr(off, sc.size(), bits); Ok(())
+            }
+            _ => bad("wrong type for this field"),
+        }
+    }
+    /// Field read by cached column: no path parse and no allocation for scalars. Strings allocate their result only.
+    pub fn row_get(&self, g: usize, slot: usize, field: &str) -> Result<Val, Error> {
+        if let Some((cols, _)) = &self.gcols[g] {
+            if let Some(ci) = cols.iter().position(|c| c.path == field) {
+                if self.row_live(g, slot) {
+                    let off = self.prog.globals[g].2;
+                    let a = off + cols[ci].off;
+                    match cols[ci].kind {
+                        CKind::Scalar(s) => return self.loc_val(Loc::Mem(a + slot * s.size(), Ty::Scalar(s))),
+                        CKind::StrLen => if let CKind::StrBytes(m) = cols[ci + 1].kind { return self.loc_val(Loc::Str { len: a + 4 * slot, bytes: off + cols[ci + 1].off + slot * m, cap: m }); },
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let l = self.row_loc(g, slot, field)?; self.loc_val(l)
+    }
+    pub fn row_set(&mut self, g: usize, slot: usize, field: &str, v: &Val) -> Result<(), Error> { let l = self.row_loc(g, slot, field)?; self.loc_store(l, v) }
+    pub fn path_get(&self, path: &str) -> Result<Val, Error> { let l = self.resolve(path)?; self.loc_val(l) }
+    pub fn path_set(&mut self, path: &str, v: &Val) -> Result<(), Error> { let l = self.resolve(path)?; self.loc_store(l, v) }
+    pub fn alloc_row(&mut self, g: usize) -> Result<(usize, Option<u32>), Error> { let n = self.prog.globals[g].0.clone(); self.push(&n) }
+    pub fn free_row(&mut self, g: usize, slot: usize) -> Result<(), Error> { let n = self.prog.globals[g].0.clone(); self.remove(&n, &slot.to_string()) }
+}
+
 impl Drop for Instance { fn drop(&mut self) { os::release(self.base); } }
 
 #[cfg(test)]
@@ -560,7 +672,7 @@ mod tests {
     fn limits_and_liveness_are_typed_errors() {
         let mut i = inst();
         i.push("w").unwrap();
-        assert!(matches!(i.set("w[0].name", "123456789"), Err(Error::Full(_))));
+        assert!(matches!(i.set("w[0].name", "123456789"), Err(Error::TooLong(_))));
         assert!(matches!(i.get("w[1].id"), Err(Error::Bad(_)))); // row 1 is not live
         for _ in 0..4 { i.push("w[0].tags").unwrap(); }
         assert!(matches!(i.push("w[0].tags"), Err(Error::Full(_))));

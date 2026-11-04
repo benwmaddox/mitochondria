@@ -1,0 +1,73 @@
+// lib/sorted.mito: order by key kept as items change, ties in the order added, walks from a key either way,
+// string keys, capacity, rollback of a failed request, and many adds and removes in one request
+--- state
+struct Score { name: string<8>; points: i64; }
+struct Word { w: string<12>; n: i64; }
+struct Fav { s: ref<board>; }
+global board: sorted<Score, 6, points>;
+global words: sorted<Word, 8, w>;
+global fav: Fav;
+--- api
+endpoint POST /add { let s = board.add(int(body("points"))); s.name = body("name"); respond 201 { "slot": slot(s), "size": board.size() }; }
+endpoint POST /set/{k} { board.set_key(board.get(int(param("k"))), int(body("points"))); respond 200 {}; }
+endpoint DELETE /x/{k} { board.remove(board.get(int(param("k")))); respond 200 { "size": board.size() }; }
+endpoint GET /asc { respond 200 { "x": [each s in board s.name + ":" + s.points] }; }
+endpoint GET /top { let n = int(or(query("n"), "3")); respond 200 { "x": [each s in board reverse limit n s.name] }; }
+endpoint GET /from/{k} { let k = int(param("k")); respond 200 { "up": [each s in board from k s.name], "down": [each s in board from k reverse s.name] }; }
+endpoint GET /ends { respond 200 { "first": or(board.first().name, "-"), "last": or(board.last().name, "-"), "room": board.room() }; }
+endpoint GET /sum { var t = 0; each s in board where s.points > 0 { t = t + s.points; } respond 200 { "t": t }; }
+endpoint POST /fav/{k} { fav.s = board.get(int(param("k"))); respond 200 {}; }
+endpoint GET /fav { respond 200 { "fav": or(fav.s.name, "-") }; }
+endpoint POST /churn/{n} {
+    each i in 0..int(param("n")) { let s = board.add(i % 4 - 1); s.name = "c"; board.remove(s); }
+    respond 200 { "size": board.size() };
+}
+endpoint POST /words { let x = words.add(body("w")); x.n = len(body("w")); respond 201 {}; }
+endpoint GET /words/{from} { respond 200 { "all": [each x in words x.w], "from": [each x in words from param("from") x.w], "back": [each x in words from param("from") reverse x.w] }; }
+--- requests
+GET /asc
+GET /ends
+GET /from/5
+POST /add {"name": "ann", "points": 30}
+POST /add {"name": "bob", "points": 10}
+POST /add {"name": "cy", "points": 20}
+POST /add {"name": "dee", "points": 20}
+POST /add {"name": "eve", "points": 10}
+GET /asc
+GET /top
+GET /top?n=10
+GET /from/15
+GET /from/20
+GET /from/0
+GET /from/99
+GET /ends
+GET /sum
+POST /add {"name": "much too long a name", "points": 5}
+GET /asc
+POST /fav/2
+POST /set/2 {"points": 5}
+GET /asc
+GET /fav
+POST /set/0 {"points": 20}
+GET /asc
+DELETE /x/3
+GET /asc
+POST /add {"name": "fay", "points": 15}
+POST /add {"name": "gus", "points": 40}
+POST /add {"name": "hal", "points": 1}
+GET /asc
+GET /ends
+DELETE /x/2
+GET /fav
+*40 POST /churn/1
+POST /churn/2
+GET /asc
+DELETE /x/9
+POST /set/9 {"points": 1}
+POST /words {"w": "pear"}
+POST /words {"w": "apple"}
+POST /words {"w": "fig"}
+POST /words {"w": "plum"}
+POST /words {"w": "apple"}
+GET /words/g
+GET /words/plum

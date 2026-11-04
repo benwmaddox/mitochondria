@@ -705,7 +705,11 @@ impl<'p> G<'p> {
         Err(SpecErr::Other("kinds did not settle".into()))
     }
 
-    fn tmp(&mut self, p: &str) -> String { self.n += 1; format!("{}{}", p, self.n) }
+    fn tmp(&mut self, p: &str) -> String {
+        self.n += 1;
+        let t = format!("{}{}", p, self.n);
+        if ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"].contains(&t.as_str()) { format!("{}_{}", p, self.n) } else { t } // never a type's name
+    }
     fn line(&mut self, s: &str) { for _ in 0..self.depth + 1 { self.body.push_str("    "); } self.body.push_str(s); self.body.push('\n'); }
     /// Call a helper that returns 0 or -1.
     fn call(&mut self, s: &str) {
@@ -818,7 +822,8 @@ impl<'p> G<'p> {
                 if !e.is_empty() { self.open("else {"); self.block(e, env)?; self.close("}"); }
             }
             Stmt::Each(it, body) => {
-                if let (Some(_), Expr::Var(n, _)) = (&it.via, &it.coll) {
+                if let (Some(_), Expr::Var(_, VarRes::Global(g))) = (&it.via, &it.coll) {
+                    let n = &self.prog.globals[*g as usize].name;
                     if changes_instance(self.api, n, body) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
                 let collect = it.order.is_some() || allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
@@ -1480,7 +1485,8 @@ impl<'p> G<'p> {
     /// capacity of steps, stopping at a null cursor or the limit. Order of evaluation as in the interpreter: `from`,
     /// `limit`, then the first cursor.
     fn walk(&mut self, it: &'p Iter, v: crate::lang::Via, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
-        let Expr::Var(n, _) = &it.coll else { return no("walking something other than a module instance") };
+        let Expr::Var(_, VarRes::Global(g)) = &it.coll else { return no("walking something other than a module instance") };
+        let n = &self.prog.globals[*g as usize].name;
         let steps = self.prog.colls.iter().find(|c| c.name == format!("{}.items", n)).map_or(0, |c| c.cap);
         let from = match &it.from { Some(e) => { let x = self.expr(e, env, None)?; self.hold(x, false)? } None => CV::Null };
         let lim = match &it.limit { Some(e) => { let x = self.expr(e, env, None)?; Some(self.int_or(x, 400, "bad limit")) } None => None };
@@ -1498,6 +1504,7 @@ impl<'p> G<'p> {
         let item = self.call_values(v.item, vec![CV::Any(cur.clone())], None)?;
         let item = self.hold(item, false)?;
         env[it.slot as usize] = Some(item);
+        if let Some(w) = &it.whil { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) break;", wc)); }
         let filtered = if let Some(w) = &it.wher { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.open(&format!("if ({}) {{", wc)); true } else { false };
         self.line(&format!("{}++;", hits));
         body(self, env, &hits)?;
@@ -1534,6 +1541,7 @@ impl<'p> G<'p> {
         }
         if let Some(l) = &lim { self.line(&format!("if ({} >= {}) break;", hits, l)); }
         env[it.slot as usize] = Some(CV::Int(k.clone()));
+        if let Some(w) = &it.whil { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) break;", wc)); }
         if let Some(w) = &it.wher {
             let wv = self.expr(w, env, None)?;
             let wc = self.cond(wv)?;
@@ -1561,7 +1569,8 @@ impl<'p> G<'p> {
             }
             Json::Arr(it, inner) => {
                 self.out("[");
-                if let (Some(_), Expr::Var(n, _)) = (&it.via, &it.coll) {
+                if let (Some(_), Expr::Var(_, VarRes::Global(g))) = (&it.via, &it.coll) {
+                    let n = &self.prog.globals[*g as usize].name;
                     if changes_instance(self.api, n, &[Stmt::Respond(200, (**inner).clone())]) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
                 self.each(it, env, it.order.is_some(), |g, env, hits| {

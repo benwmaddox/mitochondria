@@ -5,14 +5,16 @@
 //! global scores: bag<Score, 8>;
 //! ```
 //!
-//! becomes plain declarations: the module's structs renamed for the instance (`scores__Counts`), its state as the fields
+//! becomes plain declarations: the module's structs renamed for the instance (`__mito__scores__Counts`: generated
+//! names start with `__mito__`, which programs do not use), its state as the fields
 //! of a struct the instance's global holds (`scores.items`, `scores.counts`), an `instance` line naming the instance, and
-//! its functions, named `scores.add` and so on, appended to the program's api. In the module, `self` is the instance
-//! and parameters are replaced by their arguments; nothing else is renamed. Every way of loading a program calls `expand`.
+//! its functions, named `scores.add` and so on, appended to the program's api. Parameters are replaced by their
+//! arguments; nothing else is renamed. `self` stays `self`: the binder reads it as the instance whose function it is
+//! in, so no local of the module can shadow it. Every way of loading a program calls `expand`.
 use std::collections::HashMap;
 
 /// The standard library: module name, source.
-pub const STDLIB: &[(&str, &str)] = &[("bag", include_str!("../lib/bag.mito"))];
+pub const STDLIB: &[(&str, &str)] = &[("bag", include_str!("../lib/bag.mito")), ("sorted", include_str!("../lib/sorted.mito"))];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PKind { Struct, Count, Field }
@@ -57,8 +59,8 @@ fn subst(text: &str, map: &HashMap<String, String>, fn_prefix: Option<&str>) -> 
             let after_dot = o.ends_with('.') && !o.ends_with("..");
             if prev_fn { if let Some(p) = fn_prefix { o += p; o.push('.'); } o += &w; prev_fn = false; continue; }
             prev_fn = w == "fn";
-            // a field name after `.` is replaced only if it is a parameter (`x.key`), never `self`
-            match map.get(&w) { Some(r) if !(after_dot && w == "self") => o += r, _ => o += &w }
+            let _ = after_dot;
+            match map.get(&w) { Some(r) => o += r, _ => o += &w }
             continue;
         }
         if !c[i].is_whitespace() { prev_fn = false; }
@@ -90,11 +92,10 @@ pub fn expand(state: &str, api: &str) -> Result<(String, String), String> {
             if *k == PKind::Field { key = Some(a.clone()); }
             map.insert(p.clone(), a.clone());
         }
-        map.insert("self".into(), inst.clone());
         // the module's own structs are renamed for this instance
         let st = subst(&m.state, &map, None);
         let mut names: HashMap<String, String> = HashMap::new();
-        for w in st.split_whitespace().collect::<Vec<_>>().windows(2) { if w[0] == "struct" { let n = w[1].trim_end_matches('{'); names.insert(n.to_string(), format!("{}__{}", inst, n)); } }
+        for w in st.split_whitespace().collect::<Vec<_>>().windows(2) { if w[0] == "struct" { let n = w[1].trim_end_matches('{'); names.insert(n.to_string(), format!("__mito__{}__{}", inst, n)); } }
         let st = subst(&st, &names, None);
         // its globals become fields of the instance's state struct
         let (mut decls, mut fields) = (String::new(), String::new());
@@ -106,7 +107,7 @@ pub fn expand(state: &str, api: &str) -> Result<(String, String), String> {
             if let Some(r) = s.strip_prefix("global") { let e = r.find(';').ok_or_else(|| format!("module {}: expected `;`", module))?; fields += &r[..e]; fields += ";"; s = &r[e + 1..]; continue; }
             return Err(format!("module {}: its state holds struct and global declarations, found `{}`", module, s.lines().next().unwrap_or("")));
         }
-        out_state += &format!("{}struct {}__state {{{} }}\nglobal {}: {}__state;\ninstance {} of {}{};", decls, inst, fields, inst, inst, inst, module, key.map(|k| format!(" key {}", k)).unwrap_or_default());
+        out_state += &format!("{}struct __mito__{}__state {{{} }}\nglobal {}: __mito__{}__state;\ninstance {} of {}{};", decls, inst, fields, inst, inst, inst, module, key.map(|k| format!(" key {}", k)).unwrap_or_default());
         out_api += &format!("// module {} as `{}`\n", module, inst);
         out_api += &subst(&m.funcs, &map, Some(&inst));
         rest = &rest[pos + len..];
@@ -141,9 +142,9 @@ mod tests {
     #[test]
     fn a_use_expands_into_declarations_and_functions() {
         let (st, api) = expand("struct S { n: i64; }\nglobal b: bag<S, 4>;\n", "").unwrap();
-        assert!(st.contains("struct b__Counts {") && st.contains("struct b__state {") && st.contains("items: pool<S, 4> checked;") && st.contains("counts: b__Counts;"), "{}", st);
-        assert!(st.contains("global b: b__state;") && st.contains("instance b of bag;"), "{}", st);
-        assert!(api.contains("pub fn b.add()") && api.contains("alloc b.items") && api.contains("return 4 - count(b.items);"), "{}", api);
+        assert!(st.contains("struct __mito__b__Counts {") && st.contains("struct __mito__b__state {") && st.contains("items: pool<S, 4> checked;") && st.contains("counts: __mito__b__Counts;"), "{}", st);
+        assert!(st.contains("global b: __mito__b__state;") && st.contains("instance b of bag;"), "{}", st);
+        assert!(api.contains("pub fn b.add()") && api.contains("alloc self.items") && api.contains("return 4 - count(self.items);"), "{}", api);
         assert!(expand("struct S { n: i64; }\nglobal b: bag<S>;\n", "").unwrap_err().contains("takes 2 arguments"));
     }
 

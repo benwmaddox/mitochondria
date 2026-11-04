@@ -12,5 +12,8 @@ GET /badlimit -> 200 {"x":[0,1]}
 GET /badlimit -> 400 {"error":"bad limit"}
 POST /add -> 200 {"total":14}
 POST /add -> 200 {"total":28}
+GET /until/10 -> 200 {"t":14,"x":[9,8,7,6,5,4]}
+GET /until/0 -> 200 {"t":0,"x":[9,8,7,6,5,4]}
+GET /until/99 -> 200 {"t":140,"x":[9,8,7,6,5,4]}
 state <plain values> 40
 memory reserved=4096 committed=4096 live=40

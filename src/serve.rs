@@ -736,7 +736,8 @@ impl<'a> Run<'a> {
     fn walk_start(&mut self, it: &'a Iter) -> R<'a, (Value, usize, Option<usize>)> {
         let from = match &it.from { Some(e) => self.eval(e)?, None => Value::Null };
         let limit = match &it.limit { Some(e) => match self.eval(e)? { Value::Int(n) if n >= 0 => Some(n as usize), _ => return fail(400, "bad limit") }, None => None };
-        let Expr::Var(n, _) = &it.coll else { unreachable!() };
+        let Expr::Var(_, VarRes::Global(g)) = &it.coll else { unreachable!() };
+        let n = &self.inst.prog.globals[*g as usize].name;
         let steps = self.inst.prog.colls.iter().find(|c| c.name == format!("{}.items", n)).map_or(0, |c| c.cap);
         let v = it.via.unwrap();
         let cur = self.call_values(if it.reverse { v.last.unwrap() } else { v.first }, &[from])?;
@@ -811,6 +812,7 @@ impl<'a> Run<'a> {
                     if matches!(cur, Value::Null) || limit.map_or(false, |l| hits >= l) { break; }
                     let v = self.call_values(it.via.unwrap().item, &[cur.clone()])?;
                     self.set_slot(it.slot, v);
+                    if let Some(w) = &it.whil { let v = self.eval(w)?; if !self.truthy(&v)? { break; } }
                     let keep = match &it.wher { Some(w) => { let v = self.eval(w)?; self.truthy(&v)? } None => true };
                     if keep { hits += 1; self.exec(body)?; }
                     cur = self.call_values(if it.reverse { it.via.unwrap().prev.unwrap() } else { it.via.unwrap().next }, &[cur])?;
@@ -822,6 +824,7 @@ impl<'a> Run<'a> {
                 for k in 0..n {
                     if limit.map_or(false, |l| hits >= l) { break; }
                     self.set_slot(it.slot, Value::Int(if it.reverse { lo.wrapping_add((n - 1 - k) as i64) } else { lo.wrapping_add(k as i64) }));
+                    if let Some(w) = &it.whil { let v = self.eval(w)?; if !self.truthy(&v)? { break; } }
                     if let Some(w) = &it.wher { let v = self.eval(w)?; if !self.truthy(&v)? { continue; } }
                     hits += 1;
                     self.exec(body)?;
@@ -886,6 +889,7 @@ impl<'a> Run<'a> {
                     if matches!(cur, Value::Null) || limit.map_or(false, |l| hits >= l) { break; }
                     let v = self.call_values(it.via.unwrap().item, &[cur.clone()])?;
                     self.set_slot(it.slot, v);
+                    if let Some(w) = &it.whil { let v = self.eval(w)?; if !self.truthy(&v)? { break; } }
                     let keep = match &it.wher { Some(w) => { let v = self.eval(w)?; self.truthy(&v)? } None => true };
                     if keep { if hits > 0 { self.out(b",")?; } hits += 1; self.json(inner)?; }
                     cur = self.call_values(if it.reverse { it.via.unwrap().prev.unwrap() } else { it.via.unwrap().next }, &[cur])?;
@@ -899,6 +903,7 @@ impl<'a> Run<'a> {
                 for k in 0..n {
                     if limit.map_or(false, |l| hits >= l) { break; }
                     self.set_slot(it.slot, Value::Int(if it.reverse { lo.wrapping_add((n - 1 - k) as i64) } else { lo.wrapping_add(k as i64) }));
+                    if let Some(w) = &it.whil { let v = self.eval(w)?; if !self.truthy(&v)? { break; } }
                     if let Some(w) = &it.wher { let v = self.eval(w)?; if !self.truthy(&v)? { continue; } }
                     if hits > 0 { self.out(b",")?; }
                     hits += 1;

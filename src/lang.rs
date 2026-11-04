@@ -53,7 +53,8 @@ pub enum Expr {
 /// `each var in coll ...`, or with `hi`, a range of integers `each var in coll..hi ...` (from `coll`, the low bound,
 /// up to but not including `hi`).
 /// `from`: where a loop over a module instance starts. `via`: that instance's iteration functions (set by the binder).
-pub struct Iter { pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub wher: Option<Expr>, pub order: Option<(Expr, bool)>, pub limit: Option<Expr>, pub via: Option<Via> }
+/// `whil`: `while cond` ends the loop as soon as `cond` is false (tested before `where` and the body).
+pub struct Iter { pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub whil: Option<Expr>, pub wher: Option<Expr>, pub order: Option<(Expr, bool)>, pub limit: Option<Expr>, pub via: Option<Via> }
 
 /// A module instance's iteration functions: a cursor from `first(from)` (or `last(from)` for reverse), the next from
 /// `next(cur)` (or `prev`), the item at it from `item(cur)`; a null cursor ends the loop.
@@ -195,10 +196,11 @@ impl P {
         let hi = if self.sym("..") { Some(self.expr()?) } else { None };
         let from = if self.is_kw("from") { self.i += 1; Some(self.expr()?) } else { None };
         let reverse = if self.is_kw("reverse") { self.i += 1; true } else { false };
+        let whil = if self.is_kw("while") { self.i += 1; Some(self.expr()?) } else { None };
         let wher = if self.is_kw("where") { self.i += 1; Some(self.expr()?) } else { None };
         let order = if self.is_kw("order") { self.i += 1; self.kw("by")?; let e = self.expr()?; let desc = if self.is_kw("desc") { self.i += 1; true } else { false }; Some((e, desc)) } else { None };
         let limit = if self.is_kw("limit") { self.i += 1; Some(self.expr()?) } else { None };
-        Ok(Iter { var, slot: 0, coll, hi, from, reverse, wher, order, limit, via: None })
+        Ok(Iter { var, slot: 0, coll, hi, from, reverse, whil, wher, order, limit, via: None })
     }
 
     fn stmt(&mut self) -> R<Stmt> {
@@ -361,6 +363,7 @@ impl Binder<'_> {
         if it.hi.is_some() && it.order.is_some() { return Err(format!("`each {} in a..b order by`: a range is already in order", it.var)); }
         // a loop over a module instance walks it with the instance's iteration functions
         if let Expr::Var(n, VarRes::Global(_)) = &it.coll {
+            let n = if n == "self" { self.owner.clone().unwrap_or_default() } else { n.clone() };
             let f = |x: &str| self.fns.iter().position(|g| g.0 == format!("{}.{}", n, x)).map(|k| k as u32);
             if let (Some(first), Some(next), Some(item)) = (f("iter_first"), f("iter_next"), f("iter_item")) {
                 if it.order.is_some() { return self.err(format!("`each {} in {} order by`: {} keeps its own order", it.var, n, n)); }
@@ -371,6 +374,7 @@ impl Binder<'_> {
         if let Some(fr) = &mut it.from { if it.via.is_none() { return self.err(format!("`each {} in ... from`: only a module instance can start a loop from a key", it.var)); } self.expr(fr)?; }
         if let Some(l) = &mut it.limit { self.expr(l)?; }
         it.slot = self.declare(&it.var, false);
+        if let Some(w) = &mut it.whil { if it.hi.is_none() && it.via.is_none() { return self.err(format!("`each {} in ... while`: only ranges and module instances stop early; a list or pool is walked whole", it.var)); } self.expr(w)?; }
         if let Some(w) = &mut it.wher { self.expr(w)?; }
         if let Some((o, _)) = &mut it.order { self.expr(o)?; }
         Ok(())
@@ -409,6 +413,11 @@ impl Binder<'_> {
     }
     fn expr(&mut self, e: &mut Expr) -> R<()> {
         match e {
+            Expr::Var(n, res) if n == "self" => {
+                // in a module instance's function, `self` is the instance (never a local, so nothing shadows it)
+                let Some(o) = self.owner.clone() else { return self.err("`self` is only for module code".into()) };
+                *res = match (self.globals)(&o) { Some(g) => VarRes::Global(g as u32), None => return self.err(format!("unknown instance `{}`", o)) };
+            }
             Expr::Var(n, res) => {
                 *res = match self.names.iter().rev().find(|x| x.0 == *n) {
                     Some(x) => VarRes::Local(x.1),
@@ -421,6 +430,7 @@ impl Binder<'_> {
             Expr::Bin(_, a, b) => { self.expr(a)?; self.expr(b)?; }
             Expr::Call(n, args, res) => {
                 for a in args.iter_mut() { self.expr(a)?; }
+                if let (Some(rest), Some(o)) = (n.strip_prefix("self."), self.owner.as_ref()) { *n = format!("{}.{}", o, rest); }
                 *res = if let Some(k) = self.fns.iter().position(|f| f.0 == *n) {
                     if self.fns[k].1 != args.len() { return self.err(format!("`{}` takes {} arguments, given {}", n, self.fns[k].1, args.len())); }
                     if let Some(i) = n.rfind('.') { if !self.fns[k].2 && self.owner.as_deref() != Some(&n[..i]) { return self.err(format!("`{}` is private to {}", n, &n[..i])); } }

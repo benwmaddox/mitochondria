@@ -1,0 +1,91 @@
+GET /asc -> 200 {"x":[]}
+GET /ends -> 200 {"first":"-","last":"-","room":6}
+GET /from/5 -> 200 {"up":[],"down":[]}
+POST /add -> 201 {"slot":0,"size":1}
+POST /add -> 201 {"slot":1,"size":2}
+POST /add -> 201 {"slot":2,"size":3}
+POST /add -> 201 {"slot":3,"size":4}
+POST /add -> 201 {"slot":4,"size":5}
+GET /asc -> 200 {"x":["bob:10","eve:10","cy:20","dee:20","ann:30"]}
+GET /top -> 200 {"x":["ann","dee","cy"]}
+GET /top?n=10 -> 200 {"x":["ann","dee","cy","eve","bob"]}
+GET /from/15 -> 200 {"up":["cy","dee","ann"],"down":["eve","bob"]}
+GET /from/20 -> 200 {"up":["cy","dee","ann"],"down":["dee","cy","eve","bob"]}
+GET /from/0 -> 200 {"up":["bob","eve","cy","dee","ann"],"down":[]}
+GET /from/99 -> 200 {"up":[],"down":["ann","dee","cy","eve","bob"]}
+GET /ends -> 200 {"first":"bob","last":"ann","room":1}
+GET /sum -> 200 {"t":90}
+POST /add -> 413 {"error":"string of 20 bytes does not fit string<8>"}
+GET /asc -> 200 {"x":["bob:10","eve:10","cy:20","dee:20","ann:30"]}
+POST /fav/2 -> 200 {}
+POST /set/2 -> 200 {}
+GET /asc -> 200 {"x":["cy:5","bob:10","eve:10","dee:20","ann:30"]}
+GET /fav -> 200 {"fav":"cy"}
+POST /set/0 -> 200 {}
+GET /asc -> 200 {"x":["cy:5","bob:10","eve:10","dee:20","ann:20"]}
+DELETE /x/3 -> 200 {"size":5}
+GET /asc -> 200 {"x":["cy:5","bob:10","eve:10","ann:20"]}
+POST /add -> 201 {"slot":3,"size":5}
+POST /add -> 201 {"slot":5,"size":6}
+POST /add -> 503 {"error":"capacity: board.items is full (6 of 6)"}
+GET /asc -> 200 {"x":["cy:5","bob:10","eve:10","fay:15","ann:20","gus:40"]}
+GET /ends -> 200 {"first":"cy","last":"gus","room":0}
+DELETE /x/2 -> 200 {"size":6}
+GET /fav -> 200 {"fav":"-"}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/1 -> 200 {"size":6}
+POST /churn/2 -> 503 {"error":"capacity: board.items is full (6 of 6)"}
+GET /asc -> 200 {"x":["bob:10","eve:10","fay:15","ann:20","gus:40"]}
+DELETE /x/9 -> 404 {"error":"slot 9 is not live"}
+POST /set/9 -> 404 {"error":"slot 9 is not live"}
+POST /words -> 201 {}
+POST /words -> 201 {}
+POST /words -> 201 {}
+POST /words -> 201 {}
+POST /words -> 201 {}
+GET /words/g -> 200 {"all":["apple","apple","fig","pear","plum"],"from":["pear","plum"],"back":["fig","apple","apple"]}
+GET /words/plum -> 200 {"all":["apple","apple","fig","pear","plum"],"from":["plum"],"back":["plum","pear","fig","apple","apple"]}
+state <plain values> 232
+state board.items 135
+state board.links 606
+state words.items 125
+state words.links 509
+memory reserved=20480 committed=20480 live=1607

@@ -11,6 +11,7 @@ endpoint GET /find/{x} { respond 200 { "at": first_at_least(int(param("x"))) }; 
 endpoint GET /empty { respond 200 { "a": [each i in 5..5 i], "b": [each i in 9..2 i], "c": [each i in -3..0 reverse i] }; }
 endpoint GET /bad { respond 200 { "x": [each i in 0..body("n") i] }; }
 endpoint GET /badlimit { respond 200 { "x": [each i in 0..3 limit body("n") i] }; }
+endpoint GET /until/{x} { var t = 0; each i in 0..8 while grid.cells[i] < int(param("x")) { t = t + grid.cells[i]; } respond 200 { "t": t, "x": [each i in 0..10 reverse while i > 3 i] }; }
 endpoint POST /add { each i in 0..8 where grid.cells[i] < 10 { grid.total = grid.total + grid.cells[i]; } respond 200 { "total": grid.total }; }
 --- requests
 GET /find/1
@@ -27,3 +28,6 @@ GET /badlimit {"n": 2}
 GET /badlimit {"n": -1}
 POST /add
 POST /add
+GET /until/10
+GET /until/0
+GET /until/99

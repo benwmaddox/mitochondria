@@ -1,0 +1,95 @@
+// Up to N items of struct T, kept in order of their field `key`; items with equal keys stay in the order they were
+// added. Change an item's key with set_key (the key is read-only outside this module); other fields are the
+// program's. Walk it with `each s in instance [from k] [reverse] ...`.
+//
+// A skip list: every item is linked to its neighbours in order (level 0), and some items also at higher levels,
+// each about a quarter as many as the one below, so finding a key takes O(log n) steps from the top level down.
+// Links run both ways at every level, so an item is unlinked in O(levels) without searching. Nothing holds a copy
+// of a key: comparisons read the items' own keys. Positions in links are slot + 1, and 0 is the head (or the end).
+module sorted<T: struct, N: count, key: field of T>
+--- state
+struct Link { level: u8; next: u32[12]; prev: u32[12]; }
+struct Head { next: u32[12]; last: u32; rng: i64; update: u32[12]; }
+global items: pool<T, N> checked;
+global links: pool<Link, N>;
+global head: Head;
+--- functions
+pub fn add(kv) {
+    let it = alloc self.items;
+    let ln = alloc self.links;
+    if slot(ln) != slot(it) { fail 500 "sorted: items and links out of step"; }
+    it.key = kv;
+    self.link(slot(it));
+    return it;
+}
+pub fn remove(it) {
+    self.unlink(slot(it));
+    free self.links[slot(it)];
+    free it;
+}
+pub fn set_key(it, kv) {
+    if self.links[slot(it)].level == 0 { fail 404 "this item was removed"; }
+    self.unlink(slot(it));
+    it.key = kv;
+    self.link(slot(it));
+}
+pub fn size() { return count(self.items); }
+pub fn room() { return N - count(self.items); }
+pub fn get(k) { return self.items[k]; }
+pub fn first() { let n = self.head.next[0]; if n == 0 { return null; } return self.items[n - 1]; }
+pub fn last() { let n = self.head.last; if n == 0 { return null; } return self.items[n - 1]; }
+
+// the position after x at level l (x: 0 the head, else slot + 1)
+fn nxt(x, l) { if x == 0 { return self.head.next[l]; } return self.links[x - 1].next[l]; }
+// the last position whose key is below kv (strictly when `strict`), 0 if none; with `record`, also the last such
+// position at every level, where link() puts a new item
+fn below(kv, strict, record) {
+    var x = 0;
+    each l in 0..12 reverse {
+        each step in 0..N while self.nxt(x, l) != 0 && (self.items[self.nxt(x, l) - 1].key < kv || (!strict && self.items[self.nxt(x, l) - 1].key == kv)) { x = self.nxt(x, l); }
+        if record { self.head.update[l] = x; }
+    }
+    return x;
+}
+// how many levels a new item takes: 1, and one more with chance 1/4 each, up to 12 (a fixed sequence, the same
+// on every run: MINSTD, Park and Miller's generator)
+fn levels() {
+    var r = self.head.rng;
+    if r == 0 { r = 20261104; }
+    r = r * 48271 % 2147483647;
+    self.head.rng = r;
+    var v = r / 7;
+    var h = 1;
+    each t in 0..11 while v % 4 == 0 { h = h + 1; v = v / 4; }
+    return h;
+}
+// put item slot s (its key set) after every item with a key up to its own
+fn link(s) {
+    self.below(self.items[s].key, false, true);
+    let h = self.levels();
+    self.links[s].level = h;
+    each l in 0..h {
+        let p = self.head.update[l];
+        let n = self.nxt(p, l);
+        self.links[s].next[l] = n;
+        self.links[s].prev[l] = p;
+        if p == 0 { self.head.next[l] = s + 1; } else { self.links[p - 1].next[l] = s + 1; }
+        if n != 0 { self.links[n - 1].prev[l] = s + 1; } else if l == 0 { self.head.last = s + 1; }
+    }
+}
+// take item slot s out of the order (a second unlink of the same item does nothing)
+fn unlink(s) {
+    each l in 0..self.links[s].level {
+        let p = self.links[s].prev[l];
+        let n = self.links[s].next[l];
+        if p == 0 { self.head.next[l] = n; } else { self.links[p - 1].next[l] = n; }
+        if n != 0 { self.links[n - 1].prev[l] = p; } else if l == 0 { self.head.last = p; }
+    }
+    self.links[s].level = 0;
+}
+// iteration: a cursor is a slot
+fn iter_first(from) { var x = 0; if from != null { x = self.below(from, true, false); } let n = self.nxt(x, 0); if n == 0 { return null; } return n - 1; }
+fn iter_next(cur) { let n = self.links[cur].next[0]; if n == 0 { return null; } return n - 1; }
+fn iter_last(from) { var x = self.head.last; if from != null { x = self.below(from, false, false); } if x == 0 { return null; } return x - 1; }
+fn iter_prev(cur) { let p = self.links[cur].prev[0]; if p == 0 { return null; } return p - 1; }
+fn iter_item(cur) { return self.items[cur]; }

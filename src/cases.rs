@@ -439,6 +439,58 @@ mod tests {
         }
     }
 
+    /// lib/sorted.mito against a model (a list kept in key order, equal keys in the order they were placed): thousands
+    /// of random adds, key changes and removes, the whole order and walks from random keys checked after every step.
+    #[test]
+    fn sorted_matches_a_model_under_random_changes() {
+        let (state, api) = crate::modules::expand("struct E { v: i64; id: i64; }\nglobal s: sorted<E, 48, v>;\n",
+            "endpoint POST /add/{v}/{id} { let e = s.add(int(param(\"v\"))); e.id = int(param(\"id\")); respond 201 { \"slot\": slot(e) }; }\n\
+             endpoint POST /set/{k}/{v} { s.set_key(s.get(int(param(\"k\"))), int(param(\"v\"))); respond 200 {}; }\n\
+             endpoint DELETE /x/{k} { s.remove(s.get(int(param(\"k\")))); respond 200 {}; }\n\
+             endpoint GET /all { respond 200 { \"x\": [each e in s e.id] }; }\n\
+             endpoint GET /from/{k} { let k = int(param(\"k\")); respond 200 { \"up\": [each e in s from k e.id], \"down\": [each e in s from k reverse e.id] }; }\n").unwrap();
+        let case = Case { name: "sorted-model".into(), state, api, requests: String::new(), system: None, files: Vec::new() };
+        let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("compiled", Box::new(RustBackend::start(&case, true)))];
+        if clang().is_some() { bes.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true)))); }
+        for (name, be) in bes.iter_mut() {
+            let mut model: Vec<(i64, i64, i64)> = Vec::new(); // (slot, key, id), in order
+            let mut x = 0x2545_F491_4F6C_DD1Du64;
+            let mut rnd = |n: u64| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; (x % n) as i64 };
+            let ids = |m: &[(i64, i64, i64)]| format!("[{}]", m.iter().map(|e| e.2.to_string()).collect::<Vec<_>>().join(","));
+            for step in 0..4000 {
+                let op = rnd(10);
+                if model.len() < 48 && (op < 4 || model.is_empty()) {
+                    let (v, id) = (rnd(12), step as i64);
+                    let (code, b) = be.handle("POST", &format!("/add/{}/{}", v, id), &[], "");
+                    assert_eq!(code, 201, "{} step {}: {}", name, step, b);
+                    let slot: i64 = b.split("\"slot\":").nth(1).unwrap().trim_end_matches('}').parse().unwrap();
+                    let at = model.iter().position(|e| e.1 > v).unwrap_or(model.len());
+                    model.insert(at, (slot, v, id));
+                } else if op < 7 {
+                    let i = rnd(model.len() as u64) as usize; let v = rnd(12);
+                    let mut e = model.remove(i);
+                    assert_eq!(be.handle("POST", &format!("/set/{}/{}", e.0, v), &[], "").0, 200);
+                    e.1 = v;
+                    let at = model.iter().position(|f| f.1 > v).unwrap_or(model.len());
+                    model.insert(at, e);
+                } else {
+                    let i = rnd(model.len() as u64) as usize;
+                    let e = model.remove(i);
+                    assert_eq!(be.handle("DELETE", &format!("/x/{}", e.0), &[], "").0, 200);
+                }
+                let (_, all) = be.handle("GET", "/all", &[], "");
+                assert_eq!(all, format!("{{\"x\":{}}}", ids(&model)), "{} step {}", name, step);
+                if step % 7 == 0 {
+                    let k = rnd(14) - 1;
+                    let up: Vec<_> = model.iter().filter(|e| e.1 >= k).cloned().collect();
+                    let down: Vec<_> = model.iter().rev().filter(|e| e.1 <= k).cloned().collect();
+                    let (_, b) = be.handle("GET", &format!("/from/{}", k), &[], "");
+                    assert_eq!(b, format!("{{\"up\":{},\"down\":{}}}", ids(&up), ids(&down)), "{} step {} from {}", name, step, k);
+                }
+            }
+        }
+    }
+
     #[test]
     fn cases_match_their_records_on_every_backend() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");

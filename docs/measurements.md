@@ -562,3 +562,20 @@ items, the whole order and walks from random keys compared after every step, on 
 clang-built C runtime. `order by` is gone: the chat's rooms are `sorted<Room, 64, created>`, the sharded chat's
 directory `sorted<Dir, 256, id>`. The collect-then-run loops remain for bodies that allocate or change what `where`
 tests (collect.case), now without sort keys.
+
+## Compile times (2026-11-04)
+`cargo test --release compile_times -- --ignored --nocapture`, median of 5, ms:
+
+| Stage | chat example | sorted.case (a module) |
+|---|---|---|
+| parse + bind (+ module expansion) | 0.6 | 1.2 |
+| generate endpoint C | 1.9 (1,148 lines) | 9.6 (3,134 lines) |
+| tcc.exe check alone (a child process) | 15.2 | 18.6 |
+| TinyCC, endpoints only (Rust runtime), check included | 14.6 | 20.3 |
+| TinyCC, whole program with the C runtime, check included | 17.9 (2,435 lines) | 26.7 (4,422 lines) |
+| clang -O0, whole program, to a DLL | 186 | 208 |
+| clang -O2, whole program, to a DLL | 846 | 983 |
+
+Interpreted loading still runs the generator (it decides what loads). Most of TinyCC's time is starting `tcc.exe` to
+check the C first (its library cannot report errors to this host); compiling in memory is a few ms. Module functions are
+inlined into every endpoint that calls them, which is why sorted.case generates almost 3x the chat's endpoint C.

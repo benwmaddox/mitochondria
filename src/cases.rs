@@ -492,6 +492,66 @@ mod tests {
         }
     }
 
+    /// `cargo test --release compile_times -- --ignored --nocapture`: how long each way of running a program takes to
+    /// get ready, stage by stage (median of 5), for the chat example and a program using a module.
+    #[test]
+    #[ignore]
+    fn compile_times() {
+        let sorted = load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/sorted.case"));
+        let (cs, ca) = (include_str!("../examples/chat/chat.mito"), include_str!("../examples/chat/chat.api"));
+        let progs: [(&str, &str, &str, bool); 2] = [("chat example", cs, ca, true), ("sorted.case (a module)", &sorted.state, &sorted.api, false)];
+        let med = |mut v: Vec<f64>| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] };
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
+        for (name, state, api, raw) in progs {
+            let (mut front, mut gen, mut whole, mut check, mut tcc_ep, mut tcc_all, mut clang_o0, mut clang_o2) = (vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![]);
+            let (mut ep_lines, mut all_lines) = (0, 0);
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                let (st, ap) = if raw { crate::modules::expand(state, api).unwrap() } else { (state.to_string(), api.to_string()) };
+                let prog = Program::parse(&st).unwrap();
+                let mut a = crate::lang::parse(&ap).unwrap();
+                crate::lang::bind(&mut a, &|n| prog.global(n)).unwrap();
+                front.push(ms(t));
+                let t = std::time::Instant::now();
+                let g = crate::cgen::generate(&prog, &a);
+                gen.push(ms(t));
+                ep_lines = g.src.lines().count();
+                let t = std::time::Instant::now();
+                let src = crate::cgen::program_c(&prog, &a, None).unwrap();
+                whole.push(ms(t));
+                all_lines = src.lines().count();
+                let t = std::time::Instant::now();
+                crate::tcc::Unit::check(&src).unwrap();
+                check.push(ms(t));
+                let t = std::time::Instant::now();
+                let _u = crate::tcc::Unit::compile(&g.src, &[]).unwrap();
+                tcc_ep.push(ms(t));
+                let t = std::time::Instant::now();
+                let _u = crate::tcc::Unit::compile(&src, &[]).unwrap();
+                tcc_all.push(ms(t));
+                if clang().is_some() {
+                    let t = std::time::Instant::now();
+                    let _ = clang_dll(&src, "ctime", &["-O0"]).unwrap();
+                    clang_o0.push(ms(t));
+                    let t = std::time::Instant::now();
+                    let _ = clang_dll(&src, "ctime", &[]).unwrap();
+                    clang_o2.push(ms(t));
+                }
+            }
+            println!("{} ({} lines of endpoint C, {} lines as a whole program):", name, ep_lines, all_lines);
+            println!("  parse + bind (+ module expansion)            {:8.2} ms", med(front));
+            println!("  generate endpoint C                          {:8.2} ms", med(gen));
+            println!("  whole program C (runtime + layout tables)    {:8.2} ms", med(whole));
+            println!("  tcc.exe check (child process)                {:8.2} ms", med(check.clone()));
+            println!("  TinyCC, endpoints only (Rust runtime)        {:8.2} ms  (check included)", med(tcc_ep));
+            println!("  TinyCC, whole program (C runtime)            {:8.2} ms  (check included)", med(tcc_all));
+            if !clang_o0.is_empty() {
+                println!("  clang -O0, whole program, to a DLL           {:8.2} ms", med(clang_o0));
+                println!("  clang -O2, whole program, to a DLL           {:8.2} ms", med(clang_o2));
+            }
+        }
+    }
+
     #[test]
     fn cases_match_their_records_on_every_backend() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");

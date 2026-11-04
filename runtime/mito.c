@@ -68,6 +68,24 @@ static int c_eq(const char *a, const u8 *b, u64 n) { u64 i = 0; for (; i < n; i+
 static int b_eq(const u8 *a, u64 an, const u8 *b, u64 bn) { if (an != bn) return 0; for (u64 i = 0; i < an; i++) if (a[i] != b[i]) return 0; return 1; }
 static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 
+/* Bytes as UTF-8 text, each maximal invalid sequence replaced by U+FFFD (as Rust's String::from_utf8_lossy). */
+static int a_lossy(Area *o, const u8 *s, u64 n) {
+    u64 i = 0;
+    while (i < n) {
+        u8 b = s[i]; u32 need; u8 lo = 0x80, hi = 0xBF;
+        if (b < 0x80) { if (!a_put(o, s + i, 1)) return 0; i++; continue; }
+        if (b >= 0xC2 && b <= 0xDF) need = 1;
+        else if (b >= 0xE0 && b <= 0xEF) { need = 2; if (b == 0xE0) lo = 0xA0; if (b == 0xED) hi = 0x9F; }
+        else if (b >= 0xF0 && b <= 0xF4) { need = 3; if (b == 0xF0) lo = 0x90; if (b == 0xF4) hi = 0x8F; }
+        else { if (!a_str(o, "\xEF\xBF\xBD")) return 0; i++; continue; }
+        u64 j = i + 1; u32 got = 0;
+        while (got < need && j < n && s[j] >= (got == 0 ? lo : 0x80) && s[j] <= (got == 0 ? hi : 0xBF)) { j++; got++; }
+        if (got == need) { if (!a_put(o, s + i, j - i)) return 0; } else if (!a_str(o, "\xEF\xBF\xBD")) return 0;
+        i = j;
+    }
+    return 1;
+}
+
 /* A JSON string: quotes, backslash escapes, \u00XX for other control bytes. */
 static int a_json_str(Area *o, const u8 *s, u64 n) {
     if (!a_put(o, "\"", 1)) return 0;
@@ -473,10 +491,13 @@ static void relieve(Mem *m, Pressure *p) {
 /* ---------------------------------------------------------------- a running program */
 #define TEXT_CAP (256 * 1024)
 #define RESPONSE_CAP (256 * 1024)
+/* The declared limits of a request, the same in every runtime (serve.rs MAX_QUERY ...). A route has at most 32 parts
+   (checked when the program loads), names at most 128 bytes and fail messages 1024, so messages fit `ebuf`. */
 #define MAX_PARAMS 32
 #define MAX_QUERY 64
 #define MAX_JSON 256
 #define MAX_FREES 65536
+#define QUOTE 64
 #define MAX_SEL (1 << 24)
 
 /* What went wrong in a request: the error kinds of the Rust runtime. */
@@ -495,7 +516,7 @@ typedef struct Mito {
     u32 nparams; struct { u32 seg; T t; } params[MAX_PARAMS];
     u32 nquery; struct { T k, v; } query[MAX_QUERY];
     u32 njson; JField json[MAX_JSON];
-    int ekind; int ecode; Area emsg; u8 ebuf[1024];
+    int ekind; int ecode; Area emsg; u8 ebuf[4096];
     Grow frees; /* (collection, item) pairs, u32 each */
     Grow sel;   /* items collected by loops (u32 each) */
     int crashed;
@@ -755,7 +776,7 @@ static int parse_body(Mito *m, const u8 *s, u64 n) {
         if (c == '"') { T t; if ((r = j_string(m, &p, &t))) return r; v = v_str(t); }
         else if (c == '{' || c == '[') { u32 mark = m->text.len; if ((r = j_skip(m, &p, 0))) return r; m->text.len = mark; v = v_null(); }
         else if ((r = j_scalar(m, &p, &v))) return r;
-        if (m->njson == MAX_JSON) return -2;
+        if (m->njson == MAX_JSON) return -3;
         m->json[m->njson].k = k; m->json[m->njson].v = v; m->njson++;
         j_ws(&p);
         c = j_peek(&p);
@@ -908,11 +929,11 @@ static int h_alloc(Ctx *c, u32 cid, u32 inst, int try_, u32 *out) {
     }
     *out = (u32)idx; return 0;
 }
+/* Record a free for when the request succeeds. Not searched for duplicates: a second free of the same item finds it no
+   longer live then and does nothing. */
 static int add_free(Mito *m, u32 cid, u32 idx) {
-    u32 *f = (u32 *)m->frees.p;
-    for (u64 i = 0; i < m->frees.len; i += 2) if (f[i] == cid && f[i + 1] == idx) return 0;
-    if (!grow_to(&m->frees, (m->frees.len + 2) * 4)) return fail(m, 507, "too many frees in one request");
-    f = (u32 *)m->frees.p; f[m->frees.len] = cid; f[m->frees.len + 1] = idx; m->frees.len += 2; return 0;
+    if (m->frees.len / 2 >= MAX_FREES || !grow_to(&m->frees, (m->frees.len + 2) * 4)) return fail(m, 507, "too many frees in one request");
+    u32 *f = (u32 *)m->frees.p; f[m->frees.len] = cid; f[m->frees.len + 1] = idx; m->frees.len += 2; return 0;
 }
 static int h_free(Ctx *c, u32 cid, u32 idx) {
     Mito *m = M_(c);
@@ -1018,7 +1039,8 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
                 while (b < e && (s[b] == ' ' || (s[b] >= 9 && s[b] <= 13))) b++;
                 while (e > b && (s[e - 1] == ' ' || (s[e - 1] >= 9 && s[e - 1] <= 13))) e--;
                 if (parse_i64(s + b, e - b, &i)) { *out = v_int(i); return 0; }
-                err(m, E_FAIL, 400); a_str(&m->emsg, "`"); a_put(&m->emsg, s, a0.b); a_str(&m->emsg, "` is not a number"); return -1;
+                err(m, E_FAIL, 400); a_str(&m->emsg, "`"); a_lossy(&m->emsg, s, a0.b < QUOTE ? a0.b : QUOTE); if (a0.b > QUOTE) a_str(&m->emsg, "...");
+                a_str(&m->emsg, "` is not a number"); return -1;
             }
             if (a0.tag == 0) return fail(m, 400, "missing number");
             return fail(m, 500, "int(x)");
@@ -1138,12 +1160,14 @@ MITO_API int mito_handle(Mito *m, const char *method, u32 mn, const char *target
         if (e == b) continue;
         u64 eq = b; while (eq < e && t[eq] != '=') eq++;
         T k, v;
-        if (m->nquery < MAX_QUERY && push_decoded(m, t + b, eq - b, 1, &k) && push_decoded(m, t + (eq < e ? eq + 1 : e), eq < e ? e - eq - 1 : 0, 1, &v)) { m->query[m->nquery].k = k; m->query[m->nquery].v = v; m->nquery++; }
+        if (m->nquery == MAX_QUERY) { out_err_c(m, "request has more than 64 query parameters"); return 413; }
+        if (push_decoded(m, t + b, eq - b, 1, &k) && push_decoded(m, t + (eq < e ? eq + 1 : e), eq < e ? e - eq - 1 : 0, 1, &v)) { m->query[m->nquery].k = k; m->query[m->nquery].v = v; m->nquery++; }
         else fits = 0;
     }
     if (fits) {
         int pr = parse_body(m, (const u8 *)body, bn);
         if (pr == -2) fits = 0;
+        else if (pr == -3) { out_err_c(m, "request body has more than 256 fields"); return 413; }
         else if (pr) { out_err(m, m->ebuf, m->emsg.len); return 400; }
     }
     if (!fits) { out_err_c(m, "request too large for the request text area"); return 413; }
@@ -1158,7 +1182,7 @@ MITO_API int mito_handle(Mito *m, const char *method, u32 mn, const char *target
     else {
         ok = 0;
         switch (m->ekind) {
-            case E_FULL: { u8 b[1100]; Area x = { b, sizeof b, 0 }; a_str(&x, "capacity: "); a_put(&x, m->ebuf, m->emsg.len); out_err(m, b, x.len); code = 503; break; }
+            case E_FULL: { u8 b[4200]; Area x = { b, sizeof b, 0 }; a_str(&x, "capacity: "); a_put(&x, m->ebuf, m->emsg.len); out_err(m, b, x.len); code = 503; break; }
             case E_DEAD: out_err_c(m, "reference is not live"); code = 404; break;
             case E_NONE: out_err_c(m, "compiled code failed without a reason"); code = 500; break;
             default: out_err(m, m->ebuf, m->emsg.len); code = m->ecode; break;

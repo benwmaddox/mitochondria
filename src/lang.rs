@@ -93,6 +93,11 @@ pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt>
 #[derive(Debug, Clone, Default)]
 pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 
+/// Names (of fields, collections, functions, workers) are at most this long, and `fail` messages at most MAX_FAIL
+/// bytes, so error messages fit every runtime's buffer.
+pub const MAX_NAME: usize = 128;
+pub const MAX_FAIL: usize = 1024;
+
 /// Tokens, and the source line each one starts on.
 fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
     let c: Vec<char> = src.chars().collect();
@@ -104,7 +109,12 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
         if ch == '\n' { line += 1; }
         if ch.is_whitespace() { i += 1; }
         else if ch == '/' && c.get(i + 1) == Some(&'/') { while i < c.len() && c[i] != '\n' { i += 1; } }
-        else if ch.is_alphabetic() || ch == '_' { let s = i; while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') { i += 1; } out.push(Tok::Id(c[s..i].iter().collect())); }
+        else if ch.is_alphabetic() || ch == '_' {
+            let s = i; while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') { i += 1; }
+            let id: String = c[s..i].iter().collect();
+            if id.len() > MAX_NAME { return Err(format!("line {}: a name longer than {} bytes", line, MAX_NAME)); }
+            out.push(Tok::Id(id));
+        }
         else if ch.is_ascii_digit() {
             let s = i; while i < c.len() && c[i].is_ascii_digit() { i += 1; }
             if c.get(i) == Some(&'.') && c.get(i + 1).map_or(false, |d| d.is_ascii_digit()) { i += 1; while i < c.len() && c[i].is_ascii_digit() { i += 1; } out.push(Tok::Flt(c[s..i].iter().collect::<String>().parse().unwrap())); }
@@ -158,6 +168,7 @@ pub fn parse(src: &str) -> R<Api> {
         let mut segs = Vec::new();
         while p.sym("/") {
             if p.sym("{") { let n = p.id()?; p.eat("}")?; segs.push(Seg::Param(n)); } else { segs.push(Seg::Lit(p.id()?)); }
+            if segs.len() > 32 { return Err("an endpoint path has at most 32 parts".into()); }
         }
         let body = p.block()?;
         let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(n) => format!("/{{{}}}", n) }).collect::<String>());
@@ -234,6 +245,7 @@ impl P {
         if self.is_kw("fail") {
             self.i += 1; let code = self.int()? as u16;
             let msg = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err("fail needs a message string".into()) };
+            if msg.len() > MAX_FAIL { return Err(format!("a fail message longer than {} bytes", MAX_FAIL)); }
             self.eat(";")?; return Ok(Stmt::Fail(code, msg));
         }
         if self.is_kw("respond") { self.i += 1; let code = self.int()? as u16; let j = self.json()?; self.eat(";")?; return Ok(Stmt::Respond(code, j)); }

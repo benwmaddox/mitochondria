@@ -114,7 +114,16 @@ fn escaped(out: &mut Area, s: &[u8]) -> bool {
 }
 
 /// Why a request's input was refused.
-enum Bad { Json(&'static str), Full }
+enum Bad { Json(&'static str), Full, TooMany }
+
+/// The declared limits of a request (the same in every runtime).
+pub const MAX_QUERY: usize = 64;
+pub const MAX_BODY_FIELDS: usize = 256;
+pub const MAX_FREES: usize = 65536;
+/// How much of a value an error message quotes, in bytes.
+const QUOTE: usize = 64;
+/// What `int(text)` trims: ASCII space, tab, newline, vertical tab, form feed, carriage return.
+fn is_trim(c: char) -> bool { matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r') }
 
 /// A request body: empty, or one JSON object. Its fields' strings, numbers, booleans and nulls are kept (strings copied
 /// into the text area); nested arrays and objects are checked but read as null. The first of repeated keys wins.
@@ -135,6 +144,7 @@ fn parse_json(s: &[u8], text: &mut Area, out: &mut Vec<(Txt, Value)>) -> Result<
                 Some(b'{') | Some(b'[') => { let mark = text.len; p.skip(text, 0)?; text.len = mark; Value::Null }
                 _ => p.scalar()?,
             };
+            if out.len() == MAX_BODY_FIELDS { return Err(Bad::TooMany); }
             out.push((k, v));
             p.ws();
             match p.peek() { Some(b',') => p.i += 1, Some(b'}') => { p.i += 1; break; } _ => return Err(Bad::Json("invalid JSON body")) }
@@ -340,6 +350,7 @@ impl Server {
             if let Seg::Param(_) = s { match push_decoded(text, p.as_bytes(), false) { Some(t) => b.params.push((k, t)), None => fits = false } }
         }
         for kv in qs.split('&').filter(|s| !s.is_empty()) {
+            if b.query.len() == MAX_QUERY { Self::out_err(out, "request has more than 64 query parameters"); self.bufs = b; return 413; }
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
             match (push_decoded(text, k.as_bytes(), true), push_decoded(text, v.as_bytes(), true)) { (Some(k), Some(v)) => b.query.push((k, v)), _ => fits = false }
         }
@@ -347,6 +358,7 @@ impl Server {
             match parse_json(body.as_bytes(), text, &mut b.json) {
                 Ok(()) => {}
                 Err(Bad::Full) => fits = false,
+                Err(Bad::TooMany) => { Self::out_err(out, "request body has more than 256 fields"); self.bufs = b; return 413; }
                 Err(Bad::Json(m)) => { Self::out_err(out, m); self.bufs = b; return 400; }
             }
         }
@@ -675,7 +687,10 @@ impl<'a> Run<'a> {
             }
             B::Int => match self.arg(base, 0) {
                 Value::Int(i) => Value::Int(i), Value::Float(f) => Value::Int(f as i64),
-                Value::Str(t) => match std::str::from_utf8(self.text.get(t)).ok().and_then(|s| s.trim().parse::<i64>().ok()) { Some(i) => Value::Int(i), None => return fail(400, format!("`{}` is not a number", String::from_utf8_lossy(self.text.get(t)))) },
+                Value::Str(t) => match std::str::from_utf8(self.text.get(t)).ok().and_then(|s| s.trim_matches(is_trim).parse::<i64>().ok()) {
+                    Some(i) => Value::Int(i),
+                    None => { let b = self.text.get(t); return fail(400, format!("`{}{}` is not a number", String::from_utf8_lossy(&b[..b.len().min(QUOTE)]), if b.len() > QUOTE { "..." } else { "" })) }
+                },
                 Value::Null => return fail(400, "missing number"), _ => return fail(500, "int(x)"),
             },
             B::Str => { let v = self.arg(base, 0); let start = self.text.len; self.show_into(&v)?; Value::Str(self.text.since(start)) }
@@ -838,7 +853,7 @@ impl<'a> Run<'a> {
                 res?;
             }
             Stmt::Free(e) => match self.eval(e)? {
-                Value::Item(c, i) => { if self.inst.is_list(c) { return fail(500, "list items are not freed; lists drop their oldest or pop their newest"); } if !self.frees.contains(&(c, i)) { self.frees.push((c, i)); } }
+                Value::Item(c, i) => { if self.inst.is_list(c) { return fail(500, "list items are not freed; lists drop their oldest or pop their newest"); } if self.frees.len() >= MAX_FREES { return fail(507, "too many frees in one request"); } self.frees.push((c, i)); }
                 Value::Null => {}
                 _ => return fail(500, "free needs an item"),
             },
@@ -1122,6 +1137,9 @@ mod tests {
             ("endpoint GET /a { x = 1; respond 200 {}; }", "unknown variable `x`"),
             ("endpoint GET /a { if true { let y = 1; } respond 200 { \"y\": y }; }", "unknown name `y`"), // block scope
             ("fn len(s) { return 1; }", "name of a builtin"),
+            (&format!("endpoint GET {} {{ respond 200 {{}}; }}", "/a".repeat(33)), "at most 32 parts"),
+            (&format!("endpoint GET /a {{ let {} = 1; respond 200 {{}}; }}", "n".repeat(129)), "a name longer than 128 bytes"),
+            (&format!("endpoint GET /a {{ fail 400 \"{}\"; }}", "m".repeat(1025)), "a fail message longer than 1024 bytes"),
         ] {
             let e = Server::new(st(), api).err().unwrap_or_default();
             assert!(e.contains(want), "{} -> {}", api, e);
@@ -1347,7 +1365,7 @@ extern "C" fn h_store_field(c: *mut Ctx, base: *const CVal, p: *const u8, n: u32
 }
 extern "C" fn h_free_val(c: *mut Ctx, v: *const CVal) -> i32 {
     with_run(c, |r| match to_value(unsafe { &*v }) {
-        Value::Item(cid, i) => { if r.inst.is_list(cid) { return fail(500, "list items are not freed; lists drop their oldest or pop their newest"); } if !r.frees.contains(&(cid, i)) { r.frees.push((cid, i)); } Ok(0) }
+        Value::Item(cid, i) => { if r.inst.is_list(cid) { return fail(500, "list items are not freed; lists drop their oldest or pop their newest"); } if r.frees.len() >= MAX_FREES { return fail(507, "too many frees in one request"); } r.frees.push((cid, i)); Ok(0) }
         Value::Null => Ok(0),
         _ => fail(500, "free needs an item"),
     })
@@ -1416,7 +1434,8 @@ extern "C" fn h_free(c: *mut Ctx, cid: u32, idx: u32) -> i32 {
     with_run(c, |r| {
         let (cid, idx) = (cid as usize, idx as usize);
         if r.inst.is_list(cid) { return fail(500, "list items are not freed; lists drop their oldest or pop their newest"); }
-        if !r.frees.contains(&(cid, idx)) { r.frees.push((cid, idx)); }
+        if r.frees.len() >= MAX_FREES { return fail(507, "too many frees in one request"); }
+        r.frees.push((cid, idx));
         Ok(0)
     })
 }

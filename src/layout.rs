@@ -132,6 +132,7 @@ impl Program {
 
     pub fn parse(src: &str) -> Result<Program, String> {
         let mut p = P { t: tokenize(src), i: 0 };
+        if let Some(t) = p.t.iter().find(|t| t.len() > crate::lang::MAX_NAME) { return Err(format!("a name longer than {} bytes: `{}...`", crate::lang::MAX_NAME, t.chars().take(32).collect::<String>())); }
         let mut structs: Vec<StructDef> = Vec::new();
         let mut globals: Vec<(String, Ty)> = Vec::new();
         let mut instances: Vec<ModInst> = Vec::new();

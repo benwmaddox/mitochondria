@@ -1,0 +1,61 @@
+// list indexing (oldest first, after drop_oldest wraps), lists and pools of plain values, loops whose body allocates
+--- state
+struct Ev { n: i64; who: string<8>; }
+struct Bag { nums: list<i32, 4> drop_oldest; flags: pool<bool, 4>; }
+global evs: list<Ev, 3> drop_oldest;
+global strict: list<Ev, 2>;
+global bags: pool<Bag, 2>;
+--- api
+endpoint POST /evs { let e = alloc evs; e.n = int(body("n")); e.who = body("who"); respond 201 { "count": count(evs) }; }
+endpoint GET /evs/{k} { let e = evs[int(param("k"))]; respond 200 { "n": e.n, "who": e.who }; }
+endpoint GET /evs { respond 200 { "x": [each e in evs e.n], "r": [each e in evs reverse e.n], "first": evs[0].n }; }
+endpoint POST /strict { let e = alloc strict; e.n = count(strict); respond 201 { "n": e.n }; }
+endpoint POST /strict/try { let e = try_alloc strict; respond 200 { "got": exists(e) }; }
+endpoint POST /copy {
+    // the loop sees the items there were when it started, not the ones it adds
+    each e in evs { let f = alloc evs; f.n = e.n + 100; f.who = e.who; }
+    respond 200 { "x": [each e in evs e.n] };
+}
+endpoint POST /bags { let b = alloc bags; let x = alloc b.nums; let y = alloc b.nums; let f = alloc b.flags; respond 201 { "n": count(b.nums), "f": count(b.flags) }; }
+endpoint GET /bags/{k} {
+    let b = bags[int(param("k"))];
+    var sum = 0;
+    each v in b.nums { sum = sum + v; }
+    respond 200 { "sum": sum, "all": [each v in b.nums v], "rev": [each v in b.nums reverse v], "at1": b.nums[1], "flags": [each f in b.flags f] };
+}
+endpoint POST /bags/{k}/grow {
+    let b = bags[int(param("k"))];
+    each v in b.nums { let w = alloc b.nums; }
+    respond 200 { "n": count(b.nums) };
+}
+--- requests
+GET /evs
+GET /evs/0
+POST /evs {"n": 1, "who": "a"}
+POST /evs {"n": 2, "who": "b"}
+GET /evs/0
+GET /evs/1
+GET /evs/2
+GET /evs/-1
+GET /evs/x
+POST /evs {"n": 3, "who": "c"}
+POST /evs {"n": 4, "who": "d"}
+GET /evs
+GET /evs/0
+GET /evs/2
+POST /copy
+GET /evs
+POST /strict
+POST /strict
+POST /strict
+POST /strict/try
+POST /bags
+set bags[0].nums[0] 5
+set bags[0].nums[1] -6
+set bags[0].flags[0] true
+GET /bags/0
+GET /bags/1
+POST /bags/0/grow
+GET /bags/0
+POST /bags/0/grow
+GET /bags/0

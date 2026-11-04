@@ -1,0 +1,11 @@
+GET /mean -> 409 {"error":"no values"}
+POST /add -> 200 {"total":1.25}
+POST /add -> 200 {"total":3.25}
+POST /add -> 200 {"total":2.5}
+GET /mean -> 200 {"mean":0.8333333333333334}
+POST /small -> 200 {"small":0.10000000149011612}
+GET /math -> 200 {"sum":3.5,"diff":0.5,"prod":3,"quot":0.5,"neg":-1.5,"tenth":0.30000000000000004,"lt":true,"eq":true,"ne":false,"int":7,"nint":-7,"str":"2.5!","whole":3,"big":1000000000000000000000,"tiny":0.000001,"inf":null}
+GET /cmp/2 -> 200 {"gt":true,"max":false}
+GET /cmp/10 -> 200 {"gt":true,"max":true}
+GET /cmp/1 -> 200 {"gt":false,"max":false}
+state <plain values> 24

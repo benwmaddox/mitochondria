@@ -1,0 +1,32 @@
+// strings: building, comparing, length limits, plain and item string fields, headers and query values
+--- state
+struct Meta { motd: string<16>; }
+struct Note { text: string<12>; }
+global meta: Meta;
+global notes: list<Note, 4> drop_oldest;
+--- api
+endpoint POST /motd { meta.motd = body("m"); respond 200 { "motd": meta.motd, "len": len(meta.motd), "max": maxlen(meta.motd) }; }
+endpoint POST /notes {
+    let t = body("t");
+    let n = alloc notes;
+    if len(t) + 2 > maxlen(n.text) { fail 413 "too long"; }
+    n.text = "[" + t + "]";
+    respond 201 { "text": n.text };
+}
+endpoint GET /notes {
+    var all = "";
+    each n in notes { all = all + n.text; }
+    respond 200 { "all": all, "first": notes[0].text, "eq": notes[0].text == "[a]", "lt": "abc" < "abd", "hdr": or(header("X-Name"), "none"), "q": query("q") };
+}
+endpoint GET /concat { respond 200 { "a": "n=" + 5, "b": "t=" + true, "c": "x" + null, "d": str(12) + str(false) }; }
+--- requests
+POST /motd {"m": "hello"}
+POST /motd {"m": "this is far too long"}
+GET /notes
+POST /notes {"t": "a"}
+POST /notes {"t": "quote\"d"}
+POST /notes {"t": "0123456789"}
+GET /notes
+@X-Name: zed
+GET /notes?q=hi
+GET /concat

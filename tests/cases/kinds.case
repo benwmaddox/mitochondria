@@ -1,0 +1,52 @@
+// values whose kind changes: a var holding a reference, a var given another kind, functions returning different kinds
+--- state
+struct Node { name: string<8>; next: ref<nodes>; }
+global nodes: pool<Node, 4> checked;
+struct Top { head: ref<nodes>; }
+global top: Top;
+--- api
+fn find(name) { each n in nodes { if n.name == name { return n; } } return null; }
+fn describe(k) { if k == 0 { return "zero"; } if k < 0 { return null; } return k; }
+endpoint POST /nodes {
+    let n = alloc nodes;
+    n.name = body("name");
+    n.next = top.head;
+    top.head = n;
+    respond 201 { "slot": slot(n) };
+}
+endpoint DELETE /nodes/{name} { let n = find(param("name")); if n == null { fail 404 "no such node"; } free n; respond 200 {}; }
+endpoint GET /walk {
+    var cur = top.head;
+    var names = "";
+    var steps = 0;
+    each n in nodes {
+        if exists(cur) { names = names + cur.name + ","; cur = cur.next; steps = steps + 1; }
+    }
+    respond 200 { "names": names, "steps": steps };
+}
+endpoint GET /find/{name} { let n = find(param("name")); respond 200 { "found": exists(n), "name": or(n.name, "-") }; }
+endpoint GET /describe/{k} { respond 200 { "d": describe(int(param("k"))) }; }
+endpoint GET /mixed/{k} {
+    var v = 1;
+    if int(param("k")) > 5 { v = "big"; }
+    if int(param("k")) > 9 { v = null; }
+    respond 200 { "v": v };
+}
+--- requests
+GET /walk
+POST /nodes {"name": "a"}
+POST /nodes {"name": "b"}
+POST /nodes {"name": "c"}
+GET /walk
+GET /find/b
+GET /find/z
+DELETE /nodes/b
+GET /walk
+GET /find/b
+DELETE /nodes/zz
+GET /describe/0
+GET /describe/-4
+GET /describe/12
+GET /mixed/1
+GET /mixed/7
+GET /mixed/11

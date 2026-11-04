@@ -48,6 +48,14 @@ struct H {
     int (*forward)(Ctx *, const char *, u32, i64);             /* send the forward to the worker for key; ends the request here */
     int (*crash)(Ctx *);                                       /* test hook: crash this worker */
     int (*builtin)(Ctx *, int, const Val *, u32, Val *);       /* a builtin (BUILTINS order) on argument values */
+    int (*json_f64)(Ctx *, double);                            /* append a float as JSON (shortest form; null if not finite) */
+    int (*elem)(Ctx *, i64, u32);                              /* check index k into a fixed array of n */
+    int (*store_elem)(Ctx *, u32, u32, u32, i64, const Val *); /* journaled write of element k of array column (coll, idx, col) */
+    int (*sel_mark)(Ctx *, u32 *);                             /* start collecting items for a loop: a mark to come back to */
+    int (*sel_add)(Ctx *, double, u32);                        /* collect an item with its order key */
+    int (*sel_sort)(Ctx *, u32, int, int, i64, u32 *);         /* order (if asked, stable; desc) and limit what was collected */
+    int (*sel_get)(Ctx *, u32, u32, u32 *);                    /* the k-th collected item */
+    int (*sel_end)(Ctx *, u32);                                /* drop what was collected since the mark */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -107,6 +115,7 @@ pub struct Generated { pub src: String, pub eps: Vec<Option<String>>, pub notes:
 #[derive(Clone, Debug)]
 enum CV {
     Int(String),                    // C expression of type i64
+    Flt(String),                    // C expression of type double
     Bool(String),                   // C expression, 0 or 1
     Lit(String),                    // a string known when generating
     Txt(String),                    // a Txt: a string in the request's text area, or absent (null)
@@ -116,13 +125,43 @@ enum CV {
     Coll(usize, String),            // collection, C expression for the instance
     StateStr(usize, String, usize), // a string column of an item: collection, item index, column
     Plain(usize, usize),            // a plain struct: struct id, offset
+    Part(usize, String, String),    // a struct-valued field of an item: collection, item index, path of the field
+    ArrCol(usize, String, usize),   // a fixed-array field of an item: collection, item index, column
+    PlainArr(usize, Ty, usize),     // a plain fixed array: offset, element type, length
     Null,
 }
 
-/// Where `return` goes inside an inlined function.
-struct Ret { var: String, label: String, kind: Option<CV> }
+/// Where `return` goes inside an inlined function, and the kind of value it returns (known after the first `return`).
+struct Ret { var: String, label: String, kind: Option<K> }
 
-struct G<'p> { prog: &'p Program, api: &'p Api, ep: &'p Endpoint, body: String, n: usize, depth: usize, inlining: Vec<u32>, ret: Vec<Ret> }
+/// The kind of a value that a `var` or a function's result holds, when it must be the same everywhere.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum K { Null, Int, Flt, Bool, Txt, Any, Item(usize), Ref(usize) }
+
+/// The smallest kind that holds values of both kinds: null joins strings and references (which have their own empty
+/// value) or becomes a general value; an item and a reference to the same pool join as a reference.
+fn unify(a: K, b: K) -> K {
+    use K::*;
+    match (a, b) {
+        (a, b) if a == b => a,
+        (Null, Txt) | (Txt, Null) => Txt,
+        (Null, Item(c) | Ref(c)) | (Item(c) | Ref(c), Null) => Ref(c),
+        (Item(c), Ref(d)) | (Ref(c), Item(d)) | (Ref(c), Ref(d)) if c == d => Ref(c),
+        _ => Any,
+    }
+}
+
+/// A kind that has to be widened, found while generating: the endpoint is generated again with it.
+#[derive(Clone, Copy, Debug)]
+enum Widen { Slot(Option<u32>, u32, K), Ret(u32, K) }
+
+struct G<'p> {
+    prog: &'p Program, api: &'p Api, ep: &'p Endpoint, body: String, n: usize, depth: usize, inlining: Vec<u32>, ret: Vec<Ret>,
+    frame: Option<u32>,                                  // the function whose slots `env` holds (None: the endpoint)
+    slot_kinds: &'p [((Option<u32>, u32), K)],           // widened kinds of `var` and `let` slots
+    ret_kinds: &'p [(u32, K)],                           // widened result kinds of functions
+    widen: Option<Widen>,
+}
 type R<T> = Result<T, String>;
 fn no<T>(what: impl Into<String>) -> R<T> { Err(what.into()) }
 fn is_name(e: &str) -> bool { e.chars().all(|c| c.is_alphanumeric() || c == '_') }
@@ -132,6 +171,11 @@ pub fn c_lit(s: &[u8]) -> String {
     let mut o = String::from("\"");
     for &b in s { match b { b'"' => o.push_str("\\\""), b'\\' => o.push_str("\\\\"), 0x20..=0x7e => o.push(b as char), _ => o.push_str(&format!("\\{:03o}", b)) } }
     o.push('"'); o
+}
+/// A C double literal that is exactly `f` (Rust's shortest round-trip text, with a decimal point).
+fn c_double(f: f64) -> String {
+    let t = format!("{:?}", f);
+    if t.contains('.') || t.contains('e') { t } else { format!("{}.0", t) }
 }
 /// The JSON text of a string, escaped now, so the generated code can write it as is.
 fn json_lit(s: &str) -> String {
@@ -189,9 +233,23 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Gen
     let mut src = String::from(PRELUDE);
     let (mut eps, mut notes) = (Vec::new(), Vec::new());
     for (k, ep) in api.eps.iter().enumerate() {
-        let mut g = G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new() };
-        let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
-        match g.block(&ep.body, &mut env).and_then(|_| check_profile(&g.body).map_err(|e| format!("C safety profile: {}", e))) {
+        let (mut slot_kinds, mut ret_kinds): (Vec<((Option<u32>, u32), K)>, Vec<(u32, K)>) = (Vec::new(), Vec::new());
+        let mut tries = 0;
+        let (res, body) = loop {
+            tries += 1;
+            let mut g = G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds: &slot_kinds, ret_kinds: &ret_kinds, widen: None };
+            let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
+            let r = g.block(&ep.body, &mut env);
+            match (r, g.widen) {
+                (Err(_), Some(w)) if tries < 32 => match w {
+                    Widen::Slot(f, sl, k) => match slot_kinds.iter_mut().find(|x| x.0 == (f, sl)) { Some(x) => x.1 = unify(x.1, k), None => slot_kinds.push(((f, sl), k)) },
+                    Widen::Ret(f, k) => match ret_kinds.iter_mut().find(|x| x.0 == f) { Some(x) => x.1 = unify(x.1, k), None => ret_kinds.push((f, k)) },
+                },
+                (r, _) => break (r, g.body),
+            }
+        };
+        let g = G { prog, api, ep, body, n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds: &[], ret_kinds: &[], widen: None };
+        match res.and_then(|_| check_profile(&g.body).map_err(|e| format!("C safety profile: {}", e))) {
             Ok(()) => {
                 let name = format!("ep{}", k);
                 let head = match source { Some(sf) => source_comment(ep, sf), None => format!("\n// {}\n", ep.text) };
@@ -207,8 +265,30 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Gen
     Generated { src, eps, notes }
 }
 
-/// Does running these statements (including inlined calls) allocate? Loops whose body allocates are not compiled yet,
-/// because the interpreter iterates over a snapshot taken before the body runs.
+/// Does running these statements (including inlined calls) write state or allocate? A loop with `where` whose body
+/// does collects its items first, as the interpreter does, so the body cannot change which items the filter keeps.
+fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
+    fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
+        match e {
+            Expr::Call(_, a, r) => a.iter().any(|x| ex(api, x, seen)) || match r { CallRes::User(k) if !seen.contains(k) => { seen.push(*k); writes(api, &api.fns[*k as usize].body, seen) } _ => false },
+            Expr::Field(b, ..) | Expr::Un(_, b) => ex(api, b, seen),
+            Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| match s {
+        Stmt::Alloc { .. } | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
+        Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Free(e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
+        Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
+        Stmt::If(c, t, e) => ex(api, c, seen) || writes(api, t, seen) || writes(api, e, seen),
+        Stmt::Each(it, b) => ex(api, &it.coll, seen) || writes(api, b, seen),
+        Stmt::Forward { key, fields, .. } => ex(api, key, seen) || fields.iter().any(|f| ex(api, &f.1, seen)),
+        _ => false,
+    })
+}
+
+/// Does running these statements (including inlined calls) allocate? A loop whose body allocates collects its items
+/// first, as the interpreter does, so it does not visit items its body adds.
 fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
@@ -229,6 +309,17 @@ fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     })
 }
 
+/// The kind of a value that a variable or result can hold; None for places (collections, structs, arrays).
+fn kind(v: &CV) -> Option<K> {
+    Some(match v {
+        CV::Int(_) => K::Int, CV::Flt(_) => K::Flt, CV::Bool(_) => K::Bool, CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) => K::Txt,
+        CV::Any(_) => K::Any, CV::Item(c, _) => K::Item(*c), CV::Ref(c, ..) => K::Ref(*c), CV::Null => K::Null,
+        CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => return None,
+    })
+}
+/// Can a value of kind `v` be stored where kind `k` is held?
+fn fits(v: K, k: K) -> bool { k == K::Any || unify(v, k) == k }
+
 impl<'p> G<'p> {
     fn tmp(&mut self, p: &str) -> String { self.n += 1; format!("{}{}", p, self.n) }
     fn line(&mut self, s: &str) { for _ in 0..self.depth + 1 { self.body.push_str("    "); } self.body.push_str(s); self.body.push('\n'); }
@@ -245,40 +336,64 @@ impl<'p> G<'p> {
 
     fn stmt(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<()> {
         match s {
-            Stmt::Let(_, slot, e) => { let v = self.expr(e, env, None)?; let v = self.hold(v, false)?; env[*slot as usize] = Some(v); }
-            Stmt::Var(_, slot, e) => { let v = self.expr(e, env, None)?; let v = self.hold(v, true)?; env[*slot as usize] = Some(v); }
+            Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
+                let mutable = matches!(s, Stmt::Var(..));
+                let v = self.expr(e, env, None)?;
+                let v = match self.slot_kind(*slot) { Some(k) => self.coerce(v, k, mutable)?, None => self.hold(v, mutable)? };
+                env[*slot as usize] = Some(v);
+            }
             Stmt::Assign(Expr::Var(n, VarRes::Local(slot)), rhs) => {
                 let cur = env[*slot as usize].clone().ok_or_else(|| format!("`{}` has no compiled value", n))?;
                 let v = self.expr(rhs, env, None)?;
-                self.assign_var(&cur, v)?;
+                if let Err(e) = self.assign_var(&cur, v.clone()) {
+                    if let (Some(a), Some(b)) = (kind(&cur), kind(&v)) { self.widen = Some(Widen::Slot(self.frame, *slot, unify(a, b))); }
+                    return Err(e);
+                }
             }
             Stmt::Assign(Expr::Field(base, f, _), rhs) => {
                 let bv = self.expr(base, env, None)?;
-                match bv {
-                    CV::Item(c, idx) => {
-                        let coll = &self.prog.colls[c];
-                        let Some(ci) = coll.cols.iter().position(|x| x.path == *f && !matches!(x.kind, CKind::StrBytes(_))) else { return no(format!("assigning `.{}` not compiled yet", f)) };
-                        let v = self.expr(rhs, env, None)?;
-                        let vv = self.val(v)?;
-                        self.call(&format!("c->h->store(c, {}, {}, {}, &{})", c, idx, ci, vv));
-                    }
-                    CV::Ref(t, s, k) => {
-                        let Some(ci) = self.prog.colls[t].cols.iter().position(|x| x.path == *f && !matches!(x.kind, CKind::StrBytes(_))) else { return no(format!("assigning `.{}` not compiled yet", f)) };
-                        self.line(&format!("if ({} == 0) TAIL(c->h->dead(c));", s));
-                        let v = self.expr(rhs, env, None)?;
-                        let vv = self.val(v)?;
-                        self.call(&format!("c->h->store(c, {}, {}, {}, &{})", t, k, ci, vv));
-                    }
+                let (c, idx, path) = match bv {
+                    CV::Item(c, idx) => (c, idx, f.clone()),
+                    CV::Part(c, idx, p) => (c, idx, format!("{}.{}", p, f)),
+                    CV::Ref(t, s, k) => { self.line(&format!("if ({} == 0) TAIL(c->h->dead(c));", s)); (t, k, f.clone()) }
                     CV::Plain(sid, off) => {
                         let sd = &self.prog.structs[sid];
                         let Some(k) = sd.fields.iter().position(|x| x.0 == *f) else { return no(format!("no field `{}`", f)) };
-                        let Some((code, cap)) = plain_code(&sd.fields[k].1) else { return no(format!("assigning plain `.{}` not compiled yet", f)) };
+                        let (code, cap) = match &sd.fields[k].1 { Ty::Ref(p) => (30, self.prog.coll_of(p).ok_or("ref to an unknown pool")? as u32), t => plain_code(t).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))? };
                         let at = off + sd.offs[k];
                         let v = self.expr(rhs, env, None)?;
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, {}, {}, {}, &{})", at, code, cap, vv));
+                        return Ok(());
                     }
+                    CV::Null => { self.line("TAIL(c->h->dead(c));"); return Ok(()); }
                     _ => return no("assignment target not compiled yet"),
+                };
+                let Some(ci) = self.prog.colls[c].cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_) | CKind::Arr(..))) else { return no(format!("assigning `.{}` not compiled yet", path)) };
+                let v = self.expr(rhs, env, None)?;
+                let vv = self.val(v)?;
+                self.call(&format!("c->h->store(c, {}, {}, {}, &{})", c, idx, ci, vv));
+            }
+            Stmt::Assign(Expr::Index(base, k), rhs) => {
+                let bv = self.expr(base, env, None)?;
+                let CV::Int(k) = self.expr(k, env, None)? else { return no("an index that is not an integer") };
+                let k = self.hold_int(k);
+                match bv {
+                    CV::ArrCol(c, idx, ci) => {
+                        let CKind::Arr(_, n) = self.prog.colls[c].cols[ci].kind else { unreachable!() };
+                        self.call(&format!("c->h->elem(c, {}, {})", k, n));
+                        let v = self.expr(rhs, env, None)?;
+                        let vv = self.val(v)?;
+                        self.call(&format!("c->h->store_elem(c, {}, {}, {}, {}, &{})", c, idx, ci, k, vv));
+                    }
+                    CV::PlainArr(off, e, n) => {
+                        let Some((code, cap)) = plain_code(&e) else { return no("assigning an element of this array not compiled yet") };
+                        self.call(&format!("c->h->elem(c, {}, {})", k, n));
+                        let v = self.expr(rhs, env, None)?;
+                        let vv = self.val(v)?;
+                        self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, self.prog.plain_size(&e).0, code, cap, vv));
+                    }
+                    _ => return no("only fixed arrays can be assigned by index"),
                 }
             }
             Stmt::Assign(..) => return no("assignment target not compiled yet"),
@@ -291,8 +406,8 @@ impl<'p> G<'p> {
                 if !e.is_empty() { self.open("else {"); self.block(e, env)?; self.close("}"); }
             }
             Stmt::Each(it, body) => {
-                if allocates(self.api, body, &mut Vec::new()) { return no("a loop whose body allocates is not compiled yet"); }
-                self.each(it, env, |g, env, _| g.block(body, env))?;
+                let collect = it.order.is_some() || allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
+                self.each(it, env, collect, |g, env, _| g.block(body, env))?;
             }
             Stmt::Free(e) => match self.expr(e, env, None)? {
                 CV::Item(c, i) => self.call(&format!("c->h->free_(c, {}, {})", c, i)),
@@ -337,18 +452,14 @@ impl<'p> G<'p> {
 
     fn ret_with(&mut self, v: CV) -> R<()> {
         let v = self.hold(v, false)?;
+        let Some(kv) = kind(&v) else { return no("a function returning this kind of value is not compiled yet") };
         let r = self.ret.last().unwrap();
-        let (var, label) = (r.var.clone(), r.label.clone());
-        match (&r.kind, &v) {
-            (None, _) => { self.ret.last_mut().unwrap().kind = Some(v.clone()); }
-            (Some(k), _) if std::mem::discriminant(k) == std::mem::discriminant(&v) => {
-                if let (CV::Item(a, _), CV::Item(b, _)) = (k, &v) { if a != b { return no("a function returns items of different collections"); } }
-            }
-            _ => return no("a function returns values of different kinds"),
-        }
+        let (var, label, f) = (r.var.clone(), r.label.clone(), *self.inlining.last().unwrap());
+        let k = match r.kind { None => { self.ret.last_mut().unwrap().kind = Some(kv); kv } Some(k) => k };
+        if !fits(kv, k) { self.widen = Some(Widen::Ret(f, unify(k, kv))); return no("a function returns values of different kinds"); }
+        let v = self.coerce(v, k, false)?;
         let assign = match &v {
-            CV::Int(e) | CV::Bool(e) | CV::Txt(e) | CV::Any(e) => format!("{}_v = {};", var, e),
-            CV::Item(_, e) => format!("{}_v = {};", var, e),
+            CV::Int(e) | CV::Flt(e) | CV::Bool(e) | CV::Txt(e) | CV::Any(e) | CV::Item(_, e) => format!("{}_v = {};", var, e),
             CV::Ref(_, s, k) => format!("{}_s = {}; {}_v = {};", var, s, var, k),
             CV::Null => String::new(),
             _ => return no("a function returning this kind of value is not compiled yet"),
@@ -358,10 +469,26 @@ impl<'p> G<'p> {
         Ok(())
     }
 
+    fn slot_kind(&self, slot: u32) -> Option<K> { self.slot_kinds.iter().find(|x| x.0 == (self.frame, slot)).map(|x| x.1) }
+
+    /// Convert a value to kind `k` (which it fits), in its own variable if `mutable`.
+    fn coerce(&mut self, v: CV, k: K, mutable: bool) -> R<CV> {
+        Ok(match (k, v) {
+            (K::Any, v) => { let x = self.val(v)?; if mutable { let t = self.tmp("v"); self.line(&format!("Val {} = {};", t, x)); CV::Any(t) } else { CV::Any(x) } }
+            (K::Txt, CV::Null) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ 0, 0, 0 }};", t)); CV::Txt(t) }
+            (K::Txt, v @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..))) => { let x = self.txt_of(v)?; if mutable { let t = self.tmp("t"); self.line(&format!("Txt {} = {};", t, x)); CV::Txt(t) } else { CV::Txt(x) } }
+            (K::Ref(c), CV::Null) => { let (s, i) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = 0, {} = 0;", s, i)); CV::Ref(c, s, i) }
+            (K::Ref(c), CV::Item(_, e)) => { let (s, i) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = 1, {} = {};", s, i, e)); CV::Ref(c, s, i) }
+            (K::Ref(_), v @ CV::Ref(..)) => self.hold(v, mutable)?,
+            (_, v) => self.hold(v, mutable)?,
+        })
+    }
+
     /// Give a value its own C variable (so it is computed once, and a `var` can be assigned later).
     fn hold(&mut self, v: CV, mutable: bool) -> R<CV> {
         Ok(match v {
             CV::Int(e) if mutable || !is_name(&e) => { let t = self.tmp("v"); self.line(&format!("i64 {} = {};", t, e)); CV::Int(t) }
+            CV::Flt(e) if mutable || !is_name(&e) => { let t = self.tmp("v"); self.line(&format!("double {} = {};", t, e)); CV::Flt(t) }
             CV::Bool(e) if mutable || !is_name(&e) => { let t = self.tmp("v"); self.line(&format!("int {} = {};", t, e)); CV::Bool(t) }
             CV::Item(c, e) if mutable || !is_name(&e) => { let t = self.tmp("i"); self.line(&format!("u32 {} = {};", t, e)); CV::Item(c, t) }
             CV::Txt(e) if mutable => { let t = self.tmp("t"); self.line(&format!("Txt {} = {};", t, e)); CV::Txt(t) }
@@ -369,7 +496,7 @@ impl<'p> G<'p> {
             CV::Lit(s) if mutable => CV::Txt(self.txt_of(CV::Lit(s))?),
             CV::StateStr(..) => CV::Txt(self.txt_of(v)?), // a value is copied when read, as in the interpreter
             CV::Null if mutable => { let t = self.tmp("v"); self.line(&format!("Val {} = {{ 0, 0, 0, 0, 0 }};", t)); CV::Any(t) }
-            CV::Ref(..) if mutable => return no("a `var` holding a reference is not compiled yet"),
+            CV::Ref(c, s, k) if mutable => { let (s2, k2) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}, {} = {};", s2, s, k2, k)); CV::Ref(c, s2, k2) }
             o => o,
         })
     }
@@ -377,10 +504,14 @@ impl<'p> G<'p> {
 
     fn assign_var(&mut self, cur: &CV, v: CV) -> R<()> {
         match (cur, v) {
-            (CV::Int(t), CV::Int(e)) | (CV::Bool(t), CV::Bool(e)) => self.line(&format!("{} = {};", t, e)),
+            (CV::Int(t), CV::Int(e)) | (CV::Bool(t), CV::Bool(e)) | (CV::Flt(t), CV::Flt(e)) => self.line(&format!("{} = {};", t, e)),
             (CV::Item(a, t), CV::Item(b, e)) if *a == b => self.line(&format!("{} = {};", t, e)),
             (CV::Txt(t), v @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..))) => { let s = self.txt_of(v)?; self.line(&format!("{} = {};", t, s)); }
             (CV::Any(t), v) => { let s = self.val(v)?; self.line(&format!("{} = {};", t, s)); }
+            (CV::Txt(t), CV::Null) => self.line(&format!("{} = (Txt){{ 0, 0, 0 }};", t)),
+            (CV::Ref(a, s, k), CV::Ref(b, s2, k2)) if *a == b => self.line(&format!("{} = {}; {} = {};", s, s2, k, k2)),
+            (CV::Ref(a, s, k), CV::Item(b, e)) if *a == b => self.line(&format!("{} = 1; {} = {};", s, k, e)),
+            (CV::Ref(_, s, _), CV::Null) => self.line(&format!("{} = 0;", s)),
             _ => return no("a `var` assigned a value of another kind"),
         }
         Ok(())
@@ -392,12 +523,13 @@ impl<'p> G<'p> {
         match v {
             CV::Any(e) => return Ok(e),
             CV::Int(e) => self.line(&format!("Val {} = {{ 1, 0, 0, {}, 0 }};", t, e)),
+            CV::Flt(e) => self.line(&format!("Val {} = {{ 2, 0, 0, 0, {} }};", t, e)),
             CV::Bool(e) => self.line(&format!("Val {} = {{ 3, 0, 0, {}, 0 }};", t, e)),
             CV::Null => self.line(&format!("Val {} = {{ 0, 0, 0, 0, 0 }};", t)),
             CV::Item(c, e) => self.line(&format!("Val {} = {{ 5, {}, {}, 0, 0 }};", t, c, e)),
             CV::Ref(c, s, k) => self.line(&format!("Val {} = {{ {} == 0 ? 0 : 5, {}, {}, 0, 0 }};", t, s, c, k)),
             v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..)) => { let x = self.txt_of(v)?; self.line(&format!("Val {} = {{ {}.present ? 4 : 0, {}.off, {}.len, 0, 0 }};", t, x, x, x)); }
-            CV::Coll(..) | CV::Plain(..) => return no("a collection or struct used as a value is not compiled yet"),
+            CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => return no("a collection, struct or array used as a value is not compiled yet"),
         }
         Ok(t)
     }
@@ -430,7 +562,7 @@ impl<'p> G<'p> {
             Expr::Bool(b) => Ok(CV::Bool(if *b { "1" } else { "0" }.into())),
             Expr::Str(s) => Ok(CV::Lit(s.clone())),
             Expr::Null => Ok(CV::Null),
-            Expr::Float(_) => no("floats are not compiled yet"),
+            Expr::Float(f) => Ok(CV::Flt(c_double(*f))),
             Expr::Var(n, VarRes::Local(s)) => env.get(*s as usize).cloned().flatten().ok_or_else(|| format!("`{}` has no compiled value", n)),
             Expr::Var(n, VarRes::Global(g)) => {
                 let gl = &self.prog.globals[*g as usize];
@@ -442,18 +574,31 @@ impl<'p> G<'p> {
             Expr::Index(base, k) => {
                 let bv = self.expr(base, env, dead)?;
                 let CV::Int(k) = self.expr(k, env, dead)? else { return no("an index that is not an integer") };
-                let CV::Coll(c, inst) = bv else { return no("indexing something other than a collection") };
-                if !matches!(self.prog.colls[c].kind, Kind::Pool(_)) { return no("list indexing not compiled yet"); }
-                if self.prog.colls[c].cols.iter().any(|x| x.path.is_empty()) { return no("a pool of plain values not compiled yet"); }
-                let t = self.tmp("i");
-                self.line(&format!("u32 {};", t));
-                self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, k, t));
-                Ok(CV::Item(c, t))
+                match bv {
+                    CV::Coll(c, inst) => {
+                        let t = self.tmp("i");
+                        self.line(&format!("u32 {};", t));
+                        self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, k, t));
+                        self.item_value(c, t, dead)
+                    }
+                    CV::ArrCol(c, idx, ci) => {
+                        let (off, CKind::Arr(sc, n)) = (self.prog.colls[c].cols[ci].off, self.prog.colls[c].cols[ci].kind.clone()) else { unreachable!() };
+                        let k = self.hold_int(k);
+                        self.call(&format!("c->h->elem(c, {}, {})", k, n));
+                        self.load(&off.to_string(), &format!("(i64)({}) * {} + {}", idx, n, k), sc)
+                    }
+                    CV::PlainArr(off, Ty::Scalar(sc), n) => {
+                        let k = self.hold_int(k);
+                        self.call(&format!("c->h->elem(c, {}, {})", k, n));
+                        self.load(&off.to_string(), &k, sc)
+                    }
+                    _ => no("indexing this kind of value not compiled yet"),
+                }
             }
             Expr::Un(op, x) => {
                 let v = self.expr(x, env, dead)?;
                 if *op == '!' { let c = self.cond(v)?; return Ok(CV::Bool(format!("!({})", c))); }
-                match v { CV::Int(e) => { let e = self.hold_int(e); let r = self.tmp("v"); self.line(&format!("NEG({}, {});", r, e)); Ok(CV::Int(r)) } _ => no("negating something other than an integer") }
+                match v { CV::Int(e) => { let e = self.hold_int(e); let r = self.tmp("v"); self.line(&format!("NEG({}, {});", r, e)); Ok(CV::Int(r)) } CV::Flt(e) => Ok(CV::Flt(format!("(-{})", e))), _ => no("negating something other than a number") }
             }
             Expr::Bin(op, a, b) => self.bin(op, a, b, env, dead),
             Expr::Call(n, args, res) => self.callx(n, args, *res, env, dead),
@@ -466,6 +611,8 @@ impl<'p> G<'p> {
             Ty::Struct(s) => CV::Plain(*s, off),
             Ty::Scalar(s) => self.load(&off.to_string(), "0", *s)?,
             Ty::Str(_) => { let x = self.tmp("t"); self.line(&format!("Txt {};", x)); self.call(&format!("c->h->plain_txt(c, {}, &{})", off, x)); CV::Txt(x) }
+            Ty::Arr(e, n) => CV::PlainArr(off, (**e).clone(), *n),
+            Ty::Ref(p) => { let t = self.prog.coll_of(p).ok_or("ref to an unknown pool")?; self.load_ref(t, &off.to_string(), "0", None)? }
             _ => return no("a plain value of this kind"),
         })
     }
@@ -479,18 +626,19 @@ impl<'p> G<'p> {
             I16 => CV::Int(format!("(i64){}", ld("I16"))), U16 => CV::Int(format!("(i64){}", ld("U16"))),
             I8 => CV::Int(format!("(i64){}", ld("I8"))), U8 => CV::Int(format!("(i64){}", ld("U8"))),
             Bool => CV::Bool(format!("({} != 0)", ld("U8"))),
-            F32 | F64 => { let t = self.tmp("v"); self.line(&format!("Val {} = {{ 2, 0, 0, 0, (double){} }};", t, ld(if s == F32 { "F32" } else { "F64" }))); CV::Any(t) }
+            F32 => CV::Flt(format!("(double){}", ld("F32"))), F64 => CV::Flt(ld("F64")),
         })
     }
 
     fn field(&mut self, base: CV, f: &str, dead: Option<&str>) -> R<CV> {
-        let (c, idx) = match base {
-            CV::Item(c, idx) => (c, idx),
+        let (c, idx, path) = match base {
+            CV::Item(c, idx) => (c, idx, f.to_string()),
+            CV::Part(c, idx, p) => (c, idx, format!("{}.{}", p, f)),
             CV::Ref(t, s, k) => {
                 // reading through a null reference is a dead reference, as in the interpreter
                 let on_dead = match dead { Some(l) => format!("goto {};", l), None => "TAIL(c->h->dead(c));".into() };
                 self.line(&format!("if ({} == 0) {}", s, on_dead));
-                (t, k)
+                (t, k, f.to_string())
             }
             CV::Plain(sid, off) => {
                 let sd = &self.prog.structs[sid];
@@ -503,22 +651,39 @@ impl<'p> G<'p> {
             _ => return no(format!("`.{}` on this kind of value is not compiled yet", f)),
         };
         let coll = &self.prog.colls[c];
-        if let Some(k) = coll.children.iter().find(|x| x.0 == f) { return Ok(CV::Coll(k.1, idx)); }
-        let Some(ci) = coll.cols.iter().position(|x| x.path == f && !matches!(x.kind, CKind::StrBytes(_))) else { return no(format!("field `{}` (nested struct fields are not compiled yet)", f)) };
-        let col = coll.cols[ci].clone();
+        if let Some(k) = coll.children.iter().find(|x| x.0 == path) { return Ok(CV::Coll(k.1, idx)); }
+        if let Some(ci) = coll.cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_))) { return self.col_value(c, idx, ci, dead); }
+        let inner = format!("{}.", path);
+        if coll.cols.iter().any(|x| x.path.starts_with(&inner)) || coll.children.iter().any(|x| x.0.starts_with(&inner)) { return Ok(CV::Part(c, idx, path)); }
+        no(format!("no field `{}`", path))
+    }
+
+    /// The value of column `ci` of item `idx`: scalars are loaded, strings are read where used, references followed.
+    fn col_value(&mut self, c: usize, idx: String, ci: usize, dead: Option<&str>) -> R<CV> {
+        let col = self.prog.colls[c].cols[ci].clone();
         Ok(match col.kind {
             CKind::Scalar(s) => self.load(&col.off.to_string(), &idx, s)?,
             CKind::StrLen => CV::StateStr(c, idx, ci),
-            CKind::Ref(t) => {
-                let (s, gv, k) = (self.tmp("r"), self.tmp("g"), self.tmp("i"));
-                self.line(&format!("u32 {} = LD_U32({}, (i64)({}) * 2), {} = LD_U32({}, (i64)({}) * 2), {} = 0;", s, col.off, idx, gv, col.off + 4, idx, k));
-                let on_dead = match dead { Some(l) => format!("goto {};", l), None => "TAIL(c->h->dead(c));".into() };
-                self.line(&format!("if ({} != 0 && !DEREF({}, {} - 1, {}, &{})) {}", s, t, s, gv, k, on_dead));
-                CV::Ref(t, s, k)
-            }
-            CKind::Arr(..) => return no(format!("array field `{}` not compiled yet", f)),
+            CKind::Ref(t) => self.load_ref(t, &col.off.to_string(), &idx, dead)?,
+            CKind::Arr(..) => CV::ArrCol(c, idx, ci),
             CKind::StrBytes(_) => unreachable!(),
         })
+    }
+
+    /// What an item of collection `c` is as a value: the item, or for a collection of plain values, its value.
+    fn item_value(&mut self, c: usize, idx: String, dead: Option<&str>) -> R<CV> {
+        let coll = &self.prog.colls[c];
+        if let Some(k) = coll.children.iter().find(|x| x.0.is_empty()) { return Ok(CV::Coll(k.1, idx)); }
+        match coll.cols.iter().position(|x| x.path.is_empty()) { Some(ci) => self.col_value(c, idx, ci, dead), None => Ok(CV::Item(c, idx)) }
+    }
+
+    /// Follow a reference stored at `off` + item `idx` * 8 (slot+1, then generation) to pool `t`.
+    fn load_ref(&mut self, t: usize, off: &str, idx: &str, dead: Option<&str>) -> R<CV> {
+        let (s, gv, k) = (self.tmp("r"), self.tmp("g"), self.tmp("i"));
+        self.line(&format!("u32 {} = LD_U32({}, (i64)({}) * 2), {} = LD_U32({} + 4, (i64)({}) * 2), {} = 0;", s, off, idx, gv, off, idx, k));
+        let on_dead = match dead { Some(l) => format!("goto {};", l), None => "TAIL(c->h->dead(c));".into() };
+        self.line(&format!("if ({} != 0 && !DEREF({}, {} - 1, {}, &{})) {}", s, t, s, gv, k, on_dead));
+        Ok(CV::Ref(t, s, k))
     }
 
     fn bin(&mut self, op: &str, a: &'p Expr, b: &'p Expr, env: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<CV> {
@@ -539,13 +704,15 @@ impl<'p> G<'p> {
             let neg = if op == "!=" { "!" } else { "" };
             let inline = match (&l, &r) {
                 (CV::Int(x), CV::Int(y)) | (CV::Bool(x), CV::Bool(y)) => Some(format!("({} == {})", x, y)),
+                (CV::Flt(x), CV::Flt(y)) => Some(format!("({} == {})", x, y)),
+                (CV::Flt(x), CV::Int(y)) | (CV::Int(y), CV::Flt(x)) => Some(format!("({} == (double)({}))", x, y)),
                 (CV::Item(c1, x), CV::Item(c2, y)) => Some(if c1 == c2 { format!("({} == {})", x, y) } else { "0".into() }),
                 (CV::Ref(c1, s, k), CV::Item(c2, y)) | (CV::Item(c2, y), CV::Ref(c1, s, k)) => Some(if c1 == c2 { format!("({} != 0 && {} == {})", s, k, y) } else { "0".into() }),
                 (CV::Null, CV::Null) => Some("1".into()),
                 (CV::Null, CV::Txt(t)) | (CV::Txt(t), CV::Null) => Some(format!("(!{}.present)", t)),
                 (CV::Null, CV::Any(v)) | (CV::Any(v), CV::Null) => Some(format!("({}.tag == 0)", v)),
                 (CV::Null, CV::Ref(_, s, _)) | (CV::Ref(_, s, _), CV::Null) => Some(format!("({} == 0)", s)),
-                (CV::Null, CV::Int(_) | CV::Bool(_) | CV::Lit(_) | CV::Item(..) | CV::StateStr(..)) | (CV::Int(_) | CV::Bool(_) | CV::Lit(_) | CV::Item(..) | CV::StateStr(..), CV::Null) => Some("0".into()),
+                (CV::Null, CV::Int(_) | CV::Flt(_) | CV::Bool(_) | CV::Lit(_) | CV::Item(..) | CV::StateStr(..)) | (CV::Int(_) | CV::Flt(_) | CV::Bool(_) | CV::Lit(_) | CV::Item(..) | CV::StateStr(..), CV::Null) => Some("0".into()),
                 _ => None,
             };
             if let Some(e) = inline { return Ok(CV::Bool(format!("{}{}", neg, e))); }
@@ -560,7 +727,16 @@ impl<'p> G<'p> {
                 _ => {}
             }
         }
-        // anything else (strings, mixed kinds, floats): the interpreter's own operator
+        let num = |v: &CV| match v { CV::Int(e) => Some(format!("(double)({})", e)), CV::Flt(e) => Some(e.clone()), _ => None };
+        if let (Some(x), Some(y), true) = (num(&l), num(&r), matches!(l, CV::Flt(_)) || matches!(r, CV::Flt(_))) {
+            // as the interpreter: a float on either side makes it float arithmetic (no overflow checks; IEEE results)
+            match op {
+                "+" | "-" | "*" | "/" => return Ok(CV::Flt(format!("({} {} {})", x, op, y))),
+                "<" | "<=" | ">" | ">=" => return Ok(CV::Bool(format!("({} {} {})", x, op, y))),
+                _ => {}
+            }
+        }
+        // anything else (strings, mixed kinds): the interpreter's own operator
         let code = OPS.iter().position(|o| *o == op).ok_or_else(|| format!("operator `{}`", op))?;
         let (lv, rv) = (self.val(l)?, self.val(r)?);
         let t = self.tmp("v");
@@ -696,26 +872,32 @@ impl<'p> G<'p> {
         let (var, label) = (self.tmp("ret"), self.tmp("end"));
         let saved = std::mem::take(&mut self.body);
         self.inlining.push(k);
-        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: None });
+        let forced = self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1);
+        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced });
         self.depth += 1;
+        let frame = std::mem::replace(&mut self.frame, Some(k));
         let r = self.block(&f.body, &mut fenv);
+        self.frame = frame;
         self.depth -= 1;
         let ret = self.ret.pop().unwrap();
         self.inlining.pop();
         let inner = std::mem::replace(&mut self.body, saved);
         r?;
         let ends_by_itself = matches!(f.body.last(), Some(Stmt::Return(_)) | Some(Stmt::Fail(..)) | Some(Stmt::Respond(..)) | Some(Stmt::Forward { .. }));
-        let kind = ret.kind.unwrap_or(CV::Null);
-        if !ends_by_itself && !matches!(kind, CV::Null) { return no("a function that can end without returning its value"); }
-        let (decl, out) = match &kind {
-            CV::Int(_) => (format!("i64 {}_v = 0;", var), CV::Int(format!("{}_v", var))),
-            CV::Bool(_) => (format!("int {}_v = 0;", var), CV::Bool(format!("{}_v", var))),
-            CV::Txt(_) => (format!("Txt {}_v;", var), CV::Txt(format!("{}_v", var))),
-            CV::Any(_) => (format!("Val {}_v;", var), CV::Any(format!("{}_v", var))),
-            CV::Item(c, _) => (format!("u32 {}_v = 0;", var), CV::Item(*c, format!("{}_v", var))),
-            CV::Ref(c, _, _) => (format!("u32 {}_s = 0, {}_v = 0;", var, var), CV::Ref(*c, format!("{}_s", var), format!("{}_v", var))),
-            CV::Null => (String::new(), CV::Null),
-            _ => return no("a function returning this kind of value is not compiled yet"),
+        let kind = ret.kind.unwrap_or(K::Null);
+        if !ends_by_itself && kind != K::Null {
+            // falling off the end returns null, as in the interpreter
+            if !fits(K::Null, kind) { self.widen = Some(Widen::Ret(k, unify(kind, K::Null))); return no("a function that can end without returning its value"); }
+        }
+        let (decl, out) = match kind {
+            K::Int => (format!("i64 {}_v = 0;", var), CV::Int(format!("{}_v", var))),
+            K::Flt => (format!("double {}_v = 0;", var), CV::Flt(format!("{}_v", var))),
+            K::Bool => (format!("int {}_v = 0;", var), CV::Bool(format!("{}_v", var))),
+            K::Txt => (format!("Txt {}_v = {{ 0, 0, 0 }};", var), CV::Txt(format!("{}_v", var))),
+            K::Any => (format!("Val {}_v = {{ 0, 0, 0, 0, 0 }};", var), CV::Any(format!("{}_v", var))),
+            K::Item(c) => (format!("u32 {}_v = 0;", var), CV::Item(c, format!("{}_v", var))),
+            K::Ref(c) => (format!("u32 {}_s = 0, {}_v = 0;", var, var), CV::Ref(c, format!("{}_s", var), format!("{}_v", var))),
+            K::Null => (String::new(), CV::Null),
         };
         if !decl.is_empty() { self.line(&decl); }
         self.line("{");
@@ -725,17 +907,18 @@ impl<'p> G<'p> {
         Ok(out)
     }
 
-    /// Emit a loop over a list or pool instance (with `reverse`, `where` and `limit`), running `body` with the item bound.
-    fn each(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
-        if it.order.is_some() { return no("each ... order by not compiled yet"); }
+    /// Emit a loop over a list or pool instance (with `reverse`, `where`, `order by` and `limit`), running `body` with the
+    /// item bound. With `collect`, the items passing `where` are collected (with their order keys) before any body runs,
+    /// then ordered and limited, as the interpreter's `select` does; otherwise filtering and the body run in one pass.
+    fn each(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
         let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
         let coll = self.prog.colls[c].clone();
-        if coll.cols.iter().any(|x| x.path.is_empty()) || coll.children.iter().any(|x| x.0.is_empty()) { return no("each over a collection of plain values not compiled yet"); }
         let lim = match &it.limit { Some(e) => match self.expr(e, env, None)? { CV::Int(x) => Some(self.hold_int(x)), _ => return no("limit must be an integer") }, None => None };
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
-        let (k, m, hits) = (self.tmp("k"), self.tmp("m"), self.tmp("hits"));
+        let (k, m, hits, h) = (self.tmp("k"), self.tmp("m"), self.tmp("hits"), self.tmp("h"));
         self.open("{");
         self.line(&format!("u32 {} = 0;", hits));
+        if collect { self.line(&format!("u32 {};", h)); self.call(&format!("c->h->sel_mark(c, &{})", h)); }
         if coll.is_list() {
             let (len, head) = (self.tmp("len"), self.tmp("head"));
             self.line(&format!("u32 {} = LD_U32({}, {}), {} = LD_U32({}, {});", len, coll.hdr, inst, head, coll.hdr + 4 * coll.mult, inst));
@@ -749,16 +932,51 @@ impl<'p> G<'p> {
             self.line(&format!("if (!((LD_U64({}, (i64)({}) * {} + {} / 64) >> ({} % 64)) & 1)) continue;", coll.live, inst, coll.words(), k, k));
             self.line(&format!("u32 {} = (u32)((i64)({}) * {} + {});", m, inst, coll.cap, k));
         }
-        if let Some(l) = &lim { self.line(&format!("if ((i64){} >= {}) break;", hits, l)); }
-        env[it.slot as usize] = Some(CV::Item(c, m.clone()));
+        if !collect { if let Some(l) = &lim { self.line(&format!("if ((i64){} >= {}) break;", hits, l)); } }
+        let v = self.item_value(c, m.clone(), None)?;
+        env[it.slot as usize] = Some(v);
         if let Some(w) = &it.wher {
             let wv = self.expr(w, env, None)?;
             let wc = self.cond(wv)?;
             self.line(&format!("if (!({})) continue;", wc));
         }
         self.line(&format!("{}++;", hits));
+        if !collect {
+            body(self, env, &hits)?;
+            self.close("}");
+            self.close("}");
+            return Ok(());
+        }
+        let key = match &it.order {
+            None => "0.0".to_string(),
+            Some((e, _)) => match self.expr(e, env, None)? {
+                CV::Int(x) => format!("(double)({})", x),
+                CV::Flt(x) => x,
+                CV::Any(v) => {
+                    let t = self.tmp("key");
+                    self.line(&format!("double {} = 0;", t));
+                    self.line(&format!("if ({}.tag == 1) {} = (double){}.i; else if ({}.tag == 2) {} = {}.f; else FAIL(500, \"order by needs a number\", 23);", v, t, v, v, t, v));
+                    t
+                }
+                _ => { self.fail(500, "order by needs a number"); "0.0".to_string() }
+            },
+        };
+        self.call(&format!("c->h->sel_add(c, {}, {})", key, m));
+        if it.order.is_none() { if let Some(l) = &lim { self.line(&format!("if ((i64){} >= {}) break;", hits, l)); } }
+        self.close("}");
+        let (n, q, m2) = (self.tmp("n"), self.tmp("q"), self.tmp("m"));
+        self.line(&format!("u32 {};", n));
+        let desc = matches!(it.order, Some((_, true)));
+        self.call(&format!("c->h->sel_sort(c, {}, {}, {}, {}, &{})", h, it.order.is_some() as i32, desc as i32, lim.clone().unwrap_or("-1".into()), n));
+        self.open(&format!("for (u32 {} = 0; {} < {}; {}++) {{", q, q, n, q));
+        self.line(&format!("u32 {};", m2));
+        self.call(&format!("c->h->sel_get(c, {}, {}, &{})", h, q, m2));
+        self.line(&format!("{} = {} + 1;", hits, q));
+        let v = self.item_value(c, m2, None)?;
+        env[it.slot as usize] = Some(v);
         body(self, env, &hits)?;
         self.close("}");
+        self.call(&format!("c->h->sel_end(c, {})", h));
         self.close("}");
         Ok(())
     }
@@ -778,7 +996,7 @@ impl<'p> G<'p> {
             }
             Json::Arr(it, inner) => {
                 self.out("[");
-                self.each(it, env, |g, env, hits| {
+                self.each(it, env, it.order.is_some(), |g, env, hits| {
                     g.line(&format!("if ({} > 1) {{ CALL(c->h->out(c, \",\", 1)); }}", hits));
                     g.json(inner, env)
                 })?;
@@ -809,6 +1027,7 @@ impl<'p> G<'p> {
     fn write(&mut self, v: CV) -> R<()> {
         match v {
             CV::Int(e) => self.call(&format!("c->h->json_i64(c, {})", e)),
+            CV::Flt(e) => self.call(&format!("c->h->json_f64(c, {})", e)),
             CV::Bool(e) if e == "1" || e == "0" => self.out(if e == "1" { "true" } else { "false" }),
             CV::Bool(e) => self.line(&format!("CALL({} ? c->h->out(c, \"true\", 4) : c->h->out(c, \"false\", 5));", e)),
             CV::Lit(s) => { let j = json_lit(&s); self.out(&j); }
@@ -817,7 +1036,7 @@ impl<'p> G<'p> {
             CV::StateStr(c, idx, ci) => self.call(&format!("c->h->json_col(c, {}, {}, {})", c, idx, ci)),
             CV::Null => self.out("null"),
             CV::Ref(_, s, _) => { self.line(&format!("if ({} == 0) {{ CALL(c->h->out(c, \"null\", 4)); }}", s)); self.line("else FAIL(500, \"cannot write this value as JSON\", 30);"); }
-            CV::Item(..) | CV::Coll(..) | CV::Plain(..) => self.fail(500, "cannot write this value as JSON"),
+            CV::Item(..) | CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => self.fail(500, "cannot write this value as JSON"),
         }
         Ok(())
     }
@@ -845,7 +1064,7 @@ pub fn check_profile(body: &str) -> Result<(), String> {
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
-    const TYPES: [&str; 5] = ["i64", "u32", "int", "Val", "Txt"];
+    const TYPES: [&str; 6] = ["i64", "u32", "int", "Val", "Txt", "double"];
     let is_id = |s: &str| s.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_');
     let is_num = |s: &str| s.chars().next().map_or(false, |c| c.is_ascii_digit());
     let mut declared: Vec<&str> = vec!["st", "b", "c"];

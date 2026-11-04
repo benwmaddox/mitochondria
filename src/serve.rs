@@ -56,6 +56,10 @@ impl Area {
 impl std::fmt::Write for Area { fn write_str(&mut self, s: &str) -> std::fmt::Result { self.push(s.as_bytes()).map(|_| ()).ok_or(std::fmt::Error) } }
 
 /// Write `s` as a JSON string.
+/// A float as JSON: the shortest text that reads back as the same number, never with an exponent; JSON has no
+/// infinity or NaN, so those are written as null.
+fn json_f64(out: &mut Area, f: f64) -> bool { if f.is_finite() { write!(out, "{}", f).is_ok() } else { out.push(b"null").is_some() } }
+
 pub(crate) fn escaped(out: &mut Area, s: &[u8]) -> bool {
     if out.push(b"\"").is_none() { return false; }
     let mut start = 0;
@@ -153,13 +157,13 @@ const NO_FIELDS: StrFields<'static, 'static> = StrFields(&[]);
 pub struct SysInfo { pub kinds: Vec<(String, usize)>, pub me: (usize, usize) }
 
 /// Buffers reused by every request (allocated at startup, grown only if a request needs more).
-struct Bufs { vars: Vec<Value>, args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>, params: Vec<(usize, Txt)>, query: Vec<(Txt, Txt)>, json: Vec<(Txt, Value)> }
+struct Bufs { vars: Vec<Value>, args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>, params: Vec<(usize, Txt)>, query: Vec<(Txt, Txt)>, json: Vec<(Txt, Value)>, sel: Vec<(f64, u32)> }
 impl Bufs {
     /// Placeholder while a request holds the real buffers (allocates nothing).
-    fn empty() -> Bufs { Bufs { vars: Vec::new(), args: Vec::new(), frees: Vec::new(), idx: Vec::new(), keyed: Vec::new(), params: Vec::new(), query: Vec::new(), json: Vec::new() } }
+    fn empty() -> Bufs { Bufs { vars: Vec::new(), args: Vec::new(), frees: Vec::new(), idx: Vec::new(), keyed: Vec::new(), params: Vec::new(), query: Vec::new(), json: Vec::new(), sel: Vec::new() } }
     fn startup() -> Bufs {
         Bufs { vars: Vec::with_capacity(256), args: Vec::with_capacity(64), frees: Vec::with_capacity(64), idx: (0..8).map(|_| Vec::with_capacity(1024)).collect(),
-            keyed: (0..4).map(|_| Vec::with_capacity(1024)).collect(), params: Vec::with_capacity(8), query: Vec::with_capacity(16), json: Vec::with_capacity(32) }
+            keyed: (0..4).map(|_| Vec::with_capacity(1024)).collect(), params: Vec::with_capacity(8), query: Vec::with_capacity(16), json: Vec::with_capacity(32), sel: Vec::with_capacity(4096) }
     }
 }
 
@@ -254,7 +258,7 @@ impl Server {
             inst, api, ep, headers, fwd, rng, sys: self.system.as_ref(), fwd_out: &mut self.fwd_out, params: &b.params, query: &b.query, json: &b.json, text, out, now,
             vars: { let mut v = std::mem::take(&mut b.vars); v.clear(); v.resize(ep.slots as usize, Value::Null); v }, frame: 0, depth: 0,
             args: std::mem::take(&mut b.args), frees: std::mem::take(&mut b.frees), idx: std::mem::take(&mut b.idx), keyed: std::mem::take(&mut b.keyed),
-            cerr: None, panicked: false,
+            sel: { let mut v = std::mem::take(&mut b.sel); v.clear(); v }, cerr: None, panicked: false,
         };
         let res = match cfn {
             None => run.exec(&ep.body),
@@ -276,8 +280,8 @@ impl Server {
             Err(Ctl::Dead) => { Self::out_err(run.out, "reference is not live"); (404, false) }
             Err(Ctl::Forward(kind, key)) => { run.out.len = 0; self.pending = Some((kind, key)); (0, true) }
         };
-        let Run { vars, args, mut frees, idx, keyed, .. } = run;
-        b.vars = vars; b.args = args; b.args.clear(); b.idx = idx; b.keyed = keyed; // ends the borrow of the endpoint code
+        let Run { vars, args, mut frees, idx, keyed, sel, .. } = run;
+        b.vars = vars; b.args = args; b.args.clear(); b.idx = idx; b.keyed = keyed; b.sel = sel; // ends the borrow of the endpoint code
         if code == 0 { self.pending_frees.clear(); self.pending_frees.extend_from_slice(&frees); } // decided by finish_forward
         else if ok { for &(c, i) in &frees { let _ = self.inst.free_item(c, i); } self.inst.commit_changes(); } else { self.inst.rollback(); }
         frees.clear(); b.frees = frees;
@@ -311,6 +315,7 @@ struct Run<'a> {
     vars: Vec<Value>, // frames of local slots: the endpoint's, then one per active function call
     frame: usize, depth: usize,
     args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>,
+    sel: Vec<(f64, u32)>, // items selected by compiled loops that collect before running their body: (order key, item)
     rng: &'a std::cell::Cell<u64>,
     cerr: Option<Ctl<'a>>, // an error a helper stored for compiled code
     panicked: bool,
@@ -426,7 +431,8 @@ impl<'a> Run<'a> {
                 let (bv, kv) = (self.eval(b)?, self.eval(k)?);
                 let Value::Int(k) = kv else { return fail(400, "an index must be an integer") };
                 let l = match bv { Value::ArrField(c, i, ci) => Loc::Field(c, i, ci), Value::Plain(off, t) => Loc::Plain(off, t), _ => return fail(500, "only fixed arrays can be assigned by index") };
-                Ok(self.inst.step_index(l, k.max(0) as usize, None)?)
+                if k < 0 { return Err(Error::NotLive(format!("index {} is negative", k)).into()); }
+                Ok(self.inst.step_index(l, k as usize, None)?)
             }
             _ => fail(500, "cannot assign to this"),
         }
@@ -641,7 +647,7 @@ impl<'a> Run<'a> {
             match (keep, key) { (Ok(true), Ok(k)) => hits.push((k, idx)), (Ok(false), _) => continue, (Err(e), _) | (_, Err(e)) => { res = Err(e); break; } }
             if it.order.is_none() && limit.map_or(false, |l| hits.len() >= l) { break; }
         }
-        if let Some((_, desc)) = &it.order { hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)); if *desc { hits.reverse(); } }
+        if let Some((_, desc)) = &it.order { let desc = *desc; hits.sort_by(|a, b| { let o = a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal); if desc { o.reverse() } else { o } }); } // stable: ties keep their order
         if let Some(l) = limit { hits.truncate(l); }
         items.clear(); items.extend(hits.iter().map(|h| h.1));
         self.keyed.push(hits);
@@ -747,7 +753,7 @@ impl<'a> Run<'a> {
                 };
                 let ok = match v {
                     Value::Int(i) => write!(self.out, "{}", i).is_ok(),
-                    Value::Float(f) => write!(self.out, "{}", f).is_ok(),
+                    Value::Float(f) => json_f64(self.out, f),
                     Value::Bool(b) => write!(self.out, "{}", b).is_ok(),
                     Value::Str(t) => escaped(self.out, self.text.get(t)),
                     Value::Null => self.out.push(b"null").is_some(),
@@ -1300,11 +1306,21 @@ struct Helpers {
     forward: extern "C" fn(*mut Ctx, *const u8, u32, i64) -> i32,
     crash: extern "C" fn(*mut Ctx) -> i32,
     builtin: extern "C" fn(*mut Ctx, i32, *const CVal, u32, *mut CVal) -> i32,
+    json_f64: extern "C" fn(*mut Ctx, f64) -> i32,
+    elem: extern "C" fn(*mut Ctx, i64, u32) -> i32,
+    store_elem: extern "C" fn(*mut Ctx, u32, u32, u32, i64, *const CVal) -> i32,
+    sel_mark: extern "C" fn(*mut Ctx, *mut u32) -> i32,
+    sel_add: extern "C" fn(*mut Ctx, f64, u32) -> i32,
+    sel_sort: extern "C" fn(*mut Ctx, u32, i32, i32, i64, *mut u32) -> i32,
+    sel_get: extern "C" fn(*mut Ctx, u32, u32, *mut u32) -> i32,
+    sel_end: extern "C" fn(*mut Ctx, u32) -> i32,
 }
 static HELPERS: Helpers = Helpers {
     out: h_out, json_i64: h_json_i64, json_col: h_json_col, json_txt: h_json_txt, json_val: h_json_val, auth: h_auth, index: h_index, lit: h_lit,
     deref: h_deref, fail: h_fail, dead: h_dead, col_txt: h_col_txt, plain_txt: h_plain_txt, binop: h_binop, truthy: h_truthy, store: h_store,
     store_plain: h_store_plain, alloc: h_alloc, free_: h_free, fwd_begin: h_fwd_begin, fwd_put: h_fwd_put, forward: h_forward, crash: h_crash, builtin: h_builtin,
+    json_f64: h_json_f64, elem: h_elem, store_elem: h_store_elem,
+    sel_mark: h_sel_mark, sel_add: h_sel_add, sel_sort: h_sel_sort, sel_get: h_sel_get, sel_end: h_sel_end,
 };
 
 /// Run a helper body on the request behind `c`. A stored error returns -1; a panic is caught here (it must not unwind
@@ -1348,7 +1364,7 @@ extern "C" fn h_json_txt(c: *mut Ctx, t: *const CTxt) -> i32 {
 extern "C" fn h_json_val(c: *mut Ctx, v: *const CVal) -> i32 {
     with_run(c, |r| {
         let ok = match to_value(unsafe { &*v }) {
-            Value::Int(i) => write!(r.out, "{}", i).is_ok(), Value::Float(f) => write!(r.out, "{}", f).is_ok(), Value::Bool(b) => write!(r.out, "{}", b).is_ok(),
+            Value::Int(i) => write!(r.out, "{}", i).is_ok(), Value::Float(f) => json_f64(r.out, f), Value::Bool(b) => write!(r.out, "{}", b).is_ok(),
             Value::Str(t) => escaped(r.out, r.text.get(t)), Value::Null => r.out.push(b"null").is_some(),
             _ => return fail(500, "cannot write this value as JSON"),
         };
@@ -1359,8 +1375,36 @@ extern "C" fn h_auth(c: *mut Ctx, cid: u32, out: *mut u32) -> i32 { with_run(c, 
 extern "C" fn h_index(c: *mut Ctx, cid: u32, inst: u32, k: i64, out: *mut u32) -> i32 {
     with_run(c, |r| {
         if k < 0 { return Err(Error::NotLive(format!("index {} is negative", k)).into()); }
-        match r.inst.step_index(Loc::Coll(cid as usize, inst as usize), k as usize, None)? { Loc::Item(_, i, _) => { unsafe { *out = i as u32 }; Ok(0) } _ => fail(500, "compiled index of a collection of plain values") }
+        // the item's index; for a collection of plain values, the item's value column or nested collection is found from it
+        match r.inst.step_index(Loc::Coll(cid as usize, inst as usize), k as usize, None)? { Loc::Item(_, i, _) | Loc::Field(_, i, _) | Loc::Coll(_, i) => { unsafe { *out = i as u32 }; Ok(0) } _ => fail(500, "compiled index of this collection") }
     })
+}
+extern "C" fn h_json_f64(c: *mut Ctx, f: f64) -> i32 { with_run(c, |r| if json_f64(r.out, f) { Ok(0) } else { fail(507, "response too large") }) }
+/// Check an index into a fixed array of `n`, with the interpreter's errors.
+extern "C" fn h_elem(c: *mut Ctx, k: i64, n: u32) -> i32 {
+    with_run(c, |_| {
+        if k < 0 { return Err(Error::NotLive(format!("index {} is negative", k)).into()); }
+        if k >= n as i64 { return Err(Error::Bad(format!("index {} out of range (fixed size {})", k, n)).into()); }
+        Ok(0)
+    })
+}
+extern "C" fn h_sel_mark(c: *mut Ctx, out: *mut u32) -> i32 { with_run(c, |r| { unsafe { *out = r.sel.len() as u32 }; Ok(0) }) }
+extern "C" fn h_sel_add(c: *mut Ctx, key: f64, idx: u32) -> i32 { with_run(c, |r| { r.sel.push((key, idx)); Ok(0) }) }
+/// Order the items added since mark `h` as the interpreter does (a stable sort, so ties keep their order), keep at most
+/// `limit` (when not negative), and say how many there are.
+extern "C" fn h_sel_sort(c: *mut Ctx, h: u32, order: i32, desc: i32, limit: i64, out: *mut u32) -> i32 {
+    with_run(c, |r| {
+        let h = h as usize;
+        if order != 0 { r.sel[h..].sort_by(|a, b| { let o = a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal); if desc != 0 { o.reverse() } else { o } }); }
+        if limit >= 0 && r.sel.len() - h > limit as usize { r.sel.truncate(h + limit as usize); }
+        unsafe { *out = (r.sel.len() - h) as u32 };
+        Ok(0)
+    })
+}
+extern "C" fn h_sel_get(c: *mut Ctx, h: u32, k: u32, out: *mut u32) -> i32 { with_run(c, |r| { unsafe { *out = r.sel[h as usize + k as usize].1 }; Ok(0) }) }
+extern "C" fn h_sel_end(c: *mut Ctx, h: u32) -> i32 { with_run(c, |r| { r.sel.truncate(h as usize); Ok(0) }) }
+extern "C" fn h_store_elem(c: *mut Ctx, cid: u32, idx: u32, ci: u32, k: i64, v: *const CVal) -> i32 {
+    with_run(c, |r| { let l = r.inst.step_index(Loc::Field(cid as usize, idx as usize, ci as usize), k as usize, None)?; r.store(l, to_value(unsafe { &*v }))?; Ok(0) })
 }
 extern "C" fn h_lit(c: *mut Ctx, p: *const u8, n: u32, out: *mut CTxt) -> i32 { with_run(c, |r| { let t = r.txt(bytes(p, n))?; put_txt(t, out); Ok(0) }) }
 extern "C" fn h_deref(c: *mut Ctx, target: u32, slot: u32, gen: u32, out: *mut u32) -> i32 {
@@ -1383,7 +1427,16 @@ extern "C" fn h_store(c: *mut Ctx, cid: u32, idx: u32, ci: u32, v: *const CVal) 
     with_run(c, |r| { r.store(Loc::Field(cid as usize, idx as usize, ci as usize), to_value(unsafe { &*v }))?; Ok(0) })
 }
 extern "C" fn h_store_plain(c: *mut Ctx, off: u32, code: u32, cap: u32, v: *const CVal) -> i32 {
-    with_run(c, |r| { let Some(t) = crate::cgen::plain_ty(code, cap) else { return fail(500, "bad plain kind") }; r.store(Loc::Plain(off as usize, t), to_value(unsafe { &*v }))?; Ok(0) })
+    with_run(c, |r| {
+        // code 30: a reference to top-level pool `cap`
+        if code == 30 {
+            let val = match to_value(unsafe { &*v }) { Value::Null => Val::Ref(None), Value::Item(t, i) if t == cap as usize => Val::Ref(Some((i, r.inst.gen(t, i).unwrap_or(0)))), _ => return fail(500, "this field holds a reference to a different pool") };
+            r.inst.plain_set(off as usize, &Ty::Ref(String::new()), &val)?; // the name is not needed to store
+            return Ok(0);
+        }
+        let Some(t) = crate::cgen::plain_ty(code, cap) else { return fail(500, "bad plain kind") };
+        r.store(Loc::Plain(off as usize, t), to_value(unsafe { &*v }))?; Ok(0)
+    })
 }
 extern "C" fn h_alloc(c: *mut Ctx, cid: u32, inst: u32, try_: i32, out: *mut u32) -> i32 {
     with_run(c, |r| match r.inst.push_item(cid as usize, inst as usize) {

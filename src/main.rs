@@ -1,4 +1,6 @@
 mod alloc_count;
+#[cfg(test)]
+mod cases;
 mod exp;
 mod lang;
 mod layout;

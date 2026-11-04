@@ -1,0 +1,37 @@
+// struct fields inside items: read, written, nested two deep, and in plain state
+--- state
+struct Pos { x: i64; y: i64; }
+struct Box { lo: Pos; hi: Pos; }
+struct Unit { name: string<8>; at: Pos; area: Box; }
+struct World { origin: Pos; size: i64; }
+global world: World;
+global units: pool<Unit, 3>;
+--- api
+fn width(u) { return u.area.hi.x - u.area.lo.x; }
+endpoint POST /units {
+    let u = alloc units;
+    u.name = body("name");
+    u.at.x = int(body("x"));
+    u.at.y = int(body("y"));
+    u.area.lo.x = u.at.x - 1;
+    u.area.hi.x = u.at.x + 1;
+    respond 201 { "slot": slot(u), "w": width(u) };
+}
+endpoint POST /units/{k}/move {
+    let u = units[int(param("k"))];
+    u.at.x = u.at.x + int(body("dx"));
+    u.at.y = u.at.y + int(body("dy"));
+    respond 200 { "x": u.at.x, "y": u.at.y };
+}
+endpoint POST /world { world.origin.x = int(body("x")); world.origin.y = int(body("y")); world.size = 3; respond 200 { "x": world.origin.x }; }
+endpoint GET /units {
+    respond 200 { "o": world.origin.x + world.origin.y, "x": [each u in units where u.at.x >= world.origin.x { "name": u.name, "x": u.at.x, "y": u.at.y, "w": width(u) }] };
+}
+--- requests
+GET /units
+POST /units {"name": "a", "x": 1, "y": 2}
+POST /units {"name": "b", "x": 10, "y": -4}
+POST /units/1/move {"dx": -3, "dy": 1}
+POST /units/7/move {"dx": 1, "dy": 1}
+POST /world {"x": 5, "y": 1}
+GET /units

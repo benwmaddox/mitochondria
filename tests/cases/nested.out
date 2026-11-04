@@ -1,0 +1,9 @@
+GET /units -> 200 {"o":0,"x":[]}
+POST /units -> 201 {"slot":0,"w":2}
+POST /units -> 201 {"slot":1,"w":2}
+POST /units/1/move -> 200 {"x":7,"y":-3}
+POST /units/7/move -> 404 {"error":"slot 7 is not live"}
+POST /world -> 200 {"x":5}
+GET /units -> 200 {"o":6,"x":[{"name":"b","x":7,"y":-3,"w":2}]}
+state <plain values> 24
+state units 130

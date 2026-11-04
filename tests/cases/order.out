@@ -1,0 +1,28 @@
+GET /asc -> 200 {"x":[]}
+POST /items -> 201 {"slot":0}
+POST /items -> 201 {"slot":1}
+POST /items -> 201 {"slot":2}
+POST /items -> 201 {"slot":3}
+POST /items -> 201 {"slot":4}
+POST /items -> 201 {"slot":5}
+GET /asc -> 200 {"x":[{"s":-3,"t":"neg"},{"s":2,"t":"b"},{"s":2,"t":"b2"},{"s":5,"t":"e"},{"s":7,"t":"g"},{"s":9,"t":"i"}]}
+GET /desc -> 200 {"x":[{"s":9,"t":"i"},{"s":7,"t":"g"},{"s":5,"t":"e"},{"s":2,"t":"b"},{"s":2,"t":"b2"},{"s":-3,"t":"neg"}]}
+GET /top -> 200 {"x":["i","g","e"]}
+GET /top?n=1 -> 200 {"x":["i"]}
+GET /top?n=0 -> 200 {"x":[]}
+GET /top?n=-1 -> 400 {"error":"bad limit"}
+GET /top?n=99 -> 200 {"x":["i","g","e","b","b2"]}
+GET /weight -> 200 {"x":["b2","g","neg","e","i","b"]}
+GET /sum -> 200 {"total":21,"seen":"ige"}
+GET /bykey -> 500 {"error":"order by needs a number"}
+DELETE /items/2 -> 200 {}
+GET /asc -> 200 {"x":[{"s":-3,"t":"neg"},{"s":2,"t":"b"},{"s":2,"t":"b2"},{"s":5,"t":"e"},{"s":7,"t":"g"}]}
+POST /items -> 201 {"slot":2}
+GET /asc -> 200 {"x":[{"s":-3,"t":"neg"},{"s":2,"t":"b"},{"s":2,"t":"b3"},{"s":2,"t":"b2"},{"s":5,"t":"e"},{"s":7,"t":"g"}]}
+GET /desc -> 200 {"x":[{"s":7,"t":"g"},{"s":5,"t":"e"},{"s":2,"t":"b"},{"s":2,"t":"b3"},{"s":2,"t":"b2"},{"s":-3,"t":"neg"}]}
+POST /boxes -> 201 {"n":6}
+GET /boxes -> 200 {"x":[{"items":[70,50,20,20,20,-30]}]}
+state <plain values> 0
+state items 154
+state boxes 24
+state boxes.items 154

@@ -271,7 +271,13 @@ impl Instance {
             (Scalar::F64, Val::Int(i)) => (*i as f64).to_bits(),
             (Scalar::Bool, Val::Bool(b)) => *b as u64,
             (Scalar::F32 | Scalar::F64 | Scalar::Bool, _) => return bad("wrong type for this field"),
-            (_, Val::Int(i)) => *i as u64,
+            (_, Val::Int(i)) => {
+                // a number that does not fit the declared width is refused, like a string that does not fit its maximum
+                let (lo, hi): (i64, i64) = match s { Scalar::I8 => (-128, 127), Scalar::I16 => (-32768, 32767), Scalar::I32 => (i32::MIN as i64, i32::MAX as i64),
+                    Scalar::U8 => (0, 255), Scalar::U16 => (0, 65535), Scalar::U32 => (0, u32::MAX as i64), Scalar::U64 => (0, i64::MAX), _ => (i64::MIN, i64::MAX) };
+                if *i < lo || *i > hi { return Err(Error::TooLong(format!("{} does not fit {}", i, format!("{:?}", s).to_lowercase()))); }
+                *i as u64
+            }
             (_, Val::Bool(b)) => *b as u64,
             _ => return bad("wrong type for this field"),
         };

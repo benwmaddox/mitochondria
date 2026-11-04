@@ -667,14 +667,14 @@ mod compile_tests {
         let info = SysInfo { kinds: vec![("auth".into(), 2), ("rooms".into(), 3)], me: (0, 0) };
         for (state, api, want) in [
             (include_str!("../examples/chat-sharded/auth.mito"), include_str!("../examples/chat-sharded/auth.api"), 9),
-            (include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api"), 5),
+            (include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api"), 6),
         ] {
             let inst = Instance::start(Program::parse(state).unwrap(), usize::MAX).unwrap();
             let mut s = Server::new(inst, api).unwrap();
             s.system = Some(info.clone());
             let (notes, _) = s.compile().unwrap();
-            let n = notes.iter().filter(|x| x.ends_with(": compiled")).count();
-            assert_eq!(n, want, "{:#?}", notes);
+            assert_eq!(notes.len(), want, "{:#?}", notes);
+            assert!(notes.iter().all(|x| x.ends_with(": compiled")), "{:#?}", notes);
         }
     }
 }

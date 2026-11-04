@@ -307,6 +307,15 @@ static u64 words(const MitoColl *c) { return (c->cap + 63) / 64; }
 static u64 haddr(Mem *m, u32 c, u32 f, u64 inst) { const MitoColl *k = coll(m, c); return k->hdr + 4 * (f * (u64)k->mult + inst); }
 static u64 hget(Mem *m, u32 c, u32 f, u64 inst) { return rd(m, haddr(m, c, f, inst), 4); }
 static void hset(Mem *m, u32 c, u32 f, u64 inst, u64 v) { wr(m, haddr(m, c, f, inst), 4, v); }
+/* A pool's four header words at once: with one instance they are the first 16 bytes of the header, so one ensure, one
+   undo-log check and one store do for all four. */
+static void hset4(Mem *m, u32 c, u64 inst, u64 hw, u64 cnt, u64 hint, u64 ever) {
+    const MitoColl *k = coll(m, c);
+    if (k->mult == 1) {
+        u32 v[4] = { (u32)hw, (u32)cnt, (u32)hint, (u32)ever };   /* HW, COUNT, HINT, EVER */
+        ensure(m, k->hdr, k->hdr + 16); save(m, k->hdr, 16); memcpy(m->base + k->hdr, v, 16);
+    } else { hset(m, c, HW, inst, hw); hset(m, c, COUNT, inst, cnt); hset(m, c, HINT, inst, hint); hset(m, c, EVER, inst, ever); }
+}
 static u64 waddr(Mem *m, u32 c, u64 inst, u64 w) { const MitoColl *k = coll(m, c); return k->live + 8 * (inst * words(k) + w); }
 static int bit(Mem *m, u32 c, u64 inst, u64 s) { return (int)((rd(m, waddr(m, c, inst, s / 64), 8) >> (s % 64)) & 1); }
 static u64 gaddr(Mem *m, u32 c, u64 idx) { return coll(m, c)->gen + 4 * idx; }
@@ -385,7 +394,7 @@ static u64 push_item(Mem *m, u32 c, u64 inst) {
     if (k->checked) { u64 ga = gaddr(m, c, idx); ensure(m, ga, ga + 4); }
     u64 nhw = hw > slot + 1 ? hw : slot + 1;
     if (nhw > ever) ever = nhw;
-    hset(m, c, HW, inst, nhw); hset(m, c, COUNT, inst, cnt + 1); hset(m, c, HINT, inst, slot + 1); hset(m, c, EVER, inst, ever);
+    hset4(m, c, inst, nhw, cnt + 1, slot + 1, ever);
     return idx;
 }
 /* Free a pool slot (the caller checked it is a live pool item). */
@@ -397,8 +406,8 @@ static void free_item(Mem *m, u32 c, u64 idx) {
     u64 wa = waddr(m, c, inst, s / 64);
     wr(m, wa, 8, rd(m, wa, 8) & ~(1ULL << (s % 64)));
     if (k->checked) { u64 ga = gaddr(m, c, idx); wr(m, ga, 4, rd(m, ga, 4) + 1); }
-    u64 cnt = hget(m, c, COUNT, inst), hint = hget(m, c, HINT, inst), hw = hget(m, c, HW, inst);
-    hset(m, c, COUNT, inst, cnt - 1); hset(m, c, HINT, inst, hint < s ? hint : s);
+    u64 cnt = hget(m, c, COUNT, inst), hint = hget(m, c, HINT, inst), hw = hget(m, c, HW, inst), ever = hget(m, c, EVER, inst);
+    u64 nhw = hw;
     if (s + 1 == hw) {
         u64 h = s;
         while (h > 0) {
@@ -406,8 +415,9 @@ static void free_item(Mem *m, u32 c, u64 idx) {
             if (valid < 64) word &= (1ULL << valid) - 1;
             if (!word) h = w * 64; else { u64 lz = 0; while (!((word >> (63 - lz)) & 1)) lz++; h = w * 64 + (64 - lz); break; }
         }
-        hset(m, c, HW, inst, h);
+        nhw = h;
     }
+    hset4(m, c, inst, nhw, cnt - 1, hint < s ? hint : s, ever);
 }
 
 /* ---- live ranges: the bytes in use, as trims and the live counts see them ---- */

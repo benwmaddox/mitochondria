@@ -17,3 +17,4 @@ GET /mixed/7 -> 200 {"v":"big"}
 GET /mixed/11 -> 200 {"v":null}
 state <plain values> 8
 state nodes 74
+memory reserved=8192 committed=8192 live=82

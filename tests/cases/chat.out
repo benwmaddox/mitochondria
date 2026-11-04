@@ -85,3 +85,4 @@ state sessions 95
 state rooms 55
 state rooms.messages 181
 state rooms.typing 72
+memory reserved=36864 committed=28672 live=427

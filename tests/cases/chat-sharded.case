@@ -1,0 +1,60 @@
+// the sharded chat: sessions on auth shards, rooms on room shards, the room directory on rooms[0]
+--- system
+worker auth  { state "auth.mito";  api "auth.api";  count 2; mailbox 64; slot 4096; }
+worker rooms { state "rooms.mito"; api "rooms.api"; count 3; mailbox 64; slot 4096; }
+entry auth;
+inflight 64;
+budget 4096;
+--- file auth.mito
+include examples/chat-sharded/auth.mito
+--- file auth.api
+include examples/chat-sharded/auth.api
+--- file rooms.mito
+include examples/chat-sharded/rooms.mito
+--- file rooms.api
+include examples/chat-sharded/rooms.api
+--- requests
+POST /sessions {"name":"ann"} => ann
+POST /sessions {"name":"bob"} => bob
+POST /sessions {}
+@X-Session: $ann
+POST /rooms {"name":"a"}
+@X-Session: $ann
+POST /rooms {"name":"b"}
+@X-Session: $ann
+POST /rooms {"name":"c"}
+@X-Session: $ann
+POST /rooms {"name":"d"}
+@X-Session: $ann
+POST /rooms {}
+@X-Session: $bob
+GET /rooms
+@X-Session: $ann
+POST /rooms/2/messages {"body":"hi"}
+@X-Session: $bob
+POST /rooms/2/messages {"body":"hello"}
+@X-Session: $ann
+POST /rooms/2/messages {"body":"bye"}
+@X-Session: $bob
+GET /rooms/2/messages
+@X-Session: $bob
+GET /rooms/2/messages?limit=1
+@X-Session: $bob
+GET /rooms/9/messages
+@X-Session: $bob
+GET /rooms/x/messages
+@X-Session: $ann
+POST /rooms/3/typing
+@X-Session: $bob
+GET /rooms/3/typing
+clock 7000
+@X-Session: $bob
+GET /rooms/3/typing
+@X-Session: $ann
+DELETE /session
+@X-Session: $ann
+GET /rooms/2/messages
+GET /rooms
+@X-Session: $bob
+GET /rooms/2/messages
+stats

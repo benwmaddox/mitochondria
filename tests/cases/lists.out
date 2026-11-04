@@ -39,3 +39,4 @@ state strict 32
 state bags 24
 state bags.nums 24
 state bags.flags 25
+memory reserved=20480 committed=20480 live=149

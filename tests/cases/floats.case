@@ -21,6 +21,15 @@ GET /mean
 POST /add {"x": 1.25}
 POST /add {"x": 2}
 POST /add {"x": -0.75}
+POST /add {"x": 1e2}
+POST /add {"x": -2.5E-1}
+POST /add {"x": 99999999999999999999}
+POST /add {"x": 0}
+POST /add {"x": -0}
+POST /add {"x": 01}
+POST /add {"x": 1.}
+POST /add {"x": .5}
+POST /add {"x": 1e}
 GET /mean
 POST /small {"x": 0.1}
 GET /math

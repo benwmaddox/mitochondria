@@ -1,0 +1,17 @@
+POST /inc/0 -> 200 {"shard":0,"n":1,"from":0,"seen":1}
+POST /inc/0 -> 200 {"shard":0,"n":2,"from":1,"seen":1}
+POST /inc/0 -> 200 {"shard":0,"n":3,"from":0,"seen":2}
+POST /inc/0 -> 200 {"shard":0,"n":4,"from":1,"seen":2}
+POST /inc/1 -> 200 {"shard":1,"n":1,"from":0,"seen":3}
+POST /inc/1 -> 200 {"shard":1,"n":2,"from":1,"seen":3}
+POST /inc/2 -> 200 {"shard":2,"n":1,"from":0,"seen":4}
+POST /inc/3 -> 200 {"shard":0,"n":5,"from":1,"seen":4}
+POST /inc/4 -> 200 {"shard":1,"n":3,"from":0,"seen":5}
+POST /inc/5 -> 200 {"shard":2,"n":2,"from":1,"seen":5}
+POST /inc/-1 -> 200 {"shard":2,"n":3,"from":0,"seen":6}
+POST /inc/x -> 400 {"error":"`x` is not a number"}
+POST /bad -> 500 {"error":"no worker kind `nowhere`"}
+POST /odd/1 -> 409 {"error":"the shard said no"}
+GET /front -> 200 {"n":6,"me":0,"of":2}
+GET /front -> 200 {"n":5,"me":1,"of":2}
+front0 handled=8 forwarded=6 restarts=0 | front1 handled=8 forwarded=6 restarts=0 | count0 handled=5 forwarded=0 restarts=0 | count1 handled=4 forwarded=0 restarts=0 | count2 handled=3 forwarded=0 restarts=0

@@ -10,3 +10,4 @@ POST /down/5 -> 200 {"n":5}
 POST /down/100 -> 500 {"error":"calls nested more than 64 deep"}
 POST /down/3 -> 200 {"n":8}
 state <plain values> 8
+memory reserved=4096 committed=4096 live=8

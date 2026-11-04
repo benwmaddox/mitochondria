@@ -1,0 +1,35 @@
+// forwards reach the shard for their key, in order, each answered once; a failing forward target answers for itself
+--- system
+worker front { state "front.mito"; api "front.api"; count 2; mailbox 64; slot 4096; }
+worker count { state "count.mito"; api "count.api"; count 3; mailbox 64; slot 4096; }
+entry front;
+inflight 16;
+budget 1024;
+--- file front.mito
+struct M { n: i64; }
+global m: M;
+--- file front.api
+endpoint POST /inc/{k} { m.n = m.n + 1; forward count[int(param("k"))] { "from": worker_index(), "seen": m.n }; }
+endpoint POST /bad { forward nowhere[0] { "x": 1 }; }
+endpoint POST /odd/{k} { forward count[int(param("k"))] {}; }
+endpoint GET /front { respond 200 { "n": m.n, "me": worker_index(), "of": worker_count() }; }
+--- file count.mito
+struct C { n: i64; }
+global c: C;
+--- file count.api
+endpoint POST /inc/{k} { c.n = c.n + 1; respond 200 { "shard": worker_index(), "n": c.n, "from": int(fwd("from")), "seen": int(fwd("seen")) }; }
+endpoint POST /odd/{k} { fail 409 "the shard said no"; }
+--- requests
+*4 POST /inc/0
+*2 POST /inc/1
+POST /inc/2
+POST /inc/3
+POST /inc/4
+POST /inc/5
+POST /inc/-1
+POST /inc/x
+POST /bad
+POST /odd/1
+GET /front
+GET /front
+stats

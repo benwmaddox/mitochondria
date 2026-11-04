@@ -7,3 +7,4 @@ POST /world -> 200 {"x":5}
 GET /units -> 200 {"o":6,"x":[{"name":"b","x":7,"y":-3,"w":2}]}
 state <plain values> 24
 state units 130
+memory reserved=8192 committed=8192 live=154

@@ -9,3 +9,4 @@ GET /notes?q=hi -> 200 {"all":"[a][quote\"d][0123456789]","first":"[a]","eq":tru
 GET /concat -> 200 {"a":"n=5","b":"t=true","c":"xnull","d":"12false"}
 state <plain values> 24
 state notes 44
+memory reserved=8192 committed=8192 live=68

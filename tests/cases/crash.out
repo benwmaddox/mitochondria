@@ -1,0 +1,6 @@
+POST /inc -> 200 {"n":1}
+POST /inc -> 200 {"n":2}
+w0 handled=2 forwarded=0 restarts=0
+POST /crash -> 500 {"error":"worker failed and was restarted"}
+POST /inc -> 200 {"n":1}
+w0 handled=4 forwarded=0 restarts=1

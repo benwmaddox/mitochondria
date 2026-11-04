@@ -26,3 +26,4 @@ state <plain values> 0
 state items 154
 state boxes 24
 state boxes.items 154
+memory reserved=12288 committed=12288 live=332

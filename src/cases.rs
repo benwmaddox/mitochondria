@@ -2,36 +2,37 @@
 //! must match each other and the recorded `.out` file, and every endpoint must compile. Warm successful requests must
 //! make no heap allocations on a compiled backend. `MITO_BLESS=1 cargo test cases` records the reference backend's log.
 //!
-//! In the state and api sections, `include path` takes a file (relative to the repository). Request script lines:
+//! A case is one program (`--- state`, `--- api`) or a system of workers (`--- system` holding a `.system` file, whose
+//! programs are `--- file name` sections). In any section, `include path` takes a file (relative to the repository).
+//! Request script lines:
 //! `METHOD target [json body]`, optionally ending in `=> name` to remember the response's `"token"` as `$name`;
 //! `*N` before a request repeats it N times; `@Header: value` adds a header to the next request; `clock ms` sets the
-//! request clock; `marks soft hard` sets the memory pressure marks (bytes); `stats` logs the pressure counters.
+//! request clock; `marks soft hard` sets the memory pressure marks (bytes); `stats` logs the pressure counters (for a
+//! system: what each worker handled, forwarded and how often it was restarted).
 //! `$name` is replaced anywhere in a line. `allocates target` exempts requests to that target from the allocation
 //! check (a known limit of the current runtime, to be removed with it).
 use crate::layout::Program;
 use crate::runtime::{Instance, Pressure};
 use crate::serve::Server;
 
-pub struct Case { pub name: String, pub state: String, pub api: String, pub requests: String }
+pub struct Case { pub name: String, pub state: String, pub api: String, pub requests: String, pub system: Option<String>, pub files: Vec<(String, String)> }
 
 pub fn load(path: &std::path::Path) -> Case {
     let text = std::fs::read_to_string(path).unwrap();
-    let mut parts: [String; 3] = Default::default();
-    let mut at = None;
+    let mut sections: Vec<(String, String)> = Vec::new();
     for line in text.lines() {
-        match line.trim_end() {
-            "--- state" => at = Some(0), "--- api" => at = Some(1), "--- requests" => at = Some(2),
-            l => if let Some(k) = at {
-                match l.strip_prefix("include ") {
-                    Some(f) if k < 2 => parts[k] += &std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f.trim())).unwrap_or_else(|e| panic!("{}: {}", f, e)),
-                    _ => parts[k] += l,
-                }
-                parts[k].push('\n');
-            }
+        if let Some(name) = line.trim_end().strip_prefix("--- ") { sections.push((name.to_string(), String::new())); continue; }
+        let Some(cur) = sections.last_mut() else { continue };
+        match line.strip_prefix("include ") {
+            Some(f) if cur.0 != "requests" => cur.1 += &std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f.trim())).unwrap_or_else(|e| panic!("{}: {}", f, e)),
+            _ => cur.1 += line,
         }
+        cur.1.push('\n');
     }
-    let [state, api, requests] = parts;
-    Case { name: path.file_stem().unwrap().to_string_lossy().into_owned(), state, api, requests }
+    let get = |n: &str| sections.iter().find(|s| s.0 == n).map(|s| s.1.clone());
+    let files = sections.iter().filter_map(|s| s.0.strip_prefix("file ").map(|f| (f.trim().to_string(), s.1.clone()))).collect();
+    Case { name: path.file_stem().unwrap().to_string_lossy().into_owned(), state: get("state").unwrap_or_default(), api: get("api").unwrap_or_default(),
+        requests: get("requests").unwrap_or_default(), system: get("system"), files }
 }
 
 /// A running program, as the cases drive it. Every way of running a program implements this, so the same scripts and
@@ -42,7 +43,7 @@ pub trait Backend {
     fn handle_quiet(&mut self, method: &str, target: &str, headers: &[(String, String)], body: &str) -> u16;
     fn set_clock(&mut self, ms: i64);
     fn set_marks(&mut self, soft: usize, hard: usize);
-    /// `state <path> <live bytes>` for the plain values and every collection.
+    /// `state <path> <live bytes>` for the plain values and every collection, then the memory totals.
     fn state(&self) -> Vec<String>;
     /// Pressure counters, as one log line.
     fn stats(&self) -> String;
@@ -50,6 +51,8 @@ pub trait Backend {
     fn notes(&self) -> Vec<String>;
     /// Does this backend promise warm requests without heap allocations?
     fn no_alloc(&self) -> bool;
+    /// Heap allocations made handling requests so far.
+    fn allocs(&self) -> usize;
 }
 
 /// The Rust runtime, with endpoints interpreted or compiled.
@@ -69,10 +72,62 @@ impl Backend for RustBackend {
     fn handle_quiet(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> u16 { self.s.handle_raw(m, t, h, b) }
     fn set_clock(&mut self, ms: i64) { self.s.clock = Some(ms); }
     fn set_marks(&mut self, soft: usize, hard: usize) { self.s.pressure = Some(Pressure::new(&self.s.inst, soft, hard)); }
-    fn state(&self) -> Vec<String> { self.s.inst.inspect().into_iter().map(|r| format!("state {} {}", r.0, r.4)).collect() }
+    fn state(&self) -> Vec<String> {
+        let i = &self.s.inst;
+        let mut v: Vec<String> = i.inspect().into_iter().map(|r| format!("state {} {}", r.0, r.4)).collect();
+        v.push(format!("memory reserved={} committed={} live={}", i.reserved(), i.committed(), i.live_total()));
+        v
+    }
     fn stats(&self) -> String { match &self.s.pressure { Some(p) => format!("stats refusing={} full_trims={}", p.refusing, p.full_trims), None => "stats no marks".into() } }
     fn notes(&self) -> Vec<String> { self.notes.clone() }
     fn no_alloc(&self) -> bool { self.compiled }
+    fn allocs(&self) -> usize { crate::alloc_count::allocs() }
+}
+
+/// A system of worker threads, from the Rust runtime.
+pub struct SystemBackend { sys: Option<crate::system::System>, notes: Vec<String>, compiled: bool }
+impl SystemBackend {
+    pub fn start(case: &Case, compiled: bool) -> SystemBackend {
+        let read = |f: &str| case.files.iter().find(|x| x.0 == f).map(|x| x.1.clone()).ok_or_else(|| format!("no `--- file {}` section", f));
+        let mut spec = crate::system::parse_spec_with(case.system.as_deref().unwrap(), &read).unwrap_or_else(|e| panic!("{}: system: {}", case.name, e));
+        spec.compile = compiled;
+        spec.seed = Some(0x1234_5678_9abc_def0);
+        let notes = if compiled { spec.kinds.iter().map(|k| format!("{}: compiled", k.name)).collect() } else { Vec::new() }; // start fails unless every endpoint compiles
+        let sys = crate::system::System::start(spec).unwrap_or_else(|e| panic!("{}: {}", case.name, e));
+        sys.set_clock(Some(1000));
+        SystemBackend { sys: Some(sys), notes, compiled }
+    }
+    fn sys(&self) -> &crate::system::System { self.sys.as_ref().unwrap() }
+    /// Workers count a message just after answering it: wait until the counters stop moving (nothing else is in flight).
+    fn settled(&self) -> Vec<crate::system::WorkerReport> {
+        let key = |r: &[crate::system::WorkerReport]| r.iter().map(|w| (w.handled, w.allocs, w.forwarded, w.restarts)).collect::<Vec<_>>();
+        let mut last = self.sys().report();
+        for _ in 0..1000 {
+            std::thread::sleep(std::time::Duration::from_micros(500));
+            let now = self.sys().report();
+            if key(&now) == key(&last) { return now; }
+            last = now;
+        }
+        last
+    }
+}
+impl Drop for SystemBackend { fn drop(&mut self) { if let Some(s) = self.sys.take() { s.shutdown(); } } }
+impl Backend for SystemBackend {
+    fn handle(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> (u16, String) {
+        let hv: Vec<(&str, &str)> = h.iter().map(|x| (x.0.as_str(), x.1.as_str())).collect();
+        let (code, out) = self.sys().request(m, t, &hv, b, std::time::Duration::from_secs(10));
+        (code, String::from_utf8_lossy(&out).into_owned())
+    }
+    fn handle_quiet(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> u16 { self.handle(m, t, h, b).0 }
+    fn set_clock(&mut self, ms: i64) { self.sys().set_clock(Some(ms)); }
+    fn set_marks(&mut self, _: usize, _: usize) { panic!("marks are set per worker kind in the system file"); }
+    fn state(&self) -> Vec<String> { Vec::new() }
+    fn stats(&self) -> String {
+        self.settled().iter().map(|w| format!("{}{} handled={} forwarded={} restarts={}", w.name, w.index, w.handled, w.forwarded, w.restarts)).collect::<Vec<_>>().join(" | ")
+    }
+    fn notes(&self) -> Vec<String> { self.notes.clone() }
+    fn no_alloc(&self) -> bool { self.compiled }
+    fn allocs(&self) -> usize { self.settled().iter().map(|w| w.allocs as usize).sum() } // counted inside the workers
 }
 
 /// Run a case's script; returns the log, and the heap allocations made by warm successful requests (every successful
@@ -111,9 +166,9 @@ pub fn run(case: &Case, be: &mut dyn Backend) -> (Vec<String>, usize) {
     for (m, t, h, b) in &ok { be.handle_quiet(m, t, h, b); }
     let mut allocs = 0;
     for (m, t, h, b) in &ok {
-        let a0 = crate::alloc_count::allocs();
+        let a0 = be.allocs();
         let code = be.handle_quiet(m, t, h, b);
-        let n = crate::alloc_count::allocs() - a0;
+        let n = be.allocs() - a0;
         if (200..300).contains(&code) { allocs += n; }
         if n > 0 && std::env::var("MITO_SHOW_ALLOCS").is_ok() { eprintln!("{}: {} {} {} -> {}: {} allocations", case.name, m, t, b, code, n); }
     }
@@ -136,7 +191,11 @@ mod tests {
             let case = load(&f);
             if only.as_ref().map_or(false, |o| *o != case.name) { continue; }
             // the interpreter is the reference while it exists
-            let mut backends: Vec<(&str, Box<dyn Backend>)> = vec![("interpreted", Box::new(RustBackend::start(&case, false))), ("compiled", Box::new(RustBackend::start(&case, true)))];
+            let mut backends: Vec<(&str, Box<dyn Backend>)> = if case.system.is_some() {
+                vec![("interpreted", Box::new(SystemBackend::start(&case, false))), ("compiled", Box::new(SystemBackend::start(&case, true)))]
+            } else {
+                vec![("interpreted", Box::new(RustBackend::start(&case, false))), ("compiled", Box::new(RustBackend::start(&case, true)))]
+            };
             let mut logs = Vec::new();
             for (name, be) in backends.iter_mut() {
                 for n in be.notes().iter().filter(|n| !n.ends_with(": compiled")) { problems.push(format!("{} ({}): {}", case.name, name, n)); }

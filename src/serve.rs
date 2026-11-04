@@ -175,6 +175,8 @@ pub struct Server {
     /// Set when the last request forwarded: (worker kind, key). Its writes stay uncommitted until `finish_forward`.
     pending: Option<(usize, i64)>,
     pending_frees: Vec<(usize, usize)>,
+    /// Endpoints compiled to native code (see `compile`); `None` entries stay interpreted.
+    compiled: Option<Compiled>,
     fwd_out: Vec<(Txt, Txt)>, // the forwarded fields, in the text area
     _scratch: Scratch,
     _space: Space,
@@ -192,7 +194,7 @@ impl Server {
         let mut scratch = Scratch::new(region);
         let out = scratch.alloc(RESPONSE_CAP).map_err(|_| "response area".to_string())?;
         let text = scratch.alloc(TEXT_CAP).map_err(|_| "text area".to_string())?;
-        Ok(Server { inst, api, out: Area { ptr: out, cap: RESPONSE_CAP, len: 0 }, text: Area { ptr: text, cap: TEXT_CAP, len: 0 }, bufs: Bufs::startup(), clock: None, pressure: None, system: None, pending: None, pending_frees: Vec::with_capacity(64), fwd_out: Vec::with_capacity(16), _scratch: scratch, _space: space })
+        Ok(Server { inst, api, out: Area { ptr: out, cap: RESPONSE_CAP, len: 0 }, text: Area { ptr: text, cap: TEXT_CAP, len: 0 }, bufs: Bufs::startup(), clock: None, pressure: None, system: None, pending: None, pending_frees: Vec::with_capacity(64), compiled: None, fwd_out: Vec::with_capacity(16), _scratch: scratch, _space: space })
     }
 
     /// The last response body.
@@ -229,6 +231,7 @@ impl Server {
         let (path, qs) = target.split_once('?').unwrap_or((target, ""));
         let Some(ei) = self.route(method, path) else { Self::out_err(&mut self.out, "no such endpoint"); return 404 };
         if self.pressure.as_ref().map_or(false, |p| p.refusing) && method != "GET" && method != "DELETE" { Self::out_err(&mut self.out, "memory pressure: try again later"); return 503; }
+        let cfn = self.compiled.as_ref().and_then(|c| c.eps[ei]);
         let mut b = std::mem::replace(&mut self.bufs, Bufs::empty());
         let Server { inst, api, out, text, clock, .. } = self;
         let ep = &api.eps[ei];
@@ -249,8 +252,17 @@ impl Server {
             inst, api, ep, headers, fwd, sys: self.system.as_ref(), fwd_out: &mut self.fwd_out, params: &b.params, query: &b.query, json: &b.json, text, out, now,
             vars: { let mut v = std::mem::take(&mut b.vars); v.clear(); v.resize(ep.slots as usize, Value::Null); v }, frame: 0, depth: 0,
             args: std::mem::take(&mut b.args), frees: std::mem::take(&mut b.frees), idx: std::mem::take(&mut b.idx), keyed: std::mem::take(&mut b.keyed),
+            cerr: None, panicked: false,
         };
-        let res = run.exec(&ep.body);
+        let res = match cfn {
+            None => run.exec(&ep.body),
+            Some(f) => {
+                let mut ctx = Ctx { base: run.inst.base_ptr(), run: &mut run as *mut Run as *mut c_void, h: &HELPERS };
+                let r = unsafe { f(&mut ctx) };
+                if run.panicked { panic!("a runtime helper panicked under compiled code"); } // the worker's supervisor restarts it
+                match r { 0 => Ok(()), x if x > 0 => Err(Ctl::Done(x as u16)), _ => Err(run.cerr.take().unwrap_or(Ctl::Fail(500, Cow::Borrowed("compiled code failed without a reason")))) }
+            }
+        };
         let (code, ok) = match res {
             Ok(()) | Err(Ctl::Return(_)) => { run.out.len = 0; (204, true) }
             Err(Ctl::Done(code)) => (code, true),
@@ -297,12 +309,26 @@ struct Run<'a> {
     vars: Vec<Value>, // frames of local slots: the endpoint's, then one per active function call
     frame: usize, depth: usize,
     args: Vec<Value>, frees: Vec<(usize, usize)>, idx: Vec<Vec<usize>>, keyed: Vec<Vec<(f64, usize)>>,
+    cerr: Option<Ctl<'a>>, // an error a helper stored for compiled code
+    panicked: bool,
 }
 
 fn from_scalar(v: Val) -> Value { match v { Val::Int(i) => Value::Int(i), Val::Float(f) => Value::Float(f), Val::Bool(b) => Value::Bool(b), _ => Value::Null } }
 
 impl<'a> Run<'a> {
     fn txt(&mut self, b: &[u8]) -> R<'a, Txt> { self.text.push(b).ok_or(Ctl::Fail(507, Cow::Borrowed("request text area is full"))) }
+    /// The session item named by the request's `X-Session` token, checked against pool `c`.
+    fn auth_item(&self, c: usize) -> R<'a, usize> {
+        let Some(tok) = self.headers.field(b"x-session") else { return fail(401, "missing X-Session header") };
+        let mut it = tok.split('.');
+        if let Some(s) = self.sys { if it.next().and_then(|w| w.parse::<usize>().ok()) != Some(s.me.1) { return fail(401, "session token belongs to another shard"); } }
+        let (Some(Ok(slot)), Some(Ok(gen)), Some(Ok(sec))) = (it.next().map(str::parse::<usize>), it.next().map(str::parse::<u32>), it.next().map(|h| u64::from_str_radix(h, 16))) else { return fail(401, "malformed session token") };
+        let Some(idx) = self.inst.deref_quiet(c, (slot, gen)) else { return fail(401, "session ended") };
+        let Some(ci) = self.inst.col(c, "secret") else { return fail(500, "auth needs a `secret` field") };
+        let Val::Int(real) = self.inst.field_get(c, idx, ci)? else { return fail(500, "`secret` must be an integer") };
+        if real as u64 != sec { return fail(403, "bad session secret"); }
+        Ok(idx)
+    }
     fn slot(&self, s: u32) -> Value { self.vars[self.frame + s as usize].clone() }
     fn set_slot(&mut self, s: u32, v: Value) { let i = self.frame + s as usize; self.vars[i] = v; }
     /// Where field `f` is in collection `c`: from the access site's cache, or looked up once and remembered there.
@@ -570,15 +596,7 @@ impl<'a> Run<'a> {
             },
             B::Auth => {
                 let Value::Coll(c, 0) = self.arg(base, 0) else { return fail(500, "auth(pool)") };
-                let Some(tok) = self.headers.field(b"x-session") else { return fail(401, "missing X-Session header") };
-                let mut it = tok.split('.');
-                if let Some(s) = self.sys { if it.next().and_then(|w| w.parse::<usize>().ok()) != Some(s.me.1) { return fail(401, "session token belongs to another shard"); } }
-                let (Some(Ok(slot)), Some(Ok(gen)), Some(Ok(sec))) = (it.next().map(str::parse::<usize>), it.next().map(str::parse::<u32>), it.next().map(|h| u64::from_str_radix(h, 16))) else { return fail(401, "malformed session token") };
-                let Some(idx) = self.inst.deref_quiet(c, (slot, gen)) else { return fail(401, "session ended") };
-                let Some(ci) = self.inst.col(c, "secret") else { return fail(500, "auth needs a `secret` field") };
-                let Val::Int(real) = self.inst.field_get(c, idx, ci)? else { return fail(500, "`secret` must be an integer") };
-                if real as u64 != sec { return fail(403, "bad session secret"); }
-                Value::Item(c, idx)
+                Value::Item(c, self.auth_item(c)?)
             }
             B::Or | B::Exists | B::MaxLen => unreachable!("handled before the arguments are evaluated"),
         })
@@ -1111,6 +1129,17 @@ pub fn json_floor() {
     for _ in 0..reps { s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""); }
     let interp = t.elapsed().as_nanos() as f64 / reps as f64 / 1000.0;
     let interp_len = s.out.len;
+    let interp_body = s.response().to_string();
+    let t = Instant::now();
+    let (notes, src) = match s.compile() { Ok(x) => x, Err(e) => { println!("compile failed: {}", e); return; } };
+    println!("compiled with TinyCC in {:.1} ms ({} lines of C):", t.elapsed().as_secs_f64() * 1e3, src.lines().count());
+    for n in &notes { println!("  {}", n); }
+    if std::env::var("MITO_EMIT_C").is_ok() { println!("{}", src); }
+    s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, "");
+    println!("compiled response identical to the interpreter's: {}", s.response() == interp_body);
+    let t = Instant::now();
+    for _ in 0..reps { s.handle_raw("GET", "/rooms/0/messages?limit=50", &h, ""); }
+    let compiled = t.elapsed().as_nanos() as f64 / reps as f64 / 1000.0;
 
     let mc = s.inst.prog.colls.iter().position(|c| c.name == "rooms.messages").unwrap();
     let sc = s.inst.prog.coll_of("sessions").unwrap();
@@ -1143,4 +1172,100 @@ pub fn json_floor() {
         println!("native, {:<28} {:>6.2} us  ({} bytes)", if fast { "hand-written integer format" } else { "write! integer format" }, native, s.out.len);
     }
     println!("interpreter (whole request)          {:>6.2} us  ({} bytes)", interp, interp_len);
+    println!("TinyCC-compiled (whole request)      {:>6.2} us", compiled);
+}
+
+// ---------------------------------------------------------------- compiled endpoints
+
+use std::ffi::c_void;
+
+/// One compiled unit and the native entry point of each endpoint it covers (`None`: interpreted).
+pub struct Compiled { _unit: crate::tcc::Unit, eps: Vec<Option<unsafe extern "C" fn(*mut Ctx) -> i32>>, pub notes: Vec<String> }
+
+/// What generated code receives: the reservation's base, the running request, and the helper table (see cgen::PRELUDE).
+#[repr(C)]
+pub struct Ctx { base: *mut u8, run: *mut c_void, h: *const Helpers }
+#[repr(C)]
+struct CTxt { off: u32, len: u32, present: i32 }
+#[repr(C)]
+struct Helpers {
+    out: extern "C" fn(*mut Ctx, *const u8, u32) -> i32,
+    json_i64: extern "C" fn(*mut Ctx, i64) -> i32,
+    json_col: extern "C" fn(*mut Ctx, u32, u32, u32) -> i32,
+    json_txt: extern "C" fn(*mut Ctx, *const CTxt) -> i32,
+    auth: extern "C" fn(*mut Ctx, u32, *mut u32) -> i32,
+    index: extern "C" fn(*mut Ctx, u32, u32, i64, *mut u32) -> i32,
+    param: extern "C" fn(*mut Ctx, u32, *mut CTxt) -> i32,
+    query: extern "C" fn(*mut Ctx, *const u8, u32, *mut CTxt) -> i32,
+    lit: extern "C" fn(*mut Ctx, *const u8, u32, *mut CTxt) -> i32,
+    to_int: extern "C" fn(*mut Ctx, *const CTxt, *mut i64) -> i32,
+    deref: extern "C" fn(*mut Ctx, u32, u32, u32, *mut u32) -> i32,
+    fail: extern "C" fn(*mut Ctx, i32, *const u8, u32) -> i32,
+    dead: extern "C" fn(*mut Ctx) -> i32,
+}
+static HELPERS: Helpers = Helpers { out: h_out, json_i64: h_json_i64, json_col: h_json_col, json_txt: h_json_txt, auth: h_auth, index: h_index, param: h_param, query: h_query, lit: h_lit, to_int: h_to_int, deref: h_deref, fail: h_fail, dead: h_dead };
+
+/// Run a helper body on the request behind `c`. A stored error returns -1; a panic is caught here (it must not unwind
+/// through C frames), remembered, and re-raised by `handle_req` once the compiled code has returned.
+fn with_run(c: *mut Ctx, f: impl FnOnce(&mut Run<'static>) -> R<'static, i32>) -> i32 {
+    let run = unsafe { &mut *((*c).run as *mut Run<'static>) };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *run))) {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => { run.cerr = Some(e); -1 }
+        Err(_) => { run.panicked = true; -1 }
+    }
+}
+fn bytes<'x>(p: *const u8, n: u32) -> &'x [u8] { unsafe { std::slice::from_raw_parts(p, n as usize) } }
+fn to_txt(t: Txt, out: *mut CTxt) { unsafe { *out = CTxt { off: t.off, len: t.len, present: 1 }; } }
+fn absent(out: *mut CTxt) { unsafe { *out = CTxt { off: 0, len: 0, present: 0 }; } }
+
+extern "C" fn h_out(c: *mut Ctx, p: *const u8, n: u32) -> i32 { with_run(c, |r| { r.out(bytes(p, n))?; Ok(0) }) }
+extern "C" fn h_json_i64(c: *mut Ctx, v: i64) -> i32 { with_run(c, |r| if write!(r.out, "{}", v).is_ok() { Ok(0) } else { fail(507, "response too large") }) }
+extern "C" fn h_json_col(c: *mut Ctx, cid: u32, idx: u32, ci: u32) -> i32 {
+    with_run(c, |r| { let b = r.inst.str_bytes(&Loc::Field(cid as usize, idx as usize, ci as usize)).unwrap_or(&[]); if escaped(r.out, b) { Ok(0) } else { fail(507, "response too large") } })
+}
+extern "C" fn h_json_txt(c: *mut Ctx, t: *const CTxt) -> i32 {
+    with_run(c, |r| { let t = unsafe { &*t }; if escaped(r.out, r.text.get(Txt { off: t.off, len: t.len })) { Ok(0) } else { fail(507, "response too large") } })
+}
+extern "C" fn h_auth(c: *mut Ctx, cid: u32, out: *mut u32) -> i32 { with_run(c, |r| { let i = r.auth_item(cid as usize)?; unsafe { *out = i as u32 }; Ok(0) }) }
+extern "C" fn h_index(c: *mut Ctx, cid: u32, inst: u32, k: i64, out: *mut u32) -> i32 {
+    with_run(c, |r| {
+        if k < 0 { return Err(Error::NotLive(format!("index {} is negative", k)).into()); }
+        match r.inst.step_index(Loc::Coll(cid as usize, inst as usize), k as usize, None)? { Loc::Item(_, i, _) => { unsafe { *out = i as u32 }; Ok(0) } _ => fail(500, "compiled index of a collection of plain values") }
+    })
+}
+extern "C" fn h_param(c: *mut Ctx, seg: u32, out: *mut CTxt) -> i32 { with_run(c, |r| { match r.params.iter().find(|p| p.0 == seg as usize) { Some(p) => to_txt(p.1, out), None => absent(out) } Ok(0) }) }
+extern "C" fn h_query(c: *mut Ctx, p: *const u8, n: u32, out: *mut CTxt) -> i32 {
+    with_run(c, |r| { let k = bytes(p, n); match r.query.iter().find(|x| r.text.get(x.0) == k) { Some(x) => to_txt(x.1, out), None => absent(out) } Ok(0) })
+}
+extern "C" fn h_lit(c: *mut Ctx, p: *const u8, n: u32, out: *mut CTxt) -> i32 { with_run(c, |r| { let t = r.txt(bytes(p, n))?; to_txt(t, out); Ok(0) }) }
+extern "C" fn h_to_int(c: *mut Ctx, t: *const CTxt, out: *mut i64) -> i32 {
+    with_run(c, |r| {
+        let t = unsafe { &*t };
+        if t.present == 0 { return fail(400, "missing number"); }
+        let s = r.text.get(Txt { off: t.off, len: t.len });
+        match std::str::from_utf8(s).ok().and_then(|s| s.trim().parse::<i64>().ok()) { Some(i) => { unsafe { *out = i }; Ok(0) } None => fail(400, format!("`{}` is not a number", String::from_utf8_lossy(s))) }
+    })
+}
+extern "C" fn h_deref(c: *mut Ctx, target: u32, slot: u32, gen: u32, out: *mut u32) -> i32 {
+    with_run(c, |r| Ok(match r.inst.deref_quiet(target as usize, (slot as usize, gen)) { Some(i) => { unsafe { *out = i as u32 }; 1 } None => 0 }))
+}
+extern "C" fn h_fail(c: *mut Ctx, code: i32, p: *const u8, n: u32) -> i32 { with_run(c, |_| fail(code as u16, String::from_utf8_lossy(bytes(p, n)).into_owned())) }
+extern "C" fn h_dead(c: *mut Ctx) -> i32 { with_run(c, |_| Err(Ctl::Dead)) }
+
+impl Server {
+    /// Compile what the generator handles to native code with TinyCC; the rest stays interpreted.
+    /// Returns one line per endpoint saying what happened, and the generated C.
+    pub fn compile(&mut self) -> Result<(Vec<String>, String), String> {
+        let g = crate::cgen::generate(&self.inst.prog, &self.api);
+        let unit = crate::tcc::Unit::compile(&g.src, &[])?;
+        let mut eps = Vec::new();
+        for name in &g.eps {
+            eps.push(match name { Some(n) => Some(unsafe { std::mem::transmute::<*const c_void, unsafe extern "C" fn(*mut Ctx) -> i32>(unit.symbol(n).ok_or(format!("compiled unit has no {}", n))?) }), None => None });
+        }
+        let mut notes: Vec<String> = self.api.eps.iter().zip(&g.eps).filter(|(_, n)| n.is_some()).map(|(e, _)| format!("{}: compiled", e.text)).collect();
+        notes.extend(g.notes.iter().cloned());
+        self.compiled = Some(Compiled { _unit: unit, eps, notes: notes.clone() });
+        Ok((notes, g.src))
+    }
 }

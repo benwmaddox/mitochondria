@@ -50,6 +50,9 @@ unsafe extern "C" fn on_error(opaque: *mut c_void, msg: *const c_char) {
     out.push('\n');
 }
 
+/// libtcc 0.9.27 keeps global state: one compile (or delete) at a time in the whole process.
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A compiled unit. Its code stays valid until it is dropped.
 pub struct Unit { s: *mut c_void, errors: Box<String> }
 unsafe impl Send for Unit {}
@@ -73,6 +76,7 @@ impl Unit {
     pub fn compile(src: &str, symbols: &[(&str, *const c_void)]) -> Result<Unit, String> {
         Self::check(src)?;
         let l = lib()?;
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             let s = (l.new)();
             if s.is_null() { return Err("tcc_new failed".into()); }
@@ -98,7 +102,7 @@ impl Unit {
         if p.is_null() { None } else { Some(p as *const c_void) }
     }
 }
-impl Drop for Unit { fn drop(&mut self) { if let Ok(l) = lib() { unsafe { (l.delete)(self.s) } } } }
+impl Drop for Unit { fn drop(&mut self) { if let Ok(l) = lib() { let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner()); unsafe { (l.delete)(self.s) } } } }
 
 #[cfg(test)]
 mod tests {

@@ -6,6 +6,7 @@ mod os;
 mod region;
 mod runtime;
 mod serve;
+mod cgen;
 mod system;
 mod tcc;
 use runtime::{Error, Instance};

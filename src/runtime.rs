@@ -60,6 +60,8 @@ impl Instance {
     }
 
     pub fn reserved(&self) -> usize { self.reserved }
+    /// Start of the reservation; compiled code adds the layout's constant offsets to it.
+    pub fn base_ptr(&self) -> *mut u8 { self.base }
     pub fn committed(&self) -> usize { self.committed_pages * PAGE }
 
     /// Commit every page touching bytes a..b.

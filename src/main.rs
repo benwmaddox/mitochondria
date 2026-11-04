@@ -102,7 +102,7 @@ fn emit_c(args: &[String]) {
         let prog = layout::Program::parse(state).unwrap_or_else(|e| die(e));
         let mut a = lang::parse(text).unwrap_or_else(|e| die(format!("{}: {}", name, e)));
         lang::bind(&mut a, &|n| prog.global(n)).unwrap_or_else(|e| die(format!("{}: {}", name, e)));
-        cgen::emit(&prog, &a, (name, text))
+        cgen::emit(&prog, &a, (name, text)).unwrap_or_else(|e| die(e))
     };
     match files.as_slice() {
         [sys] if sys.ends_with(".system") => {

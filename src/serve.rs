@@ -62,7 +62,7 @@ fn json_f64(out: &mut Area, f: f64) -> bool { if f.is_finite() { float_text(out,
 /// A float as text, as JavaScript writes numbers: the fewest digits that read back as the same number, positional from
 /// 1e-6 up to (not including) 1e21, otherwise with an exponent (`1e+21`, `1.5e-7`); `0` for both zeros; `Infinity`,
 /// `-Infinity`, `NaN`. Allocates nothing.
-fn float_text(out: &mut impl std::fmt::Write, f: f64) -> std::fmt::Result {
+pub(crate) fn float_text(out: &mut impl std::fmt::Write, f: f64) -> std::fmt::Result {
     if f.is_nan() { return out.write_str("NaN"); }
     if f.is_infinite() { return out.write_str(if f > 0.0 { "Infinity" } else { "-Infinity" }); }
     if f == 0.0 { return out.write_char('0'); }

@@ -1,0 +1,1193 @@
+
+/* ---- the C runtime (runtime/mito.c) ----
+   Runs a compiled program: one reservation for the declared layout with pages committed where bytes are live, a write
+   journal for exact rollback, requests in a fixed text area and response area, and the helper table (`H`) the
+   generated endpoints call. It uses no heap: everything comes from reservations made at start and committed as used.
+   It reproduces the Rust runtime's behaviour exactly (tests/cases check both against the same records). */
+
+/* ---------------------------------------------------------------- platform (Windows) */
+void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
+int VirtualFree(void *a, u64 n, u32 type);
+void GetSystemTimeAsFileTime(u64 *ft);
+void *LoadLibraryA(const char *name);
+void *GetProcAddress(void *m, const char *name);
+void *memcpy(void *d, const void *s, u64 n);
+void *memmove(void *d, const void *s, u64 n);
+void *memset(void *d, int c, u64 n);
+#define MEM_COMMIT 0x1000
+#define MEM_RESERVE 0x2000
+#define MEM_DECOMMIT 0x4000
+#define MEM_RELEASE 0x8000
+#define PAGE_NOACCESS 1
+#define PAGE_READWRITE 4
+#define PAGE 4096ULL
+
+static u64 up(u64 n, u64 to) { return (n + to - 1) / to * to; }
+static void *os_reserve(u64 n) { return VirtualAlloc(0, n, MEM_RESERVE, PAGE_NOACCESS); }
+static int os_commit(void *p, u64 n) { return VirtualAlloc(p, n, MEM_COMMIT, PAGE_READWRITE) != 0; }
+static void os_decommit(void *p, u64 n) { VirtualFree(p, n, MEM_DECOMMIT); }
+static void os_release(void *p) { if (p) VirtualFree(p, 0, MEM_RELEASE); }
+static i64 os_now_ms(void) { u64 ft = 0; GetSystemTimeAsFileTime(&ft); return (i64)((ft - 116444736000000000ULL) / 10000ULL); }
+/* Random bits from the OS (BCryptGenRandom with the system's preferred generator). */
+static u64 os_random(void) {
+    static int (*gen)(void *, u8 *, u32, u32);
+    if (!gen) { void *m = LoadLibraryA("bcrypt.dll"); if (m) gen = (int (*)(void *, u8 *, u32, u32))GetProcAddress(m, "BCryptGenRandom"); }
+    u64 v = 0;
+    if (gen) gen(0, (u8 *)&v, 8, 2); /* BCRYPT_USE_SYSTEM_PREFERRED_RNG */
+    return v;
+}
+
+/* A reservation used as a growing array: committed in 64 KB steps as it fills. */
+typedef struct { u8 *p; u64 reserved, committed, len; } Grow;
+static int grow_init(Grow *g, u64 reserve) { g->p = (u8 *)os_reserve(reserve); g->reserved = g->p ? reserve : 0; g->committed = 0; g->len = 0; return g->p != 0; }
+static int grow_to(Grow *g, u64 n) {
+    if (n <= g->committed) return 1;
+    if (n > g->reserved) return 0;
+    u64 c = up(n, 65536); if (c > g->reserved) c = g->reserved;
+    if (!os_commit(g->p + g->committed, c - g->committed)) return 0;
+    g->committed = c; return 1;
+}
+static void fatal(const char *why) { (void)why; *(volatile int *)0 = 0; } /* a reservation ran out: cannot continue */
+
+/* ---------------------------------------------------------------- text */
+/* A fixed block filled from the start: the request's text area and its response. */
+typedef struct { u8 *p; u32 cap, len; } Area;
+static int a_put(Area *a, const void *s, u64 n) { if ((u64)a->len + n > a->cap) return 0; if (n) memcpy(a->p + a->len, s, n); a->len += (u32)n; return 1; }
+static int a_str(Area *a, const char *s) { u64 n = 0; while (s[n]) n++; return a_put(a, s, n); }
+static int a_u64(Area *a, u64 v) { char b[24]; int n = 0; do { b[23 - n++] = (char)('0' + v % 10); v /= 10; } while (v); return a_put(a, b + 24 - n, n); }
+static int a_i64(Area *a, i64 v) { if (v < 0) { if (!a_put(a, "-", 1)) return 0; return a_u64(a, (u64)0 - (u64)v); } return a_u64(a, (u64)v); }
+static int a_hex(Area *a, u64 v) { char b[16]; int n = 0; do { b[15 - n++] = "0123456789abcdef"[v & 15]; v >>= 4; } while (v); return a_put(a, b + 16 - n, n); }
+static u64 c_len(const char *s) { u64 n = 0; while (s[n]) n++; return n; }
+static int c_eq(const char *a, const u8 *b, u64 n) { u64 i = 0; for (; i < n; i++) if ((u8)a[i] != b[i] || !a[i]) return 0; return a[n] == 0; }
+static int b_eq(const u8 *a, u64 an, const u8 *b, u64 bn) { if (an != bn) return 0; for (u64 i = 0; i < an; i++) if (a[i] != b[i]) return 0; return 1; }
+static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
+
+/* A JSON string: quotes, backslash escapes, \u00XX for other control bytes. */
+static int a_json_str(Area *o, const u8 *s, u64 n) {
+    if (!a_put(o, "\"", 1)) return 0;
+    u64 start = 0;
+    for (u64 i = 0; i < n; i++) {
+        u8 c = s[i];
+        const char *esc = 0;
+        if (c == '"') esc = "\\\""; else if (c == '\\') esc = "\\\\"; else if (c == '\n') esc = "\\n"; else if (c == '\r') esc = "\\r"; else if (c == '\t') esc = "\\t";
+        else if (c >= 0x20) continue;
+        if (!a_put(o, s + start, i - start)) return 0;
+        if (esc) { if (!a_str(o, esc)) return 0; }
+        else { char u[6] = { '\\', 'u', '0', '0', "0123456789abcdef"[c >> 4], "0123456789abcdef"[c & 15] }; if (!a_put(o, u, 6)) return 0; }
+        start = i + 1;
+    }
+    return a_put(o, s + start, n - start) && a_put(o, "\"", 1);
+}
+
+/* ---------------------------------------------------------------- big integers (for exact float text and parsing) */
+#define BN 200
+typedef struct { u32 n; u32 d[BN]; } Big; /* little-endian 32-bit limbs */
+static void bn_set(Big *a, u64 v) { a->n = 0; while (v) { a->d[a->n++] = (u32)v; v >>= 32; } }
+static void bn_trim(Big *a) { while (a->n && !a->d[a->n - 1]) a->n--; }
+static void bn_mul_small(Big *a, u32 m) { u64 c = 0; for (u32 i = 0; i < a->n; i++) { u64 t = (u64)a->d[i] * m + c; a->d[i] = (u32)t; c = t >> 32; } if (c) { if (a->n == BN) fatal("big"); a->d[a->n++] = (u32)c; } }
+static void bn_add_small(Big *a, u32 v) { u64 c = v; for (u32 i = 0; i < a->n && c; i++) { u64 t = (u64)a->d[i] + c; a->d[i] = (u32)t; c = t >> 32; } if (c) { if (a->n == BN) fatal("big"); a->d[a->n++] = (u32)c; } }
+static void bn_shl(Big *a, u32 k) {
+    if (!a->n) return;
+    u32 w = k / 32, b = k % 32;
+    if (a->n + w + 1 > BN) fatal("big");
+    a->d[a->n + w] = 0;
+    for (i32 i = (i32)a->n - 1; i >= 0; i--) { u32 v = a->d[i]; a->d[i + w + 1] |= b ? v >> (32 - b) : 0; a->d[i + w] = v << b; }
+    for (u32 i = 0; i < w; i++) a->d[i] = 0;
+    a->n += w + 1; bn_trim(a);
+}
+static void bn_pow10(Big *a, u32 k) { while (k >= 9) { bn_mul_small(a, 1000000000u); k -= 9; } while (k--) bn_mul_small(a, 10); }
+static int bn_cmp(const Big *a, const Big *b) { if (a->n != b->n) return a->n < b->n ? -1 : 1; for (i32 i = (i32)a->n - 1; i >= 0; i--) if (a->d[i] != b->d[i]) return a->d[i] < b->d[i] ? -1 : 1; return 0; }
+static void bn_add(Big *r, const Big *a, const Big *b) { /* r = a + b (r may be a) */
+    u32 n = a->n > b->n ? a->n : b->n; u64 c = 0;
+    for (u32 i = 0; i < n; i++) { u64 t = c + (i < a->n ? a->d[i] : 0) + (i < b->n ? b->d[i] : 0); r->d[i] = (u32)t; c = t >> 32; }
+    r->n = n; if (c) { if (n == BN) fatal("big"); r->d[r->n++] = (u32)c; }
+}
+static void bn_sub(Big *a, const Big *b) { /* a -= b, a >= b */
+    i64 br = 0;
+    for (u32 i = 0; i < a->n; i++) { i64 t = (i64)a->d[i] - (i < b->n ? b->d[i] : 0) - br; br = t < 0; a->d[i] = (u32)(t + (br ? ((i64)1 << 32) : 0)); }
+    bn_trim(a);
+}
+static u32 bn_bits(const Big *a) { if (!a->n) return 0; u32 top = a->d[a->n - 1], b = 0; while (top) { b++; top >>= 1; } return (a->n - 1) * 32 + b; }
+static int bn_cmp_sum(const Big *a, const Big *b, const Big *c) { Big t; bn_add(&t, a, b); return bn_cmp(&t, c); } /* compare a + b with c */
+
+/* The shortest digits that read back as `v` (> 0, finite), and k with v = 0.digits * 10^k (Burger and Dybvig's
+   free-format algorithm, exact with big integers; of two shortest candidates the nearer, an exact tie rounding up). */
+static int shortest(double v, char *dig, i32 *kout) {
+    u64 bits; memcpy(&bits, &v, 8);
+    u64 mant = bits & ((1ULL << 52) - 1); i32 ex = (i32)((bits >> 52) & 0x7ff);
+    u64 f = ex ? mant | (1ULL << 52) : mant; i32 e = ex ? ex - 1075 : -1074;
+    int even = (f & 1) == 0;
+    Big r, s, mp, mm;
+    if (e >= 0) {
+        if (f != (1ULL << 52)) { bn_set(&r, f); bn_shl(&r, (u32)e + 1); bn_set(&s, 2); bn_set(&mp, 1); bn_shl(&mp, (u32)e); bn_set(&mm, 1); bn_shl(&mm, (u32)e); }
+        else { bn_set(&r, f); bn_shl(&r, (u32)e + 2); bn_set(&s, 4); bn_set(&mp, 1); bn_shl(&mp, (u32)e + 1); bn_set(&mm, 1); bn_shl(&mm, (u32)e); }
+    } else {
+        if (ex <= 1 || f != (1ULL << 52)) { bn_set(&r, f); bn_shl(&r, 1); bn_set(&s, 1); bn_shl(&s, (u32)(1 - e)); bn_set(&mp, 1); bn_set(&mm, 1); }
+        else { bn_set(&r, f); bn_shl(&r, 2); bn_set(&s, 1); bn_shl(&s, (u32)(2 - e)); bn_set(&mp, 2); bn_set(&mm, 1); }
+    }
+    /* estimate k = ceil(log10 v) from the binary exponent, then correct it */
+    u32 fb = 0; { u64 t = f; while (t) { fb++; t >>= 1; } }
+    double lg = ((double)(e + (i32)fb) - 1.0) * 0.30102999566398119521 - 1e-10;
+    i32 k = (i32)lg; if ((double)k < lg) k++;
+    if (k >= 0) bn_pow10(&s, (u32)k); else { bn_pow10(&r, (u32)-k); bn_pow10(&mp, (u32)-k); bn_pow10(&mm, (u32)-k); }
+    for (;;) { int c = bn_cmp_sum(&r, &mp, &s); if (even ? c >= 0 : c > 0) { bn_mul_small(&s, 10); k++; } else break; }
+    for (;;) { Big t; bn_add(&t, &r, &mp); bn_mul_small(&t, 10); int c = bn_cmp(&t, &s); if (even ? c < 0 : c <= 0) { bn_mul_small(&r, 10); bn_mul_small(&mp, 10); bn_mul_small(&mm, 10); k--; } else break; }
+    int n = 0;
+    for (;;) {
+        bn_mul_small(&r, 10); bn_mul_small(&mp, 10); bn_mul_small(&mm, 10);
+        int d = 0; while (bn_cmp(&r, &s) >= 0) { bn_sub(&r, &s); d++; }
+        int c1 = bn_cmp(&r, &mm); int tc1 = even ? c1 <= 0 : c1 < 0;
+        int c2 = bn_cmp_sum(&r, &mp, &s); int tc2 = even ? c2 >= 0 : c2 > 0;
+        if (!tc1 && !tc2) { dig[n++] = (char)('0' + d); if (n >= 40) break; continue; }
+        if (tc1 && tc2) { Big t = r; bn_shl(&t, 1); if (bn_cmp(&t, &s) >= 0) d++; } /* the nearer candidate; an exact tie rounds up, as Rust's formatter does */
+        else if (tc2) d++;
+        dig[n++] = (char)('0' + d);
+        break;
+    }
+    *kout = k;
+    return n;
+}
+
+/* A float as text, as JavaScript writes numbers (see serve.rs `float_text`). */
+static int a_float(Area *o, double f) {
+    if (f != f) return a_str(o, "NaN");
+    if (f > 1.7976931348623157e308) return a_str(o, "Infinity");
+    if (f < -1.7976931348623157e308) return a_str(o, "-Infinity");
+    if (f == 0) return a_put(o, "0", 1);
+    if (f < 0) { if (!a_put(o, "-", 1)) return 0; f = -f; }
+    char d[48]; i32 n;
+    int k = shortest(f, d, &n); /* k digits, value 0.d * 10^n */
+    if (k <= n && n <= 21) { if (!a_put(o, d, k)) return 0; for (i32 i = 0; i < n - k; i++) if (!a_put(o, "0", 1)) return 0; return 1; }
+    if (0 < n && n <= 21) return a_put(o, d, n) && a_put(o, ".", 1) && a_put(o, d + n, k - n);
+    if (-6 < n && n <= 0) { if (!a_put(o, "0.", 2)) return 0; for (i32 i = 0; i < -n; i++) if (!a_put(o, "0", 1)) return 0; return a_put(o, d, k); }
+    if (!a_put(o, d, 1)) return 0;
+    if (k > 1 && !(a_put(o, ".", 1) && a_put(o, d + 1, k - 1))) return 0;
+    return a_put(o, "e", 1) && a_put(o, n - 1 >= 0 ? "+" : "-", 1) && a_i64(o, n - 1 >= 0 ? n - 1 : 1 - n);
+}
+static int a_json_float(Area *o, double f) { if (f != f || f > 1.7976931348623157e308 || f < -1.7976931348623157e308) return a_str(o, "null"); return a_float(o, f); }
+
+/* The double nearest to digits * 10^exp10 (ties to even), as Rust's `str::parse::<f64>` gives. `digits` are ASCII, at
+   most 800 kept (a dropped nonzero digit is kept as a sticky low digit, so rounding stays exact). */
+static double exact_double(const u8 *dig, u32 nd, i64 exp10) {
+    Big num, den;
+    bn_set(&num, 0);
+    for (u32 i = 0; i < nd; i++) { bn_mul_small(&num, 10); bn_add_small(&num, (u32)(dig[i] - '0')); }
+    if (!num.n) return 0.0;
+    if (exp10 > 400) return 1.0 / 0.0;
+    if (exp10 < -1200) return 0.0;
+    bn_set(&den, 1);
+    if (exp10 >= 0) bn_pow10(&num, (u32)exp10); else bn_pow10(&den, (u32)-exp10);
+    /* find b with 2^53 <= num / (den * 2^b) < 2^54, to round to 53 bits */
+    i32 b = (i32)bn_bits(&num) - (i32)bn_bits(&den) - 54;
+    for (;;) {
+        Big n2 = num, d2 = den;
+        if (b >= 0) bn_shl(&d2, (u32)b); else bn_shl(&n2, (u32)-b);
+        Big lo = d2; bn_shl(&lo, 53); Big hi = d2; bn_shl(&hi, 54);
+        if (bn_cmp(&n2, &lo) < 0) { b--; continue; }
+        if (bn_cmp(&n2, &hi) >= 0) { b++; continue; }
+        break;
+    }
+    /* the value's binary exponent is b + 53; below the normal range the step is fixed at 2^-1074 */
+    i32 e2 = b; /* value = q * 2^e2 with q in [2^53, 2^54) */
+    i32 shift = 1; /* bits dropped from the 54-bit quotient: keep 53 */
+    if (e2 + 1 < -1074) shift = -1074 - e2;
+    if (shift > 60) return 0.0;
+    Big n2 = num, d2 = den;
+    i32 bb = e2 + shift;
+    if (bb >= 0) bn_shl(&d2, (u32)bb); else bn_shl(&n2, (u32)-bb);
+    /* q = floor(n2 / d2) (fits 54 bits), remainder decides rounding */
+    u64 q = 0;
+    { Big dd = d2; u32 sh = 0; while (bn_cmp(&dd, &n2) <= 0) { bn_shl(&dd, 1); sh++; } while (sh--) { /* undo one shift */
+            Big t = d2; bn_shl(&t, sh); q <<= 1; if (bn_cmp(&n2, &t) >= 0) { bn_sub(&n2, &t); q |= 1; } } }
+    Big twice = n2; bn_shl(&twice, 1);
+    int c = bn_cmp(&twice, &d2);
+    if (c > 0 || (c == 0 && (q & 1))) q++;
+    i32 e = bb;
+    if (q >> 53) { q >>= 1; e++; }
+    if (e + 52 > 1023) return 1.0 / 0.0;
+    double r = (double)q;
+    /* r * 2^e, exactly (q has at most 53 bits) */
+    while (e > 0) { i32 s = e > 60 ? 60 : e; r *= (double)(1ULL << s); e -= s; }
+    while (e < 0) { i32 s = -e > 60 ? 60 : -e; r /= (double)(1ULL << s); e += s; }
+    return r;
+}
+
+/* ---------------------------------------------------------------- the program's memory */
+#define LEN 0
+#define HEAD 1
+#define HW 0
+#define COUNT 1
+#define HINT 2
+#define EVER 3
+#define RETRY_AFTER_SHRINKS 256ULL
+
+typedef struct { u64 off, n, pos; } JEnt;
+typedef struct {
+    const MitoProg *prog;
+    u8 *base; u64 reserved, npages, cpages;
+    u8 *committed;       /* one flag per page */
+    u8 *livepg;          /* trim's scratch: one flag per page */
+    u64 *shrinks;        /* per collection (top level): bumped whenever something in it is freed or cleared */
+    Grow jb, je; int jon;
+} Mem;
+
+static const MitoColl *coll(Mem *m, u32 c) { return &m->prog->colls[c]; }
+static void ensure(Mem *m, u64 a, u64 b) {
+    if (b <= a) return;
+    u64 p = a / PAGE, last = (b - 1) / PAGE;
+    while (p <= last) {
+        if (!m->committed[p]) {
+            u64 s = p;
+            while (p <= last && !m->committed[p]) p++;
+            if (!os_commit(m->base + s * PAGE, (p - s) * PAGE)) fatal("commit failed");
+            for (u64 q = s; q < p; q++) m->committed[q] = 1;
+            m->cpages += p - s;
+        } else p++;
+    }
+}
+static u64 rd(Mem *m, u64 off, u32 n) { u64 v = 0; memcpy(&v, m->base + off, n); return v; }
+static void save(Mem *m, u64 a, u64 n) {
+    if (!m->jon || !n) return;
+    u64 pos = m->jb.len;
+    if (!grow_to(&m->jb, pos + n) || !grow_to(&m->je, (m->je.len + 1) * sizeof(JEnt))) fatal("journal full");
+    memcpy(m->jb.p + pos, m->base + a, n); m->jb.len += n;
+    JEnt e = { a, n, pos }; memcpy(m->je.p + m->je.len * sizeof(JEnt), &e, sizeof e); m->je.len++;
+}
+static void wr(Mem *m, u64 off, u32 n, u64 v) { ensure(m, off, off + n); save(m, off, n); memcpy(m->base + off, &v, n); }
+static void put(Mem *m, u64 off, const u8 *b, u64 n) { ensure(m, off, off + n); save(m, off, n); if (n) memcpy(m->base + off, b, n); }
+static void zero(Mem *m, u64 off, u64 n) { if (!n) return; ensure(m, off, off + n); save(m, off, n); memset(m->base + off, 0, n); }
+static void begin(Mem *m) { m->jon = 1; m->jb.len = 0; m->je.len = 0; }
+static void commit_changes(Mem *m) { m->jon = 0; m->jb.len = 0; m->je.len = 0; }
+static void rollback(Mem *m) {
+    for (u64 k = m->je.len; k-- > 0;) { JEnt e; memcpy(&e, m->je.p + k * sizeof(JEnt), sizeof e); memcpy(m->base + e.off, m->jb.p + e.pos, e.n); }
+    commit_changes(m);
+}
+
+static u32 hdr_fields(const MitoColl *c) { return c->list ? 2 : 4; }
+static u64 words(const MitoColl *c) { return (c->cap + 63) / 64; }
+static u64 haddr(Mem *m, u32 c, u32 f, u64 inst) { const MitoColl *k = coll(m, c); return k->hdr + 4 * (f * (u64)k->mult + inst); }
+static u64 hget(Mem *m, u32 c, u32 f, u64 inst) { return rd(m, haddr(m, c, f, inst), 4); }
+static void hset(Mem *m, u32 c, u32 f, u64 inst, u64 v) { wr(m, haddr(m, c, f, inst), 4, v); }
+static u64 waddr(Mem *m, u32 c, u64 inst, u64 w) { const MitoColl *k = coll(m, c); return k->live + 8 * (inst * words(k) + w); }
+static int bit(Mem *m, u32 c, u64 inst, u64 s) { return (int)((rd(m, waddr(m, c, inst, s / 64), 8) >> (s % 64)) & 1); }
+static u64 gaddr(Mem *m, u32 c, u64 idx) { return coll(m, c)->gen + 4 * idx; }
+static u32 gen_of(Mem *m, u32 c, u64 idx) { return coll(m, c)->checked ? (u32)rd(m, gaddr(m, c, idx), 4) : 0; }
+static u64 count(Mem *m, u32 c, u64 inst) { return hget(m, c, coll(m, c)->list ? LEN : COUNT, inst); }
+
+static int item_live(Mem *m, u32 c, u64 idx) {
+    const MitoColl *k = coll(m, c); u64 cap = k->cap, inst = idx / cap, s = idx % cap;
+    if (inst >= k->mult) return 0;
+    if (k->list) return (s + cap - hget(m, c, HEAD, inst)) % cap < hget(m, c, LEN, inst);
+    return s < hget(m, c, HW, inst) && bit(m, c, inst, s);
+}
+/* Live items of an instance in order (lists oldest first, pools by slot): call with i = 0, 1, ... until it returns 0. */
+static int item_at(Mem *m, u32 c, u64 inst, u64 *it, u64 *idx) {
+    const MitoColl *k = coll(m, c); u64 cap = k->cap;
+    if (k->list) { if (*it >= hget(m, c, LEN, inst)) return 0; *idx = inst * cap + (hget(m, c, HEAD, inst) + *it) % cap; (*it)++; return 1; }
+    u64 hw = hget(m, c, HW, inst);
+    while (*it < hw) { u64 s = (*it)++; if (bit(m, c, inst, s)) { *idx = inst * cap + s; return 1; } }
+    return 0;
+}
+static u32 root(Mem *m, u32 c) { while (coll(m, c)->parent >= 0) c = (u32)coll(m, c)->parent; return c; }
+static void shrank(Mem *m, u32 c) { m->shrinks[root(m, c)]++; }
+
+static void reset_instance(Mem *m, u32 c, u64 inst);
+static void reset_children(Mem *m, u32 c, u64 idx) { const MitoColl *k = coll(m, c); for (u32 i = 0; i < k->nkids; i++) reset_instance(m, k->kids[i].coll, idx); }
+static void zero_item(Mem *m, u32 c, u64 idx) {
+    const MitoColl *k = coll(m, c);
+    for (u32 i = 0; i < k->ncols; i++) if (k->cols[i].kind != 3) zero(m, k->cols[i].off + idx * k->cols[i].size, k->cols[i].size);
+    reset_children(m, c, idx);
+}
+/* Empty one instance of a collection, including what its items hold. */
+static void reset_instance(Mem *m, u32 c, u64 inst) {
+    const MitoColl *k = coll(m, c);
+    shrank(m, c);
+    for (u32 f = 0; f < hdr_fields(k); f++) { u64 h = haddr(m, c, f, inst); ensure(m, h, h + 4); } /* a new parent's header may not be committed yet */
+    if (k->nkids) { u64 it = 0, idx; while (item_at(m, c, inst, &it, &idx)) reset_children(m, c, idx); }
+    if (k->list) { hset(m, c, LEN, inst, 0); hset(m, c, HEAD, inst, 0); return; }
+    u64 hw = hget(m, c, HW, inst);
+    if (k->checked) { u64 it = 0, idx; while (item_at(m, c, inst, &it, &idx)) { u64 ga = gaddr(m, c, idx); wr(m, ga, 4, rd(m, ga, 4) + 1); } }
+    zero(m, waddr(m, c, inst, 0), (hw + 63) / 64 * 8);
+    hset(m, c, HW, inst, 0); hset(m, c, COUNT, inst, 0); hset(m, c, HINT, inst, 0);
+}
+static int is_full(Mem *m, u32 c, u64 inst) {
+    const MitoColl *k = coll(m, c);
+    if (k->list) return k->drop_oldest ? 0 : hget(m, c, LEN, inst) >= k->cap;
+    return hget(m, c, COUNT, inst) >= k->cap;
+}
+/* Append to a list (dropping the oldest if declared) or take the lowest free slot of a pool. ~0 when full. */
+static u64 push_item(Mem *m, u32 c, u64 inst) {
+    const MitoColl *k = coll(m, c); u64 cap = k->cap;
+    if (k->list) {
+        u64 len = hget(m, c, LEN, inst), head = hget(m, c, HEAD, inst);
+        if (len < cap) { u64 idx = inst * cap + (head + len) % cap; zero_item(m, c, idx); hset(m, c, LEN, inst, len + 1); return idx; }
+        if (k->drop_oldest) { u64 idx = inst * cap + head; zero_item(m, c, idx); hset(m, c, HEAD, inst, (head + 1) % cap); return idx; }
+        return ~0ULL;
+    }
+    u64 hw = hget(m, c, HW, inst), cnt = hget(m, c, COUNT, inst), hint = hget(m, c, HINT, inst);
+    u64 slot = ~0ULL, w = hint / 64;
+    while (w * 64 < hw) {
+        u64 fr = ~rd(m, waddr(m, c, inst, w), 8);
+        if ((w + 1) * 64 > hw) fr &= (1ULL << (hw - w * 64)) - 1;
+        if (w == hint / 64) fr &= ~0ULL << (hint % 64);
+        if (fr) { u64 t = 0; while (!((fr >> t) & 1)) t++; slot = w * 64 + t; break; }
+        w++;
+    }
+    if (slot == ~0ULL) { if (hw == cap) return ~0ULL; slot = hw; }
+    u64 wa = waddr(m, c, inst, slot / 64);
+    u64 word = (slot / 64) * 64 < hw ? rd(m, wa, 8) : 0; /* words wholly above hw may be uncommitted; their bits are zero */
+    wr(m, wa, 8, word | (1ULL << (slot % 64)));
+    u64 idx = inst * cap + slot;
+    zero_item(m, c, idx);
+    if (k->checked) { u64 ga = gaddr(m, c, idx); ensure(m, ga, ga + 4); }
+    u64 nhw = hw > slot + 1 ? hw : slot + 1;
+    u64 ever = hget(m, c, EVER, inst); if (nhw > ever) ever = nhw;
+    hset(m, c, HW, inst, nhw); hset(m, c, COUNT, inst, cnt + 1); hset(m, c, HINT, inst, slot + 1); hset(m, c, EVER, inst, ever);
+    return idx;
+}
+/* Free a pool slot (the caller checked it is a live pool item). */
+static void free_item(Mem *m, u32 c, u64 idx) {
+    const MitoColl *k = coll(m, c); u64 cap = k->cap, inst = idx / cap, s = idx % cap;
+    if (k->list || !item_live(m, c, idx)) return;
+    shrank(m, c);
+    reset_children(m, c, idx);
+    u64 wa = waddr(m, c, inst, s / 64);
+    wr(m, wa, 8, rd(m, wa, 8) & ~(1ULL << (s % 64)));
+    if (k->checked) { u64 ga = gaddr(m, c, idx); wr(m, ga, 4, rd(m, ga, 4) + 1); }
+    u64 cnt = hget(m, c, COUNT, inst), hint = hget(m, c, HINT, inst), hw = hget(m, c, HW, inst);
+    hset(m, c, COUNT, inst, cnt - 1); hset(m, c, HINT, inst, hint < s ? hint : s);
+    if (s + 1 == hw) {
+        u64 h = s;
+        while (h > 0) {
+            u64 w = (h - 1) / 64, word = rd(m, waddr(m, c, inst, w), 8), valid = h - w * 64;
+            if (valid < 64) word &= (1ULL << valid) - 1;
+            if (!word) h = w * 64; else { u64 lz = 0; while (!((word >> (63 - lz)) & 1)) lz++; h = w * 64 + (64 - lz); break; }
+        }
+        hset(m, c, HW, inst, h);
+    }
+}
+
+/* ---- live ranges: the bytes in use, as trims and the live counts see them ---- */
+typedef void (*RangeFn)(Mem *m, u64 a, u64 b, void *ctx);
+static void inst_ranges(Mem *m, u32 c, u64 inst, RangeFn f, void *x) {
+    const MitoColl *k = coll(m, c); u64 cap = k->cap;
+    for (u32 h = 0; h < hdr_fields(k); h++) { u64 a = haddr(m, c, h, inst); f(m, a, a + 4, x); }
+    u64 run[2][2]; int nr;
+    if (!k->list) {
+        u64 hw = hget(m, c, HW, inst);
+        if (k->checked) { u64 ever = hget(m, c, EVER, inst); f(m, k->gen + 4 * inst * cap, k->gen + 4 * (inst * cap + ever), x); }
+        if (!hw) return;
+        f(m, waddr(m, c, inst, 0), waddr(m, c, inst, 0) + (hw + 63) / 64 * 8, x);
+        run[0][0] = 0; run[0][1] = hw; nr = 1;
+    } else {
+        u64 len = hget(m, c, LEN, inst), head = hget(m, c, HEAD, inst);
+        if (!len) return;
+        run[0][0] = head; run[0][1] = head + len < cap ? head + len : cap; nr = 1;
+        if (head + len > cap) { run[1][0] = 0; run[1][1] = head + len - cap; nr = 2; }
+    }
+    for (u32 ci = 0; ci < k->ncols; ci++) {
+        const MitoCol *col = &k->cols[ci]; u64 sz = col->size;
+        if (col->kind == 3) {
+            const MitoCol *lc = &k->cols[ci - 1];
+            for (int r = 0; r < nr; r++) for (u64 s = run[r][0]; s < run[r][1]; s++) {
+                if (!k->list && !bit(m, c, inst, s)) continue;
+                u64 idx = inst * cap + s, l = rd(m, lc->off + 4 * idx, 4);
+                if (l) f(m, col->off + idx * col->n, col->off + idx * col->n + l, x);
+            }
+        } else for (int r = 0; r < nr; r++) f(m, col->off + (inst * cap + run[r][0]) * sz, col->off + (inst * cap + run[r][1]) * sz, x);
+    }
+}
+/* Every existing instance of a collection: one at top level, one per live item of the parent otherwise. */
+static void insts_rec(Mem *m, const u32 *chain, u32 depth, u32 d, u64 inst, RangeFn f, void *x) {
+    if (depth == d) { inst_ranges(m, chain[d], inst, f, x); return; }
+    u64 it = 0, idx; while (item_at(m, chain[depth], inst, &it, &idx)) insts_rec(m, chain, depth + 1, d, idx, f, x);
+}
+static void coll_ranges(Mem *m, u32 c, RangeFn f, void *x) {
+    u32 chain[32], d = 0, k = c;
+    while (coll(m, k)->parent >= 0) k = (u32)coll(m, k)->parent, d++;
+    if (d >= 32) fatal("nesting");
+    k = c; for (i32 i = (i32)d; i >= 0; i--) { chain[i] = k; if (i) k = (u32)coll(m, k)->parent; }
+    insts_rec(m, chain, 0, d, 0, f, x);
+}
+static void coll_ranges_deep(Mem *m, u32 c, RangeFn f, void *x) { coll_ranges(m, c, f, x); const MitoColl *k = coll(m, c); for (u32 i = 0; i < k->nkids; i++) coll_ranges_deep(m, k->kids[i].coll, f, x); }
+static void sum_range(Mem *m, u64 a, u64 b, void *x) { (void)m; *(u64 *)x += b - a; }
+static void mark_range(Mem *m, u64 a, u64 b, void *x) { (void)x; if (b > a) for (u64 p = a / PAGE; p <= (b - 1) / PAGE; p++) m->livepg[p] = 1; }
+static u64 coll_live(Mem *m, u32 c) { u64 t = 0; coll_ranges(m, c, sum_range, &t); return t; }
+static u64 live_total(Mem *m) { u64 t = m->prog->plain_end; for (u32 c = 0; c < m->prog->ncolls; c++) t += coll_live(m, c); return t; }
+static u64 coll_committed(Mem *m, u32 c) { const MitoColl *k = coll(m, c); u64 n = 0; for (u64 p = k->start / PAGE; p < up(k->end, PAGE) / PAGE; p++) n += m->committed[p]; return n * PAGE; }
+static u64 release_dead(Mem *m, u64 lo, u64 hi) {
+    u64 freed = 0, p = lo;
+    while (p < hi) {
+        if (m->committed[p] && !m->livepg[p]) {
+            u64 s = p;
+            while (p < hi && m->committed[p] && !m->livepg[p]) p++;
+            os_decommit(m->base + s * PAGE, (p - s) * PAGE);
+            for (u64 q = s; q < p; q++) m->committed[q] = 0;
+            m->cpages -= p - s; freed += (p - s) * PAGE;
+        } else p++;
+    }
+    return freed;
+}
+static u64 trim_all(Mem *m) {
+    memset(m->livepg, 0, m->npages);
+    mark_range(m, 0, m->prog->plain_end, 0);
+    for (u32 c = 0; c < m->prog->ncolls; c++) coll_ranges(m, c, mark_range, 0);
+    return release_dead(m, 0, m->npages);
+}
+static u64 trim_coll(Mem *m, u32 c) {
+    memset(m->livepg, 0, m->npages);
+    coll_ranges_deep(m, c, mark_range, 0);
+    const MitoColl *k = coll(m, c);
+    return release_dead(m, k->start / PAGE, up(k->end, PAGE) / PAGE);
+}
+
+/* ---- the memory-pressure policy (DESIGN.md concept 9) ---- */
+typedef struct { int on; u64 soft, hard; int refusing; u64 *stuck; u64 trims, full_trims, freed; } Pressure;
+static i64 trim_candidate(Mem *m, Pressure *p) {
+    i64 best = -1; u64 bestc = 0;
+    for (u32 c = 0; c < m->prog->ncolls; c++) {
+        if (coll(m, c)->parent >= 0) continue;
+        int worth = p->stuck[c] == ~0ULL || m->shrinks[c] >= p->stuck[c] + RETRY_AFTER_SHRINKS;
+        if (!worth) continue;
+        u64 cc = coll_committed(m, c);
+        if (cc > 0 && (best < 0 || cc > bestc)) { best = c; bestc = cc; }
+    }
+    return best;
+}
+static void trim_one(Mem *m, Pressure *p, u32 c) { u64 f = trim_coll(m, c); p->trims++; p->freed += f; p->stuck[c] = f == 0 ? m->shrinks[c] : ~0ULL; }
+static void relieve(Mem *m, Pressure *p) {
+    if (m->cpages * PAGE > p->soft) { i64 c = trim_candidate(m, p); if (c >= 0) trim_one(m, p, (u32)c); }
+    if (m->cpages * PAGE > p->hard && !p->refusing) { p->freed += trim_all(m); p->full_trims++; }
+    p->refusing = m->cpages * PAGE > p->hard;
+}
+
+/* ---------------------------------------------------------------- a running program */
+#define TEXT_CAP (256 * 1024)
+#define RESPONSE_CAP (256 * 1024)
+#define MAX_PARAMS 32
+#define MAX_QUERY 64
+#define MAX_JSON 256
+#define MAX_FREES 65536
+#define MAX_SEL (1 << 24)
+
+/* What went wrong in a request: the error kinds of the Rust runtime. */
+enum { E_NONE, E_FAIL, E_FULL, E_TOOLONG, E_NOTLIVE, E_STALE, E_BAD, E_DEAD };
+typedef struct { u32 off, len; } T; /* a string in the text area */
+typedef struct { T k; Val v; } JField;
+
+typedef struct Mito {
+    Mem mem;
+    Area out, text;
+    u8 *areas;
+    i64 clock; int fixed_clock; u64 rng;
+    Pressure pr;
+    /* the request being handled */
+    u32 ei; const u8 *hdrs; u32 hlen; i64 now;
+    u32 nparams; struct { u32 seg; T t; } params[MAX_PARAMS];
+    u32 nquery; struct { T k, v; } query[MAX_QUERY];
+    u32 njson; JField json[MAX_JSON];
+    int ekind; int ecode; Area emsg; u8 ebuf[1024];
+    Grow frees; /* (collection, item) pairs, u32 each */
+    Grow sel;   /* (key, item) pairs collected by loops */
+    int crashed;
+} Mito;
+
+/* ---- errors: kind, status and message ---- */
+static int err(Mito *m, int kind, int code) { m->ekind = kind; m->ecode = code; m->emsg.len = 0; return -1; }
+static int fail(Mito *m, int code, const char *msg) { err(m, E_FAIL, code); a_str(&m->emsg, msg); return -1; }
+static int text_full(Mito *m) { return fail(m, 507, "request text area is full"); }
+static int resp_full(Mito *m) { return fail(m, 507, "response too large"); }
+
+static T t_since(Mito *m, u32 start) { T t = { start, m->text.len - start }; return t; }
+static const u8 *t_ptr(Mito *m, T t) { return m->text.p + t.off; }
+static int t_push(Mito *m, const void *b, u64 n, T *out) { u32 s = m->text.len; if (!a_put(&m->text, b, n)) return text_full(m); *out = t_since(m, s); return 0; }
+
+static Val v_null(void) { Val v = { 0, 0, 0, 0, 0 }; return v; }
+static Val v_int(i64 i) { Val v = { 1, 0, 0, i, 0 }; return v; }
+static Val v_flt(double f) { Val v = { 2, 0, 0, 0, f }; return v; }
+static Val v_bool(int b) { Val v = { 3, 0, 0, b ? 1 : 0, 0 }; return v; }
+static Val v_str(T t) { Val v = { 4, t.off, t.len, 0, 0 }; return v; }
+static Val v_item(u32 c, u32 i) { Val v = { 5, c, i, 0, 0 }; return v; }
+static Mito *M_(Ctx *c) { return (Mito *)c->run; }
+
+/* ---- columns ---- */
+static i64 col_by_path(Mito *m, u32 c, const u8 *p, u64 n) { const MitoColl *k = coll(&m->mem, c); for (u32 i = 0; i < k->ncols; i++) if (k->cols[i].kind != 3 && c_eq(k->cols[i].path, p, n)) return i; return -1; }
+/* Is `p` the path of a struct-valued field (some column or nested collection is below it)? */
+static int is_prefix(Mito *m, u32 c, const u8 *p, u64 n) {
+    const MitoColl *k = coll(&m->mem, c);
+    for (u32 i = 0; i < k->ncols + k->nkids; i++) {
+        const char *q = i < k->ncols ? k->cols[i].path : k->kids[i - k->ncols].path;
+        u64 j = 0; while (j < n && q[j] && (u8)q[j] == p[j]) j++;
+        if (j == n && q[n] == '.') return 1;
+    }
+    return 0;
+}
+static i64 child_by_path(Mito *m, u32 c, const u8 *p, u64 n) { const MitoColl *k = coll(&m->mem, c); for (u32 i = 0; i < k->nkids; i++) if (c_eq(k->kids[i].path, p, n)) return k->kids[i].coll; return -1; }
+static u64 caddr(Mito *m, u32 c, u64 idx, u32 ci) { const MitoCol *k = &coll(&m->mem, c)->cols[ci]; return k->off + idx * k->size; }
+static u32 scalar_size(u32 s) { return s == 1 || s == 5 || s == 11 ? 1 : s == 2 || s == 6 ? 2 : s == 3 || s == 7 || s == 9 ? 4 : 8; }
+static const char *scalar_name(u32 s) { const char *n[] = { "", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool" }; return n[s]; }
+static Val scalar_val(Mito *m, u64 a, u32 s) {
+    u64 b = rd(&m->mem, a, scalar_size(s));
+    switch (s) {
+        case 9: { u32 x = (u32)b; float f; memcpy(&f, &x, 4); return v_flt((double)f); }
+        case 10: { double f; memcpy(&f, &b, 8); return v_flt(f); }
+        case 11: return v_bool(b != 0);
+        case 1: return v_int((i64)(i8)b); case 2: return v_int((i64)(i16)b); case 3: return v_int((i64)(i32)b);
+        default: return v_int((i64)b);
+    }
+}
+static int bad_type(Mito *m) { err(m, E_BAD, 400); a_str(&m->emsg, "wrong type for this field"); return -1; }
+/* Store a number or bool in a scalar of kind `s`, refusing what does not fit (as the Rust runtime's store_scalar). */
+static int store_scalar(Mito *m, u64 a, u32 s, const Val *v) {
+    u64 bits;
+    if (s == 9 || s == 10) {
+        double f; if (v->tag == 2) f = v->f; else if (v->tag == 1) f = (double)v->i; else return bad_type(m);
+        if (s == 9) { float x = (float)f; u32 u; memcpy(&u, &x, 4); bits = u; } else memcpy(&bits, &f, 8);
+    } else if (s == 11) { if (v->tag != 3) return bad_type(m); bits = v->i != 0; }
+    else {
+        if (v->tag != 1) return bad_type(m);
+        i64 i = v->i, lo, hi;
+        switch (s) { case 1: lo = -128; hi = 127; break; case 2: lo = -32768; hi = 32767; break; case 3: lo = -2147483647 - 1; hi = 2147483647; break;
+            case 5: lo = 0; hi = 255; break; case 6: lo = 0; hi = 65535; break; case 7: lo = 0; hi = 4294967295LL; break; case 8: lo = 0; hi = I64MAX; break; default: lo = I64MIN; hi = I64MAX; }
+        if (i < lo || i > hi) { err(m, E_TOOLONG, 413); a_i64(&m->emsg, i); a_str(&m->emsg, " does not fit "); a_str(&m->emsg, scalar_name(s)); return -1; }
+        bits = (u64)i;
+    }
+    wr(&m->mem, a, scalar_size(s), bits); return 0;
+}
+static int store_bytes_at(Mito *m, u64 len_at, u64 bytes_at, u64 cap, const u8 *b, u64 n) {
+    if (n > cap) { err(m, E_TOOLONG, 413); a_str(&m->emsg, "string of "); a_u64(&m->emsg, n); a_str(&m->emsg, " bytes does not fit string<"); a_u64(&m->emsg, cap); a_str(&m->emsg, ">"); return -1; }
+    put(&m->mem, bytes_at, b, n); wr(&m->mem, len_at, 4, n); return 0;
+}
+static int deref_quiet(Mito *m, u32 t, u64 slot, u32 g, u64 *out) {
+    const MitoColl *k = coll(&m->mem, t);
+    if (slot >= k->cap || !item_live(&m->mem, t, slot)) return 0;
+    if (k->checked && (u32)rd(&m->mem, gaddr(&m->mem, t, slot), 4) != g) return 0;
+    *out = slot; return 1;
+}
+/* Store a value at column `ci` of item `idx` (element `j` of an array column when j >= 0), as the interpreter's `store`. */
+static int store_col(Mito *m, u32 c, u64 idx, u32 ci, i64 j, const Val *v) {
+    const MitoCol *col = &coll(&m->mem, c)->cols[ci];
+    u64 a = caddr(m, c, idx, ci);
+    if (col->kind == 4) {
+        if (v->tag == 0) { wr(&m->mem, a, 8, 0); return 0; }
+        if (v->tag == 5 && v->a == col->target) { wr(&m->mem, a, 4, (u64)v->b + 1); wr(&m->mem, a + 4, 4, gen_of(&m->mem, v->a, v->b)); return 0; }
+        return fail(m, 500, "this field holds a reference to a different pool");
+    }
+    if (v->tag == 4) {
+        if (col->kind != 2 || j >= 0) return bad_type(m);
+        const MitoCol *bc = &coll(&m->mem, c)->cols[ci + 1];
+        return store_bytes_at(m, a, caddr(m, c, idx, ci + 1), bc->n, t_ptr(m, (T){ v->a, v->b }), v->b);
+    }
+    if (v->tag != 1 && v->tag != 2 && v->tag != 3) return fail(m, 500, "cannot store this value in state");
+    if (col->kind == 0) return store_scalar(m, a, col->scalar, v);
+    if (col->kind == 1) { if (j < 0) { err(m, E_BAD, 400); a_str(&m->emsg, "an array field needs an index"); return -1; } return store_scalar(m, a + (u64)j * scalar_size(col->scalar), col->scalar, v); }
+    if (col->kind == 2) { err(m, E_BAD, 400); a_str(&m->emsg, "expected a string"); return -1; }
+    return bad_type(m);
+}
+/* Copy a string column into the text area. */
+static int col_txt(Mito *m, u32 c, u64 idx, u32 ci, T *out) {
+    u64 a = caddr(m, c, idx, ci); u32 n = (u32)rd(&m->mem, a, 4);
+    return t_push(m, m->mem.base + caddr(m, c, idx, ci + 1), n, out);
+}
+
+/* ---- values as text and JSON ---- */
+static int show(Mito *m, const Val *v) { /* append a value's text to the text area */
+    int ok;
+    switch (v->tag) {
+        case 4: { u32 n = v->b; if (m->text.len + (u64)n > m->text.cap) return text_full(m); memmove(m->text.p + m->text.len, m->text.p + v->a, n); m->text.len += n; return 0; }
+        case 1: ok = a_i64(&m->text, v->i); break;
+        case 2: ok = a_float(&m->text, v->f); break;
+        case 3: ok = a_str(&m->text, v->i ? "true" : "false"); break;
+        case 0: ok = a_str(&m->text, "null"); break;
+        default: return fail(m, 500, "cannot show this value");
+    }
+    return ok ? 0 : text_full(m);
+}
+static int json_val(Mito *m, const Val *v) {
+    int ok;
+    switch (v->tag) {
+        case 1: ok = a_i64(&m->out, v->i); break;
+        case 2: ok = a_json_float(&m->out, v->f); break;
+        case 3: ok = a_str(&m->out, v->i ? "true" : "false"); break;
+        case 4: ok = a_json_str(&m->out, t_ptr(m, (T){ v->a, v->b }), v->b); break;
+        case 0: ok = a_str(&m->out, "null"); break;
+        default: return fail(m, 500, "cannot write this value as JSON");
+    }
+    return ok ? 0 : resp_full(m);
+}
+
+/* ---- parsing numbers as Rust's str::parse does ---- */
+/* An i64 from text: optional sign, ASCII digits only, no overflow. */
+static int parse_i64(const u8 *s, u64 n, i64 *out) {
+    u64 i = 0; int neg = 0;
+    if (i < n && (s[i] == '+' || s[i] == '-')) { neg = s[i] == '-'; i++; }
+    if (i == n) return 0;
+    u64 v = 0;
+    for (; i < n; i++) { if (s[i] < '0' || s[i] > '9') return 0; u64 d = s[i] - '0'; if (v > (9223372036854775808ULL - d) / 10) return 0; v = v * 10 + d; }
+    if (!neg && v > 9223372036854775807ULL) return 0;
+    *out = neg ? (i64)(0 - v) : (i64)v; return 1;
+}
+static int parse_u64_radix(const u8 *s, u64 n, u32 radix, u64 *out) {
+    u64 i = 0, v = 0;
+    if (i < n && s[i] == '+') i++;
+    if (i == n) return 0;
+    for (; i < n; i++) {
+        u32 c = s[i], d;
+        if (c >= '0' && c <= '9') d = c - '0'; else if (lower((int)c) >= 'a' && lower((int)c) <= 'z') d = (u32)lower((int)c) - 'a' + 10; else return 0;
+        if (d >= radix) return 0;
+        if (v > (~0ULL - d) / radix) return 0;
+        v = v * radix + d;
+    }
+    *out = v; return 1;
+}
+/* A JSON number (already checked against the grammar) as a double. */
+static double parse_json_double(const u8 *s, u64 n) {
+    u8 dig[801]; u32 nd = 0; i64 e10 = 0; int neg = 0, sticky = 0, any = 0; u64 i = 0;
+    if (s[i] == '-') { neg = 1; i++; }
+    for (; i < n && s[i] >= '0' && s[i] <= '9'; i++) { if (s[i] != '0' || any) { any = 1; if (nd < 800) dig[nd++] = s[i]; else { e10++; if (s[i] != '0') sticky = 1; } } }
+    if (i < n && s[i] == '.') { i++; for (; i < n && s[i] >= '0' && s[i] <= '9'; i++) { if (s[i] != '0' || any) { any = 1; if (nd < 800) { dig[nd++] = s[i]; e10--; } else if (s[i] != '0') sticky = 1; } else e10--; } }
+    if (i < n && (s[i] == 'e' || s[i] == 'E')) {
+        i++; int en = 0; if (s[i] == '+' || s[i] == '-') { en = s[i] == '-'; i++; }
+        i64 x = 0; for (; i < n; i++) { if (x < 100000) x = x * 10 + (s[i] - '0'); }
+        e10 += en ? -x : x;
+    }
+    if (sticky) { dig[nd++] = '1'; e10--; }
+    double r = exact_double(dig, nd, e10);
+    return neg ? -r : r;
+}
+
+/* ---- request bodies: empty, or one JSON object (see serve.rs `parse_json`) ---- */
+typedef struct { const u8 *s; u64 n, i; } J;
+static int j_peek(J *p) { return p->i < p->n ? p->s[p->i] : -1; }
+static void j_ws(J *p) { while (p->i < p->n && (p->s[p->i] == ' ' || p->s[p->i] == '\t' || p->s[p->i] == '\n' || p->s[p->i] == '\r')) p->i++; }
+static int j_bad(Mito *m, const char *msg) { return fail(m, 400, msg); }
+static int hexv(int c) { return c >= '0' && c <= '9' ? c - '0' : lower(c) >= 'a' && lower(c) <= 'f' ? lower(c) - 'a' + 10 : -1; }
+static int j_hex4(J *p, u64 at, u32 *out) { if (at + 4 > p->n) return 0; u32 v = 0; for (int k = 0; k < 4; k++) { int h = hexv(p->s[at + k]); if (h < 0) return 0; v = v * 16 + (u32)h; } *out = v; return 1; }
+static int j_utf8(Mito *m, u32 cp) {
+    u8 b[4]; int n;
+    if (cp >= 0xD800 && cp < 0xE000) cp = 0xFFFD; /* a lone surrogate */
+    if (cp < 0x80) { b[0] = (u8)cp; n = 1; } else if (cp < 0x800) { b[0] = (u8)(0xC0 | cp >> 6); b[1] = (u8)(0x80 | (cp & 63)); n = 2; }
+    else if (cp < 0x10000) { b[0] = (u8)(0xE0 | cp >> 12); b[1] = (u8)(0x80 | ((cp >> 6) & 63)); b[2] = (u8)(0x80 | (cp & 63)); n = 3; }
+    else { b[0] = (u8)(0xF0 | cp >> 18); b[1] = (u8)(0x80 | ((cp >> 12) & 63)); b[2] = (u8)(0x80 | ((cp >> 6) & 63)); b[3] = (u8)(0x80 | (cp & 63)); n = 4; }
+    return a_put(&m->text, b, n);
+}
+/* 0 ok, -1 invalid (error set), -2 text area full */
+static int j_string(Mito *m, J *p, T *out) {
+    if (j_peek(p) != '"') return j_bad(m, "invalid JSON body");
+    p->i++;
+    u32 start = m->text.len;
+    for (;;) {
+        u64 run = p->i;
+        while (p->i < p->n && p->s[p->i] != '"' && p->s[p->i] != '\\' && p->s[p->i] >= 0x20) p->i++;
+        if (!a_put(&m->text, p->s + run, p->i - run)) return -2;
+        int c = j_peek(p);
+        if (c == '"') { p->i++; *out = t_since(m, start); return 0; }
+        if (c != '\\') return j_bad(m, "invalid JSON body");
+        p->i++;
+        int e = j_peek(p); if (e < 0) return j_bad(m, "invalid JSON body");
+        p->i++;
+        u8 one;
+        switch (e) { case '"': one = '"'; break; case '\\': one = '\\'; break; case '/': one = '/'; break; case 'b': one = 8; break; case 'f': one = 12; break;
+            case 'n': one = '\n'; break; case 'r': one = '\r'; break; case 't': one = '\t'; break; case 'u': one = 0; break; default: return j_bad(m, "invalid JSON body"); }
+        if (e != 'u') { if (!a_put(&m->text, &one, 1)) return -2; continue; }
+        u32 cp; if (!j_hex4(p, p->i, &cp)) return j_bad(m, "invalid JSON body");
+        p->i += 4;
+        if (cp >= 0xD800 && cp < 0xDC00 && p->i + 1 < p->n && p->s[p->i] == '\\' && p->s[p->i + 1] == 'u') {
+            u32 lo; if (j_hex4(p, p->i + 2, &lo) && lo >= 0xDC00 && lo < 0xE000) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); p->i += 6; }
+        }
+        if (!j_utf8(m, cp)) return -2;
+    }
+}
+static int j_scalar(Mito *m, J *p, Val *out) {
+    const u8 *s = p->s; u64 n = p->n;
+    const char *w[3] = { "true", "false", "null" };
+    for (int k = 0; k < 3; k++) { u64 l = c_len(w[k]); if (p->i + l <= n && c_eq(w[k], s + p->i, l)) { p->i += l; *out = k == 0 ? v_bool(1) : k == 1 ? v_bool(0) : v_null(); return 0; } }
+    u64 st = p->i;
+    if (j_peek(p) == '-') p->i++;
+    u64 ia = p->i; while (p->i < n && s[p->i] >= '0' && s[p->i] <= '9') p->i++;
+    if (p->i == ia || (s[ia] == '0' && p->i - ia > 1)) return j_bad(m, "invalid JSON body");
+    int whole = 1;
+    if (j_peek(p) == '.') { p->i++; whole = 0; u64 a = p->i; while (p->i < n && s[p->i] >= '0' && s[p->i] <= '9') p->i++; if (p->i == a) return j_bad(m, "invalid JSON body"); }
+    if (j_peek(p) == 'e' || j_peek(p) == 'E') { p->i++; whole = 0; if (j_peek(p) == '+' || j_peek(p) == '-') p->i++; u64 a = p->i; while (p->i < n && s[p->i] >= '0' && s[p->i] <= '9') p->i++; if (p->i == a) return j_bad(m, "invalid JSON body"); }
+    i64 iv;
+    if (whole && parse_i64(s + st, p->i - st, &iv)) { *out = v_int(iv); return 0; }
+    *out = v_flt(parse_json_double(s + st, p->i - st)); return 0;
+}
+static int j_skip(Mito *m, J *p, int depth) {
+    if (depth > 64) return j_bad(m, "JSON body nested too deeply");
+    int close = j_peek(p) == '{' ? '}' : ']';
+    p->i++; j_ws(p);
+    if (j_peek(p) == close) { p->i++; return 0; }
+    for (;;) {
+        T t; Val v; int r;
+        j_ws(p);
+        if (close == '}') { if ((r = j_string(m, p, &t))) return r; j_ws(p); if (j_peek(p) != ':') return j_bad(m, "invalid JSON body"); p->i++; j_ws(p); }
+        int c = j_peek(p);
+        if (c == '"') { if ((r = j_string(m, p, &t))) return r; } else if (c == '{' || c == '[') { if ((r = j_skip(m, p, depth + 1))) return r; } else if ((r = j_scalar(m, p, &v))) return r;
+        j_ws(p);
+        c = j_peek(p);
+        if (c == ',') p->i++; else if (c == close) { p->i++; return 0; } else return j_bad(m, "invalid JSON body");
+    }
+}
+static int parse_body(Mito *m, const u8 *s, u64 n) {
+    m->njson = 0;
+    J p = { s, n, 0 };
+    j_ws(&p);
+    if (p.i == n) return 0;
+    if (j_peek(&p) != '{') return j_bad(m, "a JSON body must be an object");
+    p.i++; j_ws(&p);
+    if (j_peek(&p) == '}') p.i++;
+    else for (;;) {
+        T k; Val v; int r;
+        j_ws(&p);
+        if ((r = j_string(m, &p, &k))) return r;
+        j_ws(&p); if (j_peek(&p) != ':') return j_bad(m, "invalid JSON body"); p.i++; j_ws(&p);
+        int c = j_peek(&p);
+        if (c == '"') { T t; if ((r = j_string(m, &p, &t))) return r; v = v_str(t); }
+        else if (c == '{' || c == '[') { u32 mark = m->text.len; if ((r = j_skip(m, &p, 0))) return r; m->text.len = mark; v = v_null(); }
+        else if ((r = j_scalar(m, &p, &v))) return r;
+        if (m->njson == MAX_JSON) return -2;
+        m->json[m->njson].k = k; m->json[m->njson].v = v; m->njson++;
+        j_ws(&p);
+        c = j_peek(&p);
+        if (c == ',') p.i++; else if (c == '}') { p.i++; break; } else return j_bad(m, "invalid JSON body");
+    }
+    j_ws(&p);
+    if (p.i != n) return j_bad(m, "invalid JSON body");
+    return 0;
+}
+/* Copy a path segment or query part into the text area, decoding %XX (and + as a space in a query). */
+static int push_decoded(Mito *m, const u8 *s, u64 n, int plus, T *out) {
+    u32 start = m->text.len;
+    for (u64 i = 0; i < n; i++) {
+        u8 c = s[i];
+        if (c == '%' && i + 2 < n && hexv(s[i + 1]) >= 0 && hexv(s[i + 2]) >= 0) { c = (u8)(hexv(s[i + 1]) * 16 + hexv(s[i + 2])); i += 2; }
+        else if (c == '+' && plus) c = ' ';
+        if (!a_put(&m->text, &c, 1)) return 0;
+    }
+    *out = t_since(m, start); return 1;
+}
+
+/* ---- request headers: "Name:value\n" lines, names compared without case ---- */
+static int header(Mito *m, const u8 *name, u64 nn, const u8 **v, u64 *vn) {
+    const u8 *p = m->hdrs, *e = m->hdrs + m->hlen;
+    while (p < e) {
+        const u8 *ln = p; while (p < e && *p != '\n') p++;
+        const u8 *le = p; if (p < e) p++;
+        const u8 *col = ln; while (col < le && *col != ':') col++;
+        if (col == le || (u64)(col - ln) != nn) continue;
+        u64 k = 0; for (; k < nn; k++) if (lower(ln[k]) != lower(name[k])) break;
+        if (k == nn) { *v = col + 1; *vn = (u64)(le - col - 1); return 1; }
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------- the helpers generated code calls */
+static int h_out(Ctx *c, const char *p, u32 n) { Mito *m = M_(c); return a_put(&m->out, p, n) ? 0 : resp_full(m); }
+static int h_json_i64(Ctx *c, i64 v) { Mito *m = M_(c); return a_i64(&m->out, v) ? 0 : resp_full(m); }
+static int h_json_col(Ctx *c, u32 cid, u32 idx, u32 ci) {
+    Mito *m = M_(c); u64 a = caddr(m, cid, idx, ci); u32 n = (u32)rd(&m->mem, a, 4);
+    return a_json_str(&m->out, m->mem.base + caddr(m, cid, idx, ci + 1), n) ? 0 : resp_full(m);
+}
+static int h_json_txt(Ctx *c, const Txt *t) { Mito *m = M_(c); return a_json_str(&m->out, m->text.p + t->off, t->len) ? 0 : resp_full(m); }
+static int h_json_val(Ctx *c, const Val *v) { return json_val(M_(c), v); }
+static int h_json_f64(Ctx *c, double f) { Mito *m = M_(c); return a_json_float(&m->out, f) ? 0 : resp_full(m); }
+/* The session item named by the request's X-Session token (slot.generation.secret in hex), checked against pool `cid`. */
+static int h_auth(Ctx *c, u32 cid, u32 *out) {
+    Mito *m = M_(c);
+    const u8 *v; u64 n;
+    if (!header(m, (const u8 *)"x-session", 9, &v, &n)) return fail(m, 401, "missing X-Session header");
+    const u8 *part[3]; u64 plen[3]; int np = 0; u64 st = 0;
+    for (u64 i = 0; i <= n && np < 3; i++) if (i == n || v[i] == '.') { part[np] = v + st; plen[np] = i - st; np++; st = i + 1; }
+    u64 slot, gen, sec;
+    if (np < 3 || !parse_u64_radix(part[0], plen[0], 10, &slot) || !parse_u64_radix(part[1], plen[1], 10, &gen) || gen > 0xFFFFFFFFULL || !parse_u64_radix(part[2], plen[2], 16, &sec)) return fail(m, 401, "malformed session token");
+    u64 idx;
+    if (!deref_quiet(m, cid, slot, (u32)gen, &idx)) return fail(m, 401, "session ended");
+    i64 ci = col_by_path(m, cid, (const u8 *)"secret", 6);
+    if (ci < 0) return fail(m, 500, "auth needs a `secret` field");
+    Val real = { 0 }; const MitoCol *col = &coll(&m->mem, cid)->cols[ci];
+    if (col->kind == 0) real = scalar_val(m, caddr(m, cid, idx, (u32)ci), col->scalar);
+    if (real.tag != 1) return fail(m, 500, "`secret` must be an integer");
+    if ((u64)real.i != sec) return fail(m, 403, "bad session secret");
+    *out = (u32)idx; return 0;
+}
+static int not_live(Mito *m, const char *a, i64 k, const char *b) { err(m, E_NOTLIVE, 404); a_str(&m->emsg, a); a_i64(&m->emsg, k); a_str(&m->emsg, b); return -1; }
+static int h_index(Ctx *c, u32 cid, u32 inst, i64 k, u32 *out) {
+    Mito *m = M_(c); const MitoColl *col = coll(&m->mem, cid);
+    if (k < 0) return not_live(m, "index ", k, " is negative");
+    if (col->list) {
+        if ((u64)k >= hget(&m->mem, cid, LEN, inst)) return not_live(m, "position ", k, " is past the end");
+        *out = (u32)((u64)inst * col->cap + (hget(&m->mem, cid, HEAD, inst) + (u64)k) % col->cap); return 0;
+    }
+    u64 idx = (u64)inst * col->cap + (u64)k;
+    if ((u64)k >= col->cap || !item_live(&m->mem, cid, idx)) return not_live(m, "slot ", k, " is not live");
+    *out = (u32)idx; return 0;
+}
+static int h_lit(Ctx *c, const char *p, u32 n, Txt *out) { Mito *m = M_(c); T t; if (t_push(m, p, n, &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
+static int h_deref(Ctx *c, u32 t, u32 slot, u32 g, u32 *out) { Mito *m = M_(c); u64 i; if (!deref_quiet(m, t, slot, g, &i)) return 0; *out = (u32)i; return 1; }
+static int h_fail(Ctx *c, int code, const char *p, u32 n) { Mito *m = M_(c); err(m, E_FAIL, code); a_put(&m->emsg, p, n); return -1; }
+static int h_dead(Ctx *c) { return err(M_(c), E_DEAD, 404); }
+static int h_col_txt(Ctx *c, u32 cid, u32 idx, u32 ci, Txt *out) { Mito *m = M_(c); T t; if (col_txt(m, cid, idx, ci, &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
+static int h_plain_txt(Ctx *c, u32 off, Txt *out) { Mito *m = M_(c); T t; if (t_push(m, m->mem.base + off + 4, rd(&m->mem, off, 4), &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
+
+static int num(const Val *v, double *f) { if (v->tag == 1) { *f = (double)v->i; return 1; } if (v->tag == 2) { *f = v->f; return 1; } return 0; }
+static int bytes_cmp(const u8 *a, u64 an, const u8 *b, u64 bn) { u64 n = an < bn ? an : bn; for (u64 i = 0; i < n; i++) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1; return an < bn ? -1 : an > bn ? 1 : 0; }
+/* An operator (OPS order: == != < <= > >= + - * / %) on values of run-time kind, as the interpreter's binop. */
+static int h_binop(Ctx *c, int op, const Val *l, const Val *r, Val *out) {
+    Mito *m = M_(c);
+    if (op <= 1) {
+        int eq; double a, b;
+        if (l->tag == 0 && r->tag == 0) eq = 1;
+        else if (l->tag == 0 || r->tag == 0) eq = 0;
+        else if (l->tag == 4 && r->tag == 4) eq = b_eq(t_ptr(m, (T){ l->a, l->b }), l->b, t_ptr(m, (T){ r->a, r->b }), r->b);
+        else if (l->tag == 3 && r->tag == 3) eq = l->i == r->i;
+        else if (l->tag == 5 && r->tag == 5) eq = l->a == r->a && l->b == r->b;
+        else if (num(l, &a) && num(r, &b)) eq = a == b;
+        else return fail(m, 500, "cannot compare these values");
+        *out = v_bool(eq == (op == 0)); return 0;
+    }
+    if (l->tag == 1 && r->tag == 1) {
+        i64 a = l->i, b = r->i;
+        switch (op) {
+            case 2: *out = v_bool(a < b); return 0; case 3: *out = v_bool(a <= b); return 0; case 4: *out = v_bool(a > b); return 0; case 5: *out = v_bool(a >= b); return 0;
+            case 6: if ((b > 0 && a > I64MAX - b) || (b < 0 && a < I64MIN - b)) return fail(m, 500, "integer overflow"); *out = v_int(a + b); return 0;
+            case 7: if ((b < 0 && a > I64MAX + b) || (b > 0 && a < I64MIN + b)) return fail(m, 500, "integer overflow"); *out = v_int(a - b); return 0;
+            case 8: { if (a > 0 ? (b > 0 ? a > I64MAX / b : b < I64MIN / a) : (b > 0 ? a < I64MIN / b : (a != 0 && b < I64MAX / a))) return fail(m, 500, "integer overflow"); *out = v_int(a * b); return 0; }
+            case 9: if (b == 0) return fail(m, 500, "division by zero"); if (a == I64MIN && b == -1) return fail(m, 500, "integer overflow"); *out = v_int(a / b); return 0;
+            case 10: if (b == 0) return fail(m, 500, "division by zero"); if (a == I64MIN && b == -1) return fail(m, 500, "integer overflow"); *out = v_int(a % b); return 0;
+        }
+    }
+    if (op == 6 && l->tag == 4) { u32 start = m->text.len; if (show(m, l) || show(m, r)) return -1; *out = v_str(t_since(m, start)); return 0; }
+    double a, b;
+    if (num(l, &a) && num(r, &b)) {
+        switch (op) {
+            case 6: *out = v_flt(a + b); return 0; case 7: *out = v_flt(a - b); return 0; case 8: *out = v_flt(a * b); return 0; case 9: *out = v_flt(a / b); return 0;
+            case 2: *out = v_bool(a < b); return 0; case 3: *out = v_bool(a <= b); return 0; case 4: *out = v_bool(a > b); return 0; case 5: *out = v_bool(a >= b); return 0;
+            default: return fail(m, 500, "bad operator");
+        }
+    }
+    if (l->tag == 4 && r->tag == 4) {
+        int k = bytes_cmp(t_ptr(m, (T){ l->a, l->b }), l->b, t_ptr(m, (T){ r->a, r->b }), r->b);
+        switch (op) { case 2: *out = v_bool(k < 0); return 0; case 3: *out = v_bool(k <= 0); return 0; case 4: *out = v_bool(k > 0); return 0; case 5: *out = v_bool(k >= 0); return 0; default: return fail(m, 500, "bad operator"); }
+    }
+    return fail(m, 500, "operator does not fit these values");
+}
+static int h_truthy(Ctx *c, const Val *v, int *out) { if (v->tag == 3) { *out = v->i != 0; return 0; } if (v->tag == 0) { *out = 0; return 0; } return fail(M_(c), 500, "condition is not a boolean"); }
+static int h_store(Ctx *c, u32 cid, u32 idx, u32 ci, const Val *v) { return store_col(M_(c), cid, idx, ci, -1, v); }
+static int h_store_elem(Ctx *c, u32 cid, u32 idx, u32 ci, i64 k, const Val *v) { return store_col(M_(c), cid, idx, ci, k, v); }
+/* A plain value at `off`: code 1..11 a scalar, 20 a string<cap>, 30 a reference to top-level pool `cap`. */
+static int h_store_plain(Ctx *c, u32 off, u32 code, u32 cap, const Val *v) {
+    Mito *m = M_(c);
+    if (code == 30) {
+        if (v->tag == 0) { wr(&m->mem, off, 8, 0); return 0; }
+        if (v->tag == 5 && v->a == cap) { wr(&m->mem, off, 4, (u64)v->b + 1); wr(&m->mem, off + 4, 4, gen_of(&m->mem, v->a, v->b)); return 0; }
+        return fail(m, 500, "this field holds a reference to a different pool");
+    }
+    if (v->tag == 4) { if (code != 20) return bad_type(m); return store_bytes_at(m, off, off + 4, cap, t_ptr(m, (T){ v->a, v->b }), v->b); }
+    if (v->tag != 1 && v->tag != 2 && v->tag != 3) return fail(m, 500, "cannot store this value in state");
+    if (code == 20) { err(m, E_BAD, 400); a_str(&m->emsg, "expected a string"); return -1; }
+    return store_scalar(m, off, code, v);
+}
+static int h_alloc(Ctx *c, u32 cid, u32 inst, int try_, u32 *out) {
+    Mito *m = M_(c);
+    if (try_ && is_full(&m->mem, cid, inst)) { *out = 0xFFFFFFFFu; return 0; }
+    u64 idx = push_item(&m->mem, cid, inst);
+    if (idx == ~0ULL) {
+        const MitoColl *k = coll(&m->mem, cid);
+        err(m, E_FULL, 503); a_str(&m->emsg, k->name); a_str(&m->emsg, " is full ("); a_u64(&m->emsg, count(&m->mem, cid, inst)); a_str(&m->emsg, " of "); a_u64(&m->emsg, k->cap); a_str(&m->emsg, ")");
+        return -1;
+    }
+    *out = (u32)idx; return 0;
+}
+static int add_free(Mito *m, u32 cid, u32 idx) {
+    u32 *f = (u32 *)m->frees.p;
+    for (u64 i = 0; i < m->frees.len; i += 2) if (f[i] == cid && f[i + 1] == idx) return 0;
+    if (!grow_to(&m->frees, (m->frees.len + 2) * 4)) return fail(m, 507, "too many frees in one request");
+    f = (u32 *)m->frees.p; f[m->frees.len] = cid; f[m->frees.len + 1] = idx; m->frees.len += 2; return 0;
+}
+static int h_free(Ctx *c, u32 cid, u32 idx) {
+    Mito *m = M_(c);
+    if (coll(&m->mem, cid)->list) return fail(m, 500, "list items are not freed; lists drop their oldest or pop their newest");
+    return add_free(m, cid, idx);
+}
+static int h_free_val(Ctx *c, const Val *v) {
+    Mito *m = M_(c);
+    if (v->tag == 0) return 0;
+    if (v->tag != 5) return fail(m, 500, "free needs an item");
+    return h_free(c, v->a, v->b);
+}
+static int h_fwd_begin(Ctx *c, const char *p, u32 n) { (void)p; (void)n; return fail(M_(c), 500, "forward needs a system of workers"); }
+static int h_fwd_put(Ctx *c, const char *p, u32 n, const Val *v) { (void)p; (void)n; (void)v; return fail(M_(c), 500, "forward needs a system of workers"); }
+static int h_forward(Ctx *c, const char *p, u32 n, i64 key) { (void)p; (void)n; (void)key; return fail(M_(c), 500, "forward needs a system of workers"); }
+static int h_crash(Ctx *c) { Mito *m = M_(c); m->crashed = 1; return fail(m, 500, "worker failed and was restarted"); }
+static int h_elem(Ctx *c, i64 k, u32 n) {
+    Mito *m = M_(c);
+    if (k < 0) return not_live(m, "index ", k, " is negative");
+    if (k >= (i64)n) { err(m, E_BAD, 400); a_str(&m->emsg, "index "); a_i64(&m->emsg, k); a_str(&m->emsg, " out of range (fixed size "); a_u64(&m->emsg, n); a_str(&m->emsg, ")"); return -1; }
+    return 0;
+}
+/* Field `name` of an item held as a value (only top-level struct fields of items reach here at run time). */
+static int h_field_val(Ctx *c, const Val *base, const char *p, u32 n, Val *out) {
+    Mito *m = M_(c);
+    if (base->tag == 0) return err(m, E_DEAD, 404);
+    if (base->tag != 5) { err(m, E_FAIL, 500); a_str(&m->emsg, "`."); a_put(&m->emsg, p, n); a_str(&m->emsg, "` needs an item or a state struct"); return -1; }
+    u32 cid = base->a, idx = base->b;
+    i64 ci = col_by_path(m, cid, (const u8 *)p, n);
+    if (ci < 0) {
+        if (child_by_path(m, cid, (const u8 *)p, n) >= 0 || is_prefix(m, cid, (const u8 *)p, n)) return fail(m, 500, "a collection, struct or array field of an item held as a value cannot be read here; name the item's collection");
+        err(m, E_BAD, 400); a_str(&m->emsg, "no field `"); a_put(&m->emsg, p, n); a_str(&m->emsg, "`"); return -1;
+    }
+    const MitoCol *col = &coll(&m->mem, cid)->cols[ci];
+    if (col->kind == 1) return fail(m, 500, "a collection, struct or array field of an item held as a value cannot be read here; name the item's collection");
+    if (col->kind == 2) { T t; if (col_txt(m, cid, idx, (u32)ci, &t)) return -1; *out = v_str(t); return 0; }
+    if (col->kind == 4) {
+        u64 a = caddr(m, cid, idx, (u32)ci); u32 s1 = (u32)rd(&m->mem, a, 4), g = (u32)rd(&m->mem, a + 4, 4); u64 k;
+        if (!s1) { *out = v_null(); return 0; }
+        if (!deref_quiet(m, col->target, s1 - 1, g, &k)) return err(m, E_DEAD, 404);
+        *out = v_item(col->target, (u32)k); return 0;
+    }
+    *out = scalar_val(m, caddr(m, cid, idx, (u32)ci), col->scalar); return 0;
+}
+static int h_store_field(Ctx *c, const Val *base, const char *p, u32 n, const Val *v) {
+    Mito *m = M_(c);
+    if (base->tag != 5) return fail(m, 500, "assignment target is not an item or a state struct");
+    i64 ci = col_by_path(m, base->a, (const u8 *)p, n);
+    if (ci < 0 && (is_prefix(m, base->a, (const u8 *)p, n) || child_by_path(m, base->a, (const u8 *)p, n) >= 0)) { /* a struct or collection: the interpreter's store refuses it */
+        err(m, E_BAD, 400); a_str(&m->emsg, v->tag == 4 ? "wrong type for this field" : "not a value"); return -1;
+    }
+    if (ci < 0) { err(m, E_BAD, 400); a_str(&m->emsg, "no field `"); a_put(&m->emsg, p, n); a_str(&m->emsg, "`"); return -1; }
+    return store_col(m, base->a, base->b, (u32)ci, -1, v);
+}
+static int h_was_dead(Ctx *c) { Mito *m = M_(c); if (m->ekind == E_DEAD || m->ekind == E_NOTLIVE || m->ekind == E_STALE) { m->ekind = E_NONE; return 1; } return 0; }
+
+/* ---- loops that collect their items first ---- */
+typedef struct { double key; u32 idx, pad; } Sel;
+static Sel *sel_at(Mito *m, u64 i) { return (Sel *)(m->sel.p + i * sizeof(Sel)); }
+static int h_sel_mark(Ctx *c, u32 *out) { *out = (u32)M_(c)->sel.len; return 0; }
+static int h_sel_add(Ctx *c, double key, u32 idx) {
+    Mito *m = M_(c);
+    if (!grow_to(&m->sel, (m->sel.len + 1) * sizeof(Sel))) return fail(m, 507, "a loop collected too many items");
+    Sel s = { key, idx, 0 }; *sel_at(m, m->sel.len) = s; m->sel.len++; return 0;
+}
+/* the interpreter's order: a < b, equal when neither is (NaN keys compare equal to everything) */
+static int sel_before(const Sel *a, const Sel *b, int desc) { return desc ? b->key < a->key : a->key < b->key; }
+static int h_sel_sort(Ctx *c, u32 h, int order, int desc, i64 limit, u32 *out) {
+    Mito *m = M_(c); u64 n = m->sel.len - h;
+    if (order && n > 1) { /* a stable merge sort through the free space after the items */
+        if (!grow_to(&m->sel, (m->sel.len + n) * sizeof(Sel))) return fail(m, 507, "a loop collected too many items");
+        Sel *a = sel_at(m, h), *t = sel_at(m, m->sel.len);
+        for (u64 w = 1; w < n; w *= 2) {
+            for (u64 lo = 0; lo < n; lo += 2 * w) {
+                u64 mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n, i = lo, j = mid, k = lo;
+                while (i < mid && j < hi) t[k++] = sel_before(&a[j], &a[i], desc) ? a[j++] : a[i++];
+                while (i < mid) t[k++] = a[i++];
+                while (j < hi) t[k++] = a[j++];
+            }
+            memcpy(a, t, n * sizeof(Sel));
+        }
+    }
+    if (limit >= 0 && n > (u64)limit) { m->sel.len = h + (u64)limit; n = (u64)limit; }
+    *out = (u32)n; return 0;
+}
+static int h_sel_get(Ctx *c, u32 h, u32 k, u32 *out) { *out = sel_at(M_(c), (u64)h + k)->idx; return 0; }
+static int h_sel_end(Ctx *c, u32 h) { M_(c)->sel.len = h; return 0; }
+
+/* ---- builtins (cgen BUILTINS order) ---- */
+static int arg_txt(Mito *m, const Val *a, u32 n, u32 i, T *out) { if (i >= n || a[i].tag != 4) return fail(m, 500, "expected a string argument"); out->off = a[i].a; out->len = a[i].b; return 0; }
+static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
+    Mito *m = M_(c); T k;
+    Val a0 = n > 0 ? a[0] : v_null();
+    switch (code) {
+        case 0: /* body */ if (arg_txt(m, a, n, 0, &k)) return -1;
+            for (u32 i = 0; i < m->njson; i++) if (b_eq(t_ptr(m, m->json[i].k), m->json[i].k.len, t_ptr(m, k), k.len)) { *out = m->json[i].v; return 0; }
+            *out = v_null(); return 0;
+        case 1: { /* param */ if (arg_txt(m, a, n, 0, &k)) return -1;
+            const MitoRoute *rt = &mito_prog.routes[m->ei];
+            for (u32 s = 0; s < rt->nsegs; s++) if (rt->segs[s].param && c_eq(rt->segs[s].text, t_ptr(m, k), k.len)) {
+                for (u32 i = 0; i < m->nparams; i++) if (m->params[i].seg == s) { *out = v_str(m->params[i].t); return 0; }
+                break;
+            }
+            *out = v_null(); return 0; }
+        case 2: /* query */ if (arg_txt(m, a, n, 0, &k)) return -1;
+            for (u32 i = 0; i < m->nquery; i++) if (b_eq(t_ptr(m, m->query[i].k), m->query[i].k.len, t_ptr(m, k), k.len)) { *out = v_str(m->query[i].v); return 0; }
+            *out = v_null(); return 0;
+        case 3: { /* header */ if (arg_txt(m, a, n, 0, &k)) return -1;
+            const u8 *v; u64 vn; T t;
+            if (!header(m, t_ptr(m, k), k.len, &v, &vn)) { *out = v_null(); return 0; }
+            if (t_push(m, v, vn, &t)) return -1;
+            *out = v_str(t); return 0; }
+        case 4: /* fwd */ if (arg_txt(m, a, n, 0, &k)) return -1; *out = v_null(); return 0;
+        case 5: /* int */
+            if (a0.tag == 1) { *out = a0; return 0; }
+            if (a0.tag == 2) { double f = a0.f; i64 i = f != f ? 0 : f >= 9223372036854775807.0 ? I64MAX : f <= -9223372036854775808.0 ? I64MIN : (i64)f; *out = v_int(i); return 0; }
+            if (a0.tag == 4) {
+                const u8 *s = t_ptr(m, (T){ a0.a, a0.b }); u64 b = 0, e = a0.b; i64 i;
+                while (b < e && (s[b] == ' ' || (s[b] >= 9 && s[b] <= 13))) b++;
+                while (e > b && (s[e - 1] == ' ' || (s[e - 1] >= 9 && s[e - 1] <= 13))) e--;
+                if (parse_i64(s + b, e - b, &i)) { *out = v_int(i); return 0; }
+                err(m, E_FAIL, 400); a_str(&m->emsg, "`"); a_put(&m->emsg, s, a0.b); a_str(&m->emsg, "` is not a number"); return -1;
+            }
+            if (a0.tag == 0) return fail(m, 400, "missing number");
+            return fail(m, 500, "int(x)");
+        case 6: { /* str */ u32 start = m->text.len; if (show(m, &a0)) return -1; *out = v_str(t_since(m, start)); return 0; }
+        case 7: /* len */ if (a0.tag == 4) { *out = v_int(a0.b); return 0; } if (a0.tag == 0) { *out = v_int(0); return 0; } return fail(m, 500, "len(text)");
+        case 8: /* now */ *out = v_int(m->now); return 0;
+        case 9: { /* random */ u64 x = m->rng; if (!x) x = os_random(); else { x ^= x << 13; x ^= x >> 7; x ^= x << 17; m->rng = x; } *out = v_int((i64)x); return 0; }
+        case 10: { /* token */
+            if (a0.tag != 5) return fail(m, 500, "token(item)");
+            i64 ci = col_by_path(m, a0.a, (const u8 *)"secret", 6);
+            if (ci < 0) return fail(m, 500, "token needs a `secret` field");
+            const MitoCol *col = &coll(&m->mem, a0.a)->cols[ci];
+            Val sec = col->kind == 0 ? scalar_val(m, caddr(m, a0.a, a0.b, (u32)ci), col->scalar) : v_null();
+            if (sec.tag != 1) return fail(m, 500, "`secret` must be an integer");
+            u32 start = m->text.len;
+            if (!(a_u64(&m->text, a0.b) && a_put(&m->text, ".", 1) && a_u64(&m->text, gen_of(&m->mem, a0.a, a0.b)) && a_put(&m->text, ".", 1) && a_hex(&m->text, (u64)sec.i))) return text_full(m);
+            *out = v_str(t_since(m, start)); return 0; }
+        case 11: { /* stat */ if (arg_txt(m, a, n, 0, &k)) return -1;
+            const u8 *s = t_ptr(m, k); u64 v;
+            if (c_eq("committed_kb", s, k.len)) v = m->mem.cpages * PAGE / 1024;
+            else if (c_eq("live_kb", s, k.len)) v = live_total(&m->mem) / 1024;
+            else if (c_eq("reserved_kb", s, k.len)) v = m->mem.reserved / 1024;
+            else return fail(m, 500, "unknown stat");
+            *out = v_int((i64)v); return 0; }
+        case 12: /* worker_index */ *out = v_int(0); return 0;
+        case 13: /* worker_count */ if (n == 0) { *out = v_int(1); return 0; } if (a0.tag == 4) return fail(m, 500, "no such worker kind"); return fail(m, 500, "worker_count(\"kind\")");
+        case 14: case 15: { /* min, max */
+            Val b = n > 1 ? a[1] : v_null();
+            if (a0.tag != 1 || b.tag != 1) return fail(m, 500, "min/max need integers");
+            *out = v_int(code == 14 ? (a0.i < b.i ? a0.i : b.i) : (a0.i > b.i ? a0.i : b.i)); return 0; }
+        case 16: /* slot */ if (a0.tag != 5) return fail(m, 500, "slot(item)"); *out = v_int((i64)(a0.b % coll(&m->mem, a0.a)->cap)); return 0;
+    }
+    return fail(m, 500, "unknown builtin code");
+}
+
+static const H mito_h = {
+    h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
+    h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_sort, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead,
+};
+
+/* ---------------------------------------------------------------- the interface: mito_* */
+/* Start the program: reserve its layout (refusing if over `budget` bytes), commit plain values and top-level headers.
+   `seed` 0 takes random numbers from the OS. Returns 0 if over budget or out of address space. */
+Mito *mito_start(u64 budget, u64 seed) {
+    const MitoProg *pg = &mito_prog;
+    if (pg->total > budget) return 0;
+    Mito *m = (Mito *)VirtualAlloc(0, sizeof(Mito), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!m) return 0;
+    Mem *mem = &m->mem;
+    mem->prog = pg;
+    mem->reserved = up(pg->total ? pg->total : 1, PAGE);
+    mem->base = (u8 *)os_reserve(mem->reserved);
+    mem->npages = mem->reserved / PAGE;
+    u64 small = up(mem->npages * 2 + (pg->ncolls + 1) * 16, PAGE);
+    u8 *s = (u8 *)VirtualAlloc(0, small, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!mem->base || !s) return 0;
+    mem->committed = s; mem->livepg = s + mem->npages;
+    mem->shrinks = (u64 *)(s + up(mem->npages * 2, 8));
+    m->pr.stuck = mem->shrinks + pg->ncolls + 1;
+    if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&mem->je, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 2 * sizeof(Sel))) return 0;
+    m->areas = (u8 *)VirtualAlloc(0, TEXT_CAP + RESPONSE_CAP, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!m->areas) return 0;
+    m->text.p = m->areas; m->text.cap = TEXT_CAP; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
+    m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf;
+    m->rng = seed;
+    ensure(mem, 0, pg->plain_end);
+    for (u32 c = 0; c < pg->ncolls; c++) { const MitoColl *k = &pg->colls[c]; if (k->parent < 0) ensure(mem, k->hdr, k->hdr + hdr_fields(k) * 4); }
+    return m;
+}
+void mito_stop(Mito *m) { if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.jb.p); os_release(m->mem.je.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }
+void mito_set_clock(Mito *m, i64 ms, int fixed) { m->clock = ms; m->fixed_clock = fixed; }
+void mito_set_marks(Mito *m, u64 soft, u64 hard) {
+    m->pr.on = 1; m->pr.soft = soft; m->pr.hard = hard; m->pr.refusing = 0; m->pr.trims = m->pr.full_trims = m->pr.freed = 0;
+    for (u32 c = 0; c < m->mem.prog->ncolls; c++) m->pr.stuck[c] = ~0ULL;
+}
+static void out_err(Mito *m, const u8 *msg, u64 n) { m->out.len = 0; a_str(&m->out, "{\"error\":"); a_json_str(&m->out, msg, n); a_str(&m->out, "}"); }
+static void out_err_c(Mito *m, const char *msg) { out_err(m, (const u8 *)msg, c_len(msg)); }
+static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
+    u64 n = 0; for (u64 i = 0; i < pn; ) { while (i < pn && path[i] == '/') i++; if (i < pn) n++; while (i < pn && path[i] != '/') i++; }
+    for (u32 e = 0; e < mito_prog.neps; e++) {
+        const MitoRoute *r = &mito_prog.routes[e];
+        if (!c_eq(r->method, method, mn) || r->nsegs != n) continue;
+        u64 i = 0; u32 s = 0; int ok = 1;
+        while (ok && s < r->nsegs) {
+            while (i < pn && path[i] == '/') i++;
+            u64 b = i; while (i < pn && path[i] != '/') i++;
+            if (!r->segs[s].param && !c_eq(r->segs[s].text, path + b, i - b)) ok = 0;
+            s++;
+        }
+        if (ok) return e;
+    }
+    return 0xFFFFFFFFu;
+}
+/* Handle one request. Headers are "Name:value\n" lines. Returns the status; the body is in the response area. */
+int mito_handle(Mito *m, const char *method, u32 mn, const char *target, u32 tn, const char *hdrs, u32 hn, const char *body, u32 bn) {
+    m->out.len = 0; m->text.len = 0; m->ekind = E_NONE;
+    const u8 *t = (const u8 *)target;
+    u64 q = 0; while (q < tn && t[q] != '?') q++;
+    u32 ei = route(m, (const u8 *)method, mn, t, q);
+    if (ei == 0xFFFFFFFFu) { out_err_c(m, "no such endpoint"); return 404; }
+    if (m->pr.on && m->pr.refusing && !c_eq("GET", (const u8 *)method, mn) && !c_eq("DELETE", (const u8 *)method, mn)) { out_err_c(m, "memory pressure: try again later"); return 503; }
+    m->ei = ei; m->hdrs = (const u8 *)hdrs; m->hlen = hn;
+    const MitoRoute *r = &mito_prog.routes[ei];
+    m->nparams = 0; m->nquery = 0; m->njson = 0;
+    int fits = 1;
+    { u64 i = 0; u32 s = 0;
+      while (s < r->nsegs) {
+          while (i < q && t[i] == '/') i++;
+          u64 b = i; while (i < q && t[i] != '/') i++;
+          if (r->segs[s].param) { T x; if (m->nparams < MAX_PARAMS && push_decoded(m, t + b, i - b, 0, &x)) { m->params[m->nparams].seg = s; m->params[m->nparams].t = x; m->nparams++; } else fits = 0; }
+          s++;
+      } }
+    for (u64 i = q + 1; i < tn; ) {
+        u64 b = i; while (i < tn && t[i] != '&') i++;
+        u64 e = i; i++;
+        if (e == b) continue;
+        u64 eq = b; while (eq < e && t[eq] != '=') eq++;
+        T k, v;
+        if (m->nquery < MAX_QUERY && push_decoded(m, t + b, eq - b, 1, &k) && push_decoded(m, t + (eq < e ? eq + 1 : e), eq < e ? e - eq - 1 : 0, 1, &v)) { m->query[m->nquery].k = k; m->query[m->nquery].v = v; m->nquery++; }
+        else fits = 0;
+    }
+    if (fits) {
+        int pr = parse_body(m, (const u8 *)body, bn);
+        if (pr == -2) fits = 0;
+        else if (pr) { out_err(m, m->ebuf, m->emsg.len); return 400; }
+    }
+    if (!fits) { out_err_c(m, "request too large for the request text area"); return 413; }
+    m->now = m->fixed_clock ? m->clock : os_now_ms();
+    begin(&m->mem);
+    m->frees.len = 0; m->sel.len = 0;
+    Ctx ctx = { m->mem.base, m, &mito_h };
+    int res = mito_eps[ei](&ctx);
+    int code, ok;
+    if (res == 0) { m->out.len = 0; code = 204; ok = 1; }
+    else if (res > 0) { code = res; ok = 1; }
+    else {
+        ok = 0;
+        switch (m->ekind) {
+            case E_FULL: { u8 b[1100]; Area x = { b, sizeof b, 0 }; a_str(&x, "capacity: "); a_put(&x, m->ebuf, m->emsg.len); out_err(m, b, x.len); code = 503; break; }
+            case E_DEAD: out_err_c(m, "reference is not live"); code = 404; break;
+            case E_NONE: out_err_c(m, "compiled code failed without a reason"); code = 500; break;
+            default: out_err(m, m->ebuf, m->emsg.len); code = m->ecode; break;
+        }
+    }
+    if (ok) { u32 *f = (u32 *)m->frees.p; for (u64 i = 0; i < m->frees.len; i += 2) free_item(&m->mem, f[i], f[i + 1]); commit_changes(&m->mem); }
+    else rollback(&m->mem);
+    if (m->pr.on) relieve(&m->mem, &m->pr);
+    return code;
+}
+const char *mito_response(Mito *m, u32 *len) { *len = m->out.len; return (const char *)m->out.p; }
+/* The same lines the cases record: `state <name> <live bytes>` per collection, then the memory totals. */
+u32 mito_state(Mito *m, char *buf, u32 cap) {
+    Area a = { (u8 *)buf, cap, 0 };
+    a_str(&a, "state <plain values> "); a_u64(&a, m->mem.prog->plain_end); a_str(&a, "\n");
+    for (u32 c = 0; c < m->mem.prog->ncolls; c++) { a_str(&a, "state "); a_str(&a, m->mem.prog->colls[c].name); a_str(&a, " "); a_u64(&a, coll_live(&m->mem, c)); a_str(&a, "\n"); }
+    a_str(&a, "memory reserved="); a_u64(&a, m->mem.reserved); a_str(&a, " committed="); a_u64(&a, m->mem.cpages * PAGE); a_str(&a, " live="); a_u64(&a, live_total(&m->mem)); a_str(&a, "\n");
+    return a.len;
+}
+u32 mito_stats(Mito *m, char *buf, u32 cap) {
+    Area a = { (u8 *)buf, cap, 0 };
+    if (!m->pr.on) a_str(&a, "stats no marks");
+    else { a_str(&a, "stats refusing="); a_str(&a, m->pr.refusing ? "true" : "false"); a_str(&a, " full_trims="); a_u64(&a, m->pr.full_trims); }
+    return a.len;
+}

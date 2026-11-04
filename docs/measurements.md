@@ -506,3 +506,21 @@ Floats are now written as JavaScript writes numbers (Ben's choice): the fewest d
 positional from 1e-6 up to 1e21 and with an exponent outside that (`1e+21`, `1e-7`); `0` for both zeros; in text
 `Infinity` and `NaN`, in JSON `null`. Before, Rust's form never used an exponent (1e300 printed 301 digits). The C runtime
 reproduces this with a shortest-digits formatter of its own.
+
+## Round 10 (2026-11-04): the C runtime
+`runtime/mito.c` (about 900 lines) runs a compiled program without Rust: the reservation with pages committed where
+bytes are live, the write journal and rollback, lists and pools with live bits and generations, live ranges, trims and
+the pressure policy, the request epoch (text and response areas), strict JSON bodies, routing and percent-decoding, every
+helper the generated code calls, and the `mito_*` interface. It uses no heap: every buffer is a reservation made at start
+and committed as it fills. Floats are written with an exact shortest-digits algorithm (Burger and Dybvig, with small
+fixed-size big integers) and parsed exactly (the nearest double, ties to even); a test checks both against Rust on
+300,000 random values (bit patterns, scaled decimals, subnormals), two texts each. The one difference found: an exact
+tie between two 17-digit candidates (201409170638417.125), which Rust rounds up; the C code now does too.
+
+The generator emits the program's layout and routes as C tables, and `emit-c` writes the whole program as one file
+(1,949 lines for the chat example, compiling on its own). In the cases the C runtime is a third backend: all 14
+single-program cases match their records on it from its first run. Worker systems are not ported yet.
+
+Speed, compiled by TinyCC (the runtime too, so almost unoptimised), chat GET 50 of 1000 messages / POST message:
+Rust runtime 4.1 / 0.4 us, C runtime 10.4 / 0.8 us. The clang -O2 build is expected to close this; it waits on the LLVM
+install.

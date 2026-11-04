@@ -1,0 +1,238 @@
+
+/* ---- the HTTP front end and main (runtime/http.c) ----
+   Serves one program (HTTP_SINGLE) or a system of workers (HTTP_SYSTEM) on 127.0.0.1, one request per connection,
+   exactly as the Rust front ends do (src/serve.rs `serve`, src/system.rs `serve`): headers up to 64 KB, a body of
+   Content-Length bytes (at most 1 MB), invalid UTF-8 in the request read as U+FFFD, the same response head.
+   Winsock is loaded at run time. Flags: --port N, --conns N (a system's connection threads), --budget MB, --soft MB,
+   --hard MB (one program's memory), and for tests --seed N and --clock MS. */
+
+void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
+void *LoadLibraryA(const char *name);
+void *GetProcAddress(void *m, const char *name);
+void *CreateThread(void *attr, u64 stack, u32 (*fn)(void *), void *arg, u32 flags, u32 *id);
+u32 WaitForSingleObject(void *h, u32 ms);
+int printf(const char *f, ...);
+int fflush(void *f);
+void *memcpy(void *d, const void *s, u64 n);
+
+#ifdef HTTP_SINGLE
+void *mito_start(u64 budget, u64 seed);
+void mito_set_clock(void *m, i64 ms, int fixed);
+void mito_set_marks(void *m, u64 soft, u64 hard);
+int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
+const char *mito_response(void *m, u32 *len);
+#else
+void *mito_system_start(u64 seed, int seeded);
+void mito_system_set_clock(void *s, i64 ms, int fixed);
+int mito_system_request(void *s, const char *m, u32 mn, const char *t, u32 tn, const MitoPair *h, u32 nh, const char *body, u32 bn, u32 timeout_ms, char *out, u32 cap, u32 *outlen);
+#endif
+
+/* sockets */
+static void *(*ws_socket)(int, int, int);
+static int (*ws_startup)(unsigned short, void *), (*ws_bind)(void *, const void *, int), (*ws_listen)(void *, int), (*ws_close)(void *);
+static void *(*ws_accept)(void *, void *, int *);
+static int (*ws_recv)(void *, char *, int, int), (*ws_send)(void *, const char *, int, int), (*ws_opt)(void *, int, int, const char *, int);
+#define BAD_SOCKET ((void *)~0ULL)
+static int ws_load(void) {
+    void *w = LoadLibraryA("ws2_32.dll");
+    if (!w) return 0;
+    ws_startup = (int (*)(unsigned short, void *))GetProcAddress(w, "WSAStartup"); ws_socket = (void *(*)(int, int, int))GetProcAddress(w, "socket");
+    ws_bind = (int (*)(void *, const void *, int))GetProcAddress(w, "bind"); ws_listen = (int (*)(void *, int))GetProcAddress(w, "listen");
+    ws_accept = (void *(*)(void *, void *, int *))GetProcAddress(w, "accept"); ws_recv = (int (*)(void *, char *, int, int))GetProcAddress(w, "recv");
+    ws_send = (int (*)(void *, const char *, int, int))GetProcAddress(w, "send"); ws_close = (int (*)(void *))GetProcAddress(w, "closesocket");
+    ws_opt = (int (*)(void *, int, int, const char *, int))GetProcAddress(w, "setsockopt");
+    if (!(ws_startup && ws_socket && ws_bind && ws_listen && ws_accept && ws_recv && ws_send && ws_close && ws_opt)) return 0;
+    u8 wsa[512]; return ws_startup(0x0202, wsa) == 0;
+}
+
+static const char *reason(int code) {
+    switch (code) {
+        case 200: return "OK"; case 201: return "Created"; case 204: return "No Content"; case 400: return "Bad Request"; case 401: return "Unauthorized";
+        case 403: return "Forbidden"; case 404: return "Not Found"; case 409: return "Conflict"; case 413: return "Payload Too Large"; case 429: return "Too Many Requests";
+        case 500: return "Internal Server Error"; case 503: return "Service Unavailable"; case 504: return "Gateway Timeout"; case 507: return "Insufficient Storage";
+    }
+    return "Error";
+}
+
+/* text: bytes to UTF-8 with each maximal invalid sequence as U+FFFD (Rust's from_utf8_lossy) */
+typedef struct { u8 *p; u32 cap, len; } Buf;
+static void b_put(Buf *b, const void *s, u32 n) { if (b->len + (u64)n > b->cap) n = b->cap - b->len; memcpy(b->p + b->len, s, n); b->len += n; }
+static void b_lossy(Buf *o, const u8 *s, u32 n) {
+    for (u32 i = 0; i < n;) {
+        u8 c = s[i]; u32 need; u8 lo = 0x80, hi = 0xBF;
+        if (c < 0x80) { b_put(o, s + i, 1); i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) need = 1; else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+        else { b_put(o, "\xEF\xBF\xBD", 3); i++; continue; }
+        u32 j = i + 1, got = 0;
+        while (got < need && j < n && s[j] >= (got == 0 ? lo : 0x80) && s[j] <= (got == 0 ? hi : 0xBF)) { j++; got++; }
+        if (got == need) b_put(o, s + i, j - i); else b_put(o, "\xEF\xBF\xBD", 3);
+        i = j;
+    }
+}
+static int utf8_valid(const u8 *s, u32 n) {
+    for (u32 i = 0; i < n;) {
+        u8 c = s[i]; u32 need; u8 lo = 0x80, hi = 0xBF;
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) need = 1; else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; } else return 0;
+        for (u32 k = 1; k <= need; k++) { if (i + k >= n) return 0; if (s[i + k] < (k == 1 ? lo : 0x80) || s[i + k] > (k == 1 ? hi : 0xBF)) return 0; }
+        i += need + 1;
+    }
+    return 1;
+}
+/* the length of the Unicode white space (Rust's char::is_whitespace) starting at s[i], or 0 */
+static u32 ws_at(const u8 *s, u32 n, u32 i) {
+    u8 c = s[i];
+    if (c == ' ' || (c >= 9 && c <= 13)) return 1;
+    if (c == 0xC2 && i + 1 < n && (s[i + 1] == 0x85 || s[i + 1] == 0xA0)) return 2;
+    if (c == 0xE1 && i + 2 < n && s[i + 1] == 0x9A && s[i + 2] == 0x80) return 3;
+    if (c == 0xE2 && i + 2 < n && s[i + 1] == 0x80 && (s[i + 2] <= 0x8A || s[i + 2] == 0xA8 || s[i + 2] == 0xA9 || s[i + 2] == 0xAF)) return 3;
+    if (c == 0xE2 && i + 2 < n && s[i + 1] == 0x81 && s[i + 2] == 0x9F) return 3;
+    if (c == 0xE3 && i + 2 < n && s[i + 1] == 0x80 && s[i + 2] == 0x80) return 3;
+    return 0;
+}
+/* trim white space at both ends of s[*a..*b] (UTF-8) */
+static void trim(const u8 *s, u32 *a, u32 *b) {
+    for (u32 k; *a < *b && (k = ws_at(s, *b, *a)); ) *a += k;
+    for (;;) {
+        u32 hit = 0;
+        for (u32 k = 1; k <= 3 && k <= *b - *a; k++) if (ws_at(s, *b, *b - k) == k) { hit = k; break; }
+        if (!hit) break;
+        *b -= hit;
+    }
+}
+
+typedef struct { void *app; void *listener; u8 *data, *head, *body, *out; MitoPair *pairs; } Conn;
+/* the head search stops past 64 KB (at most one more 4 KB read), the body read past Content-Length (at most 1 MB) */
+#define HEAD_MAX (64 * 1024 + 4096)
+#define DATA_CAP (HEAD_MAX + 4 + (1 << 20) + 4096)
+#define TEXT_CAP_ (3 * DATA_CAP)
+#define MAX_PAIRS (HEAD_MAX / 2 + 1)
+#define OUT_CAP (300 * 1024)
+
+static void send_all(void *c, const char *p, u32 n) { while (n) { int k = ws_send(c, p, (int)n, 0); if (k <= 0) return; p += k; n -= (u32)k; } }
+static void serve_one(Conn *x, void *c) {
+    u32 to = 5000; ws_opt(c, 0xffff, 0x1006, (const char *)&to, 4); /* SO_RCVTIMEO: 5 s */
+    u32 len = 0, he = 0xFFFFFFFFu, from = 0;
+    for (;;) {
+        for (u32 i = from; i + 4 <= len; i++) if (x->data[i] == '\r' && x->data[i + 1] == '\n' && x->data[i + 2] == '\r' && x->data[i + 3] == '\n') { he = i; break; }
+        if (he != 0xFFFFFFFFu) break;
+        if (len > 64 * 1024) break;
+        from = len >= 3 ? len - 3 : 0;
+        int k = ws_recv(c, (char *)x->data + len, 4096, 0);
+        if (k <= 0) break;
+        len += (u32)k;
+    }
+    if (he == 0xFFFFFFFFu) { const char *r = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; u32 n = 0; while (r[n]) n++; send_all(c, r, n); return; }
+    Buf head = { x->head, TEXT_CAP_, 0 };
+    b_lossy(&head, x->data, he);
+    /* lines (a trailing \r dropped), the request line split on spaces */
+    const u8 *h = head.p; u32 hn = head.len, ls = 0, le = 0;
+    while (le < hn && h[le] != '\n') le++;
+    u32 rle = le < hn && le > 0 && h[le - 1] == '\r' ? le - 1 : le; /* as Rust's lines(): \r goes only with a \n */
+    u32 m0 = 0, m1 = 0; while (m1 < rle && h[m1] != ' ') m1++;
+    u32 t0, t1;
+    if (m1 < rle) { t0 = m1 + 1; t1 = t0; while (t1 < rle && h[t1] != ' ') t1++; } else { t0 = t1 = 0; }
+    const char *method = (const char *)h + m0, *target = (const char *)h + t0; u32 mn = m1 - m0, tn = t1 - t0;
+    if (m1 >= rle) { target = "/"; tn = 1; }
+    u32 np = 0; u64 want = 0; int have_len = 0;
+    ls = le < hn ? le + 1 : hn;
+    while (ls < hn) {
+        u32 e = ls; while (e < hn && h[e] != '\n') e++;
+        u32 ee = e < hn && e > ls && h[e - 1] == '\r' ? e - 1 : e;
+        u32 col = ls; while (col < ee && h[col] != ':') col++;
+        if (col < ee && np < MAX_PAIRS) {
+            u32 ka = ls, kb = col, va = col + 1, vb = ee;
+            trim(h, &ka, &kb); trim(h, &va, &vb);
+            MitoPair *p = &x->pairs[np++]; p->k = (const char *)h + ka; p->kn = kb - ka; p->v = (const char *)h + va; p->vn = vb - va;
+            const char *cl = "content-length";
+            if (!have_len && p->kn == 14) {
+                u32 q = 0; for (; q < 14; q++) { char ch = p->k[q]; if (ch >= 'A' && ch <= 'Z') ch += 32; if (ch != cl[q]) break; }
+                if (q == 14) {
+                    have_len = 1; u64 v = 0; u32 i = 0; int ok = p->vn > 0;
+                    if (ok && p->v[0] == '+') { i = 1; ok = p->vn > 1; }
+                    for (; i < p->vn && ok; i++) { char ch = p->v[i]; if (ch < '0' || ch > '9' || v > (~0ULL - (u64)(ch - '0')) / 10) ok = 0; else v = v * 10 + (u64)(ch - '0'); }
+                    want = ok ? v : 0;
+                }
+            }
+        }
+        ls = e < hn ? e + 1 : hn;
+    }
+    if (want > (1 << 20)) want = 1 << 20;
+    while ((u64)len < he + 4 + want) { int k = ws_recv(c, (char *)x->data + len, 4096, 0); if (k <= 0) break; len += (u32)k; }
+    Buf body = { x->body, TEXT_CAP_, 0 };
+    u32 bs = he + 4 < len ? he + 4 : len;
+    b_lossy(&body, x->data + bs, len - bs);
+    int code; const char *resp; u32 rn;
+#ifdef HTTP_SINGLE
+    code = mito_handle(x->app, method, mn, target, tn, x->pairs, np, 0, 0, (const char *)body.p, body.len);
+    resp = mito_response(x->app, &rn);
+    if (!utf8_valid((const u8 *)resp, rn)) rn = 0; /* as the Rust server: a body that is not UTF-8 is sent empty */
+#else
+    code = mito_system_request(x->app, method, mn, target, tn, x->pairs, np, (const char *)body.p, body.len, 10000, (char *)x->out, OUT_CAP, &rn);
+    resp = (const char *)x->out;
+#endif
+    char hd[200]; u32 n = 0; const char *r = reason(code);
+    #define HPUT(s) do { const char *s_ = (s); while (*s_ && n < sizeof hd) hd[n++] = *s_++; } while (0)
+    char num[24]; int dn;
+    HPUT("HTTP/1.1 "); { u64 v = (u64)code; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
+    HPUT(" "); HPUT(r); HPUT("\r\nContent-Type: application/json\r\nContent-Length: ");
+    { u64 v = rn; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
+    HPUT("\r\nConnection: close\r\n\r\n");
+    send_all(c, hd, n);
+    send_all(c, resp, rn);
+    #undef HPUT
+}
+static Conn *conn_new(void *app, void *listener) {
+    Conn *x = (Conn *)VirtualAlloc(0, sizeof(Conn), 0x3000, 4);
+    if (!x) return 0;
+    x->app = app; x->listener = listener;
+    x->data = (u8 *)VirtualAlloc(0, DATA_CAP, 0x3000, 4); x->head = (u8 *)VirtualAlloc(0, TEXT_CAP_, 0x3000, 4); x->body = (u8 *)VirtualAlloc(0, TEXT_CAP_, 0x3000, 4);
+    x->out = (u8 *)VirtualAlloc(0, OUT_CAP, 0x3000, 4); x->pairs = (MitoPair *)VirtualAlloc(0, sizeof(MitoPair) * MAX_PAIRS, 0x3000, 4);
+    return x->data && x->head && x->body && x->out && x->pairs ? x : 0;
+}
+static u32 accept_loop(void *arg) {
+    Conn *x = (Conn *)arg;
+    for (;;) { void *c = ws_accept(x->listener, 0, 0); if (c == BAD_SOCKET) continue; serve_one(x, c); ws_close(c); }
+    return 0;
+}
+
+static int flag(int argc, char **argv, const char *name, u64 *out) {
+    for (int i = 1; i + 1 < argc; i++) {
+        const char *a = argv[i]; u32 k = 0; while (name[k] && a[k] == name[k]) k++;
+        if (!name[k] && !a[k]) { u64 v = 0; for (const char *p = argv[i + 1]; *p >= '0' && *p <= '9'; p++) v = v * 10 + (u64)(*p - '0'); *out = v; return 1; }
+    }
+    return 0;
+}
+int main(int argc, char **argv) {
+    u64 port = 8080, conns = 16, budget = 1024, soft = 0, hard = 0, seed = 0, clock = 0;
+    flag(argc, argv, "--port", &port); flag(argc, argv, "--conns", &conns); flag(argc, argv, "--budget", &budget);
+    int marks = flag(argc, argv, "--soft", &soft); if (!flag(argc, argv, "--hard", &hard)) hard = ~0ULL >> 21;
+    int seeded = flag(argc, argv, "--seed", &seed), clocked = flag(argc, argv, "--clock", &clock);
+    if (!ws_load()) { printf("error: could not load ws2_32.dll\n"); return 1; }
+    void *l = ws_socket(2, 1, 6); /* AF_INET, SOCK_STREAM, TCP */
+    if (l == BAD_SOCKET) { printf("error: no socket\n"); return 1; }
+    u8 addr[16] = { 2, 0, (u8)(port >> 8), (u8)port, 127, 0, 0, 1 };
+    if (ws_bind(l, addr, 16) != 0 || ws_listen(l, 128) != 0) { printf("error: cannot listen on port %u\n", (u32)port); return 1; }
+#ifdef HTTP_SINGLE
+    void *app = mito_start(budget << 20, seeded ? seed : 0);
+    if (!app) { printf("error: over budget (%u MB) or out of address space\n", (u32)budget); return 1; }
+    if (marks) mito_set_marks(app, soft << 20, hard << 20);
+    if (clocked) mito_set_clock(app, (i64)clock, 1);
+    printf("listening on http://127.0.0.1:%u (single-threaded; Ctrl-C to stop)\n", (u32)port); fflush(0);
+    Conn *x = conn_new(app, l);
+    if (!x) return 1;
+    accept_loop(x);
+#else
+    (void)marks; (void)budget;
+    void *app = mito_system_start(seed, seeded);
+    if (!app) { printf("error: the system did not start\n"); return 1; }
+    if (clocked) mito_system_set_clock(app, (i64)clock, 1);
+    printf("listening on http://127.0.0.1:%u (%u connection threads)\n", (u32)port, (u32)conns); fflush(0);
+    void *t[256]; u32 nt = conns > 256 ? 256 : (u32)conns;
+    for (u32 i = 0; i < nt; i++) { Conn *x = conn_new(app, l); if (!x) return 1; t[i] = CreateThread(0, 0, accept_loop, x, 0, 0); }
+    for (u32 i = 0; i < nt; i++) WaitForSingleObject(t[i], 0xFFFFFFFFu);
+#endif
+    return 0;
+}

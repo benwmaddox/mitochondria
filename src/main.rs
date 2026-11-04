@@ -1,7 +1,10 @@
 mod alloc_count;
+mod build;
 #[cfg(test)]
 mod cases;
 mod exp;
+#[cfg(test)]
+mod http_check;
 mod lang;
 mod modules;
 mod layout;
@@ -23,6 +26,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(|s| s.as_str()) == Some("exp") { return if args.get(1).map(|s| s.as_str()) == Some("json") { serve::json_floor() } else if args.get(1).map(|s| s.as_str()) == Some("pressure") { exp::pressure() } else if args.get(1).map(|s| s.as_str()) == Some("chat") { exp::chat_scan() } else if args.get(1).map(|s| s.as_str()) == Some("access") { exp::access_cost() } else if args.get(1).map(|s| s.as_str()) == Some("trim") { { exp::trim_cost(); exp::scoped_cost() } } else { exp::run() }; }
     if args.first().map(|s| s.as_str()) == Some("emit-c") { return emit_c(&args[1..]); }
+    if args.first().map(|s| s.as_str()) == Some("build") { return build_exe(&args[1..]); }
     if matches!(args.first().map(|s| s.as_str()), Some("system") | Some("bench-system")) {
         let file = std::path::Path::new(args.get(1).expect("system file"));
         let src = std::fs::read_to_string(file).expect("read system file");
@@ -130,6 +134,37 @@ fn emit_c(args: &[String]) {
         }
         _ => die("usage: emit-c <state.mito> <api> [-o file.c]  |  emit-c <file.system> [-o dir]".into()),
     }
+}
+
+/// `build <state.mito> <api> [-o app.exe] [--tcc]`, or `build <file.system> [-o app.exe] [--tcc]`: an executable serving
+/// HTTP. The executable takes --port, --conns (a system's connection threads), --budget/--soft/--hard MB (a program's
+/// memory), and for tests --seed and --clock.
+fn build_exe(args: &[String]) {
+    let die = |e: String| -> ! { eprintln!("error: {}", e); std::process::exit(1) };
+    let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1)).cloned();
+    let use_tcc = args.iter().any(|a| a == "--tcc");
+    let files: Vec<&String> = args.iter().enumerate().filter(|(i, a)| *a != "-o" && *a != "--tcc" && (*i == 0 || args[i - 1] != "-o")).map(|(_, a)| a).collect();
+    let read = |f: &str| std::fs::read_to_string(f).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
+    let stem = |f: &str| std::path::Path::new(f).file_stem().map_or("app".into(), |n| n.to_string_lossy().into_owned());
+    let (units, name) = match files.as_slice() {
+        [sys] if sys.ends_with(".system") => {
+            let file = std::path::Path::new(sys.as_str());
+            let spec = system::parse_spec(&read(sys), file.parent().unwrap_or(std::path::Path::new("."))).unwrap_or_else(|e| die(e));
+            (cgen::system_exe(&spec).unwrap_or_else(|e| die(e)), stem(sys))
+        }
+        [state, api] => {
+            let (s, text) = modules::expand(&read(state), &read(api)).unwrap_or_else(|e| die(e));
+            let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(e));
+            let src_name = std::path::Path::new(api.as_str()).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+            let mut a = lang::parse(&text).unwrap_or_else(|e| die(format!("{}: {}", src_name, e)));
+            lang::bind(&mut a, &|n| prog.global(n)).unwrap_or_else(|e| die(format!("{}: {}", src_name, e)));
+            (cgen::program_exe(&prog, &a, Some((&src_name, &text))).unwrap_or_else(|e| die(e)), stem(api))
+        }
+        _ => die("usage: build <state.mito> <api> [-o app.exe] [--tcc]  |  build <file.system> [-o app.exe] [--tcc]".into()),
+    };
+    let out = std::path::PathBuf::from(out.unwrap_or_else(|| format!("{}.exe", name)));
+    build::exe(&units, &out, use_tcc, &[]).unwrap_or_else(|e| die(e));
+    println!("built {}", out.display());
 }
 
 fn mb(n: usize) -> f64 { n as f64 / MB as f64 }

@@ -102,11 +102,7 @@ extern "system" {
 /// clang's undefined-behaviour checks in trap mode (no runtime library: a violation stops the process at once), and
 /// array bounds: overflow of signed integers, shifts, out-of-range indexes into the C runtime's fixed arrays.
 pub const UBSAN: &[&str] = &["-O1", "-fsanitize=undefined,bounds", "-fsanitize-trap=undefined,bounds"];
-/// The clang to build C runtimes with: `MITO_CLANG`, or LLVM's default install. None if neither exists.
-pub fn clang() -> Option<String> {
-    let p = std::env::var("MITO_CLANG").unwrap_or_else(|_| "C:/Program Files/LLVM/bin/clang.exe".into());
-    if std::path::Path::new(&p).exists() { Some(p) } else { None }
-}
+pub use crate::build::clang;
 /// Build `src` with clang into a DLL (in the temp directory, named by `name`) and load it.
 pub fn clang_dll(src: &str, name: &str, extra: &[&str]) -> Result<*mut std::ffi::c_void, String> { clang_dll_units(&[src], name, extra) }
 /// The same for several translation units built into one DLL.

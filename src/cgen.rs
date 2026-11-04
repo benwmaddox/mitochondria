@@ -236,6 +236,21 @@ pub fn program_c_named(prog: &Program, api: &Api, source: Option<(&str, &str)>, 
     Ok(o)
 }
 
+/// The HTTP server and `main` (runtime/http.c), for executables.
+pub const HTTP: &str = include_str!("../runtime/http.c");
+
+/// One program as an executable's source: the program, then its HTTP server.
+pub fn program_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Result<Vec<String>, String> {
+    Ok(vec![program_c(prog, api, source)? + "#define HTTP_SINGLE\n" + HTTP])
+}
+
+/// A system as an executable's sources: its translation units, the HTTP server after the system's.
+pub fn system_exe(spec: &crate::system::Spec) -> Result<Vec<String>, String> {
+    let mut units = system_c(spec)?;
+    if let Some(last) = units.last_mut() { *last += HTTP; }
+    Ok(units)
+}
+
 /// The C system of workers (runtime/system.c): threads, mailboxes, reply slots, forwarding.
 pub const SYSTEM: &str = include_str!("../runtime/system.c");
 

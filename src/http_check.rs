@@ -178,7 +178,7 @@ fn timed(port: u16, req: &[u8]) -> (Duration, Vec<u8>) {
 
 /// `cargo test --release http_load -- --ignored --nocapture`: requests per second and latency of the chat executable
 /// (clang -O2, or TinyCC without clang) from client threads, one connection per request, for a small answer (`GET /rooms`)
-/// and a large one (the newest 50 of 1000 messages, about 8 KB). `MITO_LOAD_SECS` (default 1) per run, `MITO_LOAD_ROUNDS`
+/// and a large one (the newest 50 of 1000 messages, about 6 KB). `MITO_LOAD_SECS` (default 1) per run, `MITO_LOAD_ROUNDS`
 /// (default 3). `MITO_LOAD_OTHER=file.c` also builds with that HTTP server instead of runtime/http.c, and alternates the
 /// two in every round, so a busy machine slows both alike.
 #[test]
@@ -219,7 +219,7 @@ fn http_load() {
     println!("  {:<14} {:<24} {:>7} {:>10} {:>9} {:>9} {:>9} {:>7}", "server", "request", "clients", "req/s", "p50 us", "p99 us", "max us", "bytes");
     for round in 0..rounds {
         println!("  round {}", round + 1);
-        for (name, target) in [("GET /rooms (small)", "/rooms"), ("GET 50 messages (8 KB)", "/rooms/0/messages?limit=50")] {
+        for (name, target) in [("GET /rooms (small)", "/rooms"), ("GET 50 messages (6 KB)", "/rooms/0/messages?limit=50")] {
             for clients in [1usize, 8, 32] {
                 for (sname, port, tok, _, _) in &servers {
                     let (port, req) = (*port, format!("GET {} HTTP/1.1\r\nX-Session: {}\r\n\r\n", target, tok).into_bytes());

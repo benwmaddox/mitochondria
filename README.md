@@ -35,6 +35,8 @@ cargo run --release -- serve examples/chat-sharded/chat.system --port 8080      
 cargo run --release -- emit-c examples/chat/chat.mito examples/chat/chat.api -o chat.c   # or: emit-c x.system -o dir
 ```
 
+New here? Start with the [tutorial](docs/tutorial.md).
+
 See [docs/chat-api-findings.md](docs/chat-api-findings.md) for what worked and what did not in the chat API.
 
 Windows only for now. Design: [DESIGN.md](DESIGN.md). Measurements: [docs/measurements.md](docs/measurements.md).

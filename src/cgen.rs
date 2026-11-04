@@ -828,7 +828,11 @@ impl<'p> G<'p> {
                     }
                     _ => { self.fail(500, "assignment target is not an item or a state struct"); return Ok(()); }
                 };
-                let Some(ci) = self.prog.colls[c].cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_) | CKind::Arr(..))) else { return no(format!("assigning `.{}` not compiled yet", path)) };
+                let Some(ci) = self.prog.colls[c].cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_) | CKind::Arr(..))) else {
+                    let prefix = format!("{}.", path);
+                    let known = self.prog.colls[c].cols.iter().any(|x| x.path == path || x.path.starts_with(&prefix)) || self.prog.colls[c].children.iter().any(|x| x.0 == path);
+                    return no(if known { format!("assigning `.{}` as a whole is not supported yet; assign its fields", path) } else { format!("no field `{}`", path) });
+                };
                 self.may_write_col(c, &path)?;
                 let v = self.expr(rhs, env, None)?;
                 let vv = self.val(v)?;

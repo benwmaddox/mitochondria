@@ -1,0 +1,34 @@
+// the tutorial's program (docs/tutorial.md): every output the tutorial shows comes from this log
+--- state
+include examples/scoreboard/score.mito
+--- api
+include examples/scoreboard/score.api
+--- requests
+POST /players {"name": "ada"}
+POST /players {"name": "bo"}
+POST /players {"name": "cy"}
+POST /players {}
+POST /players/0/games {"points": 120}
+POST /players/1/games {"points": 340}
+POST /players/2/games {"points": 90}
+POST /players/0/games {"points": 400}
+POST /players/0/games {"points": 50}
+GET /board
+GET /board?top=2
+GET /recent
+GET /stats
+POST /players/1/games {"points": 5000000}
+GET /stats
+GET /board
+POST /players/7/games {"points": 1}
+POST /players/0/games {"points": "lots"}
+POST /players {"name": "a name much longer than twenty-four bytes"}
+DELETE /players/1
+GET /board
+GET /recent
+POST /players {"name": "dee"}
+POST /players/1/games {"points": 10}
+GET /recent
+*20 POST /players/2/games {"points": 1}
+GET /recent
+GET /stats

@@ -83,8 +83,8 @@ so a parent that does not exist costs nothing. Freeing or dropping a parent empt
 State lives as long as the program. Each request (or tick) gets a scratch region with a declared size that is reset when the request
 ends: a text area for every string the handler reads or builds (strings are copied in, so values never alias state) and a response
 area. Temporaries therefore need no per-value maximum, only the epoch total. Running out of either area fails that request (507,
-or 413 if the request itself does not fit). Locals, call arguments and item lists use buffers sized at startup and reused, so a
-warm request makes no heap allocation; tests check this. The HTTP layer outside the handler (reading the socket) still allocates.
+or 413 if the request itself does not fit). Locals, call arguments and item lists use buffers sized at startup and reused; the
+runtime has no heap allocator at all, and the HTTP server's buffers are reserved at start and committed as requests reach into them.
 
 ### 8. Handlers and functions
 - `fn name(params) -> type { ... }` plain functions. Parameters are values or references. No closures, no captures.
@@ -110,7 +110,7 @@ costing only that part) and driven by pressure, not by schedule:
 | below the soft mark | never trim; reuse stays a plain write |
 | above the soft mark | at each epoch boundary, trim the top-level collection with the most committed memory (one per boundary) |
 | above the hard mark | trim everything once; refuse new writes (503) while still above it; reads continue |
-| quiet (no request for a second) | trim the largest collection even below the soft mark, so a past burst does not stay committed |
+| quiet (no request for a second) | trim the largest collection even below the soft mark, so a past burst does not stay committed (not yet in the C servers) |
 
 A collection whose trim released nothing is skipped until 256 of its items have been freed, popped or cleared since: growth adds
 live pages, only shrinking creates dead ones, so this keeps a steady state from rescanning. Marks are given in megabytes
@@ -144,18 +144,18 @@ inflight 4096;    // reply slots: the most requests in flight at once
 budget 8192;      // MB: the sum of every worker's declared total must fit
 ```
 
-- **A mailbox is a list with a full policy (concept 3):** a bounded ring of fixed-size message slots, allocated once. A worker
-  takes every queued message (up to `batch`, default 32) under one lock, and a sender signals it only if it is asleep. A message
-  is the request (method, target, body, headers) plus forwarded fields. A full mailbox is `Full`: the sender answers 503.
+- **A mailbox is a list with a full policy (concept 3):** a bounded ring of fixed-size message slots, allocated once. A sender
+  signals the worker only if it is asleep. A message is the request (method, target, body, headers) plus forwarded fields. A
+  full mailbox is `Full`: the sender answers 503.
 - **One message is one epoch (concept 7)** and one atomic handler (concept 8).
 - **`forward kind[key] { "field": expr };`** is the one new statement. It ends the handler and hands the request to worker
   `key % count` of that kind, with the fields; `fwd("field")` reads them there. The forward is part of the handler's
   transaction: the message is queued first and the handler's writes are committed only if that worked; if the next mailbox
   is full the writes roll back and the client gets 503. Worker-to-worker sends never block, so chains of forwards cannot deadlock.
 - **Every request is answered once,** through a fixed table of reply slots (`inflight`). When none is free, the front answers 503.
-- **A worker that panics is rebuilt** from its source with a fresh reservation, so its state is lost (as an Erlang process's
-  is); the message gets 500 and the restart is counted.
-- Each worker trims its own region when its mailbox is quiet (concept 9).
+- **A worker that fails is rebuilt** from its declarations with a fresh reservation, so its state is lost (as an Erlang
+  process's is); the message gets 500 and the restart is counted. So far the only such failure is `__crash()`, the test hook:
+  a real fault in the C code ends the whole process (see Status).
 - `worker_index()` and `worker_count("kind")` let handlers compute ids that are unique across shards. A session token carries
   its auth shard (`shard.slot.generation.secret`), and `auth()` rejects a token for another shard.
 

@@ -612,3 +612,24 @@ in Rounds 11 and earlier.
 
 Found on the way: the `recursion` case overflowed the debug-build interpreter's 2 MB test-thread stack (it passed with
 16 MB); the C runtime caps calls at 64 deep, so the C builds were unaffected.
+
+## Round 15 (2026-11-04): HTTP, one send and buffers committed as used
+`http_load` (an ignored test) drives the chat executable (clang -O2) over real connections, one per request, with
+`MITO_LOAD_OTHER` alternating two HTTP servers in every round so a busy machine slows both alike. The machine was
+shared with other work: the same build measured 240 us and 480 us for one client minutes apart, so only the alternated
+comparison counts.
+
+| one connection per request | 1 client | 8 clients | 32 clients |
+|---|---|---|---|
+| GET /rooms (125 bytes), two sends | 1,600-2,000 req/s | 5,800-5,900 | 5,600-6,000 |
+| GET /rooms, one send + TCP_NODELAY | 1,600-1,700 | 6,000-6,150 | 5,850-6,250 |
+| GET 50 messages (6 KB), two sends | 1,550-1,600 | 5,200-5,550 | 5,000-5,350 |
+| GET 50 messages, one send + TCP_NODELAY | 1,600 | 5,600-6,050 | 5,600-5,850 |
+
+One send is 3-10% faster with 8 and 32 clients and the same with one; neither showed a delayed-acknowledgement stall
+(the worst request took about 5 ms in both). The point is elsewhere: a request costs about 500 us of connection
+handling against about 2 us in the handler, so reusing connections (keep-alive) is the next step.
+
+Committing connection buffers as used, idle commit charge (Windows private bytes): one program 10.2 -> 1.3 MB; the
+sharded chat system with 16 connection threads 171.5 -> 34.1 MB. The rest of the system's is its own (mailboxes and
+worker buffers), not HTTP.

@@ -1,0 +1,49 @@
+fn player() -> ref<players> { return players[int(param("id"))]; }
+
+endpoint POST /players {
+    let name = body("name");
+    if len(name) == 0 { fail 400 "name is required"; }
+    let p = alloc players;
+    p.name = name;
+    let e = board.add(0);
+    e.who = p;
+    p.entry = e;
+    respond 201 { "id": slot(p) };
+}
+
+endpoint POST /players/{id}/games {
+    let p = player();
+    let points = int(body("points"));
+    totals.games = totals.games + 1;
+    let g = alloc recent;
+    g.who = p;
+    g.points = points;
+    g.at = now();
+    if points > p.best { p.best = points; board.set_key(p.entry, points); }
+    // checked last on purpose: everything above is undone when this fails
+    if points > 1000000 { fail 422 "not a believable score"; }
+    respond 200 { "best": p.best };
+}
+
+endpoint GET /board {
+    let n = min(int(or(query("top"), "10")), 100);
+    respond 200 { "top": [each e in board reverse limit n { "name": e.who.name, "points": e.points }] };
+}
+
+endpoint GET /recent {
+    respond 200 { "games": [each g in recent reverse { "name": or(g.who.name, "[left]"), "points": g.points }] };
+}
+
+endpoint DELETE /players/{id} {
+    let p = player();
+    board.remove(p.entry);
+    free p;
+    respond 200 { "ok": true };
+}
+
+endpoint GET /stats {
+    respond 200 {
+        "players": count(players), "games": totals.games,
+        "reserved_kb": stat("reserved_kb"), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb")
+    };
+}

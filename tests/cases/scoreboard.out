@@ -1,0 +1,53 @@
+POST /players -> 201 {"id":0}
+POST /players -> 201 {"id":1}
+POST /players -> 201 {"id":2}
+POST /players -> 400 {"error":"name is required"}
+POST /players/0/games -> 200 {"best":120}
+POST /players/1/games -> 200 {"best":340}
+POST /players/2/games -> 200 {"best":90}
+POST /players/0/games -> 200 {"best":400}
+POST /players/0/games -> 200 {"best":400}
+GET /board -> 200 {"top":[{"name":"ada","points":400},{"name":"bo","points":340},{"name":"cy","points":90}]}
+GET /board?top=2 -> 200 {"top":[{"name":"ada","points":400},{"name":"bo","points":340}]}
+GET /recent -> 200 {"games":[{"name":"ada","points":50},{"name":"ada","points":400},{"name":"cy","points":90},{"name":"bo","points":340},{"name":"ada","points":120}]}
+GET /stats -> 200 {"players":3,"games":5,"reserved_kb":172,"committed_kb":52,"live_kb":0}
+POST /players/1/games -> 422 {"error":"not a believable score"}
+GET /stats -> 200 {"players":3,"games":5,"reserved_kb":172,"committed_kb":52,"live_kb":0}
+GET /board -> 200 {"top":[{"name":"ada","points":400},{"name":"bo","points":340},{"name":"cy","points":90}]}
+POST /players/7/games -> 404 {"error":"slot 7 is not live"}
+POST /players/0/games -> 400 {"error":"`lots` is not a number"}
+POST /players -> 413 {"error":"string of 41 bytes does not fit string<24>"}
+DELETE /players/1 -> 200 {"ok":true}
+GET /board -> 200 {"top":[{"name":"ada","points":400},{"name":"cy","points":90}]}
+GET /recent -> 200 {"games":[{"name":"ada","points":50},{"name":"ada","points":400},{"name":"cy","points":90},{"name":"[left]","points":340},{"name":"ada","points":120}]}
+POST /players -> 201 {"id":1}
+POST /players/1/games -> 200 {"best":10}
+GET /recent -> 200 {"games":[{"name":"dee","points":10},{"name":"ada","points":50},{"name":"ada","points":400},{"name":"cy","points":90},{"name":"[left]","points":340},{"name":"ada","points":120}]}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+POST /players/2/games -> 200 {"best":90}
+GET /recent -> 200 {"games":[{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1},{"name":"cy","points":1}]}
+GET /stats -> 200 {"players":3,"games":26,"reserved_kb":172,"committed_kb":52,"live_kb":1}
+state <plain values> 120
+state players 104
+state board.items 84
+state board.links 315
+state recent 488
+memory reserved=176128 committed=53248 live=1111

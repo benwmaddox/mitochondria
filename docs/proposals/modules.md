@@ -1,6 +1,8 @@
 # Proposal: modules with compile-time parameters, and a standard library
 
-Status: proposal for review (2026-11-04). Nothing here is built yet.
+Status: decided (2026-11-04), not built yet. Ben's decisions: one file per module; compile-time copies, one per use;
+keys read-only outside the module (changed with `set_key`); changing an instance inside a loop over it is a compile
+error; `order by` is removed once `sorted` exists, and the chat's rooms become a `sorted` instance.
 
 ## Why
 Ordered data (`sorted`, a B-tree) should be a collection written in the language, in a standard library, not a new
@@ -75,14 +77,10 @@ it is allowed in capacities), `field of T` (a field of a struct parameter, with 
 4. The iteration protocol in the interpreter and the generator (calls to generated functions, as for recursion).
 Counted loops (built) cover the search inside a node.
 
-## Decisions for review
-1. **One file per module** holding state and functions (proposed), or keep state and functions in separate files as
-   programs do now?
-2. **Compile-time instantiation**, one copy per use (proposed), or shared code with run-time parameters? (Copies cost
-   compile time and code size, not memory: state is per instance either way.)
-3. **Key read-only outside the module** (proposed), or hooks that run when a field is assigned?
-4. **Cursors as integers** returned by `start`/`step` (proposed): simple and allocation-free, but a module could hand out
-   a cursor that is no longer valid if the structure changes during a loop. Proposed rule: changing a module instance
-   inside a loop over it is a compile error (the generator already knows what loop bodies write).
-5. **`order by`** goes once `sorted` exists; `GET /rooms` becomes `global rooms: sorted<Room, 64, created>` (rooms are
-   then items of `rooms.items`).
+## Decisions (2026-11-04)
+1. One file per module, holding its parameters, state and functions.
+2. Compile-time instantiation: one copy of the code per use, specialised (constant offsets, the key's own comparison).
+   No run-time generics.
+3. The key field is read-only outside the module; `instance.set_key(item, k)` moves the item. No assignment hooks.
+4. Changing a module instance inside a loop over it is a compile error.
+5. `order by` is removed once `sorted` exists; `GET /rooms` uses `global rooms: sorted<Room, 64, created>`.

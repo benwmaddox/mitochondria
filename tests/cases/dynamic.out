@@ -22,6 +22,10 @@ POST /set -> 200 {"n":7}
 POST /set -> 400 {"error":"wrong type for this field"}
 POST /set -> 400 {"error":"wrong type for this field"}
 GET /min_int -> 500 {"error":"integer overflow"}
+GET /divmin -> 500 {"error":"integer overflow"}
+GET /divmin -> 200 {"d":-4611686018427387904}
+GET /modmin -> 500 {"error":"integer overflow"}
+POST /setstr -> 400 {"error":"wrong type for this field"}
 GET /ornotlive -> 200 {"a":-1,"b":false,"c":0}
 GET /ornotlive -> 200 {"a":-1,"b":false,"c":10}
 GET /anyitem -> 200 {"n":10,"slot":1}

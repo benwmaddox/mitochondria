@@ -605,8 +605,8 @@ impl<'a> Run<'a> {
             return match op {
                 "+" => a.checked_add(*b).map(Value::Int).map_or_else(ov, Ok), "-" => a.checked_sub(*b).map(Value::Int).map_or_else(ov, Ok),
                 "*" => a.checked_mul(*b).map(Value::Int).map_or_else(ov, Ok),
-                "/" => if *b == 0 { fail(500, "division by zero") } else { Ok(Value::Int(a / b)) },
-                "%" => if *b == 0 { fail(500, "division by zero") } else { Ok(Value::Int(a % b)) },
+                "/" => if *b == 0 { fail(500, "division by zero") } else { a.checked_div(*b).map(Value::Int).map_or_else(ov, Ok) },
+                "%" => if *b == 0 { fail(500, "division by zero") } else { a.checked_rem(*b).map(Value::Int).map_or_else(ov, Ok) },
                 "<" => Ok(Value::Bool(a < b)), "<=" => Ok(Value::Bool(a <= b)), ">" => Ok(Value::Bool(a > b)), ">=" => Ok(Value::Bool(a >= b)),
                 _ => fail(500, "bad operator"),
             };

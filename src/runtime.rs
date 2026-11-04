@@ -306,9 +306,9 @@ impl Instance {
     /// Store bytes into a string field or plain string.
     pub fn store_str_bytes(&mut self, l: &Loc, b: &[u8]) -> Result<(), Error> {
         match l {
-            Loc::Field(cid, idx, ci) => { let CKind::StrBytes(m) = *self.col_kind(*cid, ci + 1) else { return bad("not a string field") }; let (a, bb) = (self.caddr(*cid, *idx, *ci), self.caddr(*cid, *idx, ci + 1)); self.store_bytes_at(a, bb, m, b) }
+            Loc::Field(cid, idx, ci) => { if !matches!(self.col_kind(*cid, *ci), CKind::StrLen) { return bad("wrong type for this field"); } let CKind::StrBytes(m) = *self.col_kind(*cid, ci + 1) else { return bad("wrong type for this field") }; let (a, bb) = (self.caddr(*cid, *idx, *ci), self.caddr(*cid, *idx, ci + 1)); self.store_bytes_at(a, bb, m, b) }
             Loc::Plain(off, Ty::Str(n)) => { let (off, n) = (*off, *n); self.store_bytes_at(off, off + 4, n, b) }
-            _ => bad("not a string"),
+            _ => bad("wrong type for this field"),
         }
     }
     /// Follow a reference without building an error: `None` if the slot is not live or was reused.

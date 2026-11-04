@@ -315,20 +315,21 @@ impl P {
 
 // ---------------------------------------------------------------- binder
 
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize)>, place: String }
+/// `owner`: the module instance whose function is being bound (its private functions may be called from it).
+struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String> }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
 pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
-    let fns: Vec<(String, usize)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len())).collect();
+    let fns: Vec<(String, usize, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name) };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()) };
         for p in &f.params { b.declare(p, false); }
         b.block(&mut f.body)?;
         f.slots = b.max;
     }
     for e in &mut api.eps {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text) };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None };
         b.block(&mut e.body)?;
         e.slots = b.max;
     }
@@ -405,6 +406,7 @@ impl Binder<'_> {
                 for a in args.iter_mut() { self.expr(a)?; }
                 *res = if let Some(k) = self.fns.iter().position(|f| f.0 == *n) {
                     if self.fns[k].1 != args.len() { return self.err(format!("`{}` takes {} arguments, given {}", n, self.fns[k].1, args.len())); }
+                    if let Some(i) = n.rfind('.') { if !self.fns[k].2 && self.owner.as_deref() != Some(&n[..i]) { return self.err(format!("`{}` is private to {}", n, &n[..i])); } }
                     CallRes::User(k as u32)
                 } else if let Some(b) = B::from(n) { CallRes::Builtin(b) }
                 else { return self.err(format!("unknown function `{}`", n)); };

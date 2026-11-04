@@ -475,6 +475,55 @@ impl<'p> G<'p> {
         G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, recursive, specs, dep: false, inl: 0, or_dead: None }
     }
 
+    /// The module instance whose function is being generated (None: the program's own code).
+    fn module_code(&self) -> Option<String> { let k = *self.inlining.last()?; let n = &self.api.fns[k as usize].name; n.rfind('.').map(|i| n[..i].to_string()) }
+    /// The instance a collection belongs to: (instance, its items or nested in them (the program's data), its items exactly).
+    fn coll_owner(&self, c: usize) -> Option<(&'p crate::layout::ModInst, bool, bool)> {
+        let name = &self.prog.colls[c].name;
+        let m = self.prog.instances.iter().find(|m| name.starts_with(&format!("{}.", m.name)))?;
+        let items = format!("{}.items", m.name);
+        Some((m, *name == items || name.starts_with(&format!("{}.", items)), *name == items))
+    }
+    fn module_err(&self, m: &crate::layout::ModInst, what: &str) -> String { format!("{} belongs to {} (module {}); change it through {}'s functions", what, m.name, m.module, m.name) }
+    /// Writing column `path` of collection `c` from here: refused outside a module for its own state, and for its key.
+    fn may_write_col(&self, c: usize, path: &str) -> R<()> {
+        let Some((m, data, items)) = self.coll_owner(c) else { return Ok(()) };
+        if self.module_code().as_deref() == Some(m.name.as_str()) { return Ok(()); }
+        if !data { return Err(self.module_err(m, &format!("`{}`", self.prog.colls[c].name))); }
+        if items && m.key.as_deref() == Some(path) { return Err(format!("`{}` is the key of {}; change it with {}.set_key(item, value)", path, m.name, m.name)); }
+        Ok(())
+    }
+    /// Writing the plain value at `off` from here: an instance's plain state is its own.
+    fn may_write_plain(&self, off: usize) -> R<()> {
+        for m in &self.prog.instances {
+            let Some(g) = self.prog.global(&m.name) else { continue };
+            let gl = &self.prog.globals[g];
+            if off >= gl.off && off < gl.off + self.prog.plain_size(&gl.ty).0 && self.module_code().as_deref() != Some(m.name.as_str()) { return Err(self.module_err(m, &format!("the state of {}", m.name))); }
+        }
+        Ok(())
+    }
+    /// Adding or freeing items of collection `c` from here: an instance's items and state change only through its functions.
+    fn may_add_or_free(&self, c: usize, verb: &str) -> R<()> {
+        let Some((m, data, items)) = self.coll_owner(c) else { return Ok(()) };
+        if self.module_code().as_deref() == Some(m.name.as_str()) || (data && !items) { return Ok(()); }
+        Err(format!("{} items of {} with its functions, not `{}`", if verb == "alloc" { "add" } else { "remove" }, m.name, verb))
+    }
+    /// A field store or free through a value whose kind is known only at run time: refused outside module code when it
+    /// could reach a module's key or private state.
+    fn may_write_dynamic(&self, field: Option<&str>) -> R<()> {
+        if self.prog.instances.is_empty() || self.module_code().is_some() { return Ok(()); }
+        match field {
+            None => Err("`free` of a value whose kind is only known at run time, in a program with module instances: free a named item".into()),
+            Some(f) => {
+                for m in &self.prog.instances { if m.key.as_deref() == Some(f) { return Err(format!("`.{}` through a value whose kind is only known at run time could change the key of {}", f, m.name)); } }
+                for (c, coll) in self.prog.colls.iter().enumerate() {
+                    if let Some((m, false, _)) = self.coll_owner(c) { if coll.cols.iter().any(|x| x.path == f) { return Err(format!("`.{}` through a value whose kind is only known at run time could change the state of {}", f, m.name)); } }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// A call is about to be made: refuse it, as the interpreter does, if it would nest more than MAX_DEPTH calls deep.
     fn depth_check(&mut self) {
         let n = self.inl + 1;
@@ -660,6 +709,7 @@ impl<'p> G<'p> {
                         let Some(k) = sd.fields.iter().position(|x| x.0 == *f) else { return no(format!("no field `{}`", f)) };
                         let (code, cap) = match &sd.fields[k].1 { Ty::Ref(p) => (30, self.prog.ref_pool(p).ok_or("ref to an unknown pool")? as u32), t => plain_code(t).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))? };
                         let at = off + sd.offs[k];
+                        self.may_write_plain(at)?;
                         let v = self.expr(rhs, env, None)?;
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, {}, {}, {}, &{})", at, code, cap, vv));
@@ -667,6 +717,7 @@ impl<'p> G<'p> {
                     }
                     CV::Null => { self.line("TAIL(c->h->dead(c));"); return Ok(()); }
                     CV::Any(x) => {
+                        self.may_write_dynamic(Some(f))?;
                         self.line(&format!("if ({}.tag == 0) TAIL(c->h->dead(c));", x));
                         self.line(&format!("if ({}.tag != 5) FAIL(500, \"assignment target is not an item or a state struct\", 50);", x));
                         let v = self.expr(rhs, env, None)?;
@@ -677,6 +728,7 @@ impl<'p> G<'p> {
                     _ => { self.fail(500, "assignment target is not an item or a state struct"); return Ok(()); }
                 };
                 let Some(ci) = self.prog.colls[c].cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_) | CKind::Arr(..))) else { return no(format!("assigning `.{}` not compiled yet", path)) };
+                self.may_write_col(c, &path)?;
                 let v = self.expr(rhs, env, None)?;
                 let vv = self.val(v)?;
                 self.call(&format!("c->h->store(c, {}, {}, {}, &{})", c, idx, ci, vv));
@@ -688,6 +740,7 @@ impl<'p> G<'p> {
                 if let CV::Coll(..) | CV::ArrCol(..) | CV::PlainArr(..) = bv {} else { self.fail(500, "only fixed arrays and collections can be assigned by index"); return Ok(()); }
                 match bv {
                     CV::ArrCol(c, idx, ci) => {
+                        self.may_write_col(c, &self.prog.colls[c].cols[ci].path.clone())?;
                         let CKind::Arr(_, n) = self.prog.colls[c].cols[ci].kind else { unreachable!() };
                         self.call(&format!("c->h->elem(c, {}, {})", k, n));
                         let v = self.expr(rhs, env, None)?;
@@ -695,6 +748,7 @@ impl<'p> G<'p> {
                         self.call(&format!("c->h->store_elem(c, {}, {}, {}, {}, &{})", c, idx, ci, k, vv));
                     }
                     CV::PlainArr(off, e, n) => {
+                        self.may_write_plain(off)?;
                         let Some((code, cap)) = plain_code(&e) else { return no("assigning an element of this array not compiled yet") };
                         self.call(&format!("c->h->elem(c, {}, {})", k, n));
                         let v = self.expr(rhs, env, None)?;
@@ -702,6 +756,7 @@ impl<'p> G<'p> {
                         self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, self.prog.plain_size(&e).0, code, cap, vv));
                     }
                     CV::Coll(c, inst) => {
+                        self.may_write_col(c, "")?;
                         let t = self.tmp("i");
                         self.line(&format!("u32 {};", t));
                         self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, k, t));
@@ -729,10 +784,10 @@ impl<'p> G<'p> {
                 self.each(it, env, collect, |g, env, _| g.block(body, env))?;
             }
             Stmt::Free(e) => match self.expr(e, env, None)? {
-                CV::Item(c, i) => self.call(&format!("c->h->free_(c, {}, {})", c, i)),
-                CV::Ref(t, s, k) => self.line(&format!("if ({} != 0) {{ CALL(c->h->free_(c, {}, {})); }}", s, t, k)),
+                CV::Item(c, i) => { self.may_add_or_free(c, "free")?; self.call(&format!("c->h->free_(c, {}, {})", c, i)) }
+                CV::Ref(t, s, k) => { self.may_add_or_free(t, "free")?; self.line(&format!("if ({} != 0) {{ CALL(c->h->free_(c, {}, {})); }}", s, t, k)) }
                 CV::Null => {}
-                CV::Any(x) => self.call(&format!("c->h->free_val(c, &{})", x)),
+                CV::Any(x) => { self.may_write_dynamic(None)?; self.call(&format!("c->h->free_val(c, &{})", x)) }
                 _ => self.fail(500, "free needs an item"),
             },
             Stmt::Fail(code, m) => self.fail(*code, m),
@@ -756,6 +811,7 @@ impl<'p> G<'p> {
             Stmt::Do(e) => { self.expr(e, env, None)?; }
             Stmt::Alloc { slot, coll, try_, .. } => {
                 let CV::Coll(c, inst) = self.expr(coll, env, None)? else { return no("alloc of something other than a collection") };
+                self.may_add_or_free(c, "alloc")?;
                 let t = self.tmp("i");
                 self.line(&format!("u32 {};", t));
                 self.call(&format!("c->h->alloc(c, {}, {}, {}, &{})", c, inst, *try_ as i32, t));

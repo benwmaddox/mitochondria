@@ -146,4 +146,32 @@ mod tests {
         assert!(api.contains("pub fn b.add()") && api.contains("alloc b.items") && api.contains("return 4 - count(b.items);"), "{}", api);
         assert!(expand("struct S { n: i64; }\nglobal b: bag<S>;\n", "").unwrap_err().contains("takes 2 arguments"));
     }
+
+    /// A program that changes a module instance's state other than through its functions does not load (interpreted
+    /// or compiled: the compiler decides what loads).
+    #[test]
+    fn module_state_changes_only_through_its_functions() {
+        let state = "struct S { n: i64; name: string<8>; }\nglobal b: bag<S, 4>;\n";
+        let load = |api: &str| -> Result<(), String> {
+            let (st, api) = expand(state, api)?;
+            let inst = crate::runtime::Instance::start(crate::layout::Program::parse(&st)?, 1 << 20)?;
+            crate::serve::Server::new(inst, &api).map(|_| ())
+        };
+        assert_eq!(load("endpoint POST /ok { let s = b.add(); s.n = 5; s.name = \"x\"; b.remove(s); respond 200 {}; }"), Ok(()));
+        for (api, want) in [
+            ("endpoint POST /a { b.counts.added = 9; respond 200 {}; }", "belongs to b (module bag)"),
+            ("endpoint POST /a { let s = alloc b.items; respond 200 {}; }", "add items of b with its functions, not `alloc`"),
+            ("endpoint POST /a { free b.get(0); respond 200 {}; }", "remove items of b with its functions, not `free`"),
+            ("endpoint POST /a { var x = 1; x = b.get(0); free x; respond 200 {}; }", "`free` of a value whose kind is only known at run time"),
+        ] {
+            let e = load(api).err().unwrap_or_default();
+            assert!(e.contains(want), "{} -> {}", api, e);
+        }
+        // a module's private function cannot be called from outside it
+        let (st, mut api) = expand(state, "endpoint GET /a { respond 200 { \"n\": b.secret() }; }").unwrap();
+        api += "fn b.secret() { return 1; }\n";
+        let inst = crate::runtime::Instance::start(crate::layout::Program::parse(&st).unwrap(), 1 << 20).unwrap();
+        let e = crate::serve::Server::new(inst, &api).err().unwrap_or_default();
+        assert!(e.contains("`b.secret` is private to b"), "{}", e);
+    }
 }

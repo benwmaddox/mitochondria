@@ -186,22 +186,22 @@ is the layer above it. Details and the comparison with arenas, garbage collectio
 ## Deferred, with known limits
 - **Long uneven text.** `string<N>` reserves N bytes per slot. Measured: 2000-byte chat bodies averaging ~120 bytes left 39.5 MB committed
   for 3.1 MB live, and trim could release none of it. Accepted for now; nesting improves locality but not this.
-- **Compilation.** Endpoints are interpreted. Reading a room's newest 50 messages and writing them as JSON takes 18.5 us; a scan of
-  20,000 rows through the interpreter was ~470x a native loop. A compiler would bind columns once and turn `each ... where` into a column loop.
 - **Keyed indexes** for lookups that are not by parent. Not planned until nesting proves insufficient.
 - **Debug-only orphan report** (rows nothing refers to) and **FIFO slot reuse** for pools.
 
 ## Status: prototype vs this design (2026-11-03)
-Every concept above, and the worker system, is built and tested (29 tests). Known differences:
-- Endpoints are bound once at load (slots, resolved names and calls, cached field positions). With `--compile` they are
-  generated as C and compiled in memory with the bundled TinyCC; known items and columns become constant-offset loads and
-  dynamic operations call helpers that run the interpreter's code. Generated C follows an enforced safety profile
-  (docs/codegen-options.md): loads only through checked macros, no writes except helpers, checked arithmetic, every
-  helper result checked, bounded loops, forward gotos, no globals or libc. Not compiled yet (those endpoints stay interpreted):
-  `each ... order by`, floats in literals, list indexing, fixed-array fields, nested-struct fields of items, recursion,
-  loops whose body allocates. The clang release path is designed (same C, built to a DLL) but not built: clang is not
-  installed on this machine. Types in `fn` signatures are parsed but not checked.
-- `ref<...>` targets top-level pools only. Nested-struct fields inside items (`m.pos.x`) take a slower path that allocates.
+Every concept above, and the worker system, is built and tested (39 tests, including the language cases in `tests/cases`).
+Known differences:
+- Endpoints are compiled: generated as C and compiled in memory with the bundled TinyCC (`emit-c` writes the same C as one
+  file for review). Every construct compiles. Known items and columns become constant-offset loads; a value whose kind is
+  only known at run time is a tagged `Val`, and dynamic operations call helpers that still run the interpreter's Rust code.
+  Recursive functions become C functions, one per combination of argument kinds, with the interpreter's limit of 64 nested
+  calls. Generated C follows an enforced safety profile (docs/codegen-options.md). The interpreter remains as the
+  reference the tests compare against (`--interpret` runs it); it goes once the runtime is C (Next, 1).
+  The clang release path is designed (same C, built to a DLL) but not built: clang is not installed on this machine.
+  Types in `fn` signatures are parsed but not checked.
+- `ref<...>` targets top-level pools only. Interpreted, nested-struct fields inside items (`m.pos.x`) take a slower path that
+  allocates; compiled, they are plain column loads.
 - The pressure policy's marks are absolute, not fractions of the budget; machine free memory is not consulted.
 - Workers: mailboxes are a mutex and a condition variable, not lock-free; only `forward` exists (no one-way `send`/`on` messages,
   no fan-out); a restart is the whole supervision story (no supervision tree, links or monitors).
@@ -212,7 +212,9 @@ Every concept above, and the worker system, is built and tested (29 tests). Know
 Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat-api-findings.md.
 
 ## Next
-1. Finish the compiler: `order by`, the remaining constructs, and the clang path for release builds (needs clang installed).
+1. One self-contained C program: the runtime (memory, journal, collections, JSON, HTTP, workers) rewritten in C under the
+   same rules, checked against today's build on the same request scripts, then the Rust runtime and the interpreter removed.
+   Rust stays only as the compiler. Clang (for release builds and for sanitizer runs in tests) is needed for this step.
 2. Long uneven text (the deferred 92% waste): `text<N>` fields packed into a per-collection text area, a ring for `drop_oldest` lists.
 3. Placing items on shards by load rather than `id % count` (20 rooms over 8 shards left workers 35-98% busy).
 4. Worker messages beyond `forward`: one-way `send` with `on Msg` handlers, fan-out with gathered replies, links and monitors.

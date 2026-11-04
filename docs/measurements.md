@@ -456,3 +456,26 @@ A crash in TinyCC 0.9.27's library on compile errors is avoided by checking the 
 
 GET messages p99 at 4 x 8: 1,124-1,624 us interpreted, 213-215 us compiled. Compiled runs varied far less between rounds.
 Against the original single interpreted server in the same session (about 71k req/s), 4 x 8 compiled is about 6.7x.
+
+## Round 8 (2026-11-04): every construct compiles; language cases
+`tests/cases/*.case` hold eight small programs (ordering, lists, arrays, nested struct fields, recursion, floats, values
+whose kind changes, strings), each with a request script. Each runs interpreted and compiled; the two logs (status and
+body of every request, then live bytes per collection) must match each other and a recorded `.out` file, and every
+endpoint must compile. They do, as do the chat examples, so compiled is now the default (`--interpret` runs the
+interpreter, which stays only as the reference for these comparisons).
+
+What was added to the generator: floats as C doubles (helpers still write them, Rust's shortest round-trip text);
+struct fields of items as column loads; fixed arrays with the interpreter's bounds errors; list indexing; collections of
+plain values; references in plain state and in `var`s; loops that collect their items before running the body (for
+`order by`, for a body that allocates, and for a `where` whose body writes state), as the interpreter's `select` does;
+kinds that change (a `var` or a function result given values of two kinds is generated again with the joined kind:
+value or null becomes a nullable reference or string, otherwise a tagged value); recursive functions as C functions,
+one per combination of argument kinds, whose result kind is found by trying kinds and checking the body agrees, with
+the interpreter's limit of 64 nested calls counted the same way (inlined calls count too).
+
+The cases also found four interpreter bugs, fixed before their output was recorded: an integer stored in a narrower
+field wrapped silently (40000 in an `i16` became -25536; now 413, as for a string that does not fit); `1.0 / 0.0` was
+written as `inf`, which is not JSON (now `null`); `order by ... desc` reversed ties (now ties keep their order); and
+assigning `a[-1] = v` wrote element 0 (now 404, as reading does).
+
+Speed is unchanged: GET messages 5.2-5.7 us compiled before and after these changes, in alternating runs.

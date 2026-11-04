@@ -34,7 +34,7 @@ pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usiz
 pub fn parse_spec(src: &str, dir: &Path) -> Result<Spec, String> {
     let toks = tokens(src);
     let mut i = 0;
-    let mut spec = Spec { kinds: Vec::new(), entry: usize::MAX, inflight: 4096, budget: 4096 * MB, spin: Duration::ZERO, batch: 32, compile: false }; // sleep at once by default: spinning only pays when there are idle cores
+    let mut spec = Spec { kinds: Vec::new(), entry: usize::MAX, inflight: 4096, budget: 4096 * MB, spin: Duration::ZERO, batch: 32, compile: true }; // sleep at once by default: spinning only pays when there are idle cores
     let mut entry = String::new();
     let next = |i: &mut usize| -> Result<String, String> { let t = toks.get(*i).cloned().ok_or("unexpected end of system file")?; *i += 1; Ok(t) };
     let num = |s: String| -> Result<usize, String> { s.parse().map_err(|_| format!("expected a number, found `{}`", s)) };
@@ -262,6 +262,13 @@ impl System {
             let p = Program::parse(&k.state).map_err(|e| format!("worker {} state: {}", k.name, e))?;
             crate::lang::parse(&k.api).map_err(|e| format!("worker {} api: {}", k.name, e))?;
             total += p.total * k.count;
+            if spec.compile {
+                // every worker compiles its own copy; check once here that they will
+                let inst = Instance::start(p, usize::MAX).map_err(|e| format!("worker {}: {:?}", k.name, e))?;
+                let mut s = Server::new(inst, &k.api).map_err(|e| format!("worker {} api: {}", k.name, e))?;
+                let (notes, _) = s.compile().map_err(|e| format!("worker {}: compiling failed: {}", k.name, e))?;
+                if let Some(n) = notes.iter().find(|n| !n.ends_with(": compiled")) { return Err(format!("worker {}: {}", k.name, n)); }
+            }
         }
         if total > spec.budget { return Err(format!("over budget: {} workers need {} MB, budget is {} MB", spec.kinds.iter().map(|k| k.count).sum::<usize>(), total / MB, spec.budget / MB)); }
         let (mut base, mut boxes, mut n) = (Vec::new(), Vec::new(), 0);
@@ -325,7 +332,7 @@ fn worker(sh: Arc<Shared>, spec: Arc<Spec>, k: usize, i: usize) {
     let make = || -> Server {
         let inst = Instance::start(Program::parse(&ks.state).expect("checked at start"), usize::MAX).expect("reserve");
         let mut s = Server::new(inst, &ks.api).expect("checked at start");
-        if spec.compile { if let Err(e) = s.compile() { eprintln!("{}{}: compiling endpoints failed, they stay interpreted: {}", ks.name, i, e); } }
+        if spec.compile { s.compile().expect("checked at start"); }
         s.system = Some(info.clone());
         if let Some(soft) = ks.soft { s.pressure = Some(Pressure::new(&s.inst, soft, ks.hard.unwrap_or(usize::MAX))); }
         s

@@ -19,8 +19,8 @@ global rooms: pool<Room, 64>;
 - Endpoints (`fn`, `endpoint`, `let`/`var`, `each ... where ... reverse ... limit`) are atomic: a failed request is rolled back
   exactly. Requests run in a declared epoch and make no heap allocations once warm.
 - Growing past a maximum is a typed failure (503, 413), never a crash or out-of-memory kill.
-- `--compile` generates C for endpoints and compiles it in memory with the bundled TinyCC (`third_party/tinycc`, LGPL-2.1,
-  loaded at run time); what is not compiled yet stays interpreted, and both modes answer alike.
+- Endpoints are generated as C and compiled in memory with the bundled TinyCC (`third_party/tinycc`, LGPL-2.1, loaded at
+  run time). `--interpret` runs the interpreter instead, the reference the tests compare compiled code against.
 - `emit-c` writes that C as one readable file for review: the layout table, the helper interface, and each endpoint
   next to its source lines.
 - A `.system` file runs several programs as shared-nothing worker threads with bounded mailboxes; `forward kind[key] { ... }`

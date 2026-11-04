@@ -841,7 +841,7 @@ pub fn bench(s: &mut Server, mixed: usize) {
     let mut rnd = move |n: usize| { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; (rng % n as u64) as usize };
     s.clock = Some(1_000_000);
     let _ = s.inst.resolve("meta.rate").and_then(|l| s.inst.loc_set(&l, &Val::Int(1_000_000))); // lift the per-session rate limit for load
-    println!("in-process benchmark: handler calls only, no sockets. Times in microseconds (interpreter-bound); allocs = heap allocations per request.");
+    println!("in-process benchmark: handler calls only, no sockets. Times in microseconds; allocs = heap allocations per request.");
     println!("  {:<34} {:>7} {:>10} {:>10} {:>10} {:>9}", "endpoint", "calls", "mean us", "p50 us", "p99 us", "allocs");
     snap(s, "start");
     let names: Vec<String> = (0..1000).map(|i| format!("{{\"name\":\"user{}\"}}", i)).collect();
@@ -911,10 +911,16 @@ mod tests {
         let inst = Instance::start(Program::parse(STATE).unwrap(), 1 << 30).unwrap();
         let mut s = Server::new(inst, include_str!("../examples/chat/chat.api")).unwrap();
         s.clock = Some(1000);
-        if compiled { let (notes, _) = s.compile().unwrap(); assert!(notes.iter().filter(|n| n.ends_with(": compiled")).count() >= 8, "{:?}", notes); }
+        if compiled { let (notes, _) = s.compile().unwrap(); assert!(notes.iter().all(|n| n.ends_with(": compiled")), "{:?}", notes); }
         s
     }
     fn server() -> Server { chat(COMPILED.with(|c| c.get())) }
+    /// A server for a small test program, with every endpoint compiled when `compiled`.
+    fn small(state: &str, api: &str, compiled: bool) -> Server {
+        let mut s = Server::new(Instance::start(Program::parse(state).unwrap(), 1 << 20).unwrap(), api).unwrap();
+        if compiled { let (notes, _) = s.compile().unwrap(); assert!(notes.iter().all(|n| n.ends_with(": compiled")), "{:?}", notes); }
+        s
+    }
     fn login(s: &mut Server, name: &str) -> Vec<(String, String)> {
         let (c, b) = s.handle("POST", "/sessions", &[], &format!("{{\"name\":\"{}\"}}", name));
         assert_eq!(c, 201, "{}", b);
@@ -1102,9 +1108,13 @@ mod tests {
         let err = Server::new(Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap(), api).err().unwrap();
         assert!(err.contains("`x` is a `let`"), "{}", err); // caught when the server loads, not at run time
         let api = api.replace("x = 2;", "");
-        let mut s = Server::new(inst, &api).unwrap();
-        assert_eq!(s.handle("GET", "/t", &[], ""), (200, "{\"a\":43,\"s\":55,\"j\":\"x43\"}".to_string()));
-        assert_eq!(s.handle("GET", "/bad", &[], ""), (200, "{\"x\":1}".to_string()));
+        drop(inst);
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = small("struct C { n: i64; } global c: C;", &api, compiled);
+            assert_eq!(s.handle("GET", "/t", &[], ""), (200, "{\"a\":43,\"s\":55,\"j\":\"x43\"}".to_string()));
+            assert_eq!(s.handle("GET", "/bad", &[], ""), (200, "{\"x\":1}".to_string()));
+        }
     }
 
     #[test]
@@ -1159,43 +1169,49 @@ mod tests {
 
     #[test]
     fn forward_outside_a_system_is_a_clear_error_and_rolls_back() {
-        let inst = Instance::start(Program::parse("struct C { n: i64; } global c: C;").unwrap(), 1 << 20).unwrap();
-        let mut s = Server::new(inst, "endpoint POST /f { c.n = 5; forward other[1] { \"x\": 1 }; }").unwrap();
-        let (code, body) = s.handle("POST", "/f", &[], "");
-        assert_eq!(code, 500, "{}", body);
-        assert_eq!(s.inst.get("c.n").unwrap(), "0");
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = small("struct C { n: i64; } global c: C;", "endpoint POST /f { c.n = 5; forward other[1] { \"x\": 1 }; }", compiled);
+            let (code, body) = s.handle("POST", "/f", &[], "");
+            assert_eq!(code, 500, "{}", body);
+            assert_eq!(s.inst.get("c.n").unwrap(), "0");
+        }
     }
 
     #[test]
     fn frees_happen_only_when_the_request_succeeds() {
-        let inst = Instance::start(Program::parse("struct T { n: i32; } global ts: pool<T, 2>;").unwrap(), 1 << 20).unwrap();
         let api = "endpoint POST /t { let t = alloc ts; t.n = 7; respond 201 { \"slot\": slot(t) }; }
             endpoint DELETE /t/{k} { let t = ts[int(param(\"k\"))]; free t; if param(\"k\") == \"0\" { fail 409 \"changed my mind\"; } respond 200 { \"n\": t.n }; }
             endpoint POST /swap { each t in ts { free t; } let u = try_alloc ts; respond 200 { \"got\": exists(u) }; }";
-        let mut s = Server::new(inst, api).unwrap();
-        assert_eq!(s.handle("POST", "/t", &[], ""), (201, "{\"slot\":0}".to_string()));
-        assert_eq!(s.handle("POST", "/t", &[], ""), (201, "{\"slot\":1}".to_string()));
-        assert_eq!(s.handle("DELETE", "/t/0", &[], "").0, 409); // failed: the free did not happen
-        assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 2);
-        assert_eq!(s.handle("DELETE", "/t/1", &[], ""), (200, "{\"n\":7}".to_string())); // still readable after `free` in the same request
-        assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 1);
-        // a slot freed in a request is not reusable by that request
-        assert_eq!(s.handle("POST", "/t", &[], "").0, 201);
-        assert_eq!(s.handle("POST", "/swap", &[], ""), (200, "{\"got\":false}".to_string()));
-        assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 0);
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = small("struct T { n: i32; } global ts: pool<T, 2>;", api, compiled);
+            assert_eq!(s.handle("POST", "/t", &[], ""), (201, "{\"slot\":0}".to_string()));
+            assert_eq!(s.handle("POST", "/t", &[], ""), (201, "{\"slot\":1}".to_string()));
+            assert_eq!(s.handle("DELETE", "/t/0", &[], "").0, 409); // failed: the free did not happen
+            assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 2);
+            assert_eq!(s.handle("DELETE", "/t/1", &[], ""), (200, "{\"n\":7}".to_string())); // still readable after `free` in the same request
+            assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 1);
+            // a slot freed in a request is not reusable by that request
+            assert_eq!(s.handle("POST", "/t", &[], "").0, 201);
+            assert_eq!(s.handle("POST", "/swap", &[], ""), (200, "{\"got\":false}".to_string()));
+            assert_eq!(s.inst.count(s.inst.prog.coll_of("ts").unwrap(), 0), 0);
+        }
     }
 
     #[test]
     fn lists_of_plain_values_index_and_loop_as_values() {
-        let inst = Instance::start(Program::parse("struct U { tags: list<i32, 4>; } global us: pool<U, 2>;").unwrap(), 1 << 20).unwrap();
         let api = "endpoint POST /u { let u = alloc us; let a = alloc u.tags; let b = alloc u.tags; respond 201 { \"n\": count(u.tags) }; }
             endpoint GET /u { var sum = 0; each t in us[0].tags { sum = sum + t; } respond 200 { \"sum\": sum, \"all\": [each t in us[0].tags t] }; }";
-        let mut s = Server::new(inst, api).unwrap();
-        assert_eq!(s.handle("POST", "/u", &[], "").0, 201);
-        s.inst.set("us[0].tags[0]", "5").unwrap();
-        s.inst.set("us[0].tags[1]", "6").unwrap();
-        assert_eq!(s.inst.get("us[0].tags[1]").unwrap(), "6");
-        assert_eq!(s.handle("GET", "/u", &[], ""), (200, "{\"sum\":11,\"all\":[5,6]}".to_string()));
+        for compiled in [false, true] {
+            let _m = mode(compiled);
+            let mut s = small("struct U { tags: list<i32, 4>; } global us: pool<U, 2>;", api, compiled);
+            assert_eq!(s.handle("POST", "/u", &[], "").0, 201);
+            s.inst.set("us[0].tags[0]", "5").unwrap();
+            s.inst.set("us[0].tags[1]", "6").unwrap();
+            assert_eq!(s.inst.get("us[0].tags[1]").unwrap(), "6");
+            assert_eq!(s.handle("GET", "/u", &[], ""), (200, "{\"sum\":11,\"all\":[5,6]}".to_string()));
+        }
     }
 }
 

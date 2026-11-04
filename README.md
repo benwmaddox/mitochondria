@@ -21,3 +21,7 @@ cargo run --release -- exp                                  # the earlier region
 ```
 
 Windows only for now. Design, results and gaps: [DESIGN.md](DESIGN.md).
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

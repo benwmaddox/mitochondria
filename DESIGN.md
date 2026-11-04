@@ -191,3 +191,31 @@ Native Rust loops over the same 1M items (64-byte records), 4M random operations
 4. Keep ids for references that cross ticks or workers (owners, targets, mailbox contents). A per-access generation check there is the price of detecting a stale reference.
 5. Per-object work that touches many fields of a few objects is the case where columns give no gain over records, and a pointer is the slowest of the three.
 6. Native loops here measure layout cost only. A compiled Mitochondria program would add whatever its code generator adds, so treat these as the best case.
+
+## Index + live bit instead of generation (Stasis style) — decision draft
+Reference an item by plain row index; a bitset (1 bit per row) says whether the row is live. Removing an item clears its bit and leaves the row where it is, so indexes stay put (no swap-remove). A stale index can silently reach a different item that later reused the slot (the "ABA" problem: A, removed, B takes the slot, the old reference now reads B). We accept this by default.
+
+**Measured** (`exp access`, two runs on a quieter machine; ns/op):
+| | Row index | Row index + live bit | Id + generation |
+|---|---|---|---|
+| Random read, 3 fields | 7.3-9.2 | 7.7-9.7 | 17.6-19.9 |
+| Random read, 1 field | 2.0-2.7 | 1.6-2.2 | 7.5-8.6 |
+| Scan one field, per row | 0.43-0.47 (dense, no check) | 0.64-0.65 (live bit per row) | n/a |
+
+The live bit is in the noise for random reads: 1M rows is 128 KB of bits, so the bit test almost always hits cache and does not delay the data load. The scan is ~40% slower than a check-free dense loop but still ~6x faster than scanning records (3.6-4.1 ns). Id + generation costs 2-3x because of the dependent `slot_of` load.
+
+**What a stale index can and cannot do.** It can never read outside the table (the index is checked against capacity) or corrupt memory; it can only mean the wrong item. It is deterministic: the same inputs reproduce the same mix-up, which suits replay-based debugging (Stasis's record/replay).
+
+**Proposed kinds**
+- `table<T,N>`: dense, swap-remove, rows move. For bulk data, scans, and per-tick work; reference rows only within a tick.
+- `pool<T,N>`: stable slots, live bit, free slots reused lowest-first, tracked with a high-water mark so scans run over `0..hw` and `trim` can release everything above it. References are indexes. This is the default for things other data points at.
+- `pool<T,N> checked`: adds a generation column and 8-byte handles. Opt in per type where reuse bugs are expensive.
+
+**When to opt in to `checked`**
+- Handles that leave the program (a client sends "attack target 17"): a stale one must be rejected, not misapplied.
+- Long-lived references to things freed asynchronously and reused quickly (sessions, connections).
+- Debug builds of any pool: generation on in tests to find stale-reference bugs, off in release.
+
+**Cheap mitigation without a generation:** reuse freed slots in FIFO order (oldest-freed first) so a stale index is likely to point at a still-empty slot for a long time. This conflicts with lowest-first reuse (which keeps live rows near the front for `trim`), so choose one per pool.
+
+**Costs of holes:** a pool with live rows scattered across a wide range keeps those pages committed even if most rows are dead; lowest-first reuse keeps live rows near the front. Scans test one bit per row up to `hw`.

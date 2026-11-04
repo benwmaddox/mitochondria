@@ -149,13 +149,23 @@ pub fn access_cost() {
     let r = time(&mut || q.iter().map(|&k| { let s = slot_of[k as usize] as usize; if gen[k as usize] != 1 { return 0.0; } (hp_c[s] + x_c[s] + y_c[s]) as f64 }).sum());
     println!("    {:<46} {:>7.1}", "columns, id -> slot with generation check", r);
 
+    let alive: Vec<u64> = vec![!0u64; N / 64];
+    let r = time(&mut || q.iter().map(|&k| { let k = k as usize; if alive[k >> 6] >> (k & 63) & 1 == 0 { return 0.0; } (hp_c[k] + x_c[k] + y_c[k]) as f64 }).sum());
+    println!("    {:<46} {:>7.1}", "columns, row index + live bit", r);
     println!("  read ONE field of one random object (hp):");
     let r = time(&mut || q.iter().map(|&k| aos[k as usize].hp as f64).sum());
     println!("    {:<46} {:>7.1}", "records, row index", r);
     let r = time(&mut || q.iter().map(|&k| hp_c[k as usize] as f64).sum());
     println!("    {:<46} {:>7.1}", "columns, row index", r);
+    let r = time(&mut || q.iter().map(|&k| { let k = k as usize; if alive[k >> 6] >> (k & 63) & 1 == 0 { return 0.0; } hp_c[k] as f64 }).sum());
+    println!("    {:<46} {:>7.1}", "columns, row index + live bit", r);
     let r = time(&mut || q.iter().map(|&k| { let s = slot_of[k as usize] as usize; if gen[k as usize] != 1 { return 0.0; } hp_c[s] as f64 }).sum());
     println!("    {:<46} {:>7.1}", "columns, id with generation check", r);
+    println!("  scan one field over all rows, skipping dead rows:");
+    let r = { let t = Instant::now(); let mut a = 0.0f64; for _ in 0..4 { a += black_box(hp_c.iter().sum::<f32>() as f64); } black_box(a); t.elapsed().as_nanos() as f64 / (4 * N) as f64 };
+    println!("    {:<46} {:>7.2}", "columns, dense 0..len (no check)", r);
+    let r = { let t = Instant::now(); let mut a = 0.0f64; for _ in 0..4 { let mut acc = 0.0f32; for k in 0..N { if alive[k >> 6] >> (k & 63) & 1 != 0 { acc += hp_c[k]; } } a += black_box(acc as f64); } black_box(a); t.elapsed().as_nanos() as f64 / (4 * N) as f64 };
+    println!("    {:<46} {:>7.2}", "columns, 0..hw with live bit per row", r);
 
     println!("  follow links (linked structure, random cycle through all 1M):");
     let cyc = { let p = perm(&mut rnd); let mut next = vec![0u32; N]; for i in 0..N { next[p[i] as usize] = p[(i + 1) % N]; } next };

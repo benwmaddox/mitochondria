@@ -10,7 +10,7 @@ global world: World;
 ```
 
 - `list<T, N>`: a list with a maximum size (length + N slots). `T[N]`: exactly N elements. `string<N>`: a string of at most N bytes.
-- `table<T, N>` holds the same struct as `list<T, N>` but stored one column per field (structure-of-arrays), changing only the type. Summing a field over 1M rows is about 6x faster, and committed memory tracks live.
+- `table<T, N>` (column storage, dense rows) exists in the prototype but is being folded into `pool` and column-stored `list`; see DESIGN.md.
 - `pool<T, N>` gives stable slots, a live bit per slot, and reuse of the lowest free slot; `pool<T, N> checked` adds a generation so stale handles are rejected. Plain indexes cost the same as a table row index plus one bit test.
 - Layout is exact and computed at startup. The program refuses to start if it is over `--budget`.
 - One reservation holds everything; pages are committed only where bytes are live; `trim` returns the rest.
@@ -25,7 +25,7 @@ cargo run --release -- exp                                  # the earlier region
 Endpoints: `mitochondria serve examples/chat/chat.mito examples/chat/chat.api --port 8080` runs a chat server's hot state and API;
 `mitochondria bench ...` runs it in-process. See [docs/chat-api-findings.md](docs/chat-api-findings.md) for what worked and what did not.
 
-Windows only for now. Design, results and gaps: [DESIGN.md](DESIGN.md).
+Windows only for now. Design: [DESIGN.md](DESIGN.md). Measurements: [docs/measurements.md](docs/measurements.md).
 
 ## License
 

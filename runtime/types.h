@@ -17,3 +17,5 @@ typedef struct { const char *name; u32 list, drop_oldest, checked, cap, mult; i3
 typedef struct { u32 param; const char *text; } MitoSeg;
 typedef struct { const char *method; u32 nsegs; const MitoSeg *segs; } MitoRoute;
 typedef struct { u32 ncolls; const MitoColl *colls; u64 plain_end, total; u32 neps; const MitoRoute *routes; } MitoProg;
+/* A request header or a forwarded field: name and value bytes. */
+typedef struct { const char *k; u32 kn; const char *v; u32 vn; } MitoPair;

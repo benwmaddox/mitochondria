@@ -579,3 +579,15 @@ tests (collect.case), now without sort keys.
 Interpreted loading still runs the generator (it decides what loads). Most of TinyCC's time is starting `tcc.exe` to
 check the C first (its library cannot report errors to this host); compiling in memory is a few ms. Module functions are
 inlined into every endpoint that calls them, which is why sorted.case generates almost 3x the chat's endpoint C.
+
+## Round 13 (2026-11-04): workers in C
+`runtime/system.c` runs a system of workers without Rust: a thread per worker, bounded mailboxes (Windows SRW locks and
+condition variables, loaded from kernel32 because TinyCC's import list predates them), reply slots with timeouts,
+routing by a sharded session token or in turn, `forward` with the forwarding request committed only once handed on,
+and restarts after `__crash()`. Each worker kind is its own translation unit with its interface prefixed (`k0_start`),
+so a system builds as one binary; `emit-c x.system` writes one file per kind and `system.c`. The message encoding and
+every reply text are the Rust system's, so the forward, crash and chat-sharded cases match their records on the C
+system built by TinyCC, by clang and by clang with undefined-behaviour checks. Those checks found that the program
+interface was declared with different pointer types in the two units (`Mito *` against `void *`); it now takes `void *`.
+
+Workers now count a message before answering it (both runtimes), so counters read after an answer are exact.

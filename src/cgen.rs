@@ -212,7 +212,7 @@ fn json_lit(s: &str) -> String {
     o.push('"'); o
 }
 
-pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, api, None) }
+pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, api, None, "") }
 
 /// The C runtime (runtime/*.c), compiled in the same translation unit as a program.
 pub const RUNTIME: &str = include_str!("../runtime/mito.c");
@@ -221,18 +221,51 @@ pub const RUNTIME_TYPES: &str = include_str!("../runtime/types.h");
 
 /// A whole program as one C translation unit: the prelude, the layout and routes as data, the C runtime, and the
 /// endpoints. `mito_*` (runtime/mito.c) is its interface. Fails if an endpoint does not compile.
-pub fn program_c(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Result<String, String> {
-    let g = generate_with(prog, api, source);
+pub fn program_c(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Result<String, String> { program_c_named(prog, api, source, "mito_") }
+
+/// The same, its interface named `prefix`start, `prefix`handle and so on (programs of a system share one build).
+pub fn program_c_named(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefix: &str) -> Result<String, String> {
+    let g = generate_with(prog, api, source, "static ");
     if let Some(n) = g.notes.first() { return Err(n.clone()); }
     let mut o = String::from(PRELUDE);
     o += RUNTIME_TYPES;
+    o += &format!("#define MITO(x) {}##x\n", prefix);
     o += &layout_c(prog, api);
     o += RUNTIME;
     o += &g.src[PRELUDE.len()..];
-    o += "\nconst EpFn mito_eps[] = {";
-    for (k, _) in api.eps.iter().enumerate() { o += &format!(" ep{},", k); }
-    o += " 0 };\n";
     Ok(o)
+}
+
+/// The C system of workers (runtime/system.c): threads, mailboxes, reply slots, forwarding.
+pub const SYSTEM: &str = include_str!("../runtime/system.c");
+
+/// A system of workers as C translation units: one per worker kind (its program, interface prefixed `k<n>_`), then the
+/// system itself with the table of kinds. Built together, `mito_system_*` is the interface.
+pub fn system_c(spec: &crate::system::Spec) -> Result<Vec<String>, String> {
+    let mut units = Vec::new();
+    let mut table = String::from("/* ---- the system's worker kinds (generated) ---- */\ntypedef unsigned char u8; typedef unsigned short u16; typedef unsigned int u32; typedef unsigned long long u64; typedef long long i64;\n");
+    table += "#if defined(_MSC_VER) || defined(__clang__)\n#define MITO_API __declspec(dllexport)\n#else\n#define MITO_API\n#endif\n";
+    table += "typedef struct { const char *k; u32 kn; const char *v; u32 vn; } MitoPair;\n";
+    table += "typedef struct { const char *name; u32 count, mailbox, slot; u64 soft, hard; int marks;\n    void *(*start)(u64, u64); void (*stop)(void *); void (*set_clock)(void *, i64, int); void (*set_marks)(void *, u64, u64);\n    int (*handle)(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);\n    const char *(*response)(void *, u32 *); void (*set_system)(void *, u32, const char *const *, const u32 *, u32, u32);\n    u32 (*forward_to)(void *, u32 *, i64 *, MitoPair *, u32); void (*finish_forward)(void *, int); int (*crashed)(void *); } SysKind;\n";
+    let fns = ["start", "stop", "set_clock", "set_marks", "handle", "response", "set_system", "forward_to", "finish_forward", "crashed"];
+    let sigs = ["void *{}start(u64, u64);", "void {}stop(void *);", "void {}set_clock(void *, i64, int);", "void {}set_marks(void *, u64, u64);",
+        "int {}handle(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);", "const char *{}response(void *, u32 *);",
+        "void {}set_system(void *, u32, const char *const *, const u32 *, u32, u32);", "u32 {}forward_to(void *, u32 *, i64 *, MitoPair *, u32);", "void {}finish_forward(void *, int);", "int {}crashed(void *);"];
+    let mut rows = Vec::new();
+    for (i, k) in spec.kinds.iter().enumerate() {
+        let prog = Program::parse(&k.state).map_err(|e| format!("worker {}: {}", k.name, e))?;
+        let mut api = crate::lang::parse(&k.api).map_err(|e| format!("worker {}: {}", k.name, e))?;
+        crate::lang::bind(&mut api, &|n| prog.global(n)).map_err(|e| format!("worker {}: {}", k.name, e))?;
+        let pre = format!("k{}_", i);
+        units.push(program_c_named(&prog, &api, None, &pre).map_err(|e| format!("worker {}: {}", k.name, e))?);
+        for s in &sigs { table += &s.replace("{}", &pre); table.push('\n'); }
+        let f: Vec<String> = fns.iter().map(|f| format!("{}{}", pre, f)).collect();
+        rows.push(format!("    {{ {}, {}, {}, {}, {}ULL, {}ULL, {}, {} }}", c_lit(k.name.as_bytes()), k.count, k.mailbox, k.slot, k.soft.unwrap_or(0), k.hard.unwrap_or(usize::MAX), k.soft.is_some() as i32,
+            f.iter().zip(["(void *(*)(u64, u64))", "", "", "", "", "", "", "", "", ""]).map(|(n, c)| format!("{}{}", c, n)).collect::<Vec<_>>().join(", ")));
+    }
+    table += &format!("static const SysKind SYS_KINDS[] = {{\n{}\n}};\n#define SYS_NKINDS {}\n#define SYS_ENTRY {}\n#define SYS_INFLIGHT {}\n", rows.join(",\n"), spec.kinds.len(), spec.entry, spec.inflight);
+    units.push(table + SYSTEM);
+    Ok(units)
 }
 
 /// The layout and the routes as C data for the runtime: collections with their columns and nested collections,
@@ -272,8 +305,10 @@ pub fn layout_c(prog: &Program, api: &Api) -> String {
     o += "static const MitoRoute mito_routes[] = {\n";
     for (k, ep) in api.eps.iter().enumerate() { o += &format!("    {{ {}, {}, mito_segs{} }},\n", c_lit(ep.method.as_bytes()), ep.segs.len(), k); }
     o += "    { 0, 0, 0 }\n};\n";
-    for k in 0..api.eps.len() { o += &format!("int ep{}(Ctx *c);\n", k); }
-    o += "typedef int (*EpFn)(Ctx *);\nextern const EpFn mito_eps[];\n";
+    for k in 0..api.eps.len() { o += &format!("static int ep{}(Ctx *c);\n", k); }
+    o += "typedef int (*EpFn)(Ctx *);\nstatic const EpFn mito_eps[] = {";
+    for k in 0..api.eps.len() { o += &format!(" ep{},", k); }
+    o += " 0 };\n";
     o += &format!("static const MitoProg mito_prog = {{ {}, mito_colls, {}, {}, {}, mito_routes }};\n", prog.colls.len(), prog.plain_end, prog.total, api.eps.len());
     o
 }
@@ -400,7 +435,9 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
     }).collect()
 }
 
-fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Generated {
+/// `linkage`: "static " in a whole C program (only its `mito_*` interface is external), "" when the Rust runtime looks
+/// endpoints up by name.
+fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str) -> Generated {
     let mut src = String::from(PRELUDE);
     let (mut eps, mut notes) = (Vec::new(), Vec::new());
     let recursive = recursive_fns(api);
@@ -431,11 +468,11 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Gen
                 let new = &specs[done.len()..];
                 if !new.is_empty() {
                     src += &format!("\n// functions for recursive calls, first used by {}, one per combination of argument kinds\n", ep.text);
-                    for sp in new { src += &format!("int {}{};\n", sp.name, sp.proto); }
-                    for sp in new { src += &format!("int {}{} {{\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep;\n{}    return 0;\n}}\n", sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
+                    for sp in new { src += &format!("{}int {}{};\n", linkage, sp.name, sp.proto); }
+                    for sp in new { src += &format!("{}int {}{} {{\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep;\n{}    return 0;\n}}\n", linkage, sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
                 }
                 done = specs;
-                src += &format!("{}int {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b;\n{}    return 0;\n}}\n", head, name, body);
+                src += &format!("{}{}int {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b;\n{}    return 0;\n}}\n", head, linkage, name, body);
                 eps.push(Some(name));
             }
             Err(why) => {

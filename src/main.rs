@@ -94,7 +94,7 @@ fn main() {
     }
 }
 
-/// `emit-c <state.mito> <api> [-o file.c]`, or `emit-c <file.system> [-o dir]` for one file per worker kind.
+/// `emit-c <state.mito> <api> [-o file.c]`, or `emit-c <file.system> [-o dir]`: one file per worker kind and system.c.
 fn emit_c(args: &[String]) {
     let die = |e: String| -> ! { eprintln!("error: {}", e); std::process::exit(1) };
     let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1)).cloned();
@@ -114,10 +114,12 @@ fn emit_c(args: &[String]) {
             let dir = file.parent().unwrap_or(std::path::Path::new("."));
             let spec = system::parse_spec(&std::fs::read_to_string(file).unwrap_or_else(|e| die(e.to_string())), dir).unwrap_or_else(|e| die(e));
             let to = std::path::PathBuf::from(out.unwrap_or_else(|| ".".into()));
-            for k in &spec.kinds {
-                let c = one(&k.state, &format!("{} api", k.name), &k.api);
-                let p = to.join(format!("{}.c", k.name));
-                std::fs::write(&p, c).unwrap_or_else(|e| die(format!("{}: {}", p.display(), e)));
+            // one file per worker kind (its program, interface prefixed k<n>_) and system.c: build them together
+            let units = cgen::system_c(&spec).unwrap_or_else(|e| die(e));
+            let names: Vec<String> = spec.kinds.iter().map(|k| format!("{}.c", k.name)).chain(["system.c".to_string()]).collect();
+            for (u, n) in units.iter().zip(&names) {
+                let p = to.join(n);
+                std::fs::write(&p, u).unwrap_or_else(|e| die(format!("{}: {}", p.display(), e)));
                 println!("wrote {}", p.display());
             }
         }

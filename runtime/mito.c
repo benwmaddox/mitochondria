@@ -501,7 +501,8 @@ static void relieve(Mem *m, Pressure *p) {
 #define MAX_SEL (1 << 24)
 
 /* What went wrong in a request: the error kinds of the Rust runtime. */
-enum { E_NONE, E_FAIL, E_FULL, E_TOOLONG, E_NOTLIVE, E_STALE, E_BAD, E_DEAD };
+enum { E_NONE, E_FAIL, E_FULL, E_TOOLONG, E_NOTLIVE, E_STALE, E_BAD, E_DEAD, E_FORWARD };
+#define MAX_FWD 64 /* fields of one forward */
 typedef struct { u32 off, len; } T; /* a string in the text area */
 typedef struct { T k; Val v; } JField;
 
@@ -512,7 +513,7 @@ typedef struct Mito {
     i64 clock; int fixed_clock; u64 rng;
     Pressure pr;
     /* the request being handled */
-    u32 ei; const u8 *hdrs; u32 hlen; i64 now;
+    u32 ei; const MitoPair *hdrs; u32 nhdrs; const MitoPair *fwd; u32 nfwd; i64 now;
     u32 nparams; struct { u32 seg; T t; } params[MAX_PARAMS];
     u32 nquery; struct { T k, v; } query[MAX_QUERY];
     u32 njson; JField json[MAX_JSON];
@@ -520,6 +521,10 @@ typedef struct Mito {
     Grow frees; /* (collection, item) pairs, u32 each */
     Grow sel;   /* items collected by loops (u32 each) */
     int crashed;
+    /* in a system of workers: every kind's name and count, and which worker this is */
+    int insys; u32 nkinds, me_kind, me_index; const char *const *kind_names; const u32 *kind_counts;
+    u32 nfwd_out; struct { T k, v; } fwd_out[MAX_FWD]; /* the fields of the forward being made */
+    int pending; u32 fwd_kind; i64 fwd_key;         /* a forward waiting for MITO(finish_forward) */
 } Mito;
 
 /* ---- errors: kind, status and message ---- */
@@ -798,19 +803,16 @@ static int push_decoded(Mito *m, const u8 *s, u64 n, int plus, T *out) {
     *out = t_since(m, start); return 1;
 }
 
-/* ---- request headers: "Name:value\n" lines, names compared without case ---- */
-static int header(Mito *m, const u8 *name, u64 nn, const u8 **v, u64 *vn) {
-    const u8 *p = m->hdrs, *e = m->hdrs + m->hlen;
-    while (p < e) {
-        const u8 *ln = p; while (p < e && *p != '\n') p++;
-        const u8 *le = p; if (p < e) p++;
-        const u8 *col = ln; while (col < le && *col != ':') col++;
-        if (col == le || (u64)(col - ln) != nn) continue;
-        u64 k = 0; for (; k < nn; k++) if (lower(ln[k]) != lower(name[k])) break;
-        if (k == nn) { *v = col + 1; *vn = (u64)(le - col - 1); return 1; }
+/* ---- request headers and forwarded fields: name/value pairs, names compared without case ---- */
+static int find_pair(const MitoPair *ps, u32 n, const u8 *name, u64 nn, const u8 **v, u64 *vn) {
+    for (u32 i = 0; i < n; i++) {
+        if (ps[i].kn != nn) continue;
+        u64 k = 0; for (; k < nn; k++) if (lower((u8)ps[i].k[k]) != lower(name[k])) break;
+        if (k == nn) { *v = (const u8 *)ps[i].v; *vn = ps[i].vn; return 1; }
     }
     return 0;
 }
+static int header(Mito *m, const u8 *name, u64 nn, const u8 **v, u64 *vn) { return find_pair(m->hdrs, m->nhdrs, name, nn, v, vn); }
 
 /* ---------------------------------------------------------------- the helpers generated code calls */
 static int h_out(Ctx *c, const char *p, u32 n) { Mito *m = M_(c); return a_put(&m->out, p, n) ? 0 : resp_full(m); }
@@ -827,9 +829,14 @@ static int h_auth(Ctx *c, u32 cid, u32 *out) {
     Mito *m = M_(c);
     const u8 *v; u64 n;
     if (!header(m, (const u8 *)"x-session", 9, &v, &n)) return fail(m, 401, "missing X-Session header");
-    const u8 *part[3]; u64 plen[3]; int np = 0; u64 st = 0;
-    for (u64 i = 0; i <= n && np < 3; i++) if (i == n || v[i] == '.') { part[np] = v + st; plen[np] = i - st; np++; st = i + 1; }
-    u64 slot, gen, sec;
+    const u8 *part[4]; u64 plen[4]; int np = 0, want = m->insys ? 4 : 3; u64 st = 0;
+    for (u64 i = 0; i <= n && np < want; i++) if (i == n || v[i] == '.') { part[np] = v + st; plen[np] = i - st; np++; st = i + 1; }
+    u64 slot, gen, sec, w;
+    if (m->insys) { /* shard.slot.generation.secret: the first part must be this worker */
+        if (np < 1 || !parse_u64_radix(part[0], plen[0], 10, &w) || w != m->me_index) return fail(m, 401, "session token belongs to another shard");
+        for (int k = 0; k < 3; k++) { part[k] = part[k + 1]; plen[k] = plen[k + 1]; }
+        np--;
+    }
     if (np < 3 || !parse_u64_radix(part[0], plen[0], 10, &slot) || !parse_u64_radix(part[1], plen[1], 10, &gen) || gen > 0xFFFFFFFFULL || !parse_u64_radix(part[2], plen[2], 16, &sec)) return fail(m, 401, "malformed session token");
     u64 idx;
     if (!deref_quiet(m, cid, slot, (u32)gen, &idx)) return fail(m, 401, "session ended");
@@ -946,9 +953,28 @@ static int h_free_val(Ctx *c, const Val *v) {
     if (v->tag != 5) return fail(m, 500, "free needs an item");
     return h_free(c, v->a, v->b);
 }
-static int h_fwd_begin(Ctx *c, const char *p, u32 n) { (void)p; (void)n; return fail(M_(c), 500, "forward needs a system of workers"); }
-static int h_fwd_put(Ctx *c, const char *p, u32 n, const Val *v) { (void)p; (void)n; (void)v; return fail(M_(c), 500, "forward needs a system of workers"); }
-static int h_forward(Ctx *c, const char *p, u32 n, i64 key) { (void)p; (void)n; (void)key; return fail(M_(c), 500, "forward needs a system of workers"); }
+static i64 kind_of(Mito *m, const char *p, u32 n) { for (u32 k = 0; k < m->nkinds; k++) if (c_eq(m->kind_names[k], (const u8 *)p, n)) return k; return -1; }
+static int h_fwd_begin(Ctx *c, const char *p, u32 n) {
+    Mito *m = M_(c);
+    if (!m->insys) return fail(m, 500, "forward needs a system of workers");
+    if (kind_of(m, p, n) < 0) { err(m, E_FAIL, 500); a_str(&m->emsg, "no worker kind `"); a_put(&m->emsg, p, n); a_str(&m->emsg, "`"); return -1; }
+    m->nfwd_out = 0; return 0;
+}
+/* A forwarded field: its name, and its value as text (nothing for null), in the text area. */
+static int h_fwd_put(Ctx *c, const char *p, u32 n, const Val *v) {
+    Mito *m = M_(c); T k;
+    if (m->nfwd_out == MAX_FWD) return fail(m, 500, "a forward has at most 64 fields");
+    if (t_push(m, p, n, &k)) return -1;
+    u32 start = m->text.len;
+    if (v->tag != 0 && show(m, v)) return -1;
+    m->fwd_out[m->nfwd_out].k = k; m->fwd_out[m->nfwd_out].v = t_since(m, start); m->nfwd_out++;
+    return 0;
+}
+static int h_forward(Ctx *c, const char *p, u32 n, i64 key) {
+    Mito *m = M_(c); i64 k = kind_of(m, p, n);
+    m->fwd_kind = k < 0 ? 0 : (u32)k; m->fwd_key = key;
+    return err(m, E_FORWARD, 0);
+}
 static int h_crash(Ctx *c) { Mito *m = M_(c); m->crashed = 1; return fail(m, 500, "worker failed and was restarted"); }
 static int h_elem(Ctx *c, i64 k, u32 n) {
     Mito *m = M_(c);
@@ -1030,7 +1056,11 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
             if (!header(m, t_ptr(m, k), k.len, &v, &vn)) { *out = v_null(); return 0; }
             if (t_push(m, v, vn, &t)) return -1;
             *out = v_str(t); return 0; }
-        case 4: /* fwd */ if (arg_txt(m, a, n, 0, &k)) return -1; *out = v_null(); return 0;
+        case 4: { /* fwd */ if (arg_txt(m, a, n, 0, &k)) return -1;
+            const u8 *v; u64 vn; T t;
+            if (!find_pair(m->fwd, m->nfwd, t_ptr(m, k), k.len, &v, &vn)) { *out = v_null(); return 0; }
+            if (t_push(m, v, vn, &t)) return -1;
+            *out = v_str(t); return 0; }
         case 5: /* int */
             if (a0.tag == 1) { *out = a0; return 0; }
             if (a0.tag == 2) { double f = a0.f; i64 i = f != f ? 0 : f >= 9223372036854775807.0 ? I64MAX : f <= -9223372036854775808.0 ? I64MIN : (i64)f; *out = v_int(i); return 0; }
@@ -1056,6 +1086,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
             Val sec = col->kind == 0 ? scalar_val(m, caddr(m, a0.a, a0.b, (u32)ci), col->scalar) : v_null();
             if (sec.tag != 1) return fail(m, 500, "`secret` must be an integer");
             u32 start = m->text.len;
+            if (m->insys && !(a_u64(&m->text, m->me_index) && a_put(&m->text, ".", 1))) return text_full(m); /* the shard first, in a system */
             if (!(a_u64(&m->text, a0.b) && a_put(&m->text, ".", 1) && a_u64(&m->text, gen_of(&m->mem, a0.a, a0.b)) && a_put(&m->text, ".", 1) && a_hex(&m->text, (u64)sec.i))) return text_full(m);
             *out = v_str(t_since(m, start)); return 0; }
         case 11: { /* stat */ if (arg_txt(m, a, n, 0, &k)) return -1;
@@ -1065,8 +1096,11 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
             else if (c_eq("reserved_kb", s, k.len)) v = m->mem.reserved / 1024;
             else return fail(m, 500, "unknown stat");
             *out = v_int((i64)v); return 0; }
-        case 12: /* worker_index */ *out = v_int(0); return 0;
-        case 13: /* worker_count */ if (n == 0) { *out = v_int(1); return 0; } if (a0.tag == 4) return fail(m, 500, "no such worker kind"); return fail(m, 500, "worker_count(\"kind\")");
+        case 12: /* worker_index */ *out = v_int(m->insys ? m->me_index : 0); return 0;
+        case 13: /* worker_count */
+            if (n == 0) { *out = v_int(m->insys ? m->kind_counts[m->me_kind] : 1); return 0; }
+            if (a0.tag == 4) { i64 kk = m->insys ? kind_of(m, (const char *)t_ptr(m, (T){ a0.a, a0.b }), a0.b) : -1; if (kk < 0) return fail(m, 500, "no such worker kind"); *out = v_int(m->kind_counts[kk]); return 0; }
+            return fail(m, 500, "worker_count(\"kind\")");
         case 14: case 15: { /* min, max */
             Val b = n > 1 ? a[1] : v_null();
             if (a0.tag != 1 || b.tag != 1) return fail(m, 500, "min/max need integers");
@@ -1085,7 +1119,7 @@ static const H mito_h = {
 /* ---------------------------------------------------------------- the interface: mito_* */
 /* Start the program: reserve its layout (refusing if over `budget` bytes), commit plain values and top-level headers.
    `seed` 0 takes random numbers from the OS. Returns 0 if over budget or out of address space. */
-MITO_API Mito *mito_start(u64 budget, u64 seed) {
+MITO_API void *MITO(start)(u64 budget, u64 seed) {
     const MitoProg *pg = &mito_prog;
     if (pg->total > budget) return 0;
     Mito *m = (Mito *)VirtualAlloc(0, sizeof(Mito), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -1111,9 +1145,9 @@ MITO_API Mito *mito_start(u64 budget, u64 seed) {
     for (u32 c = 0; c < pg->ncolls; c++) { const MitoColl *k = &pg->colls[c]; if (k->parent < 0) ensure(mem, k->hdr, k->hdr + hdr_fields(k) * 4); }
     return m;
 }
-MITO_API void mito_stop(Mito *m) { if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.jb.p); os_release(m->mem.je.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }
-MITO_API void mito_set_clock(Mito *m, i64 ms, int fixed) { m->clock = ms; m->fixed_clock = fixed; }
-MITO_API void mito_set_marks(Mito *m, u64 soft, u64 hard) {
+MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.jb.p); os_release(m->mem.je.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }
+MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
+MITO_API void MITO(set_marks)(void *mp_, u64 soft, u64 hard) { Mito *m = (Mito *)mp_;
     m->pr.on = 1; m->pr.soft = soft; m->pr.hard = hard; m->pr.refusing = 0; m->pr.trims = m->pr.full_trims = m->pr.freed = 0;
     for (u32 c = 0; c < m->mem.prog->ncolls; c++) m->pr.stuck[c] = ~0ULL;
 }
@@ -1135,15 +1169,16 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
     }
     return 0xFFFFFFFFu;
 }
-/* Handle one request. Headers are "Name:value\n" lines. Returns the status; the body is in the response area. */
-MITO_API int mito_handle(Mito *m, const char *method, u32 mn, const char *target, u32 tn, const char *hdrs, u32 hn, const char *body, u32 bn) {
+/* Handle one request, with its headers and (in a system) the fields forwarded with it. Returns the status, or 0 when
+   the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
+MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
     m->out.len = 0; m->text.len = 0; m->ekind = E_NONE;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     u32 ei = route(m, (const u8 *)method, mn, t, q);
     if (ei == 0xFFFFFFFFu) { out_err_c(m, "no such endpoint"); return 404; }
     if (m->pr.on && m->pr.refusing && !c_eq("GET", (const u8 *)method, mn) && !c_eq("DELETE", (const u8 *)method, mn)) { out_err_c(m, "memory pressure: try again later"); return 503; }
-    m->ei = ei; m->hdrs = (const u8 *)hdrs; m->hlen = hn;
+    m->ei = ei; m->hdrs = hdrs; m->nhdrs = nh; m->fwd = fwd; m->nfwd = nf;
     const MitoRoute *r = &mito_prog.routes[ei];
     m->nparams = 0; m->nquery = 0; m->njson = 0;
     int fits = 1;
@@ -1176,6 +1211,7 @@ MITO_API int mito_handle(Mito *m, const char *method, u32 mn, const char *target
     m->frees.len = 0; m->sel.len = 0;
     Ctx ctx = { m->mem.base, m, &mito_h };
     int res = mito_eps[ei](&ctx);
+    if (res < 0 && m->ekind == E_FORWARD) { m->out.len = 0; m->pending = 1; return 0; } /* committed or rolled back by MITO(finish_forward) */
     int code, ok;
     if (res == 0) { m->out.len = 0; code = 204; ok = 1; }
     else if (res > 0) { code = res; ok = 1; }
@@ -1193,16 +1229,42 @@ MITO_API int mito_handle(Mito *m, const char *method, u32 mn, const char *target
     if (m->pr.on) relieve(&m->mem, &m->pr);
     return code;
 }
-MITO_API const char *mito_response(Mito *m, u32 *len) { *len = m->out.len; return (const char *)m->out.p; }
+MITO_API const char *MITO(response)(void *mp_, u32 *len) { Mito *m = (Mito *)mp_; *len = m->out.len; return (const char *)m->out.p; }
+
+/* ---- in a system of workers ---- */
+MITO_API void MITO(set_system)(void *mp_, u32 nkinds, const char *const *names, const u32 *counts, u32 me_kind, u32 me_index) { Mito *m = (Mito *)mp_;
+    m->insys = 1; m->nkinds = nkinds; m->kind_names = names; m->kind_counts = counts; m->me_kind = me_kind; m->me_index = me_index;
+}
+/* Where the last request was forwarded (worker kind, key) and its fields, pointing into this request's text area. */
+MITO_API u32 MITO(forward_to)(void *mp_, u32 *kind, i64 *key, MitoPair *out, u32 cap) { Mito *m = (Mito *)mp_;
+    *kind = m->fwd_kind; *key = m->fwd_key;
+    u32 n = m->nfwd_out < cap ? m->nfwd_out : cap;
+    for (u32 i = 0; i < n; i++) {
+        out[i].k = (const char *)t_ptr(m, m->fwd_out[i].k); out[i].kn = m->fwd_out[i].k.len;
+        out[i].v = (const char *)t_ptr(m, m->fwd_out[i].v); out[i].vn = m->fwd_out[i].v.len;
+    }
+    return n;
+}
+/* Commit the forwarding request's writes (and frees) if it was handed on, or roll them back if it could not be. */
+MITO_API void MITO(finish_forward)(void *mp_, int sent) { Mito *m = (Mito *)mp_;
+    if (!m->pending) return;
+    m->pending = 0;
+    if (sent) { u32 *f = (u32 *)m->frees.p; for (u64 i = 0; i < m->frees.len; i += 2) free_item(&m->mem, f[i], f[i + 1]); commit_changes(&m->mem); }
+    else rollback(&m->mem);
+    if (m->pr.on) relieve(&m->mem, &m->pr);
+}
+/* Did the last request call the crash test hook? (The system then rebuilds this worker.) */
+MITO_API int MITO(crashed)(void *mp_) { Mito *m = (Mito *)mp_; return m->crashed; }
+MITO_API u64 MITO(committed)(void *mp_) { Mito *m = (Mito *)mp_; return m->mem.cpages * PAGE; }
 /* The same lines the cases record: `state <name> <live bytes>` per collection, then the memory totals. */
-MITO_API u32 mito_state(Mito *m, char *buf, u32 cap) {
+MITO_API u32 MITO(state)(void *mp_, char *buf, u32 cap) { Mito *m = (Mito *)mp_;
     Area a = { (u8 *)buf, cap, 0 };
     a_str(&a, "state <plain values> "); a_u64(&a, m->mem.prog->plain_end); a_str(&a, "\n");
     for (u32 c = 0; c < m->mem.prog->ncolls; c++) { a_str(&a, "state "); a_str(&a, m->mem.prog->colls[c].name); a_str(&a, " "); a_u64(&a, coll_live(&m->mem, c)); a_str(&a, "\n"); }
     a_str(&a, "memory reserved="); a_u64(&a, m->mem.reserved); a_str(&a, " committed="); a_u64(&a, m->mem.cpages * PAGE); a_str(&a, " live="); a_u64(&a, live_total(&m->mem)); a_str(&a, "\n");
     return a.len;
 }
-MITO_API u32 mito_stats(Mito *m, char *buf, u32 cap) {
+MITO_API u32 MITO(stats)(void *mp_, char *buf, u32 cap) { Mito *m = (Mito *)mp_;
     Area a = { (u8 *)buf, cap, 0 };
     if (!m->pr.on) a_str(&a, "stats no marks");
     else { a_str(&a, "stats refusing="); a_str(&a, m->pr.refusing ? "true" : "false"); a_str(&a, " full_trims="); a_u64(&a, m->pr.full_trims); }

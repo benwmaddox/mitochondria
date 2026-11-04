@@ -89,7 +89,11 @@ impl Backend for RustBackend {
 
 /// The C runtime (runtime/mito.c) and the program's generated C compiled together, driven through `mito_*`: in memory
 /// by TinyCC, or by clang (-O2) into a DLL.
-pub struct CBackend { _code: Code, m: *mut std::ffi::c_void, f: CFns, buf: Vec<u8> }
+pub struct CBackend { _code: Code, m: *mut std::ffi::c_void, f: CFns, pairs: Vec<MitoPair> }
+/// A header or forwarded field, as runtime/types.h declares it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MitoPair { pub k: *const u8, pub kn: u32, pub v: *const u8, pub vn: u32 }
 enum Code { Tcc(crate::tcc::Unit), Dll(*mut std::ffi::c_void) }
 extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
@@ -104,15 +108,18 @@ pub fn clang() -> Option<String> {
     if std::path::Path::new(&p).exists() { Some(p) } else { None }
 }
 /// Build `src` with clang into a DLL (in the temp directory, named by `name`) and load it.
-pub fn clang_dll(src: &str, name: &str, extra: &[&str]) -> Result<*mut std::ffi::c_void, String> {
+pub fn clang_dll(src: &str, name: &str, extra: &[&str]) -> Result<*mut std::ffi::c_void, String> { clang_dll_units(&[src], name, extra) }
+/// The same for several translation units built into one DLL.
+pub fn clang_dll_units(srcs: &[&str], name: &str, extra: &[&str]) -> Result<*mut std::ffi::c_void, String> {
     let cc = clang().ok_or("clang not found")?;
     let dir = std::env::temp_dir().join("mito-clang");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let stem = format!("{}-{}-{}", name, std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let (c, dll) = (dir.join(format!("{}.c", stem)), dir.join(format!("{}.dll", stem)));
-    std::fs::write(&c, src).map_err(|e| e.to_string())?;
-    let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(extra).arg("-o").arg(&dll).arg(&c).arg("-lkernel32")
+    let dll = dir.join(format!("{}.dll", stem));
+    let mut cs = Vec::new();
+    for (k, src) in srcs.iter().enumerate() { let c = dir.join(format!("{}-{}.c", stem, k)); std::fs::write(&c, src).map_err(|e| e.to_string())?; cs.push(c); }
+    let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(extra).arg("-o").arg(&dll).args(&cs).arg("-lkernel32")
         .output().map_err(|e| e.to_string())?;
     if !out.status.success() { return Err(format!("clang failed:\n{}", String::from_utf8_lossy(&out.stderr))); }
     let w: Vec<u16> = dll.to_string_lossy().encode_utf16().chain([0]).collect();
@@ -121,7 +128,7 @@ pub fn clang_dll(src: &str, name: &str, extra: &[&str]) -> Result<*mut std::ffi:
     Ok(h)
 }
 struct CFns {
-    handle: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, u32, *const u8, u32, *const u8, u32, *const u8, u32) -> i32,
+    handle: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, u32, *const u8, u32, *const MitoPair, u32, *const MitoPair, u32, *const u8, u32) -> i32,
     response: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u32) -> *const u8,
     set_clock: unsafe extern "C" fn(*mut std::ffi::c_void, i64, i32),
     set_marks: unsafe extern "C" fn(*mut std::ffi::c_void, u64, u64),
@@ -152,13 +159,13 @@ impl CBackend {
             let m = start(1 << 30, 0x1234_5678_9abc_def0);
             assert!(!m.is_null(), "{}: mito_start failed", case.name);
             (f.set_clock)(m, 1000, 1);
-            CBackend { _code: code, m, f, buf: Vec::with_capacity(1 << 16) }
+            CBackend { _code: code, m, f, pairs: Vec::with_capacity(64) }
         }
     }
     fn call(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> i32 {
-        self.buf.clear();
-        for (k, v) in h { self.buf.extend_from_slice(k.as_bytes()); self.buf.push(b':'); self.buf.extend_from_slice(v.as_bytes()); self.buf.push(10); }
-        unsafe { (self.f.handle)(self.m, m.as_ptr(), m.len() as u32, t.as_ptr(), t.len() as u32, self.buf.as_ptr(), self.buf.len() as u32, b.as_ptr(), b.len() as u32) }
+        self.pairs.clear();
+        for (k, v) in h { self.pairs.push(MitoPair { k: k.as_ptr(), kn: k.len() as u32, v: v.as_ptr(), vn: v.len() as u32 }); }
+        unsafe { (self.f.handle)(self.m, m.as_ptr(), m.len() as u32, t.as_ptr(), t.len() as u32, self.pairs.as_ptr(), self.pairs.len() as u32, std::ptr::null(), 0, b.as_ptr(), b.len() as u32) }
     }
     fn text(&self, f: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u8, u32) -> u32) -> String {
         let mut b = vec![0u8; 1 << 20];
@@ -183,6 +190,58 @@ impl Backend for CBackend {
     fn notes(&self) -> Vec<String> { Vec::new() } // program_c fails unless every endpoint compiles
     fn no_alloc(&self) -> bool { true }
     /// The C runtime has no allocator at all: it declares no malloc, and every buffer is a reservation made at start.
+    fn allocs(&self) -> usize { 0 }
+}
+
+/// A system of worker threads in C (runtime/system.c with each kind's program), built by TinyCC or clang.
+pub struct CSystemBackend { _code: Code, s: *mut std::ffi::c_void, f: SysFns, out: Vec<u8> }
+struct SysFns {
+    request: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, u32, *const u8, u32, *const MitoPair, u32, *const u8, u32, u32, *mut u8, u32, *mut u32) -> i32,
+    set_clock: unsafe extern "C" fn(*mut std::ffi::c_void, i64, i32),
+    report: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u8, u32) -> u32,
+    stop: unsafe extern "C" fn(*mut std::ffi::c_void),
+}
+impl CSystemBackend {
+    pub fn start(case: &Case, use_clang: bool, flags: &[&str]) -> CSystemBackend {
+        let read = |f: &str| case.files.iter().find(|x| x.0 == f).map(|x| x.1.clone()).ok_or_else(|| format!("no `--- file {}` section", f));
+        let spec = crate::system::parse_spec_with(case.system.as_deref().unwrap(), &read).unwrap_or_else(|e| panic!("{}: system: {}", case.name, e));
+        let units = crate::cgen::system_c(&spec).unwrap_or_else(|e| panic!("{}: {}", case.name, e));
+        let refs: Vec<&str> = units.iter().map(|s| s.as_str()).collect();
+        let code = if use_clang { Code::Dll(clang_dll_units(&refs, &case.name, flags).unwrap_or_else(|e| panic!("{}: {}", case.name, e))) }
+            else { Code::Tcc(crate::tcc::Unit::compile_units(&refs, &[]).unwrap_or_else(|e| panic!("{}: C system: {}", case.name, e))) };
+        let sym = |n: &str| -> *const std::ffi::c_void {
+            let p = match &code { Code::Tcc(u) => u.symbol(n), Code::Dll(h) => { let c = std::ffi::CString::new(n).unwrap(); let p = unsafe { GetProcAddress(*h, c.as_ptr()) }; if p.is_null() { None } else { Some(p as *const std::ffi::c_void) } } };
+            p.unwrap_or_else(|| panic!("no {}", n))
+        };
+        unsafe {
+            let start: unsafe extern "C" fn(u64, i32) -> *mut std::ffi::c_void = std::mem::transmute(sym("mito_system_start"));
+            let f = SysFns { request: std::mem::transmute(sym("mito_system_request")), set_clock: std::mem::transmute(sym("mito_system_set_clock")), report: std::mem::transmute(sym("mito_system_report")), stop: std::mem::transmute(sym("mito_system_stop")) };
+            let s = start(0x1234_5678_9abc_def0, 1);
+            assert!(!s.is_null(), "{}: mito_system_start failed", case.name);
+            (f.set_clock)(s, 1000, 1);
+            CSystemBackend { _code: code, s, f, out: vec![0; 300 * 1024] }
+        }
+    }
+}
+impl Drop for CSystemBackend { fn drop(&mut self) { unsafe { (self.f.stop)(self.s) } } }
+impl Backend for CSystemBackend {
+    fn handle(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> (u16, String) {
+        let pairs: Vec<MitoPair> = h.iter().map(|(k, v)| MitoPair { k: k.as_ptr(), kn: k.len() as u32, v: v.as_ptr(), vn: v.len() as u32 }).collect();
+        let mut n = 0u32;
+        let code = unsafe { (self.f.request)(self.s, m.as_ptr(), m.len() as u32, t.as_ptr(), t.len() as u32, pairs.as_ptr(), pairs.len() as u32, b.as_ptr(), b.len() as u32, 10_000, self.out.as_mut_ptr(), self.out.len() as u32, &mut n) };
+        (code as u16, String::from_utf8_lossy(&self.out[..n as usize]).into_owned())
+    }
+    fn handle_quiet(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> u16 { self.handle(m, t, h, b).0 }
+    fn set_clock(&mut self, ms: i64) { unsafe { (self.f.set_clock)(self.s, ms, 1) } }
+    fn set_marks(&mut self, _: usize, _: usize) { panic!("marks are set per worker kind in the system file"); }
+    fn state(&self) -> Vec<String> { Vec::new() }
+    fn stats(&self) -> String {
+        let mut b = vec![0u8; 1 << 16];
+        let n = unsafe { (self.f.report)(self.s, b.as_mut_ptr(), b.len() as u32) } as usize;
+        String::from_utf8_lossy(&b[..n]).lines().map(|l| { let p: Vec<&str> = l.split(' ').collect(); format!("{}{} handled={} forwarded={} restarts={}", p[0], p[1], p[2], p[3], p[4]) }).collect::<Vec<_>>().join(" | ")
+    }
+    fn notes(&self) -> Vec<String> { Vec::new() }
+    fn no_alloc(&self) -> bool { true }
     fn allocs(&self) -> usize { 0 }
 }
 
@@ -559,7 +618,12 @@ mod tests {
             if only.as_ref().map_or(false, |o| *o != case.name) { continue; }
             // the interpreter is the reference while it exists
             let mut backends: Vec<(&str, Box<dyn Backend>)> = if case.system.is_some() {
-                vec![("interpreted", Box::new(SystemBackend::start(&case, false))), ("compiled", Box::new(SystemBackend::start(&case, true)))]
+                let mut v: Vec<(&str, Box<dyn Backend>)> = vec![("interpreted", Box::new(SystemBackend::start(&case, false))), ("compiled", Box::new(SystemBackend::start(&case, true))), ("C system", Box::new(CSystemBackend::start(&case, false, &[])))];
+                if clang().is_some() {
+                    v.push(("C system, clang", Box::new(CSystemBackend::start(&case, true, &[]))));
+                    if std::env::var("MITO_SKIP_UBSAN").is_err() { v.push(("C system, clang, undefined-behaviour checks", Box::new(CSystemBackend::start(&case, true, UBSAN)))); }
+                }
+                v
             } else {
                 vec![("interpreted", Box::new(RustBackend::start(&case, false))), ("compiled", Box::new(RustBackend::start(&case, true))), ("C runtime", Box::new(CBackend::start(&case)))]
             };

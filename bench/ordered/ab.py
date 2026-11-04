@@ -3,6 +3,8 @@
 usage: python -I ab.py N OPS ROUNDS exeA exeB [exeC ...]
 Prints the median ns/op per workload for every exe and for the Rust baseline, and each exe's ratio to Rust."""
 import http.client, json, os, statistics, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pin import pin
 
 here = os.path.dirname(os.path.abspath(__file__))
 n, ops, rounds = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
@@ -21,6 +23,7 @@ def call(method, path):
 
 def run_mito(exe):
     p = subprocess.Popen([exe, "--port", str(port), "--timing"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    pin(p)
     try:
         for _ in range(200):
             try: call("GET", "/stats"); break
@@ -42,7 +45,9 @@ def run_mito(exe):
 
 
 def run_rust():
-    out = subprocess.run([rust, str(n), str(ops)], capture_output=True, text=True, check=True).stdout
+    rp = subprocess.Popen([rust, str(n), str(ops)], stdout=subprocess.PIPE, text=True)
+    pin(rp)
+    out = rp.communicate()[0]
     return {k: float(v) for k, v in (l.split("\t") for l in out.strip().splitlines())}
 
 

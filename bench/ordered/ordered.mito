@@ -114,3 +114,11 @@ fn insert_from(x: i64, n: i64 in 1..1048576) -> Response<{ x: i64, size: i64 }> 
     each i in 0..n { nx = nx * 48271 % 2147483647; let e = b.m.add(nx * 2); e.v = nx; }
     return ok({ "x": nx, "size": b.m.size() });
 }
+
+// the whole order walked from the start: what memory layout costs when nothing is searched
+@get("/scan/{limit}")
+fn scan(limit: i64 in 1..2000000) -> Response<{ sum: i64 }> {
+    var s = 0;
+    each e in b.m limit limit { s = s + e.v; }
+    return ok({ "sum": s });
+}

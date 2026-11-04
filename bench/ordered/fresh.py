@@ -17,7 +17,8 @@ def start():
 def probe(y, label):
     ops = 100000
     best = min(call("GET", f"/probe/{y}/{ops}")[0] for _ in range(5)) * 1e9 / ops
-    print(f"  {label:<46}{best:7.0f} ns/lookup", flush=True)
+    scan = min(call("GET", f"/scan/{w}")[0] for _ in range(5)) * 1e9 / w
+    print(f"  {label:<46}{best:7.0f} ns/lookup {scan:7.1f} ns/item in-order scan", flush=True)
 step = lambda v: v * 48271 % 2147483647
 A = start()
 try:

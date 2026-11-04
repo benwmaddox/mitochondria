@@ -731,8 +731,17 @@ insert because each item has a location record).
   Rust's private bytes did not move (3,916 KB).
 - the tree stays the same shape: height 4, leaves 8,876 -> about 8,860, inner nodes 861 -> 1,168 (leaves merge only
   under one parent, inner nodes never merge, so inner nodes creep up and plateau).
-- **lookups slow down with use**: the B+tree goes from 72-77 ns to about 128 ns between rounds 10 and 20 (4,000,000
-  steps: 126-130 ns) and stays there; the skip list from 315 to 450 ns. Rust stays at 80-84 ns. Loading the same live
-  keys into a fresh process gives 72 ns again (`fresh.py`), so the loss is in the layout left by reuse, not in the
-  amount of memory or the tree's shape. The cause is not found yet.
-- steps cost 1,000-2,000 ns in the B+tree against 195 ns in Rust.
+- speed does not drift with use. Pinned to one core, the B+tree's step stays 984 -> 1,015 ns and its lookup 116 -> 120
+  ns over the 40 rounds, the skip list's step 2,129 -> 2,200 ns and lookup 464 -> 438 ns, and the in-order scan stays
+  3.8 ns per item. (An earlier version of this note reported lookups slowing from 72 to 128 ns after 10-20 rounds and
+  recovering in a fresh process. That was not memory or layout: this machine's CPU mixes performance and efficiency
+  cores, and an unpinned benchmark process was moved to a slower one mid-run. The same loop takes 80 ns on CPUs 0, 10
+  and 12-18, 121 ns on CPUs 2-8 and 251 ns on CPU 20; `pin.py` fixes the core, and the drivers use it.)
+
+**How the two sides are timed.** Rust times the bare loop in its own process (`Instant`). Mitochondria is timed by the
+server itself: started with `--timing`, every answer carries `X-Handler-Ns`, the handler's time measured by the
+high-resolution counter, and the driver reads that. (Timing the Python HTTP round trip instead added 330-700 us per
+request with 15 ms stalls in the tail, which inflated insert and delete.) Both processes are pinned to the same core.
+Still not the same work: Mito has no direct `find`, so a lookup is `each x from key limit 1` and an equality test; a
+delete is a lookup and a remove; every request is atomic (undo log); an insert also allocates the item and its
+location record; its arithmetic is overflow-checked.

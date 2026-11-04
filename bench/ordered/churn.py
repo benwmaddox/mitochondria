@@ -6,6 +6,8 @@ position in the order). After every round: ns per step, ns per lookup of the liv
 and (B-tree builds) leaf and inner node counts. Rust's churn mode runs the same sequence for comparison.
 Every program's first line of output is the window filled with no churn yet, so growth over the rounds reads directly."""
 import http.client, json, os, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pin import pin
 
 here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
@@ -31,6 +33,7 @@ def step(v): return v * 48271 % 2147483647
 
 def run(exe):
     p = subprocess.Popen([exe, "--port", str(port), "--timing", *flags], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    pin(p)
     rows = []
     try:
         for _ in range(200):
@@ -71,7 +74,9 @@ def show(name, rows, rust_rows=None):
     print(f"  after {rounds} rounds ({rounds * c} steps, each key replaced {rounds * c // w}x): step {first[1]:.0f} -> {last[1]:.0f} ns, lookup {rows[0][2]:.0f} -> {last[2]:.0f} ns, committed {rows[0][3]} -> {last[3]} KB")
 
 
-out = subprocess.run([rust, "churn", str(w), str(c), str(rounds)], capture_output=True, text=True, check=True).stdout
+rp = subprocess.Popen([rust, "churn", str(w), str(c), str(rounds)], stdout=subprocess.PIPE, text=True)
+pin(rp)
+out = rp.communicate()[0]
 print(f"== Rust BTreeMap: window {w}, {c} steps per round")
 print(f"{'round':>5}{'ns/step':>10}{'ns/lookup':>11}{'private KB':>12}")
 rr = [l.split("\t") for l in out.strip().splitlines()]

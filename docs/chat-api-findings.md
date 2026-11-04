@@ -1,131 +1,23 @@
-# Chat API on Mitochondria: what worked and what did not (2026-11-03)
+# Chat API on Mitochondria: what the first prototype taught (2026-11-03)
 
-A Campfire-style chat server's hot state and API, written in the new endpoint language to see how the language holds up.
-Files: `examples/chat/chat.mito` (13 lines of declared state), `examples/chat/chat.api` (96 lines, 9 endpoints),
-interpreter and server `src/lang.rs` (212 lines) and `src/serve.rs` (600 lines, including tests).
-Worked from general knowledge of how a chat server behaves; no Campfire source or specs were consulted.
+The first test of the language was a Campfire-style chat server's hot state and API (sessions, rooms, messages, typing)
+on a tree-walking interpreter. It showed what fit and what was missing; every gap below shaped the current design.
 
-## What was built
-A tree-walking interpreter for a small endpoint language (`let`, assignment, `if`, `each ... where ... order by ... limit`,
-`alloc`, `free`, `fail`, `respond` with JSON objects and array comprehensions, built-ins such as `body`, `param`, `query`,
-`header`, `auth`, `token`, `now`, `random`, `count`, `capacity`, `stat`), plus a single-threaded HTTP/1.1 server using only `std`
-and an in-process benchmark. 12 tests cover auth, error codes, eviction, rate limit, typing expiry, rollback and JSON escaping.
+**What fit from the start.** Capacity became part of the API (a full pool 503, a long string 413, a dead slot 404).
+Checked pools gave real session hygiene: a deleted session's token stays rejected after its slot is reused. Memory was
+visible from inside the app (`/stats`). Handlers were short.
 
-| Endpoint | Lines |
+**What was missing, and what it became:**
+
+| Gap found | Now |
 |---|---|
-| POST /sessions | 10 |
-| DELETE /session | 5 |
-| POST /rooms | 9 |
-| GET /rooms | 4 |
-| POST /rooms/{room}/messages (auth, validation, rate limit, eviction, store) | 24 |
-| GET /rooms/{room}/messages (filter, newest first, limit) | 11 |
-| POST /rooms/{room}/typing | 12 |
-| GET /rooms/{room}/typing | 6 |
-| GET /stats | 7 |
+| A failed request leaked state (ghost rooms filled the pool) | every request is atomic: a write journal rolls it back exactly |
+| No index: "newest 50 messages of a room" scanned all 20,000 (2.9 ms) | nested collections: a room's own list, read from the end (52 µs, then 2.5 µs compiled) |
+| Evicting the oldest message sorted everything (951 µs a post) | `list<T, N> drop_oldest`, a ring (4.3 µs) |
+| `body: string<2000>` left 39.5 MB committed for 3.1 MB live | still open: packed text is planned (DESIGN.md, Next) |
+| No functions or mutable locals; auth copied into every endpoint | `fn` and `var`; then the session became a typed input |
+| Author names copied into messages | `ref<chat.sessions>` with `or(m.author.name, "[deleted]")` |
+| Declared maxima invisible to code | `x.capacity()`, `maxlen(s)` |
+| Temporaries on the heap; single-threaded; interpreter-bound | no heap at all; workers on threads; compiled to C |
 
-## Works over real HTTP
-Smoke test with `curl` against the socket server: create session (201, token), create room, post a message with escaped quotes,
-list newest first, typing ping and list, stats, and every failure mode: no token 401, wrong secret 403, ended session 401,
-missing room 404, string over `string<48>` 413, unknown path 404. Session tokens are `slot.generation.secret` where the secret
-is 64 bits from the OS (`BCryptGenRandom`), because slot and generation are sequential and guessable on their own.
-
-## Measured (in-process, no sockets; interpreter-bound)
-`mitochondria bench examples/chat/chat.mito examples/chat/chat.api`, microseconds. Declared state reserves 39.6 MB.
-
-| Endpoint | Calls | Mean | p50 | p99 |
-|---|---|---|---|---|
-| POST /sessions | 1000 | 3.5 | 3.1 | 9.3 |
-| POST message, pool filling | 20000 | 8.1 | 7.8 | 12.1 |
-| POST message, pool full (evicts oldest) | 200 | 951 | 957 | 1087 |
-| GET messages, limit 50 (20,000 messages) | 1406 | 2880 | 2371 | 5152 |
-| POST message, mixed load | 401 | 1124 | 961 | 1940 |
-| POST typing | 91 | 20.9 | 18.2 | 42.6 |
-| GET typing | 102 | 10.7 | 9.9 | 22.1 |
-| DELETE /session | 1000 | 3.1 | 2.7 | 3.1 |
-
-Memory: 1000 sessions and 20 rooms committed 0.10 MB; 20,000 messages committed 39.5 MB for 3.1 MB live.
-Deleting every session and running `trim` released 0.07 MB.
-
-**Interpreter versus layout.** A native Rust scan of the same 20,000-message columns (filter by room, sort by sequence,
-take 50) takes 6.1 us. The interpreter takes 2,880 us after one optimization pass (it was 9,344 us first: per-row cloning of the loop variable's
-name and a path built for every field read). So `GET messages` is about 470x the native cost, almost all interpreter overhead:
-per-row `Value` handling, `slot(room)` re-evaluated for every row, no loop-invariant hoisting. This does not say anything bad about
-the column layout; it says a tree-walking interpreter is the wrong place to scan 20,000 rows. A compiler would hoist, bind columns
-and compile the filter into a column loop. Simple endpoints at 3 to 20 us are fine for an interpreter.
-
-## Findings: what the language got right
-- **Capacity as part of the API.** A full pool is a typed `FULL` that becomes a 503; a string over its declared length is a 413; a dead
-  slot is a 404; these are different, and the interpreter maps each separately. This came for free from the declared types.
-- **Checked pools gave real auth hygiene.** A deleted session's token is rejected as "session ended" even after its slot is reused
-  by someone else (generation), and a guessed generation with the wrong secret is a different failure (403).
-- **Overload and memory are visible.** `GET /stats` reports reserved, committed and live memory from inside the app.
-- **Handlers read well.** Most endpoints are 4 to 12 lines. Request, state and response are all in one place.
-- **Per-request epoch.** Responses are built in a fixed 256 KB block carved from the declared reservation and reset for every request.
-  Overflow is a defined 507, not an unbounded string.
-
-## Findings: gaps and awkward places (honest list)
-1. **A failed request leaked state.** First version of `POST /rooms` allocated a slot, then failed on an over-long name; the pool filled with
-   empty "ghost" rooms and later requests got 503. Fixed by adding request-level rollback (allocations released and writes restored when a
-   request fails). Frees mid-request are not undone. This is a language-level need: handlers need atomicity, and without it every endpoint
-   has to validate before it allocates. `POST messages` still validates length by hard-coding 2000 (the declared maximum is not available to code).
-2. **No index, so reads are scans.** "Messages of room 3, newest first, limit 50" scans every live message. At 20,000 messages that is the
-   2.9 ms above; a per-room index or a per-room ring would turn it into reading the last 50 entries. The language needs a keyed index
-   or per-parent collections.
-3. **No `ring` kind.** Eviction of the oldest message when the pool is full is `each old in messages order by old.seq limit 1 { free old; }`,
-   which sorts all 20,000 rows: 951 us per post once full (vs 8 us before). A ring (or an ordered pool) makes this O(1).
-4. **Large fixed string slots defeat page reclaim.** `body: string<2000>` reserves 40 MB for 20,000 messages whose bodies average about
-   120 bytes. Every page of the body column holds at least one live prefix, so `trim` cannot release any of it: 39.5 MB committed for
-   3.1 MB live, 92% waste. This is the page-granularity limit measured earlier, now in a realistic case. Chat text needs a variable-size
-   text arena, or smaller slots with an overflow path. Fixed `string<N>` is the wrong tool for long, uneven text.
-5. **No mutable local variables and no functions.** Upsert ("update if exists else insert") became "delete old, then insert". Every
-   authenticated endpoint repeats `let me = auth(sessions);`. Common checks are copied into several endpoints.
-6. **Denormalization is forced.** Messages store `author_name` because looking up a deleted author's session would turn the whole listing
-   into a 404. A join-like lookup with a fallback needs a way to say "if present".
-7. **Declared maxima are invisible to code.** Only `capacity(collection)` was added; string maxima are not queryable, hence the hard-coded 2000.
-8. **No time-based expiry, no JSON beyond flat input, no percent-decoding of query strings, no HTTP/1.1 keep-alive or chunking.**
-9. **Single-threaded.** The mailbox/worker design is not built. These numbers say nothing about concurrency.
-10. **Temporaries use the Rust heap.** Request parsing, the interpreter's values and response copies are ordinary Rust allocations, outside
-    the declared reservation. Only state and the response buffer are in declared memory, so "all memory declared" is not yet true of the server.
-11. **Messages in memory are a cache.** A real Campfire keeps history in a database; this models the hot window only.
-
-## Verdict
-For the hot, bounded, ephemeral state of a chat server (sessions, presence, typing, rate limits, recent messages), the memory model
-fits and the handlers are short and legible. For a complete app it is missing what a web language needs:
-keyed indexes or ring collections, atomic requests (now partly present), reusable functions, a variable-size text store, and a
-compiler to remove the interpreter's per-row cost. The first four are language design work, not engineering; the last is engineering.
-
-## Next steps, in order
-1. `ring<T,N>` kind and a keyed index (`pool<T,N> index room`) so `GET messages` and eviction stop scanning.
-2. A variable-size text region with a declared total, for message bodies.
-3. Functions, so `auth` and rate limiting are written once.
-4. Compile endpoints to column loops (bind columns once, hoist invariants) and re-run the bench against the native baseline.
-5. Build the worker/mailbox design and a socket load test, and compare against the existing Campfire benchmarks the user has.
-
-## Round 2 (same day): the chat ported to the coherent design
-After the redesign (DESIGN.md: columns everywhere, `list ... drop_oldest`, nested collections, `ref<pool>`, `fn`/`var`,
-journaled atomic requests), the chat state is three globals: `meta`, `sessions: pool<Session, 2000> checked`, and
-`rooms: pool<Room, 64>` where each room holds `messages: list<Msg, 1000> drop_oldest` and `typing: pool<Typing, 32>`.
-Messages carry `author: ref<sessions>` instead of a copied name; `or(m.author.name, "[deleted]")` handles a deleted author.
-
-Same benchmark, same machine (`bench --n 20000`; microseconds):
-
-| Endpoint | Round 1 | Round 2 | Why |
-|---|---|---|---|
-| GET messages, limit 50 | 2,880 | **52** | reads the end of the room's own list; no scan, no sort |
-| POST message, store full | 951 | **4.3** | `drop_oldest` replaces "find the oldest by sorting" |
-| POST message, mixed load | 1,124 | 4.6 | |
-| POST typing | 20.9 | 3.6 | scans the room's 32 typing slots, not a global pool |
-| GET typing | 10.7 | 2.9 | |
-| POST /sessions | 3.5 | 2.0 | |
-| DELETE /session | 3.1 | 1.1 | |
-
-Fixed from round 1's gap list: (1) failed requests now roll back exactly, including the sequence counter, allocations,
-dropped list items and string bytes (the runtime journals every write); frees happen only when the request succeeds;
-(2) and (3) no scan or sort for "newest 50" or eviction; (5) `fn` and `var` exist (auth is written once, typing is an
-in-place upsert); (6) no copied author name; (7) `maxlen` and `capacity` expose declared maxima.
-
-Still open: (4) `string<2000>` slots: 38.4 MB committed for 2.9 MB live, nothing trimmable (deferred by decision);
-(8) HTTP/JSON gaps; (9) single-threaded; GET messages at 52 us is still interpreter-bound.
-
-**Round 3:** (10) is done: requests run in a declared epoch and make no heap allocations once warm; GET messages is 18.5 us.
-See docs/measurements.md, "Round 3".
+Numbers for each step: docs/measurements.md (Rounds 3 and after).

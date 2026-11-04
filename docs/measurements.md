@@ -1,8 +1,25 @@
 # Mitochondria measurements and experiment log
 
-This is the running log of prototypes and measurements from 2026-11-03. The numbers stay valid; design statements in it
-are history and are superseded by [DESIGN.md](../DESIGN.md). In particular `table<T,N>` is dropped there (columns become the
-only storage for struct collections) and "Next" lists below are replaced by the plan in DESIGN.md.
+The running log of prototypes and measurements since 2026-11-03, oldest first. Numbers stay valid for what they
+measured; design statements in older rounds are history, superseded by [DESIGN.md](../DESIGN.md). Measurements that used
+the Rust runtime cannot be rerun after it was removed (last commit with it: `0070fb9`).
+
+## What we learned (summary)
+- **Reserving is free and the runtime's accounting matches the OS.** Reserving 1088 MB moved OS commit by 0.0 MB;
+  after writing 300 MB the runtime reported 300.0 MB committed and the OS 300.6 MB (Claims, first results).
+- **Trim costs per page run, not per item:** about 0.5 µs per page plus 2.5 µs per OS call. Page granularity is the
+  real limit: one live value keeps a whole 4 KB page (Cost of trim).
+- **`string<N>` wastes memory on uneven text:** 2000-byte chat bodies averaging 120 bytes left 39.5 MB committed for
+  3.1 MB live (Round 3). Packed text is planned.
+- **Columns win scans about 6x; an id lookup costs 2-3x a row index; following ids beats pointers 2-6x** (Data access).
+- **Workers: the handler's own work dominates;** handing a request to another worker costs 2-6 µs a hop (Round 5).
+- **Compiled C is as fast as hand-written Rust.** The C runtime built by clang -O2 answers the chat's GET messages in
+  2.5 µs against 2.3 µs for the same requests written directly in Rust; the TinyCC build is about 4x slower but builds
+  in 20-30 ms against about 1 s (Round 11, Compile times).
+- **HTTP: the connection is the cost.** On Windows a connection costs 200-500 µs, the same with a bare Rust server,
+  against about 2 µs of handling; only keep-alive removes it (Rounds 15, 16).
+- **Typed, static programs found no wrong answers** in the existing examples when every answer's shape was checked
+  (Round 17).
 
 
 ## Terms

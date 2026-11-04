@@ -12,16 +12,22 @@ system {
 struct M { n: i64; }
 state m: M;
 
-endpoint POST /inc/{k} { m.n = m.n + 1; forward count[int(param("k"))] { "from": worker_index(), "seen": m.n }; }
-endpoint POST /bad { forward nowhere[0] { "x": 1 }; }
-endpoint POST /odd/{k} { forward count[int(param("k"))] {}; }
-endpoint GET /front { respond 200 { "n": m.n, "me": worker_index(), "of": worker_count() }; }
+@post("/inc/{k}")
+fn post_inc_k() -> Response<{ shard: i64, n: i64, from: i64, seen: i64 }> { m.n = m.n + 1; forward count[int(param("k"))] { "from": worker_index(), "seen": m.n }; }
+@post("/bad")
+fn post_bad() -> Response<none> { forward nowhere[0] { "x": 1 }; }
+@post("/odd/{k}")
+fn post_odd_k() -> Response<none> { forward count[int(param("k"))] {}; }
+@get("/front")
+fn get_front() -> Response<{ n: i64, me: i64, of: i64 }> { return ok({ "n": m.n, "me": worker_index(), "of": worker_count() }); }
 --- file count.mito
 struct C { n: i64; }
 state c: C;
 
-endpoint POST /inc/{k} { c.n = c.n + 1; respond 200 { "shard": worker_index(), "n": c.n, "from": int(fwd("from")), "seen": int(fwd("seen")) }; }
-endpoint POST /odd/{k} { fail 409 "the shard said no"; }
+@post("/inc/{k}")
+fn post_inc_k_2() -> Response<{ shard: i64, n: i64, from: i64, seen: i64 }> { c.n = c.n + 1; return ok({ "shard": worker_index(), "n": c.n, "from": int(fwd("from")), "seen": int(fwd("seen")) }); }
+@post("/odd/{k}")
+fn post_odd_k_2() -> Response<none> { fail 409 "the shard said no"; }
 --- requests
 *4 POST /inc/0
 *2 POST /inc/1

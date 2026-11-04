@@ -15,6 +15,13 @@ pub fn split(src: &str) -> Result<(String, String), String> {
         if c == b'\n' { state.push('\n'); code.push('\n'); i += 1; continue; }
         if c.is_ascii_whitespace() { i += 1; continue; }
         if src[i..].starts_with("//") { let e = src[i..].find('\n').map_or(b.len(), |e| i + e); i = e; continue; }
+        // an endpoint: `@get("/path")` and the function after it
+        if c == b'@' {
+            let line = src[..i].matches('\n').count() + 1;
+            let from = body_start(src, i).ok_or_else(|| format!("line {}: expected `fn name(...) -> Response<T> {{` after the attribute", line))?;
+            let e = end_of_block(src, from).ok_or_else(|| format!("line {}: unclosed `{{`", line))?;
+            put(&mut code, &mut state, &src[i..e]); i = e; continue;
+        }
         let word_end = src[i..].find(|c: char| !(c.is_alphanumeric() || c == '_')).map_or(b.len(), |e| i + e);
         let word = &src[i..word_end];
         let line = src[..i].matches('\n').count() + 1;
@@ -44,6 +51,21 @@ pub fn is_system(src: &str) -> bool {
         if s.starts_with("//") { s = s.find('\n').map_or("", |e| &s[e..]); continue; }
         return s.starts_with("system") && s[6..].trim_start().starts_with('{');
     }
+}
+
+/// Where the body of the endpoint function after the attribute at `i` starts: past its parameters and its return type
+/// (`Response<{ id: i64 }>` holds braces of its own).
+fn body_start(src: &str, i: usize) -> Option<usize> {
+    let b = src.as_bytes();
+    let f = i + src[i..].find(" fn ").or_else(|| src[i..].find("\nfn "))? + 1;
+    let (mut k, mut depth) = (f + src[f..].find('(')?, 0i32);
+    while k < b.len() { match b[k] { b'(' => depth += 1, b')' => { depth -= 1; if depth == 0 { break; } } b'"' => { k += 1; while k < b.len() && b[k] != b'"' { k += 1; } } _ => {} } k += 1; }
+    let mut angle = 0i32;
+    while k < b.len() {
+        match b[k] { b'<' => angle += 1, b'>' if k > 0 && b[k - 1] != b'-' => angle -= 1, b'{' if angle == 0 => return Some(k), _ => {} }
+        k += 1;
+    }
+    None
 }
 
 /// The position after `n` more whitespace-separated words from `i`.
@@ -86,12 +108,12 @@ mod tests {
 
     #[test]
     fn a_program_splits_into_state_and_code_with_lines_kept() {
-        let src = "// a counter\nstruct C { n: i64; }\nstate c: C;\n\nfn bump() { c.n = c.n + 1; }\nendpoint POST /n/{k} { bump(); respond 200 { \"n\": c.n, \"s\": \"}\" }; }\n";
+        let src = "// a counter\nstruct C { n: i64; }\nstate c: C;\n\nfn bump() { c.n = c.n + 1; }\n@post(\"/n/{k}\") fn post_n_k() -> Response<any> { bump(); return ok({ \"n\": c.n, \"s\": \"}\" }); }\n";
         let (st, code) = split(src).unwrap();
         assert_eq!(st.lines().count(), src.lines().count());
         assert_eq!(code.lines().count(), src.lines().count());
         assert!(st.contains("struct C") && st.contains("state c: C;") && !st.contains("fn bump"));
-        assert!(code.lines().nth(4).unwrap().starts_with("fn bump") && code.lines().nth(5).unwrap().ends_with("}; }") && !code.contains("struct"));
+        assert!(code.lines().nth(4).unwrap().starts_with("fn bump") && code.lines().nth(5).unwrap().ends_with("}); }") && !code.contains("struct"));
         assert!(split("struct C { n: i64; }\nglobal c: C;\n").unwrap_err().contains("replaced by `state`"));
         assert!(split("struct C { n: i64; }\nstate c: C;\nwat\n").unwrap_err().contains("line 3"));
         assert!(is_system("// workers\nsystem {\n}\n") && !is_system(src));

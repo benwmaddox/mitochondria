@@ -8,11 +8,16 @@ fn fib(n) { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
 fn even(n) { if n == 0 { return true; } return odd(n - 1); }
 fn odd(n) { if n == 0 { return false; } return even(n - 1); }
 fn count_down(n) { if n > 0 { c.n = c.n + 1; count_down(n - 1); } }
-endpoint GET /sum/{n} { respond 200 { "s": sum_to(int(param("n"))) }; }
-endpoint GET /sum2/{n} { respond 200 { "s": sum_to(int(param("n"))) + fib(5) }; }
-endpoint GET /fib/{n} { respond 200 { "f": fib(int(param("n"))) }; }
-endpoint GET /even/{n} { respond 200 { "e": even(int(param("n"))) }; }
-endpoint POST /down/{n} { count_down(int(param("n"))); respond 200 { "n": c.n }; }
+@get("/sum/{n}")
+fn get_sum_n() -> Response<{ s: i64 }> { return ok({ "s": sum_to(int(param("n"))) }); }
+@get("/sum2/{n}")
+fn get_sum2_n() -> Response<{ s: i64 }> { return ok({ "s": sum_to(int(param("n"))) + fib(5) }); }
+@get("/fib/{n}")
+fn get_fib_n() -> Response<{ f: i64 }> { return ok({ "f": fib(int(param("n"))) }); }
+@get("/even/{n}")
+fn get_even_n() -> Response<{ e: bool }> { return ok({ "e": even(int(param("n"))) }); }
+@post("/down/{n}")
+fn post_down_n() -> Response<{ n: i64 }> { count_down(int(param("n"))); return ok({ "n": c.n }); }
 --- requests
 GET /sum/0
 GET /sum/10

@@ -3,20 +3,26 @@
 struct Acc { total: f64; small: f32; n: i64; }
 state acc: Acc;
 
-endpoint POST /add { acc.total = acc.total + body("x"); acc.n = acc.n + 1; respond 200 { "total": acc.total }; }
-endpoint POST /small { acc.small = body("x"); respond 200 { "small": acc.small }; }
-endpoint GET /mean { if acc.n == 0 { fail 409 "no values"; } respond 200 { "mean": acc.total / acc.n }; }
-endpoint GET /math {
+@post("/add")
+fn post_add() -> Response<{ total: f64 }> { acc.total = acc.total + body("x"); acc.n = acc.n + 1; return ok({ "total": acc.total }); }
+@post("/small")
+fn post_small() -> Response<{ small: f64 }> { acc.small = body("x"); return ok({ "small": acc.small }); }
+@get("/mean")
+fn get_mean() -> Response<{ mean: f64 }> { if acc.n == 0 { fail 409 "no values"; } return ok({ "mean": acc.total / acc.n }); }
+@get("/math")
+fn get_math() -> Response<{ sum: f64, diff: f64, prod: f64, quot: f64, neg: f64, tenth: f64, lt: bool, eq: bool, ne: bool, int: i64, nint: i64, str: any, whole: f64, big: f64, tiny: f64, inf: f64 }> {
     let a = 1.5;
     let b = 2;
-    respond 200 {
+    return ok({
         "sum": a + b, "diff": b - a, "prod": a * b, "quot": b / 4.0, "neg": -a, "tenth": 0.1 + 0.2,
         "lt": a < b, "eq": 2.0 == b, "ne": a != 1.5, "int": int(7.9), "nint": int(-7.9), "str": str(2.5) + "!", "whole": 3.0,
         "big": 1000000000000000000000.0 + 1.0, "tiny": 0.000001, "inf": 1.0 / 0.0
-    };
+    });
 }
-endpoint GET /text { respond 200 { "s": str(0.0000001) + " " + str(1.0 / 0.0) + " " + str(0.0 - 1.0 / 0.0) + " " + str(0.0 / 0.0) + " " + str(123456789012345680000.0 * 10.0) + " " + str(0.0 - 0.0), "n": 0.0000001 * 3.0, "e": 0.0000015 }; }
-endpoint GET /cmp/{x} { let x = int(param("x")) + 0.5; respond 200 { "gt": x > 2, "max": x >= 10.5 }; }
+@get("/text")
+fn get_text() -> Response<{ s: any, n: f64, e: f64 }> { return ok({ "s": str(0.0000001) + " " + str(1.0 / 0.0) + " " + str(0.0 - 1.0 / 0.0) + " " + str(0.0 / 0.0) + " " + str(123456789012345680000.0 * 10.0) + " " + str(0.0 - 0.0), "n": 0.0000001 * 3.0, "e": 0.0000015 }); }
+@get("/cmp/{x}")
+fn get_cmp_x() -> Response<{ gt: bool, max: bool }> { let x = int(param("x")) + 0.5; return ok({ "gt": x > 2, "max": x >= 10.5 }); }
 --- requests
 GET /mean
 POST /add {"x": 1.25}

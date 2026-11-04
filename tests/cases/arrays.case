@@ -8,20 +8,27 @@ struct App {
 }
 state app: App;
 
-endpoint POST /grid/{k} { app.grid.cells[int(param("k"))] = int(body("v")); app.grid.total = app.grid.total + int(body("v")); respond 200 { "cell": app.grid.cells[int(param("k"))] }; }
-endpoint GET /grid { respond 200 { "c0": app.grid.cells[0], "c3": app.grid.cells[3], "total": app.grid.total }; }
-endpoint GET /grid/{k} { respond 200 { "v": app.grid.cells[int(param("k"))] }; }
-endpoint POST /players { let p = app.players.add(); p.name = body("name"); p.hits[0] = 1; p.hits[2] = 3; respond 201 { "slot": slot(p) }; }
-endpoint POST /players/{p}/hit/{k} {
+@post("/grid/{k}")
+fn post_grid_k() -> Response<{ cell: i64 }> { app.grid.cells[int(param("k"))] = int(body("v")); app.grid.total = app.grid.total + int(body("v")); return ok({ "cell": app.grid.cells[int(param("k"))] }); }
+@get("/grid")
+fn get_grid() -> Response<{ c0: i64, c3: i64, total: i64 }> { return ok({ "c0": app.grid.cells[0], "c3": app.grid.cells[3], "total": app.grid.total }); }
+@get("/grid/{k}")
+fn get_grid_k() -> Response<{ v: i64 }> { return ok({ "v": app.grid.cells[int(param("k"))] }); }
+@post("/players")
+fn post_players() -> Response<{ slot: i64 }> { let p = app.players.add(); p.name = body("name"); p.hits[0] = 1; p.hits[2] = 3; return created({ "slot": slot(p) }); }
+@post("/players/{p}/hit/{k}")
+fn post_players_p_hit_k() -> Response<{ hits: i64 }> {
     let p = app.players[int(param("p"))];
     let k = int(param("k"));
     p.hits[k] = p.hits[k] + 1;
-    respond 200 { "hits": p.hits[k] };
+    return ok({ "hits": p.hits[k] });
 }
-endpoint GET /players {
-    respond 200 { "x": [each p in app.players { "name": p.name, "h0": p.hits[0], "h1": p.hits[1], "h2": p.hits[2] }] };
+@get("/players")
+fn get_players() -> Response<{ x: [{ name: string, h0: i64, h1: i64, h2: i64 }] }> {
+    return ok({ "x": [each p in app.players { "name": p.name, "h0": p.hits[0], "h1": p.hits[1], "h2": p.hits[2] }] });
 }
-endpoint POST /overflow { let p = app.players[0]; p.hits[1] = 40000; respond 200 {}; }
+@post("/overflow")
+fn post_overflow() -> Response<{}> { let p = app.players[0]; p.hits[1] = 40000; return ok({}); }
 --- requests
 GET /grid
 POST /grid/1 {"v": 7}

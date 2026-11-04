@@ -234,21 +234,21 @@ mod tests {
             let (st, api) = expand(state, api)?;
             crate::cgen::check(&crate::layout::Program::parse(&st)?, &api).map(|_| ())
         };
-        assert_eq!(load("endpoint POST /ok { let s = app.b.add(); s.n = 5; s.name = \"x\"; app.b.remove(s); respond 200 {}; }"), Ok(()));
+        assert_eq!(load("@post(\"/ok\") fn post_ok() -> Response<any> { let s = app.b.add(); s.n = 5; s.name = \"x\"; app.b.remove(s); return ok({}); }"), Ok(()));
         for (api, want) in [
-            ("endpoint POST /a { app.b.counts.added = 9; respond 200 {}; }", "belongs to app.b (module bag)"),
-            ("endpoint POST /a { let s = app.b.items.add(); respond 200 {}; }", "add items of app.b with its functions, not `app.b.items.add()`"),
-            ("endpoint POST /a { app.b.items.remove(app.b.get(0)); respond 200 {}; }", "remove items of app.b with its functions, not `app.b.items.remove()`"),
-            ("endpoint POST /a { var x = 1; x = app.b.get(0); app.b.items.remove(x); respond 200 {}; }", "remove items of app.b with its functions"),
-            ("endpoint POST /a { each s in app.b { app.b.remove(s); } respond 200 {}; }", "a loop over app.b calls a function that changes app.b"),
-            ("endpoint GET /a { respond 200 { \"x\": [each s in app.b app.b.add()] }; }", "a loop over app.b calls a function that changes app.b"),
-            ("endpoint GET /a { respond 200 { \"x\": [each s in app.b from 1 order by s.n s.n] }; }", "`order by` was removed"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { app.b.counts.added = 9; return ok({}); }", "belongs to app.b (module bag)"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { let s = app.b.items.add(); return ok({}); }", "add items of app.b with its functions, not `app.b.items.add()`"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { app.b.items.remove(app.b.get(0)); return ok({}); }", "remove items of app.b with its functions, not `app.b.items.remove()`"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { var x = 1; x = app.b.get(0); app.b.items.remove(x); return ok({}); }", "remove items of app.b with its functions"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { each s in app.b { app.b.remove(s); } return ok({}); }", "a loop over app.b calls a function that changes app.b"),
+            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ \"x\": [each s in app.b app.b.add()] }); }", "a loop over app.b calls a function that changes app.b"),
+            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ \"x\": [each s in app.b from 1 order by s.n s.n] }); }", "`order by` was removed"),
         ] {
             let e = load(api).err().unwrap_or_default();
             assert!(e.contains(want), "{} -> {}", api, e);
         }
         // a module's private function cannot be called from outside it
-        let (st, mut api) = expand(state, "endpoint GET /a { respond 200 { \"n\": app.b.secret() }; }").unwrap();
+        let (st, mut api) = expand(state, "@get(\"/a\") fn get_a() -> Response<any> { return ok({ \"n\": app.b.secret() }); }").unwrap();
         api += "fn app.b.secret() { return 1; }\n";
         let e = crate::cgen::check(&crate::layout::Program::parse(&st).unwrap(), &api).err().unwrap_or_default();
         assert!(e.contains("`app.b.secret` is private to app.b"), "{}", e);

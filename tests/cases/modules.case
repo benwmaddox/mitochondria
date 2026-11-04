@@ -9,31 +9,39 @@ struct App {
 }
 state app: App;
 
-endpoint POST /scores {
+@post("/scores")
+fn post_scores() -> Response<{ slot: i64, size: i64, room: i64 }> {
     let s = app.scores.add();
     s.name = body("name");
     s.points = int(body("points"));
-    respond 201 { "slot": slot(s), "size": app.scores.size(), "room": app.scores.room() };
+    return created({ "slot": slot(s), "size": app.scores.size(), "room": app.scores.room() });
 }
-endpoint GET /scores/{k} { let s = app.scores.get(int(param("k"))); respond 200 { "name": s.name, "points": s.points }; }
-endpoint DELETE /scores/{k} { app.scores.remove(app.scores.get(int(param("k")))); respond 200 { "size": app.scores.size() }; }
-endpoint POST /fav/{k} { app.fav.s = app.scores.get(int(param("k"))); respond 200 {}; }
-endpoint GET /fav { respond 200 { "fav": or(app.fav.s.name, "-") }; }
-endpoint GET /stats {
-    respond 200 {
+@get("/scores/{k}")
+fn get_scores_k() -> Response<{ name: string, points: i64 }> { let s = app.scores.get(int(param("k"))); return ok({ "name": s.name, "points": s.points }); }
+@delete("/scores/{k}")
+fn delete_scores_k() -> Response<{ size: i64 }> { app.scores.remove(app.scores.get(int(param("k")))); return ok({ "size": app.scores.size() }); }
+@post("/fav/{k}")
+fn post_fav_k() -> Response<{}> { app.fav.s = app.scores.get(int(param("k"))); return ok({}); }
+@get("/fav")
+fn get_fav() -> Response<{ fav: string }> { return ok({ "fav": or(app.fav.s.name, "-") }); }
+@get("/stats")
+fn get_stats() -> Response<{ added: i64, removed: i64, count: i64, others: i64, names: [string] }> {
+    return ok({
         "added": app.scores.added(), "removed": app.scores.removed(), "count": app.scores.items.count(),
         "others": app.others.size(), "names": [each s in app.scores.items s.name]
-    };
+    });
 }
-endpoint GET /walk {
+@get("/walk")
+fn get_walk() -> Response<{ all: [string], back: [string], from1: [string], back_from1: [string], first: [string], total: i64 }> {
     var total = 0;
     each s in app.scores where s.points > 15 { total = total + s.points; }
-    respond 200 {
+    return ok({
         "all": [each s in app.scores s.name], "back": [each s in app.scores reverse s.name], "from1": [each s in app.scores from 1 s.name],
         "back_from1": [each s in app.scores from 1 reverse s.name], "first": [each s in app.scores limit 1 s.name], "total": total
-    };
+    });
 }
-endpoint POST /others { let o = app.others.add(); o.points = 1; respond 201 { "size": app.others.size() }; }
+@post("/others")
+fn post_others() -> Response<{ size: i64 }> { let o = app.others.add(); o.points = 1; return created({ "size": app.others.size() }); }
 --- requests
 GET /walk
 GET /stats

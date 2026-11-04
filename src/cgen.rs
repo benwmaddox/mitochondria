@@ -111,6 +111,97 @@ pub fn plain_code(t: &Ty) -> Option<(u32, u32)> {
     })
 }
 
+/// The JSON shape of an answer, as known when it is generated: what `Response<T>` is checked against.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Shape { Int, Flt, Bool, Str, Null, Any, Opt(Box<Shape>), Arr(Box<Shape>), Obj(Vec<(String, Shape)>), Nothing }
+impl Shape {
+    fn of(v: &CV) -> Shape {
+        match v {
+            CV::Int(_) => Shape::Int, CV::Flt(_) => Shape::Flt, CV::Bool(_) => Shape::Bool,
+            CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) => Shape::Str, CV::Null => Shape::Null,
+            _ => Shape::Any,
+        }
+    }
+    /// `or(a, b)`: one of the two.
+    fn either(a: Shape, b: Shape) -> Shape {
+        match (a, b) { (a, b) if a == b => a, (Shape::Null, s) | (s, Shape::Null) => Shape::Opt(Box::new(s)), (Shape::Int, Shape::Flt) | (Shape::Flt, Shape::Int) => Shape::Flt, _ => Shape::Any }
+    }
+}
+impl std::fmt::Display for Shape {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Shape::Int => write!(f, "i64"), Shape::Flt => write!(f, "f64"), Shape::Bool => write!(f, "bool"), Shape::Str => write!(f, "string"),
+            Shape::Null => write!(f, "null"), Shape::Any => write!(f, "any"), Shape::Nothing => write!(f, "none"),
+            Shape::Opt(s) => write!(f, "{}?", s), Shape::Arr(s) => write!(f, "[{}]", s),
+            Shape::Obj(fs) => {
+                write!(f, "{{ ")?;
+                for (i, (k, v)) in fs.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    let bare = k.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') && k.chars().all(|c| c.is_alphanumeric() || c == '_');
+                    if bare { write!(f, "{}: {}", k, v)?; } else { write!(f, "{:?}: {}", k, v)?; }
+                }
+                write!(f, " }}")
+            }
+        }
+    }
+}
+
+/// `T` of `Response<T>` as written.
+fn show_rtype(t: &RType) -> String {
+    match t {
+        RType::Name(n) => n.clone(), RType::Opt(t) => format!("{}?", show_rtype(t)), RType::Arr(t) => format!("[{}]", show_rtype(t)),
+        RType::Obj(f) => format!("{{ {} }}", f.iter().map(|(k, v)| format!("{}: {}", k, show_rtype(v))).collect::<Vec<_>>().join(", ")),
+    }
+}
+/// Does an answer of `shape` fit `Response<want>`? A value whose kind is known only at run time (`any`) fits anything:
+/// it is not checked when the program is compiled.
+fn fits_shape(prog: &Program, shape: &Shape, want: &RType, at: &str) -> Result<(), String> {
+    let here = || if at.is_empty() { "the answer".to_string() } else { format!("`{}`", at) };
+    let bad = || Err(format!("{} is {}, declared {}", here(), shape, show_rtype(want)));
+    if *shape == Shape::Any { return Ok(()); }
+    match want {
+        RType::Name(n) if n == "any" => Ok(()),
+        RType::Opt(t) => if matches!(shape, Shape::Null) { Ok(()) } else if let Shape::Opt(s) = shape { fits_shape(prog, s, t, at) } else { fits_shape(prog, shape, t, at) },
+        RType::Arr(t) => match shape { Shape::Arr(e) => fits_shape(prog, e, t, &format!("{}[]", at)), _ => bad() },
+        RType::Obj(fields) => match shape {
+            Shape::Obj(got) => {
+                for (k, _) in got { if !fields.iter().any(|f| f.0 == *k) { return Err(format!("{} has `{}`, which {} does not declare", here(), k, show_rtype(want))); } }
+                for (k, t) in fields {
+                    let Some((_, s)) = got.iter().find(|g| g.0 == *k) else { return Err(format!("{} has no `{}`", here(), k)) };
+                    fits_shape(prog, s, t, &if at.is_empty() { k.clone() } else { format!("{}.{}", at, k) })?;
+                }
+                Ok(())
+            }
+            _ => bad(),
+        },
+        RType::Name(n) => {
+            let ok = match n.as_str() {
+                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => *shape == Shape::Int,
+                "f32" | "f64" => matches!(shape, Shape::Flt | Shape::Int),
+                "bool" => *shape == Shape::Bool,
+                "string" => *shape == Shape::Str,
+                "none" => *shape == Shape::Nothing,
+                _ => {
+                    // a declared struct: an object with its plain fields
+                    let Some(sd) = prog.structs.iter().find(|s| s.name == *n) else { return Err(format!("{}: `{}` is not a type", here(), n)) };
+                    let fields: Vec<(String, RType)> = sd.fields.iter().filter(|f| !f.1.is_coll()).map(|f| (f.0.clone(), rtype_of(prog, &f.1))).collect();
+                    return fits_shape(prog, shape, &RType::Obj(fields), at);
+                }
+            };
+            if ok { Ok(()) } else { bad() }
+        }
+    }
+}
+/// A struct field's type, as a `Response<T>` type.
+fn rtype_of(prog: &Program, t: &Ty) -> RType {
+    match t {
+        Ty::Scalar(s) => RType::Name(match s { Scalar::F32 | Scalar::F64 => "f64", Scalar::Bool => "bool", _ => "i64" }.into()),
+        Ty::Str(_) => RType::Name("string".into()),
+        Ty::Struct(i) => RType::Name(prog.structs[*i].name.clone()),
+        _ => RType::Name("any".into()),
+    }
+}
+
 /// Generated endpoint C, and one note per endpoint that cannot be compiled (such a program does not load).
 pub struct Generated { pub src: String, pub notes: Vec<String> }
 
@@ -386,7 +477,7 @@ fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
             _ => {}
         }
     }
-    fn js(j: &Json, out: &mut Vec<u32>) { match j { Json::Obj(f) => for (_, v) in f { js(v, out); }, Json::Arr(it, inner) => { ex(&it.coll, out); if let Some(w) = &it.wher { ex(w, out); } js(inner, out); } Json::E(e) => ex(e, out) } }
+    fn js(j: &Json, out: &mut Vec<u32>) { match j { Json::Obj(f) => for (_, v) in f { js(v, out); }, Json::Arr(it, inner) => { ex(&it.coll, out); if let Some(w) = &it.wher { ex(w, out); } js(inner, out); } Json::E(e) => ex(e, out), Json::Empty => {} } }
     fn st(stmts: &[Stmt], out: &mut Vec<u32>) {
         for s in stmts {
             match s {
@@ -449,6 +540,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
                 Json::Obj(f) => for (_, v) in f { json_calls(v, out); },
                 Json::Arr(it, inner) => { let mut v = Vec::new(); calls(&[Stmt::Each(it.clone(), Vec::new())], &mut v); out.extend(v); json_calls(inner, out); }
                 Json::E(e) => ex(e, out),
+                Json::Empty => {}
             }
         }
     }
@@ -913,7 +1005,11 @@ impl<'p> G<'p> {
                 }
             }
             Stmt::Fail(code, m) => self.fail(*code, m),
-            Stmt::Respond(code, j) => { self.json(j, env)?; self.line(&format!("return {};", code)); }
+            Stmt::Respond(code, j) => {
+                let shape = self.json(j, env)?;
+                if let Err(e) = fits_shape(self.prog, &shape, &self.ep.resp, "") { return no(format!("the answer is {}, not Response<{}>: {}", shape, show_rtype(&self.ep.resp), e)); }
+                self.line(&format!("return {};", code));
+            }
             Stmt::Return(e) => {
                 if self.ret.is_empty() { if let Some(e) = e { self.expr(e, env, None)?; } self.line("return 0;"); return Ok(()); }
                 let v = match e { Some(e) => self.expr(e, env, None)?, None => CV::Null };
@@ -1614,18 +1710,20 @@ impl<'p> G<'p> {
         Ok(())
     }
 
-    fn json(&mut self, j: &'p Json, env: &mut Vec<Option<CV>>) -> R<()> {
+    /// Write `j` as JSON; returns the shape it has (known while generating), for checking against `Response<T>`.
+    fn json(&mut self, j: &'p Json, env: &mut Vec<Option<CV>>) -> R<Shape> {
         match j {
             Json::Obj(fields) => {
                 let mut text = String::from("{");
+                let mut shape = Vec::new();
                 for (i, (k, v)) in fields.iter().enumerate() {
                     if i > 0 { text.push(','); }
                     text += &json_lit(k); text.push(':');
                     self.out(&text); text.clear();
-                    self.json(v, env)?;
+                    shape.push((k.clone(), self.json(v, env)?));
                 }
                 text.push('}'); self.out(&text);
-                Ok(())
+                Ok(Shape::Obj(shape))
             }
             Json::Arr(it, inner) => {
                 self.out("[");
@@ -1633,12 +1731,14 @@ impl<'p> G<'p> {
                     let n = &n;
                     if changes_instance(self.api, n, &[Stmt::Respond(200, (**inner).clone())]) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
+                let mut elem = Shape::Any;
                 self.each(it, env, false, |g, env, hits| {
                     g.line(&format!("if ({} > 1) {{ CALL(c->h->out(c, \",\", 1)); }}", hits));
-                    g.json(inner, env)
+                    elem = g.json(inner, env)?;
+                    Ok(())
                 })?;
                 self.out("]");
-                Ok(())
+                Ok(Shape::Arr(Box::new(elem)))
             }
             Json::E(Expr::Call(_, args, CallRes::Builtin(B::Or))) => {
                 // or(value that may be a dead reference or null, fallback): write the value, or the fallback
@@ -1649,17 +1749,20 @@ impl<'p> G<'p> {
                 self.or_dead = saved;
                 let v = v?;
                 match &v { CV::Txt(t) => self.line(&format!("if (!{}.present) goto {};", t, l)), CV::Any(t) => self.line(&format!("if ({}.tag == 0) goto {};", t, l)), CV::Ref(_, s, _) => self.line(&format!("if ({} == 0) goto {};", s, l)), CV::Null => self.line(&format!("goto {};", l)), _ => {} }
+                let a = Shape::of(&v);
                 self.write(v)?;
                 self.line(&format!("goto {};", end));
                 self.line("}");
                 self.line(&format!("{}: {{", l));
                 let fb = self.expr(&args[1], env, None)?;
+                let b = Shape::of(&fb);
                 self.write(fb)?;
                 self.line("}");
                 self.line(&format!("{}: ;", end));
-                Ok(())
+                Ok(Shape::either(a, b))
             }
-            Json::E(e) => { let v = self.expr(e, env, None)?; self.write(v) }
+            Json::E(e) => { let v = self.expr(e, env, None)?; let s = Shape::of(&v); self.write(v)?; Ok(s) }
+            Json::Empty => Ok(Shape::Nothing),
         }
     }
 
@@ -1838,22 +1941,22 @@ mod profile_tests {
         crate::tcc::Unit::check(&c).unwrap();
         assert!(c.contains("rooms.items.messages: list cap 1000 drop_oldest"), "{}", &c[..1500]);
         for ep in &a.eps { assert!(c.contains(&format!("// chat.mito:{}-{}", ep.lines.0, ep.lines.1))); }
-        assert!(c.contains("//   | endpoint DELETE /session {"));
+        assert!(c.contains("//   | @delete(\"/session\")"));
     }
 
     #[test]
     fn the_binder_rejects_bad_names_and_calls_at_load() {
         let prog = Program::parse("struct C { n: i64; } state c: C;").unwrap();
         for (api, want) in [
-            ("endpoint GET /a { respond 200 { \"x\": nope }; }", "unknown name `nope`"),
-            ("endpoint GET /a { respond 200 { \"x\": frob(1) }; }", "unknown function `frob`"),
-            ("fn f(a, b) { return a; } endpoint GET /a { respond 200 { \"x\": f(1) }; }", "`f` takes 2 arguments, given 1"),
-            ("endpoint GET /a { x = 1; respond 200 {}; }", "unknown variable `x`"),
-            ("endpoint GET /a { if true { let y = 1; } respond 200 { \"y\": y }; }", "unknown name `y`"), // block scope
+            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ \"x\": nope }); }", "unknown name `nope`"),
+            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ \"x\": frob(1) }); }", "unknown function `frob`"),
+            ("fn f(a, b) { return a; } @get(\"/a\") fn get_a() -> Response<any> { return ok({ \"x\": f(1) }); }", "`f` takes 2 arguments, given 1"),
+            ("@get(\"/a\") fn get_a() -> Response<any> { x = 1; return ok({}); }", "unknown variable `x`"),
+            ("@get(\"/a\") fn get_a() -> Response<any> { if true { let y = 1; } return ok({ \"y\": y }); }", "unknown name `y`"), // block scope
             ("fn len(s) { return 1; }", "name of a builtin"),
-            (&format!("endpoint GET {} {{ respond 200 {{}}; }}", "/a".repeat(33)), "at most 32 parts"),
-            (&format!("endpoint GET /a {{ let {} = 1; respond 200 {{}}; }}", "n".repeat(129)), "a name longer than 128 bytes"),
-            (&format!("endpoint GET /a {{ fail 400 \"{}\"; }}", "m".repeat(1025)), "a fail message longer than 1024 bytes"),
+            (&format!("@get(\"{}\") fn a() -> Response<any> {{ return ok({{}}); }}", "/a".repeat(33)), "at most 32 parts"),
+            (&format!("@get(\"/a\") fn a() -> Response<any> {{ let {} = 1; return ok({{}}); }}", "n".repeat(129)), "a name longer than 128 bytes"),
+            (&format!("@get(\"/a\") fn a() -> Response<any> {{ fail 400 \"{}\"; }}", "m".repeat(1025)), "a fail message longer than 1024 bytes"),
         ] {
             let e = super::check(&prog, api).err().unwrap_or_default();
             assert!(e.contains(want), "{} -> {}", api, e);
@@ -1870,20 +1973,55 @@ mod profile_tests {
             super::check(&Program::parse(&st).unwrap(), &api).err().unwrap_or_default()
         };
         for (api, want) in [
-            ("endpoint POST /a { let p = alloc app.items; respond 200 {}; }", "replaced by collection functions"),
-            ("endpoint POST /a { let p = app.items[0]; free p; respond 200 {}; }", "replaced by the collection's function"),
-            ("endpoint GET /a { respond 200 { n: count(app.items) }; }", "`count(x)` was replaced by `x.count()`"),
-            ("endpoint GET /a { respond 200 { n: capacity(app.items) }; }", "`capacity(x)` was replaced by `x.capacity()`"),
-            ("endpoint POST /a { respond 200 { n: slot(app.items.add()) }; }", "makes an item"),
-            ("endpoint POST /a { let p = app.items[0]; app.board.items.remove(p); respond 200 {}; }", "cannot be removed from"),
-            ("endpoint POST /a { let p = app.items[0]; let n = app.items.remove(p); respond 200 {}; }", "is a statement"),
-            ("endpoint GET /a { respond 200 { n: app.items.count(1) }; }", "takes no arguments, given 1"),
-            ("endpoint POST /a { if app.items.add { n: 1 } { } respond 200 {}; }", "expected"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { let p = alloc app.items; return ok({}); }", "replaced by collection functions"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { let p = app.items[0]; free p; return ok({}); }", "replaced by the collection's function"),
+            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ n: count(app.items) }); }", "`count(x)` was replaced by `x.count()`"),
+            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ n: capacity(app.items) }); }", "`capacity(x)` was replaced by `x.capacity()`"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { return ok({ n: slot(app.items.add()) }); }", "makes an item"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { let p = app.items[0]; app.board.items.remove(p); return ok({}); }", "cannot be removed from"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { let p = app.items[0]; let n = app.items.remove(p); return ok({}); }", "is a statement"),
+            ("@get(\"/a\") fn get_a() -> Response<any> { return ok({ n: app.items.count(1) }); }", "takes no arguments, given 1"),
+            ("@post(\"/a\") fn post_a() -> Response<any> { if app.items.add { n: 1 } { } return ok({}); }", "expected"),
         ] {
             let e = load(api);
             assert!(e.contains(want), "{} -> {}", api, e);
         }
-        assert_eq!(load("endpoint POST /a { let p = app.items.add { n: 2 }; p.n += 1; app.items.remove(p); respond 200 { n: p.n, c: app.items.count() }; }"), "");
+        assert_eq!(load("@post(\"/a\") fn post_a() -> Response<any> { let p = app.items.add { n: 2 }; p.n += 1; app.items.remove(p); return ok({ n: p.n, c: app.items.count() }); }"), "");
+    }
+
+    /// Every answer is checked against the endpoint's `Response<T>` when the program is compiled.
+    #[test]
+    fn answers_are_checked_against_their_response_type() {
+        let st = "struct Row { name: string<8>; n: i64; } struct I { name: string<8>; n: i64; } struct App { items: pool<I, 4>; total: i64; } state app: App;";
+        let load = |api: &str| -> String { super::check(&Program::parse(st).unwrap(), api).err().unwrap_or_default() };
+        for (api, want) in [
+            ("@get(\"/a\") fn a() -> Response<{ n: i64 }> { return ok({ n: 1, m: 2 }); }", "has `m`, which { n: i64 } does not declare"),
+            ("@get(\"/a\") fn a() -> Response<{ n: i64, m: i64 }> { return ok({ n: 1 }); }", "has no `m`"),
+            ("@get(\"/a\") fn a() -> Response<{ n: string }> { return ok({ n: 1 }); }", "`n` is i64, declared string"),
+            ("@get(\"/a\") fn a() -> Response<{ x: [i64] }> { return ok({ x: [each it in app.items it.name] }); }", "`x[]` is string, declared i64"),
+            ("@get(\"/a\") fn a() -> Response<[Row]> { return ok([each it in app.items { name: it.name }]); }", "has no `n`"),
+            ("@get(\"/a\") fn a() -> Response<none> { return ok({}); }", "declared none"),
+            ("@get(\"/a\") fn a() -> Response<{}> { return status(404, {}); }", "an answer is a success (2xx)"),
+            ("@get(\"/a\") fn a() -> Response<{}> { return {}; }", "an endpoint returns its answer"),
+            ("@get(\"/a\") fn a() -> Response<{}> { respond 200 {}; }", "`respond` was replaced"),
+            ("endpoint GET /a { respond 200 {}; }", "endpoints are functions with an attribute"),
+            ("@get(\"/a\") fn a() { return ok({}); }", "returns a `Response<T>`"),
+            ("@fetch(\"/a\") fn a() -> Response<{}> { return ok({}); }", "`@fetch`"),
+            ("@get(\"/a\") fn a() -> Response<{}> { if app.total > 1 { return ok({}); } }", "can finish without an answer"),
+        ] {
+            let e = load(api);
+            assert!(e.contains(want), "{} -> {}", api, e);
+        }
+        // what fits: a declared struct, optional values, run-time kinds, no body, a status of choice
+        for api in [
+            "@get(\"/a\") fn a() -> Response<[Row]> { return ok([each it in app.items { name: it.name, n: it.n }]); }",
+            "@get(\"/a\") fn a() -> Response<{ n: string? }> { return ok({ n: or(query(\"x\"), null) }); }",
+            "@get(\"/a\") fn a() -> Response<{ n: any }> { var v = 1; v = \"x\"; return ok({ n: v }); }",
+            "@delete(\"/a\") fn a() -> Response<none> { return no_content(); }",
+            "@post(\"/a\") fn a() -> Response<{ total: i64 }> { app.total += 1; if app.total > 2 { return status(202, { total: app.total }); } return created({ total: app.total }); }",
+        ] {
+            assert_eq!(load(api), "", "{}", api);
+        }
     }
 
     #[test]

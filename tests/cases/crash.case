@@ -11,8 +11,10 @@ system {
 struct C { n: i64; }
 state c: C;
 
-endpoint POST /inc { c.n = c.n + 1; respond 200 { "n": c.n }; }
-endpoint POST /crash { c.n = 99; __crash(); }
+@post("/inc")
+fn post_inc() -> Response<{ n: i64 }> { c.n = c.n + 1; return ok({ "n": c.n }); }
+@post("/crash")
+fn post_crash() -> Response<none> { c.n = 99; __crash(); }
 --- requests
 POST /inc
 POST /inc

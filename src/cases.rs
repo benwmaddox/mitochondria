@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn c_system_parts_behave() {
         let one = "system {\n    worker w { program \"w.mito\"; count 1; mailbox 4; slot 256; }\n    entry w;\n    inflight 2;\n}\n";
-        let read = |_: &str| Ok("struct C { n: i64; } state c: C;\nendpoint GET /n { respond 200 { \"n\": c.n }; }\n".to_string());
+        let read = |_: &str| Ok("struct C { n: i64; } state c: C;\n@get(\"/n\") fn get_n() -> Response<any> { return ok({ \"n\": c.n }); }\n".to_string());
         let spec = crate::spec::parse_spec_with(one, &read).unwrap();
         let mut units = crate::cgen::system_c(&spec).unwrap();
         *units.last_mut().unwrap() += r#"
@@ -501,7 +501,7 @@ MITO_API int t_reply(void *sp) {
 
         // a forward: the handler's writes are kept only if the request was handed on
         let case = Case { name: "forward-rollback".into(), state: "struct C { n: i64; } state c: C;".into(),
-            api: "endpoint POST /f { c.n = c.n + 1; forward next[0] { \"n\": c.n }; }\nendpoint GET /n { respond 200 { \"n\": c.n }; }".into(), requests: String::new(), system: None, files: Vec::new() };
+            api: "@post(\"/f\") fn post_f() -> Response<any> { c.n = c.n + 1; forward next[0] { \"n\": c.n }; }\n@get(\"/n\") fn get_n() -> Response<any> { return ok({ \"n\": c.n }); }".into(), requests: String::new(), system: None, files: Vec::new() };
         let mut be = CBackend::start(&case);
         let sym = |n: &str| match &be._code { Code::Tcc(u) => u.symbol(n).unwrap(), Code::Dll(_) => unreachable!() };
         unsafe {
@@ -528,11 +528,11 @@ MITO_API int t_reply(void *sp) {
     #[test]
     fn sorted_matches_a_model_under_random_changes() {
         let (state, api) = crate::modules::expand("struct E { v: i64; id: i64; }\nstruct App { s: sorted<E, 48, v>; }\nstate app: App;\n",
-            "endpoint POST /add/{v}/{id} { let e = app.s.add(int(param(\"v\"))); e.id = int(param(\"id\")); respond 201 { \"slot\": slot(e) }; }\n\
-             endpoint POST /set/{k}/{v} { app.s.set_key(app.s.get(int(param(\"k\"))), int(param(\"v\"))); respond 200 {}; }\n\
-             endpoint DELETE /x/{k} { app.s.remove(app.s.get(int(param(\"k\")))); respond 200 {}; }\n\
-             endpoint GET /all { respond 200 { \"x\": [each e in app.s e.id] }; }\n\
-             endpoint GET /from/{k} { let k = int(param(\"k\")); respond 200 { \"up\": [each e in app.s from k e.id], \"down\": [each e in app.s from k reverse e.id] }; }\n").unwrap();
+            "@post(\"/add/{v}/{id}\") fn post_add_v_id() -> Response<any> { let e = app.s.add(int(param(\"v\"))); e.id = int(param(\"id\")); return created({ \"slot\": slot(e) }); }\n\
+             @post(\"/set/{k}/{v}\") fn post_set_k_v() -> Response<any> { app.s.set_key(app.s.get(int(param(\"k\"))), int(param(\"v\"))); return ok({}); }\n\
+             @delete(\"/x/{k}\") fn delete_x_k() -> Response<any> { app.s.remove(app.s.get(int(param(\"k\")))); return ok({}); }\n\
+             @get(\"/all\") fn get_all() -> Response<any> { return ok({ \"x\": [each e in app.s e.id] }); }\n\
+             @get(\"/from/{k}\") fn get_from_k() -> Response<any> { let k = int(param(\"k\")); return ok({ \"up\": [each e in app.s from k e.id], \"down\": [each e in app.s from k reverse e.id] }); }\n").unwrap();
         let case = Case { name: "sorted-model".into(), state, api, requests: String::new(), system: None, files: Vec::new() };
         let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
         if clang().is_some() {

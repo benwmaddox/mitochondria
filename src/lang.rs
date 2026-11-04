@@ -55,7 +55,13 @@ pub struct Iter { pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option
 pub struct Via { pub first: u32, pub next: u32, pub item: u32, pub last: Option<u32>, pub prev: Option<u32> }
 
 #[derive(Debug, Clone)]
-pub enum Json { Obj(Vec<(String, Json)>), Arr(Iter, Box<Json>), E(Expr) }
+/// An answer's JSON: an object, an array made by a loop, a value, or nothing (`no_content()`).
+pub enum Json { Obj(Vec<(String, Json)>), Arr(Iter, Box<Json>), E(Expr), Empty }
+
+/// The `T` of an endpoint's `Response<T>`: the shape of every answer it gives. `Name` is a scalar (`i64`, `bool`,
+/// `string`, ...), `any` (a value whose kind is known only at run time), `none` (no body), or a declared struct.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RType { Name(String), Opt(Box<RType>), Arr(Box<RType>), Obj(Vec<(String, RType)>) }
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
@@ -79,7 +85,8 @@ pub enum Stmt {
 pub enum Seg { Lit(String), Param(String) }
 #[derive(Debug, Clone)]
 /// `lines`: first and last source line (1-based) of the endpoint, for comments in generated code.
-pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String, pub slots: u32, pub lines: (u32, u32) }
+/// An endpoint: a function with an attribute (`@post("/players") fn add_player() -> Response<T> { ... }`).
+pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt>, pub text: String, pub slots: u32, pub lines: (u32, u32), pub name: String, pub resp: RType }
 #[derive(Debug, Clone)]
 /// A function. A module instance's functions are named `instance.name` (written by `modules::expand`); `public` ones
 /// (`pub fn`) can be called from outside the module.
@@ -137,12 +144,12 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
 /// `pre`: statements an initializer (`coll.add() { f: v }`) puts before the statement it is in; `init_ok`: whether
 /// an initializer may appear here (not in a condition, a loop's clauses or a JSON array, where it would run at a
 /// different time); `tmp`: hidden locals made so far.
-struct P { t: Vec<Tok>, i: usize, lines: Vec<u32>, pre: Vec<Stmt>, init_ok: bool, tmp: u32 }
+struct P { t: Vec<Tok>, i: usize, lines: Vec<u32>, pre: Vec<Stmt>, init_ok: bool, tmp: u32, in_endpoint: bool }
 type R<T> = Result<T, String>;
 
 pub fn parse(src: &str) -> R<Api> {
     let (t, lines) = lex_lines(src)?;
-    let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0 };
+    let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0, in_endpoint: false };
     let mut api = Api::default();
     while p.i < p.t.len() {
         let public = p.is_kw("pub");
@@ -159,23 +166,63 @@ pub fn parse(src: &str) -> R<Api> {
             api.fns.push(Func { name, params, body, slots: 0, public });
             continue;
         }
+        if p.is_kw("endpoint") { return Err("endpoints are functions with an attribute: `@post(\"/path\") fn name() -> Response<T> { ... }`".into()); }
+        // `@get("/path") fn name() -> Response<T> { ... }`
         let first = p.lines.get(p.i).copied().unwrap_or(0);
-        p.kw("endpoint")?;
-        let method = p.id()?;
-        let mut segs = Vec::new();
-        while p.sym("/") {
-            if p.sym("{") { let n = p.id()?; p.eat("}")?; segs.push(Seg::Param(n)); } else { segs.push(Seg::Lit(p.id()?)); }
-            if segs.len() > 32 { return Err("an endpoint path has at most 32 parts".into()); }
-        }
-        let body = p.block()?;
+        p.eat("@")?;
+        let verb = p.id()?;
+        let method = match verb.as_str() { "get" | "post" | "put" | "patch" | "delete" => verb.to_uppercase(), v => return Err(format!("`@{}`: an endpoint is `@get`, `@post`, `@put`, `@patch` or `@delete`", v)) };
+        p.eat("(")?;
+        let path = match p.t.get(p.i) { Some(Tok::Str(s)) => { p.i += 1; s.clone() } _ => return Err(format!("`@{}(...)` takes the path as a string, as in `@{}(\"/players/{{p}}\")`", verb, verb)) };
+        p.eat(")")?;
+        let segs = path_segs(&path)?;
+        p.kw("fn")?;
+        let name = p.id()?;
+        p.eat("(")?; p.eat(")")?;
+        if !(p.sym("->") && p.is_kw("Response")) { return Err(format!("endpoint `{}` returns a `Response<T>`: `fn {}() -> Response<T>`", name, name)); }
+        p.i += 1; p.eat("<")?; let resp = p.rtype()?; p.eat(">")?;
+        p.in_endpoint = true;
+        let body = p.block();
+        p.in_endpoint = false;
+        let body = body?;
         let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(n) => format!("/{{{}}}", n) }).collect::<String>());
         let last = p.lines.get(p.i.saturating_sub(1)).copied().unwrap_or(first);
-        api.eps.push(Endpoint { method, segs, body, text, slots: 0, lines: (first, last) });
+        api.eps.push(Endpoint { method, segs, body, text, slots: 0, lines: (first, last), name, resp });
     }
     Ok(api)
 }
 
+/// `/rooms/{room}/messages` as segments.
+fn path_segs(path: &str) -> R<Vec<Seg>> {
+    let Some(rest) = path.strip_prefix('/') else { return Err(format!("an endpoint path starts with `/`: `{}`", path)) };
+    let mut segs = Vec::new();
+    for part in rest.split('/').filter(|x| !x.is_empty()) {
+        let ok = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
+        match part.strip_prefix('{').and_then(|x| x.strip_suffix('}')) {
+            Some(n) if ok(n) => segs.push(Seg::Param(n.to_string())),
+            None if ok(part) => segs.push(Seg::Lit(part.to_string())),
+            _ => return Err(format!("endpoint path `{}`: `{}` is not a name or a `{{parameter}}`", path, part)),
+        }
+        if segs.len() > 32 { return Err("an endpoint path has at most 32 parts".into()); }
+    }
+    Ok(segs)
+}
+
 impl P {
+    /// The `T` of `Response<T>`: `{ name: T, ... }`, `[T]`, `T?`, or a name (`i64`, `string<24>`, `Row`, `any`, `none`).
+    fn rtype(&mut self) -> R<RType> {
+        let t = if self.sym("{") {
+            let mut f = Vec::new();
+            while !self.sym("}") { let k = self.key()?; self.eat(":")?; f.push((k, self.rtype()?)); if !self.sym(",") { self.sym(";"); } }
+            RType::Obj(f)
+        } else if self.sym("[") { let e = self.rtype()?; self.eat("]")?; RType::Arr(Box::new(e)) }
+        else {
+            let n = self.id()?;
+            if self.sym("<") { let mut depth = 1; while depth > 0 { if self.sym("<") { depth += 1; } else if self.sym(">") { depth -= 1; } else if self.peek().is_none() { return Err("unfinished type".into()); } else { self.i += 1; } } }
+            RType::Name(n)
+        };
+        Ok(if self.sym("?") { RType::Opt(Box::new(t)) } else { t })
+    }
     fn peek(&self) -> Option<&Tok> { self.t.get(self.i) }
     fn here(&self) -> String { format!("{:?}", self.peek()) }
     fn sym(&mut self, s: &str) -> bool { if matches!(self.peek(), Some(Tok::Sym(x)) if x == s) { self.i += 1; true } else { false } }
@@ -244,14 +291,32 @@ impl P {
             self.eat(";")?;
             return Ok(Stmt::Forward { kind, key, fields });
         }
-        if self.is_kw("return") { self.i += 1; if self.sym(";") { return Ok(Stmt::Return(None)); } let e = self.expr()?; self.eat(";")?; return Ok(Stmt::Return(Some(e))); }
+        if self.is_kw("return") {
+            self.i += 1;
+            // in an endpoint, the answer: ok(...) 200, created(...) 201, no_content() 204, status(code, ...)
+            if self.in_endpoint {
+                let how = self.here_word();
+                let code: u16 = match how.as_str() { "ok" => 200, "created" => 201, "no_content" => 204, "status" => 0, _ => return Err("an endpoint returns its answer: `return ok(...)`, `created(...)`, `no_content()` or `status(code, ...)`".into()) };
+                self.i += 1; self.eat("(")?;
+                let code = if code == 0 {
+                    let c = self.int()?;
+                    if !(200..300).contains(&c) { return Err(format!("`status({}, ...)`: an answer is a success (2xx); end with `fail {} \"...\"` for an error", c, c)); }
+                    self.eat(",")?; c as u16
+                } else { code };
+                let j = if code == 204 { Json::Empty } else { self.json()? };
+                self.eat(")")?; self.eat(";")?;
+                return Ok(Stmt::Respond(code, j));
+            }
+            if self.sym(";") { return Ok(Stmt::Return(None)); }
+            let e = self.expr()?; self.eat(";")?; return Ok(Stmt::Return(Some(e)));
+        }
         if self.is_kw("fail") {
             self.i += 1; let code = self.int()? as u16;
             let msg = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err("fail needs a message string".into()) };
             if msg.len() > MAX_FAIL { return Err(format!("a fail message longer than {} bytes", MAX_FAIL)); }
             self.eat(";")?; return Ok(Stmt::Fail(code, msg));
         }
-        if self.is_kw("respond") { self.i += 1; let code = self.int()? as u16; let j = self.json()?; self.eat(";")?; return Ok(Stmt::Respond(code, j)); }
+        if self.is_kw("respond") { return Err("`respond` was replaced by returning the answer: `return ok(...);` (or `created`, `no_content`, `status`)".into()); }
         let lhs = self.expr()?;
         if self.sym(";") { return Ok(Stmt::Do(lhs)); }
         // `x += e` is `x = x + e`
@@ -383,8 +448,19 @@ pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
         let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0 };
         b.block(&mut e.body)?;
         e.slots = b.max;
+        if !answers(&e.body) { return Err(format!("endpoint {} ({}) can finish without an answer: end every path with `return ok(...)` (or created, no_content, status), `fail` or `forward`", e.name, e.text)); }
     }
     Ok(())
+}
+
+/// Does every path through `body` end in an answer, a `fail`, a `forward` (or the test hook `__crash()`)?
+fn answers(body: &[Stmt]) -> bool {
+    match body.last() {
+        Some(Stmt::Respond(..) | Stmt::Fail(..) | Stmt::Forward { .. }) => true,
+        Some(Stmt::Do(Expr::Call(n, _, _))) => n == "__crash",
+        Some(Stmt::If(_, t, e)) => answers(t) && answers(e),
+        _ => false,
+    }
 }
 
 impl Binder<'_> {
@@ -472,6 +548,7 @@ impl Binder<'_> {
             Json::Obj(f) => { for (_, v) in f { self.json(v)?; } Ok(()) }
             Json::Arr(it, inner) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.json(inner)?; self.names.truncate(mark); self.next = next; Ok(()) }
             Json::E(e) => self.expr(e),
+            Json::Empty => Ok(()),
         }
     }
     fn expr(&mut self, e: &mut Expr) -> R<()> {

@@ -11,20 +11,26 @@ struct App {
 state app: App;
 
 fn first_positive() { each i in app.items where i.score > 0 { i.score = i.score; return i.tag; } return "-"; }
-endpoint POST /items { let it = app.items.add(); it.score = int(body("score")); it.tag = body("tag"); respond 201 { "slot": slot(it) }; }
-endpoint POST /double { each i in app.items { let c = app.items.add(); c.score = i.score * 2; c.tag = i.tag + "2"; } respond 200 { "n": app.items.count() }; }
-endpoint POST /zero { var n = 0; each i in app.items where i.score > 0 { each j in app.items { j.score = 0; } n = n + 1; } respond 200 { "visited": n }; }
-endpoint POST /boxes {
+@post("/items")
+fn post_items() -> Response<{ slot: i64 }> { let it = app.items.add(); it.score = int(body("score")); it.tag = body("tag"); return created({ "slot": slot(it) }); }
+@post("/double")
+fn post_double() -> Response<{ n: i64 }> { each i in app.items { let c = app.items.add(); c.score = i.score * 2; c.tag = i.tag + "2"; } return ok({ "n": app.items.count() }); }
+@post("/zero")
+fn post_zero() -> Response<{ visited: i64 }> { var n = 0; each i in app.items where i.score > 0 { each j in app.items { j.score = 0; } n = n + 1; } return ok({ "visited": n }); }
+@post("/boxes")
+fn post_boxes() -> Response<{ n: i64, scores: [i64] }> {
     let b = app.boxes.add();
     each i in app.items where i.score != 0 limit 3 { let c = b.items.add(); c.score = i.score * 10; c.tag = i.tag; }
-    respond 201 { "n": b.items.count(), "scores": [each c in b.items c.score] };
+    return created({ "n": b.items.count(), "scores": [each c in b.items c.score] });
 }
-endpoint GET /firsts {
+@get("/firsts")
+fn get_firsts() -> Response<{ calls: i64, first: string }> {
     var n = 0;
     each a in app.items { each b in app.items { if first_positive() != "-" { n = n + 1; } } }
-    respond 200 { "calls": n, "first": first_positive() };
+    return ok({ "calls": n, "first": first_positive() });
 }
-endpoint GET /list { respond 200 { "x": [each i in app.items i.tag + ":" + i.score] }; }
+@get("/list")
+fn get_list() -> Response<{ x: [any] }> { return ok({ "x": [each i in app.items i.tag + ":" + i.score] }); }
 --- requests
 POST /items {"score": 3, "tag": "a"}
 POST /items {"score": 0, "tag": "b"}

@@ -16,35 +16,44 @@ fn rate_limited(who) {
     who.sent = who.sent + 1;
 }
 
-endpoint POST /sessions {
+@post("/sessions")
+fn post_sessions() -> Response<{ token: string }> {
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
     let s = gate.sessions.add();
     s.name = name;
     s.secret = random();
     s.window = now();
-    respond 201 { "token": token(s) };
+    return created({ "token": token(s) });
 }
 
-endpoint DELETE /session {
+@delete("/session")
+fn delete_session() -> Response<{ ok: bool }> {
     gate.sessions.remove(me());
-    respond 200 { "ok": true };
+    return ok({ "ok": true });
 }
 
 // the directory of rooms lives on rooms[0]
-endpoint POST /rooms { let who = me(); forward rooms[0] { "user": user_id(who), "name": who.name }; }
-endpoint GET /rooms { let who = me(); forward rooms[0] { "user": user_id(who), "name": who.name }; }
+@post("/rooms")
+fn post_rooms() -> Response<{ id: i64, name: string, shard: i64 }> { let who = me(); forward rooms[0] { "user": user_id(who), "name": who.name }; }
+@get("/rooms")
+fn get_rooms() -> Response<{ rooms: [{ id: i64, name: string }] }> { let who = me(); forward rooms[0] { "user": user_id(who), "name": who.name }; }
 
-endpoint POST /rooms/{room}/messages {
+@post("/rooms/{room}/messages")
+fn post_rooms_room_messages() -> Response<{ seq: i64 }> {
     let who = me();
     rate_limited(who);
     forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name };
 }
-endpoint GET /rooms/{room}/messages { let who = me(); forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name }; }
-endpoint POST /rooms/{room}/typing { let who = me(); forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name }; }
-endpoint GET /rooms/{room}/typing { let who = me(); forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name }; }
+@get("/rooms/{room}/messages")
+fn get_rooms_room_messages() -> Response<{ room: string, messages: [{ seq: i64, author: string, at: i64, body: string }] }> { let who = me(); forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name }; }
+@post("/rooms/{room}/typing")
+fn post_rooms_room_typing() -> Response<{ ok: bool }> { let who = me(); forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name }; }
+@get("/rooms/{room}/typing")
+fn get_rooms_room_typing() -> Response<{ typing: [{ name: string }] }> { let who = me(); forward rooms[int(param("room"))] { "user": user_id(who), "name": who.name }; }
 
 // this shard only: one-way forwarding has no fan-out to total the other workers
-endpoint GET /stats {
-    respond 200 { "shard": worker_index(), "sessions": gate.sessions.count(), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb") };
+@get("/stats")
+fn get_stats() -> Response<{ shard: i64, sessions: i64, committed_kb: i64, live_kb: i64 }> {
+    return ok({ "shard": worker_index(), "sessions": gate.sessions.count(), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb") });
 }

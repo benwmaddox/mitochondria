@@ -22,36 +22,41 @@ fn me() -> ref<chat.sessions> { return auth(chat.sessions); }
 fn room_param() -> ref<chat.rooms> { return chat.rooms.get(int(param("room"))); }
 fn typing_until(t: i64) -> i64 { return t + max(chat.meta.typing_ttl, 5000); }
 
-endpoint POST /sessions {
+@post("/sessions")
+fn post_sessions() -> Response<{ token: string, slot: i64 }> {
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
     let s = chat.sessions.add();
     s.name = name;
     s.secret = random();
     s.window = now();
-    respond 201 { "token": token(s), "slot": slot(s) };
+    return created({ "token": token(s), "slot": slot(s) });
 }
 
-endpoint DELETE /session {
+@delete("/session")
+fn delete_session() -> Response<{ ok: bool }> {
     chat.sessions.remove(me());
-    respond 200 { "ok": true };
+    return ok({ "ok": true });
 }
 
-endpoint POST /rooms {
+@post("/rooms")
+fn post_rooms() -> Response<{ id: i64, name: string }> {
     let who = me();
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
     let r = chat.rooms.add(now());
     r.name = name;
-    respond 201 { "id": slot(r), "name": r.name };
+    return created({ "id": slot(r), "name": r.name });
 }
 
-endpoint GET /rooms {
+@get("/rooms")
+fn get_rooms() -> Response<{ rooms: [{ id: i64, name: string }] }> {
     let who = me();
-    respond 200 { "rooms": [each r in chat.rooms { "id": slot(r), "name": r.name }] };
+    return ok({ "rooms": [each r in chat.rooms { "id": slot(r), "name": r.name }] });
 }
 
-endpoint POST /rooms/{room}/messages {
+@post("/rooms/{room}/messages")
+fn post_rooms_room_messages() -> Response<{ seq: i64 }> {
     let who = me();
     let room = room_param();
     let text = body("body");
@@ -66,22 +71,24 @@ endpoint POST /rooms/{room}/messages {
     m.at = t;
     m.author = who;
     m.body = text;
-    respond 201 { "seq": m.seq };
+    return created({ "seq": m.seq });
 }
 
-endpoint GET /rooms/{room}/messages {
+@get("/rooms/{room}/messages")
+fn get_rooms_room_messages() -> Response<{ room: string, messages: [{ seq: i64, author: string, at: i64, body: string }] }> {
     let who = me();
     let room = room_param();
     let n = min(int(or(query("limit"), "50")), 100);
-    respond 200 {
+    return ok({
         "room": room.name,
         "messages": [each m in room.messages reverse limit n {
             "seq": m.seq, "author": or(m.author.name, "[deleted]"), "at": m.at, "body": m.body
         }]
-    };
+    });
 }
 
-endpoint POST /rooms/{room}/typing {
+@post("/rooms/{room}/typing")
+fn post_rooms_room_typing() -> Response<{ ok: bool }> {
     let who = me();
     let room = room_param();
     let t = now();
@@ -95,21 +102,23 @@ endpoint POST /rooms/{room}/typing {
         ty.who = who;
         ty.until = typing_until(t);
     }
-    respond 200 { "ok": true };
+    return ok({ "ok": true });
 }
 
-endpoint GET /rooms/{room}/typing {
+@get("/rooms/{room}/typing")
+fn get_rooms_room_typing() -> Response<{ typing: [{ name: string }] }> {
     let who = me();
     let room = room_param();
     let t = now();
-    respond 200 { "typing": [each ty in room.typing where ty.until >= t { "name": or(ty.who.name, "[gone]") }] };
+    return ok({ "typing": [each ty in room.typing where ty.until >= t { "name": or(ty.who.name, "[gone]") }] });
 }
 
-endpoint GET /stats {
+@get("/stats")
+fn get_stats() -> Response<{ sessions: i64, rooms: i64, messages: i64, next_seq: i64, committed_kb: i64, live_kb: i64, reserved_kb: i64 }> {
     var messages = 0;
     each r in chat.rooms { messages = messages + r.messages.count(); }
-    respond 200 {
+    return ok({
         "sessions": chat.sessions.count(), "rooms": chat.rooms.size(), "messages": messages, "next_seq": chat.meta.next_seq,
         "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb"), "reserved_kb": stat("reserved_kb")
-    };
+    });
 }

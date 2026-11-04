@@ -9,30 +9,42 @@ struct App {
 }
 state app: App;
 
-endpoint POST /evs { let e = app.evs.add(); e.n = int(body("n")); e.who = body("who"); respond 201 { "count": app.evs.count() }; }
-endpoint GET /evs/{k} { let e = app.evs[int(param("k"))]; respond 200 { "n": e.n, "who": e.who }; }
-endpoint GET /evs { respond 200 { "x": [each e in app.evs e.n], "r": [each e in app.evs reverse e.n], "first": app.evs[0].n }; }
-endpoint POST /strict { let e = app.strict.add(); e.n = app.strict.count(); respond 201 { "n": e.n }; }
-endpoint POST /strict/try { let e = app.strict.try_add(); respond 200 { "got": exists(e) }; }
-endpoint POST /copy {
+@post("/evs")
+fn post_evs() -> Response<{ count: i64 }> { let e = app.evs.add(); e.n = int(body("n")); e.who = body("who"); return created({ "count": app.evs.count() }); }
+@get("/evs/{k}")
+fn get_evs_k() -> Response<{ n: i64, who: string }> { let e = app.evs[int(param("k"))]; return ok({ "n": e.n, "who": e.who }); }
+@get("/evs")
+fn get_evs() -> Response<{ x: [i64], r: [i64], first: i64 }> { return ok({ "x": [each e in app.evs e.n], "r": [each e in app.evs reverse e.n], "first": app.evs[0].n }); }
+@post("/strict")
+fn post_strict() -> Response<{ n: i64 }> { let e = app.strict.add(); e.n = app.strict.count(); return created({ "n": e.n }); }
+@post("/strict/try")
+fn post_strict_try() -> Response<{ got: bool }> { let e = app.strict.try_add(); return ok({ "got": exists(e) }); }
+@post("/copy")
+fn post_copy() -> Response<{ x: [i64] }> {
     // the loop sees the items there were when it started, not the ones it adds
     each e in app.evs { let f = app.evs.add(); f.n = e.n + 100; f.who = e.who; }
-    respond 200 { "x": [each e in app.evs e.n] };
+    return ok({ "x": [each e in app.evs e.n] });
 }
-endpoint POST /bags { let b = app.bags.add(); let x = b.nums.add(); let y = b.nums.add(); let f = b.flags.add(); respond 201 { "n": b.nums.count(), "f": b.flags.count() }; }
-endpoint GET /bags/{k} {
+@post("/bags")
+fn post_bags() -> Response<{ n: i64, f: i64 }> { let b = app.bags.add(); let x = b.nums.add(); let y = b.nums.add(); let f = b.flags.add(); return created({ "n": b.nums.count(), "f": b.flags.count() }); }
+@get("/bags/{k}")
+fn get_bags_k() -> Response<{ sum: i64, all: [i64], rev: [i64], at1: i64, flags: [bool] }> {
     let b = app.bags[int(param("k"))];
     var sum = 0;
     each v in b.nums { sum = sum + v; }
-    respond 200 { "sum": sum, "all": [each v in b.nums v], "rev": [each v in b.nums reverse v], "at1": b.nums[1], "flags": [each f in b.flags f] };
+    return ok({ "sum": sum, "all": [each v in b.nums v], "rev": [each v in b.nums reverse v], "at1": b.nums[1], "flags": [each f in b.flags f] });
 }
-endpoint POST /bags/{k}/set { let b = app.bags[int(param("k"))]; b.nums[int(body("i"))] = body("v"); respond 200 { "at": b.nums[int(body("i"))] }; }
-endpoint POST /bags/{k}/flag { let b = app.bags[int(param("k"))]; b.flags[0] = body("on"); respond 200 { "flags": [each f in b.flags f] }; }
-endpoint POST /evs/{k} { app.evs[int(param("k"))] = 5; respond 200 {}; }
-endpoint POST /bags/{k}/grow {
+@post("/bags/{k}/set")
+fn post_bags_k_set() -> Response<{ at: i64 }> { let b = app.bags[int(param("k"))]; b.nums[int(body("i"))] = body("v"); return ok({ "at": b.nums[int(body("i"))] }); }
+@post("/bags/{k}/flag")
+fn post_bags_k_flag() -> Response<{ flags: [bool] }> { let b = app.bags[int(param("k"))]; b.flags[0] = body("on"); return ok({ "flags": [each f in b.flags f] }); }
+@post("/evs/{k}")
+fn post_evs_k() -> Response<{}> { app.evs[int(param("k"))] = 5; return ok({}); }
+@post("/bags/{k}/grow")
+fn post_bags_k_grow() -> Response<{ n: i64 }> {
     let b = app.bags[int(param("k"))];
     each v in b.nums { let w = b.nums.add(); }
-    respond 200 { "n": b.nums.count() };
+    return ok({ "n": b.nums.count() });
 }
 --- requests
 GET /evs

@@ -13,38 +13,43 @@ state app: App;
 
 fn items() -> ref<app.items> { return app.items; }
 
-endpoint POST /items {
+@post("/items")
+fn post_items() -> Response<{ id: i64, entry: i64, total: i64 }> {
     let it = app.items.add { name: body("name"), n: int(body("n")) };
     let e = app.board.add(it.n) { who: it };
     it.entry = e;
     app.log.add { what: "added" };
     app.total += it.n;
-    respond 201 { id: slot(it), entry: slot(e), total: app.total };
+    return created({ id: slot(it), entry: slot(e), total: app.total });
 }
-endpoint POST /maybe {
+@post("/maybe")
+fn post_maybe() -> Response<{ got: bool, count: i64, of: i64, via_value: i64 }> {
     let it = app.items.try_add();
-    respond 200 { got: exists(it), count: app.items.count(), of: app.items.capacity(), via_value: items().count() };
+    return ok({ got: exists(it), count: app.items.count(), of: app.items.capacity(), via_value: items().count() });
 }
-endpoint POST /sub/{k} {
+@post("/sub/{k}")
+fn post_sub_k() -> Response<{ total: i64 }> {
     app.total -= int(param("k"));
     app.total *= 2;
     app.total /= 3;
-    respond 200 { total: app.total };
+    return ok({ total: app.total });
 }
-endpoint DELETE /items/{k} {
+@delete("/items/{k}")
+fn delete_items_k() -> Response<{ left: i64 }> {
     let it = app.items[int(param("k"))];
     app.board.remove(it.entry);
     app.items.remove(it);
     app.log.add { what: "removed" };
-    respond 200 { left: app.items.count() };
+    return ok({ left: app.items.count() });
 }
-endpoint GET /all {
-    respond 200 {
+@get("/all")
+fn get_all() -> Response<{ items: [{ name: string, n: i64 }], board: [{ name: string, n: i64 }], log: [{ what: string }], "quoted key": i64 }> {
+    return ok({
         items: [each it in app.items { name: it.name, n: it.n }],
         board: [each e in app.board reverse { name: or(e.who.name, "[gone]"), n: e.n }],
         log: [each l in app.log { what: l.what }],
         "quoted key": app.total
-    };
+    });
 }
 --- requests
 POST /items {"name": "a", "n": 5}

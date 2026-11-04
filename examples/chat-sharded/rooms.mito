@@ -24,7 +24,8 @@ fn room(id) {
 fn typing_until(t) { return t + max(shard.meta.typing_ttl, 5000); }
 
 // rooms[0] assigns the id and records the room in the directory, then forwards to the owning shard (id % count)
-endpoint POST /rooms {
+@post("/rooms")
+fn post_rooms() -> Response<{ id: i64, name: string, shard: i64 }> {
     let name = body("name");
     if fwd("id") == null {
         if len(name) == 0 { fail 400 "name is required"; }
@@ -37,14 +38,16 @@ endpoint POST /rooms {
     r.id = int(fwd("id"));
     r.name = name;
     r.created = now();
-    respond 201 { "id": r.id, "name": r.name, "shard": worker_index() };
+    return created({ "id": r.id, "name": r.name, "shard": worker_index() });
 }
 
-endpoint GET /rooms {
-    respond 200 { "rooms": [each d in shard.directory { "id": d.id, "name": d.name }] };
+@get("/rooms")
+fn get_rooms() -> Response<{ rooms: [{ id: i64, name: string }] }> {
+    return ok({ "rooms": [each d in shard.directory { "id": d.id, "name": d.name }] });
 }
 
-endpoint POST /rooms/{room}/messages {
+@post("/rooms/{room}/messages")
+fn post_rooms_room_messages() -> Response<{ seq: i64 }> {
     let r = room(int(param("room")));
     let text = body("body");
     if len(text) == 0 { fail 400 "body is required"; }
@@ -55,19 +58,21 @@ endpoint POST /rooms/{room}/messages {
     m.user = fwd("user");
     m.author = fwd("name");
     m.body = text;
-    respond 201 { "seq": m.seq };
+    return created({ "seq": m.seq });
 }
 
-endpoint GET /rooms/{room}/messages {
+@get("/rooms/{room}/messages")
+fn get_rooms_room_messages() -> Response<{ room: string, messages: [{ seq: i64, author: string, at: i64, body: string }] }> {
     let r = room(int(param("room")));
     let n = min(int(or(query("limit"), "50")), 100);
-    respond 200 {
+    return ok({
         "room": r.name,
         "messages": [each m in r.messages reverse limit n { "seq": m.seq, "author": m.author, "at": m.at, "body": m.body }]
-    };
+    });
 }
 
-endpoint POST /rooms/{room}/typing {
+@post("/rooms/{room}/typing")
+fn post_rooms_room_typing() -> Response<{ ok: bool }> {
     let r = room(int(param("room")));
     let t = now();
     let user = fwd("user");
@@ -82,11 +87,12 @@ endpoint POST /rooms/{room}/typing {
         ty.name = fwd("name");
         ty.until = typing_until(t);
     }
-    respond 200 { "ok": true };
+    return ok({ "ok": true });
 }
 
-endpoint GET /rooms/{room}/typing {
+@get("/rooms/{room}/typing")
+fn get_rooms_room_typing() -> Response<{ typing: [{ name: string }] }> {
     let r = room(int(param("room")));
     let t = now();
-    respond 200 { "typing": [each ty in r.typing where ty.until >= t { "name": ty.name }] };
+    return ok({ "typing": [each ty in r.typing where ty.until >= t { "name": ty.name }] });
 }

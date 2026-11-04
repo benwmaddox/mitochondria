@@ -15,7 +15,8 @@ state game: Game;
 
 fn player() -> ref<game.players> { return game.players[int(param("id"))]; }
 
-endpoint POST /players {
+@post("/players")
+fn post_players() -> Response<{ id: i64 }> {
     let name = body("name");
     if len(name) == 0 { fail 400 "name is required"; }
     let p = game.players.add();
@@ -23,10 +24,11 @@ endpoint POST /players {
     let e = game.board.add(0);
     e.who = p;
     p.entry = e;
-    respond 201 { "id": slot(p) };
+    return created({ "id": slot(p) });
 }
 
-endpoint POST /players/{id}/games {
+@post("/players/{id}/games")
+fn post_players_id_games() -> Response<{ best: i64 }> {
     let p = player();
     let points = int(body("points"));
     game.totals.games = game.totals.games + 1;
@@ -37,28 +39,32 @@ endpoint POST /players/{id}/games {
     if points > p.best { p.best = points; game.board.set_key(p.entry, points); }
     // checked last on purpose: everything above is undone when this fails
     if points > 1000000 { fail 422 "not a believable score"; }
-    respond 200 { "best": p.best };
+    return ok({ "best": p.best });
 }
 
-endpoint GET /board {
+@get("/board")
+fn get_board() -> Response<{ top: [{ name: string, points: i64 }] }> {
     let n = min(int(or(query("top"), "10")), 100);
-    respond 200 { "top": [each e in game.board reverse limit n { "name": e.who.name, "points": e.points }] };
+    return ok({ "top": [each e in game.board reverse limit n { "name": e.who.name, "points": e.points }] });
 }
 
-endpoint GET /recent {
-    respond 200 { "games": [each g in game.recent reverse { "name": or(g.who.name, "[left]"), "points": g.points }] };
+@get("/recent")
+fn get_recent() -> Response<{ games: [{ name: string, points: i64 }] }> {
+    return ok({ "games": [each g in game.recent reverse { "name": or(g.who.name, "[left]"), "points": g.points }] });
 }
 
-endpoint DELETE /players/{id} {
+@delete("/players/{id}")
+fn delete_players_id() -> Response<{ ok: bool }> {
     let p = player();
     game.board.remove(p.entry);
     game.players.remove(p);
-    respond 200 { "ok": true };
+    return ok({ "ok": true });
 }
 
-endpoint GET /stats {
-    respond 200 {
+@get("/stats")
+fn get_stats() -> Response<{ players: i64, games: i64, reserved_kb: i64, committed_kb: i64, live_kb: i64 }> {
+    return ok({
         "players": game.players.count(), "games": game.totals.games,
         "reserved_kb": stat("reserved_kb"), "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb")
-    };
+    });
 }

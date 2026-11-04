@@ -11,22 +11,35 @@ struct App {
 }
 state app: App;
 
-endpoint POST /add { let s = app.board.add(int(body("points"))); s.name = body("name"); respond 201 { "slot": slot(s), "size": app.board.size() }; }
-endpoint POST /set/{k} { app.board.set_key(app.board.get(int(param("k"))), int(body("points"))); respond 200 {}; }
-endpoint DELETE /x/{k} { app.board.remove(app.board.get(int(param("k")))); respond 200 { "size": app.board.size() }; }
-endpoint GET /asc { respond 200 { "x": [each s in app.board s.name + ":" + s.points] }; }
-endpoint GET /top { let n = int(or(query("n"), "3")); respond 200 { "x": [each s in app.board reverse limit n s.name] }; }
-endpoint GET /from/{k} { let k = int(param("k")); respond 200 { "up": [each s in app.board from k s.name], "down": [each s in app.board from k reverse s.name] }; }
-endpoint GET /ends { respond 200 { "first": or(app.board.first().name, "-"), "last": or(app.board.last().name, "-"), "room": app.board.room() }; }
-endpoint GET /sum { var t = 0; each s in app.board where s.points > 0 { t = t + s.points; } respond 200 { "t": t }; }
-endpoint POST /fav/{k} { app.fav.s = app.board.get(int(param("k"))); respond 200 {}; }
-endpoint GET /fav { respond 200 { "fav": or(app.fav.s.name, "-") }; }
-endpoint POST /churn/{n} {
+@post("/add")
+fn post_add() -> Response<{ slot: i64, size: i64 }> { let s = app.board.add(int(body("points"))); s.name = body("name"); return created({ "slot": slot(s), "size": app.board.size() }); }
+@post("/set/{k}")
+fn post_set_k() -> Response<{}> { app.board.set_key(app.board.get(int(param("k"))), int(body("points"))); return ok({}); }
+@delete("/x/{k}")
+fn delete_x_k() -> Response<{ size: i64 }> { app.board.remove(app.board.get(int(param("k")))); return ok({ "size": app.board.size() }); }
+@get("/asc")
+fn get_asc() -> Response<{ x: [any] }> { return ok({ "x": [each s in app.board s.name + ":" + s.points] }); }
+@get("/top")
+fn get_top() -> Response<{ x: [string] }> { let n = int(or(query("n"), "3")); return ok({ "x": [each s in app.board reverse limit n s.name] }); }
+@get("/from/{k}")
+fn get_from_k() -> Response<{ up: [string], down: [string] }> { let k = int(param("k")); return ok({ "up": [each s in app.board from k s.name], "down": [each s in app.board from k reverse s.name] }); }
+@get("/ends")
+fn get_ends() -> Response<{ first: string, last: string, room: i64 }> { return ok({ "first": or(app.board.first().name, "-"), "last": or(app.board.last().name, "-"), "room": app.board.room() }); }
+@get("/sum")
+fn get_sum() -> Response<{ t: i64 }> { var t = 0; each s in app.board where s.points > 0 { t = t + s.points; } return ok({ "t": t }); }
+@post("/fav/{k}")
+fn post_fav_k() -> Response<{}> { app.fav.s = app.board.get(int(param("k"))); return ok({}); }
+@get("/fav")
+fn get_fav() -> Response<{ fav: string }> { return ok({ "fav": or(app.fav.s.name, "-") }); }
+@post("/churn/{n}")
+fn post_churn_n() -> Response<{ size: i64 }> {
     each i in 0..int(param("n")) { let s = app.board.add(i % 4 - 1); s.name = "c"; app.board.remove(s); }
-    respond 200 { "size": app.board.size() };
+    return ok({ "size": app.board.size() });
 }
-endpoint POST /words { let x = app.words.add(body("w")); x.n = len(body("w")); respond 201 {}; }
-endpoint GET /words/{from} { respond 200 { "all": [each x in app.words x.w], "from": [each x in app.words from param("from") x.w], "back": [each x in app.words from param("from") reverse x.w] }; }
+@post("/words")
+fn post_words() -> Response<{}> { let x = app.words.add(body("w")); x.n = len(body("w")); return created({}); }
+@get("/words/{from}")
+fn get_words_from() -> Response<{ all: [string], from: [string], back: [string] }> { return ok({ "all": [each x in app.words x.w], "from": [each x in app.words from param("from") x.w], "back": [each x in app.words from param("from") reverse x.w] }); }
 --- requests
 GET /asc
 GET /ends

@@ -100,3 +100,30 @@ compiler to remove the interpreter's per-row cost. The first four are language d
 3. Functions, so `auth` and rate limiting are written once.
 4. Compile endpoints to column loops (bind columns once, hoist invariants) and re-run the bench against the native baseline.
 5. Build the worker/mailbox design and a socket load test, and compare against the existing Campfire benchmarks the user has.
+
+## Round 2 (same day): the chat ported to the coherent design
+After the redesign (DESIGN.md: columns everywhere, `list ... drop_oldest`, nested collections, `ref<pool>`, `fn`/`var`,
+journaled atomic requests), the chat state is three globals: `meta`, `sessions: pool<Session, 2000> checked`, and
+`rooms: pool<Room, 64>` where each room holds `messages: list<Msg, 1000> drop_oldest` and `typing: pool<Typing, 32>`.
+Messages carry `author: ref<sessions>` instead of a copied name; `or(m.author.name, "[deleted]")` handles a deleted author.
+
+Same benchmark, same machine (`bench --n 20000`; microseconds):
+
+| Endpoint | Round 1 | Round 2 | Why |
+|---|---|---|---|
+| GET messages, limit 50 | 2,880 | **52** | reads the end of the room's own list; no scan, no sort |
+| POST message, store full | 951 | **4.3** | `drop_oldest` replaces "find the oldest by sorting" |
+| POST message, mixed load | 1,124 | 4.6 | |
+| POST typing | 20.9 | 3.6 | scans the room's 32 typing slots, not a global pool |
+| GET typing | 10.7 | 2.9 | |
+| POST /sessions | 3.5 | 2.0 | |
+| DELETE /session | 3.1 | 1.1 | |
+
+Fixed from round 1's gap list: (1) failed requests now roll back exactly, including the sequence counter, allocations,
+dropped list items and string bytes (the runtime journals every write); frees happen only when the request succeeds;
+(2) and (3) no scan or sort for "newest 50" or eviction; (5) `fn` and `var` exist (auth is written once, typing is an
+in-place upsert); (6) no copied author name; (7) `maxlen` and `capacity` expose declared maxima.
+
+Still open: (4) `string<2000>` slots: 38.4 MB committed for 2.9 MB live, nothing trimmable (deferred by decision);
+(8) HTTP/JSON gaps; (9) single-threaded; (10) interpreter temporaries on the Rust heap (next step); GET messages at
+52 us is still interpreter-bound (each field read copies a string; JSON is built value by value).

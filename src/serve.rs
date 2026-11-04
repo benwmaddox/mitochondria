@@ -547,7 +547,7 @@ pub fn bench(s: &mut Server, mixed: usize) {
     let mut rng = 0x2545F4914F6CDD1Du64;
     let mut rnd = move |n: usize| { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; (rng % n as u64) as usize };
     s.clock = Some(1_000_000);
-    if let Some(g) = s.inst.prog.global("meta") { let off = s.inst.prog.globals[g].off; let _ = s.inst.resolve("meta.rate").and_then(|l| s.inst.loc_set(&l, &Val::Int(1_000_000))); let _ = off; }
+    let _ = s.inst.resolve("meta.rate").and_then(|l| s.inst.loc_set(&l, &Val::Int(1_000_000))); // lift the per-session rate limit for load
     println!("in-process benchmark: handler calls only, no sockets. Times in microseconds (interpreter-bound).");
     println!("  {:<34} {:>7} {:>10} {:>10} {:>10}", "endpoint", "calls", "mean us", "p50 us", "p99 us");
     snap(s, "start");

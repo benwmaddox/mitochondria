@@ -126,7 +126,8 @@ inflight 4096;    // reply slots: the most requests in flight at once
 budget 8192;      // MB: the sum of every worker's declared total must fit
 ```
 
-- **A mailbox is a list with a full policy (concept 3):** a bounded ring of fixed-size message slots, allocated once. A message
+- **A mailbox is a list with a full policy (concept 3):** a bounded ring of fixed-size message slots, allocated once. A worker
+  takes every queued message (up to `batch`, default 32) under one lock, and a sender signals it only if it is asleep. A message
   is the request (method, target, body, headers) plus forwarded fields. A full mailbox is `Full`: the sender answers 503.
 - **One message is one epoch (concept 7)** and one atomic handler (concept 8).
 - **`forward kind[key] { "field": expr };`** is the one new statement. It ends the handler and hands the request to worker
@@ -204,7 +205,8 @@ Every concept above, and the worker system, is built and tested (29 tests). Know
 Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat-api-findings.md.
 
 ## Next
-1. Long uneven text (the deferred 92% waste): `text<N>` fields packed into a per-collection text area, a ring for `drop_oldest` lists.
-2. Cheaper cross-thread handoff (measured as the main cost of workers): batching, fewer hops, lock-free mailboxes.
-3. A compiler for endpoints (bind columns, compile `each ... where` to column loops), measured against the native baselines.
+1. A compiler for endpoints (bind columns, compile `each ... where` to column loops). Measured as the main cost of workers too:
+   the room handler is 18-35 us per message, the handoff a few microseconds per hop (docs/measurements.md, Round 5).
+2. Long uneven text (the deferred 92% waste): `text<N>` fields packed into a per-collection text area, a ring for `drop_oldest` lists.
+3. Placing items on shards by load rather than `id % count` (20 rooms over 8 shards left workers 35-98% busy).
 4. Worker messages beyond `forward`: one-way `send` with `on Msg` handlers, fan-out with gathered replies, links and monitors.

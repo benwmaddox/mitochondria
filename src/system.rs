@@ -20,7 +20,7 @@ const MB: usize = 1 << 20;
 // ---------------------------------------------------------------- spec
 
 pub struct KindSpec { pub name: String, pub state: String, pub api: String, pub count: usize, pub mailbox: usize, pub slot: usize, pub soft: Option<usize>, pub hard: Option<usize> }
-pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usize, pub budget: usize, pub spin: Duration }
+pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usize, pub budget: usize, pub spin: Duration, pub batch: usize }
 
 /// Parse a `.system` file. Paths in it are relative to `dir`.
 ///
@@ -34,7 +34,7 @@ pub struct Spec { pub kinds: Vec<KindSpec>, pub entry: usize, pub inflight: usiz
 pub fn parse_spec(src: &str, dir: &Path) -> Result<Spec, String> {
     let toks = tokens(src);
     let mut i = 0;
-    let mut spec = Spec { kinds: Vec::new(), entry: usize::MAX, inflight: 4096, budget: 4096 * MB, spin: Duration::ZERO }; // sleep at once by default: spinning only pays when there are idle cores
+    let mut spec = Spec { kinds: Vec::new(), entry: usize::MAX, inflight: 4096, budget: 4096 * MB, spin: Duration::ZERO, batch: 32 }; // sleep at once by default: spinning only pays when there are idle cores
     let mut entry = String::new();
     let next = |i: &mut usize| -> Result<String, String> { let t = toks.get(*i).cloned().ok_or("unexpected end of system file")?; *i += 1; Ok(t) };
     let num = |s: String| -> Result<usize, String> { s.parse().map_err(|_| format!("expected a number, found `{}`", s)) };
@@ -62,8 +62,9 @@ pub fn parse_spec(src: &str, dir: &Path) -> Result<Spec, String> {
             "entry" => { entry = next(&mut i)?; next(&mut i)?; }
             "inflight" => { spec.inflight = num(next(&mut i)?)?.max(1); next(&mut i)?; }
             "budget" => { spec.budget = num(next(&mut i)?)? * MB; next(&mut i)?; }
+            "batch" => { spec.batch = num(next(&mut i)?)?.max(1); next(&mut i)?; }
             "spin" => { spec.spin = Duration::from_micros(num(next(&mut i)?)? as u64); next(&mut i)?; }
-            o => return Err(format!("expected `worker`, `entry`, `inflight`, `budget` or `spin`, found `{}`", o)),
+            o => return Err(format!("expected `worker`, `entry`, `inflight`, `budget`, `spin` or `batch`, found `{}`", o)),
         }
     }
     spec.entry = spec.kinds.iter().position(|k| k.name == entry).ok_or(format!("entry `{}` is not a declared worker", entry))?;
@@ -84,7 +85,7 @@ fn tokens(src: &str) -> Vec<String> {
 
 // ---------------------------------------------------------------- mailboxes
 
-struct Ring { buf: Vec<u8>, head: usize, len: usize, closed: bool }
+struct Ring { buf: Vec<u8>, head: usize, len: usize, closed: bool, waiting: bool } // waiting: the consumer is asleep on the condition variable
 /// A bounded queue of fixed-size message slots, allocated once.
 pub struct Mailbox { ring: Mutex<Ring>, cv: Condvar, cap: usize, slot: usize, refused: AtomicU64, queued: AtomicUsize, spin: Duration }
 #[derive(Debug, PartialEq)]
@@ -103,7 +104,7 @@ fn spin_for(d: Duration, ready: impl Fn() -> bool) -> bool {
 }
 
 impl Mailbox {
-    fn new(cap: usize, slot: usize, spin: Duration) -> Mailbox { Mailbox { ring: Mutex::new(Ring { buf: vec![0; cap * slot], head: 0, len: 0, closed: false }), cv: Condvar::new(), cap, slot, refused: AtomicU64::new(0), queued: AtomicUsize::new(0), spin } }
+    fn new(cap: usize, slot: usize, spin: Duration) -> Mailbox { Mailbox { ring: Mutex::new(Ring { buf: vec![0; cap * slot], head: 0, len: 0, closed: false, waiting: false }), cv: Condvar::new(), cap, slot, refused: AtomicU64::new(0), queued: AtomicUsize::new(0), spin } }
     /// Put one message in; `fill` writes it into the slot and returns its length (or `None` if it does not fit). Never blocks.
     fn send(&self, fill: impl FnOnce(&mut [u8]) -> Option<usize>) -> Result<(), SendErr> {
         let mut r = self.ring.lock().unwrap();
@@ -114,24 +115,40 @@ impl Mailbox {
         r.buf[at..at + 4].copy_from_slice(&(used as u32).to_le_bytes());
         r.len += 1;
         self.queued.store(r.len, Relaxed);
+        let wake = r.waiting; // set under this lock by a consumer that is about to sleep
         drop(r);
-        self.cv.notify_one();
+        if wake { self.cv.notify_one(); } // a busy consumer will see the message without being signalled
         Ok(())
     }
     /// Take the oldest message into `out`, waiting up to `wait`. After `close`, what is queued is still delivered.
+    #[cfg(test)]
     fn recv(&self, out: &mut Vec<u8>, wait: Duration) -> Recv {
+        let mut ends = Vec::new();
+        let r = self.recv_batch(out, &mut ends, 1, wait);
+        if let Recv::Got = r { let n = ends[0]; out.truncate(n); }
+        r
+    }
+    /// Take up to `max` messages under one lock: their bytes are appended to `out`, and `ends` gets where each one ends.
+    fn recv_batch(&self, out: &mut Vec<u8>, ends: &mut Vec<usize>, max: usize, wait: Duration) -> Recv {
         spin_for(self.spin, || self.queued.load(Relaxed) > 0);
         let mut r = self.ring.lock().unwrap();
         while r.len == 0 {
             if r.closed { return Recv::Closed; }
+            r.waiting = true;
             let (g, t) = self.cv.wait_timeout(r, wait).unwrap();
             r = g;
+            r.waiting = false;
             if t.timed_out() && r.len == 0 { return if r.closed { Recv::Closed } else { Recv::Idle }; }
         }
-        let at = r.head * self.slot;
-        let n = u32::from_le_bytes(r.buf[at..at + 4].try_into().unwrap()) as usize;
-        out.clear(); out.extend_from_slice(&r.buf[at + 4..at + 4 + n]);
-        r.head = (r.head + 1) % self.cap; r.len -= 1;
+        out.clear(); ends.clear();
+        let k = r.len.min(max.max(1));
+        for _ in 0..k {
+            let at = r.head * self.slot;
+            let n = u32::from_le_bytes(r.buf[at..at + 4].try_into().unwrap()) as usize;
+            out.extend_from_slice(&r.buf[at + 4..at + 4 + n]);
+            ends.push(out.len());
+            r.head = (r.head + 1) % self.cap; r.len -= 1;
+        }
         self.queued.store(r.len, Relaxed);
         Recv::Got
     }
@@ -167,20 +184,41 @@ impl<'m> Rd<'m> {
 
 // ---------------------------------------------------------------- replies
 
-struct Slot { st: Mutex<(u8, u16, Vec<u8>)>, cv: Condvar, answered: std::sync::atomic::AtomicBool } // state 0 free, 1 waiting, 2 answered, 3 abandoned by a timed-out caller
-/// A fixed table of reply slots: the number of requests in flight is bounded by it.
-struct Replies { slots: Vec<Slot>, free: Mutex<Vec<u32>>, spin: Duration }
+/// One reply slot. State: 0 free, 1 waiting for an answer, 2 answered, 3 abandoned by a caller that timed out.
+struct SlotState { state: u8, code: u16, body: Vec<u8>, sleeping: bool }
+struct Slot { st: Mutex<SlotState>, cv: Condvar, answered: std::sync::atomic::AtomicBool }
+const FREE_SHARDS: usize = 16;
+/// A fixed table of reply slots: the number of requests in flight is bounded by it. Free slots are kept in 16 lists,
+/// so callers on different threads rarely touch the same lock.
+struct Replies { slots: Vec<Slot>, free: Vec<Mutex<Vec<u32>>>, next: AtomicUsize, spin: Duration }
 impl Replies {
-    fn new(n: usize, spin: Duration) -> Replies { Replies { slots: (0..n).map(|_| Slot { st: Mutex::new((0, 0, Vec::with_capacity(4096))), cv: Condvar::new(), answered: false.into() }).collect(), free: Mutex::new((0..n as u32).rev().collect()), spin } }
-    fn take(&self) -> Option<u32> { let id = self.free.lock().unwrap().pop()?; let s = &self.slots[id as usize]; s.answered.store(false, Relaxed); s.st.lock().unwrap().0 = 1; Some(id) }
-    fn release(&self, id: u32) { self.slots[id as usize].st.lock().unwrap().0 = 0; self.free.lock().unwrap().push(id); }
+    fn new(n: usize, spin: Duration) -> Replies {
+        let free = (0..FREE_SHARDS).map(|s| Mutex::new((0..n as u32).filter(|i| *i as usize % FREE_SHARDS == s).rev().collect())).collect();
+        Replies { slots: (0..n).map(|_| Slot { st: Mutex::new(SlotState { state: 0, code: 0, body: Vec::with_capacity(4096), sleeping: false }), cv: Condvar::new(), answered: false.into() }).collect(), free, next: AtomicUsize::new(0), spin }
+    }
+    fn give_back(&self, id: u32) { self.free[id as usize % FREE_SHARDS].lock().unwrap().push(id); }
+    fn take(&self) -> Option<u32> {
+        let start = self.next.fetch_add(1, Relaxed);
+        let id = (0..FREE_SHARDS).find_map(|k| self.free[(start + k) % FREE_SHARDS].lock().unwrap().pop())?;
+        let s = &self.slots[id as usize];
+        s.answered.store(false, Relaxed);
+        s.st.lock().unwrap().state = 1;
+        Some(id)
+    }
+    fn release(&self, id: u32) { self.slots[id as usize].st.lock().unwrap().state = 0; self.give_back(id); }
     /// Answer a request. Each request is answered once; an answer to an abandoned slot just frees it.
     fn put(&self, id: u32, code: u16, body: &[u8]) {
         let Some(s) = self.slots.get(id as usize) else { return };
         let mut g = s.st.lock().unwrap();
-        match g.0 {
-            1 => { g.0 = 2; g.1 = code; g.2.clear(); g.2.extend_from_slice(body); drop(g); s.answered.store(true, std::sync::atomic::Ordering::Release); s.cv.notify_one(); }
-            3 => { g.0 = 0; drop(g); self.free.lock().unwrap().push(id); }
+        match g.state {
+            1 => {
+                g.state = 2; g.code = code; g.body.clear(); g.body.extend_from_slice(body);
+                let wake = g.sleeping;
+                drop(g);
+                s.answered.store(true, std::sync::atomic::Ordering::Release);
+                if wake { s.cv.notify_one(); } // a caller that has not gone to sleep yet will see the answer itself
+            }
+            3 => { g.state = 0; drop(g); self.give_back(id); }
             _ => {} // already answered: never happens by construction; ignored rather than double-answering
         }
     }
@@ -189,14 +227,16 @@ impl Replies {
         spin_for(self.spin, || s.answered.load(std::sync::atomic::Ordering::Acquire));
         let mut g = s.st.lock().unwrap();
         let deadline = std::time::Instant::now() + timeout;
-        while g.0 == 1 {
+        while g.state == 1 {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() { g.0 = 3; return None; }
+            if left.is_zero() { g.state = 3; return None; }
+            g.sleeping = true;
             g = s.cv.wait_timeout(g, left).unwrap().0;
+            g.sleeping = false;
         }
-        let out = (g.1, g.2.clone());
-        g.0 = 0; drop(g);
-        self.free.lock().unwrap().push(id);
+        let out = (g.code, g.body.clone());
+        g.state = 0; drop(g);
+        self.give_back(id);
         Some(out)
     }
 }
@@ -205,13 +245,13 @@ impl Replies {
 
 /// Counters each worker publishes (it counts its own heap allocations, which only its thread can see).
 #[derive(Default)]
-pub struct WStats { pub handled: AtomicU64, pub forwarded: AtomicU64, pub allocs: AtomicU64, pub restarts: AtomicU64, pub committed: AtomicUsize, pub live: AtomicUsize }
+pub struct WStats { pub handled: AtomicU64, pub forwarded: AtomicU64, pub allocs: AtomicU64, pub restarts: AtomicU64, pub committed: AtomicUsize, pub live: AtomicUsize, pub busy_ns: AtomicU64, pub handler_ns: AtomicU64 }
 
-struct Shared { boxes: Vec<Mailbox>, base: Vec<usize>, counts: Vec<usize>, entry: usize, replies: Replies, stats: Vec<WStats>, names: Vec<String> }
+struct Shared { batch: usize, boxes: Vec<Mailbox>, base: Vec<usize>, counts: Vec<usize>, entry: usize, replies: Replies, stats: Vec<WStats>, names: Vec<String> }
 
 pub struct System { shared: Arc<Shared>, threads: Vec<std::thread::JoinHandle<()>>, rr: AtomicUsize }
 
-pub struct WorkerReport { pub name: String, pub index: usize, pub handled: u64, pub forwarded: u64, pub allocs: u64, pub restarts: u64, pub committed: usize, pub live: usize, pub refused: u64 }
+pub struct WorkerReport { pub name: String, pub index: usize, pub handled: u64, pub forwarded: u64, pub allocs: u64, pub restarts: u64, pub committed: usize, pub live: usize, pub refused: u64, pub busy_ns: u64, pub handler_ns: u64 }
 
 impl System {
     /// Check every program, check the declared total against the budget, and start one thread per worker.
@@ -226,7 +266,7 @@ impl System {
         let (mut base, mut boxes, mut n) = (Vec::new(), Vec::new(), 0);
         for k in &spec.kinds { base.push(n); for _ in 0..k.count { boxes.push(Mailbox::new(k.mailbox, k.slot, spec.spin)); } n += k.count; }
         let shared = Arc::new(Shared {
-            boxes, base, counts: spec.kinds.iter().map(|k| k.count).collect(), entry: spec.entry, replies: Replies::new(spec.inflight, spec.spin),
+            batch: spec.batch, boxes, base, counts: spec.kinds.iter().map(|k| k.count).collect(), entry: spec.entry, replies: Replies::new(spec.inflight, spec.spin),
             stats: (0..n).map(|_| WStats::default()).collect(), names: spec.kinds.iter().map(|k| k.name.clone()).collect(),
         });
         let spec = Arc::new(spec);
@@ -264,7 +304,7 @@ impl System {
             for i in 0..sh.counts[k] {
                 let w = sh.base[k] + i;
                 let s = &sh.stats[w];
-                v.push(WorkerReport { name: name.clone(), index: i, handled: s.handled.load(Relaxed), forwarded: s.forwarded.load(Relaxed), allocs: s.allocs.load(Relaxed), restarts: s.restarts.load(Relaxed), committed: s.committed.load(Relaxed), live: s.live.load(Relaxed), refused: sh.boxes[w].refused.load(Relaxed) });
+                v.push(WorkerReport { name: name.clone(), index: i, handled: s.handled.load(Relaxed), forwarded: s.forwarded.load(Relaxed), allocs: s.allocs.load(Relaxed), restarts: s.restarts.load(Relaxed), committed: s.committed.load(Relaxed), live: s.live.load(Relaxed), refused: sh.boxes[w].refused.load(Relaxed), busy_ns: s.busy_ns.load(Relaxed), handler_ns: s.handler_ns.load(Relaxed) });
             }
         }
         v
@@ -273,6 +313,8 @@ impl System {
     /// Close every mailbox; workers answer what is already queued, then stop.
     pub fn shutdown(self) { for b in &self.shared.boxes { b.close(); } for t in self.threads { let _ = t.join(); } }
 }
+
+thread_local! { static HANDLER_NS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
 fn recycle<'x, 'y>(mut v: Vec<(&'x str, &'x str)>) -> Vec<(&'y str, &'y str)> { v.clear(); unsafe { std::mem::transmute(v) } }
 
@@ -289,29 +331,40 @@ fn worker(sh: Arc<Shared>, spec: Arc<Spec>, k: usize, i: usize) {
     let mut server = make();
     let me = sh.base[k] + i;
     let stats = &sh.stats[me];
-    let mut msg: Vec<u8> = Vec::with_capacity(ks.slot);
+    let batch = sh.batch.max(1);
+    let mut msgs: Vec<u8> = Vec::with_capacity(ks.slot * batch);
+    let mut ends: Vec<usize> = Vec::with_capacity(batch);
     let (mut hv, mut fv): (Vec<(&'static str, &'static str)>, Vec<(&'static str, &'static str)>) = (Vec::with_capacity(32), Vec::with_capacity(32));
     let publish = |s: &Server| { stats.committed.store(s.inst.committed(), Relaxed); };
     loop {
-        match sh.boxes[me].recv(&mut msg, Duration::from_millis(500)) {
+        // take every queued message (up to `batch`) under one lock, then handle them without touching the mailbox
+        match sh.boxes[me].recv_batch(&mut msgs, &mut ends, batch, Duration::from_millis(500)) {
             Recv::Idle => { server.idle(); publish(&server); continue; }
             Recv::Closed => break,
             Recv::Got => {}
         }
         let a0 = crate::alloc_count::allocs();
-        let r = catch_unwind(AssertUnwindSafe(|| handle(&mut server, &msg, &sh, &mut hv, &mut fv)));
-        match r {
-            Ok(forwarded) => { if forwarded { stats.forwarded.fetch_add(1, Relaxed); } }
-            Err(_) => {
-                // supervision: the worker's state is discarded and rebuilt from source (a fresh reservation)
-                stats.restarts.fetch_add(1, Relaxed);
-                server = make();
-                hv = Vec::with_capacity(32); fv = Vec::with_capacity(32);
-                if let Some(id) = msg.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) { sh.replies.put(id, 500, b"{\"error\":\"worker failed and was restarted\"}"); }
+        let busy = std::time::Instant::now();
+        let mut start = 0;
+        for &end in &ends {
+            let msg = &msgs[start..end];
+            start = end;
+            let r = catch_unwind(AssertUnwindSafe(|| handle(&mut server, msg, &sh, &mut hv, &mut fv)));
+            match r {
+                Ok(forwarded) => { if forwarded { stats.forwarded.fetch_add(1, Relaxed); } }
+                Err(_) => {
+                    // supervision: the worker's state is discarded and rebuilt from source (a fresh reservation)
+                    stats.restarts.fetch_add(1, Relaxed);
+                    server = make();
+                    hv = Vec::with_capacity(32); fv = Vec::with_capacity(32);
+                    if let Some(id) = msg.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) { sh.replies.put(id, 500, b"{\"error\":\"worker failed and was restarted\"}"); }
+                }
             }
         }
+        stats.busy_ns.fetch_add(busy.elapsed().as_nanos() as u64, Relaxed);
         stats.allocs.fetch_add((crate::alloc_count::allocs() - a0) as u64, Relaxed);
-        stats.handled.fetch_add(1, Relaxed);
+        stats.handled.fetch_add(ends.len() as u64, Relaxed);
+        stats.handler_ns.store(HANDLER_NS.with(|c| c.get()), Relaxed);
         publish(&server);
     }
 }
@@ -326,7 +379,9 @@ fn handle(server: &mut Server, msg: &[u8], sh: &Shared, hv: &mut Vec<(&'static s
     match parsed {
         None => { if let Some(id) = msg.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) { sh.replies.put(id, 400, b"{\"error\":\"malformed message\"}"); } }
         Some((reply, method, target, body)) => {
+            let t0 = std::time::Instant::now();
             let code = server.handle_req(method, target, &StrFields(&h), body, &StrFields(&f));
+            HANDLER_NS.with(|c| c.set(c.get() + t0.elapsed().as_nanos() as u64));
             if code != 0 {
                 sh.replies.put(reply, code, server.response().as_bytes());
             } else {
@@ -396,7 +451,7 @@ fn xorshift(r: &mut u64) -> u64 { *r ^= *r << 13; *r ^= *r >> 7; *r ^= *r << 17;
 
 /// The sharded chat under load from `clients` threads, for each (auth, rooms) worker count in `configs`.
 /// Also measures one plain `Server` on one thread running the same mix (examples/chat), as the no-mailbox baseline.
-pub fn bench(src: &str, dir: &Path, clients: usize, configs: &[(usize, usize)], ops: usize, reps: usize, spin: Option<u64>) {
+pub fn bench(src: &str, dir: &Path, clients: usize, configs: &[(usize, usize)], ops: usize, reps: usize, spin: Option<u64>, batch: Option<usize>) {
     use std::time::Instant;
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     println!("logical cores: {}; client threads: {}; {} mixed requests per run (70% GET messages, 20% POST message, 5% POST typing, 5% GET typing); runs per config: {}", cores, clients, ops, reps);
@@ -430,7 +485,8 @@ pub fn bench(src: &str, dir: &Path, clients: usize, configs: &[(usize, usize)], 
             let mut spec = parse_spec(src, dir).expect("system file");
             for k in &mut spec.kinds { if k.name == "auth" { k.count = a; } if k.name == "rooms" { k.count = r; } }
             if let Some(us) = spin { spec.spin = Duration::from_micros(us); }
-            if rep == 0 && a == configs[0].0 && r == configs[0].1 { println!("  spin before sleeping: {} us", spec.spin.as_micros()); }
+            if let Some(b) = batch { spec.batch = b.max(1); }
+            if rep == 0 && a == configs[0].0 && r == configs[0].1 { println!("  spin before sleeping: {} us; batch: {} messages per lock", spec.spin.as_micros(), spec.batch); }
             let sys = System::start(spec).expect("start");
             let to = Duration::from_secs(10);
             let toks: Vec<String> = (0..3000).map(|i| { let res = sys.request("POST", "/sessions", &[], &format!("{{\"name\":\"u{}\"}}", i), to); String::from_utf8_lossy(&res.1).split("\"token\":\"").nth(1).unwrap_or("").split('"').next().unwrap_or("").to_string() }).collect();
@@ -458,14 +514,25 @@ pub fn bench(src: &str, dir: &Path, clients: usize, configs: &[(usize, usize)], 
                 (t.elapsed().as_secs_f64(), parts.into_iter().flatten().collect())
             };
             run(10_000, false); // fill the rooms with messages
-            let before = sys.report().iter().fold((0u64, 0u64), |s, w| (s.0 + w.allocs, s.1 + w.handled));
+            let rep0 = sys.report();
+            let before = rep0.iter().fold((0u64, 0u64), |s, w| (s.0 + w.allocs, s.1 + w.handled));
             let (secs, all) = run(ops, true);
             let after = sys.report().iter().fold((0u64, 0u64), |s, w| (s.0 + w.allocs, s.1 + w.handled));
             let mut by: Vec<Vec<u64>> = vec![Vec::new(); 4];
             let mut codes: std::collections::BTreeMap<u16, usize> = Default::default();
             for (k, ns, c) in &all { by[*k as usize].push(*ns); *codes.entry(*c).or_default() += 1; }
             let wa = (after.0 - before.0) as f64 / (after.1 - before.1).max(1) as f64;
+            let rep1 = sys.report();
+            let mut util = String::new();
+            for kind in ["auth", "rooms"] {
+                let ws: Vec<(&WorkerReport, &WorkerReport)> = rep0.iter().zip(rep1.iter()).filter(|(x, _)| x.name == kind).collect();
+                let busy: Vec<f64> = ws.iter().map(|(x, y)| (y.busy_ns - x.busy_ns) as f64 / 1e9 / secs * 100.0).collect();
+                let hand: f64 = ws.iter().map(|(x, y)| (y.handler_ns - x.handler_ns) as f64).sum::<f64>() / ws.iter().map(|(x, y)| (y.handled - x.handled) as f64).sum::<f64>().max(1.0) / 1000.0;
+                let per: f64 = ws.iter().map(|(x, y)| (y.busy_ns - x.busy_ns) as f64).sum::<f64>() / ws.iter().map(|(x, y)| (y.handled - x.handled) as f64).sum::<f64>().max(1.0) / 1000.0;
+                util += &format!("  {} busy {:.0}-{:.0}% ({:.1} us/msg, handler {:.1} us)", kind, busy.iter().cloned().fold(f64::MAX, f64::min), busy.iter().cloned().fold(0.0, f64::max), per, hand);
+            }
             println!("  {:<12} {:>4} {:>10.0} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.2}  {:?}", format!("{} x {}", a, r), rep + 1, all.len() as f64 / secs, pct(&mut by[0], 50), pct(&mut by[0], 99), pct(&mut by[1], 50), pct(&mut by[1], 99), wa, codes);
+            println!("             {}", util);
             sys.shutdown();
         }
     }
@@ -484,7 +551,7 @@ mod tests {
     fn forwards_reach_the_right_shard_in_order_and_each_request_is_answered_once() {
         let front = kind("front", "struct M { n: i64; } global m: M;", "endpoint POST /inc/{k} { forward count[int(param(\"k\"))] { \"from\": worker_index() }; }", 2);
         let count = kind("count", "struct C { n: i64; } global c: C;", "endpoint POST /inc/{k} { c.n = c.n + 1; respond 200 { \"shard\": worker_index(), \"n\": c.n, \"from\": int(fwd(\"from\")) }; }", 3);
-        let sys = System::start(Spec { kinds: vec![front, count], entry: 0, inflight: 16, budget: 1 << 30, spin: Duration::ZERO }).unwrap();
+        let sys = System::start(Spec { kinds: vec![front, count], entry: 0, inflight: 16, budget: 1 << 30, spin: Duration::ZERO, batch: 8 }).unwrap();
         for round in 1..=4 {
             for k in 0..6 {
                 let r = sys.request("POST", &format!("/inc/{}", k), &[], "", T);
@@ -502,7 +569,7 @@ mod tests {
     #[test]
     fn a_panicking_worker_is_restarted_with_fresh_state() {
         let w = kind("w", "struct C { n: i64; } global c: C;", "endpoint POST /inc { c.n = c.n + 1; respond 200 { \"n\": c.n }; } endpoint POST /crash { c.n = 99; __crash(); }", 1);
-        let sys = System::start(Spec { kinds: vec![w], entry: 0, inflight: 4, budget: 1 << 30, spin: Duration::ZERO }).unwrap();
+        let sys = System::start(Spec { kinds: vec![w], entry: 0, inflight: 4, budget: 1 << 30, spin: Duration::ZERO, batch: 8 }).unwrap();
         assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":1}");
         assert_eq!(body(&sys.request("POST", "/inc", &[], "", T)), "{\"n\":2}");
         assert_eq!(sys.request("POST", "/crash", &[], "", T).0, 500);
@@ -557,7 +624,7 @@ mod tests {
         let k = |n: &str, st: &str, api: &str, c| kind(n, st, api, c);
         let auth = k("auth", include_str!("../examples/chat-sharded/auth.mito"), include_str!("../examples/chat-sharded/auth.api"), 2);
         let rooms = k("rooms", include_str!("../examples/chat-sharded/rooms.mito"), include_str!("../examples/chat-sharded/rooms.api"), 3);
-        let sys = System::start(Spec { kinds: vec![auth, rooms], entry: 0, inflight: 64, budget: 4 << 30, spin: Duration::ZERO }).unwrap();
+        let sys = System::start(Spec { kinds: vec![auth, rooms], entry: 0, inflight: 64, budget: 4 << 30, spin: Duration::ZERO, batch: 8 }).unwrap();
         let login = |n: &str| { let r = sys.request("POST", "/sessions", &[], &format!("{{\"name\":\"{}\"}}", n), T); assert_eq!(r.0, 201, "{}", body(&r)); body(&r).split("\"token\":\"").nth(1).unwrap().split('"').next().unwrap().to_string() };
         let (ann, bob) = (login("ann"), login("bob"));
         assert_ne!(ann.split('.').next(), bob.split('.').next(), "round-robin puts them on different auth shards");

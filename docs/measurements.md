@@ -348,9 +348,9 @@ Workers make no heap allocations per message (measured inside each worker thread
 when a room's 256 typing slots were full.
 
 **Reading it.**
-- **The handoff dominates.** A handler takes 2-18 us; a request crosses three threads (client to auth, auth to room shard,
-  shard back to the client), and each crossing wakes a sleeping thread through a condition variable. One auth and one room
-  worker (two handoffs of real work) are slower than one thread doing everything directly.
+- ~~The handoff dominates.~~ **Corrected in Round 5:** measuring inside the workers showed the room worker's handler is the
+  cost; the handoff adds a few microseconds per hop. One auth and one room worker are slower than one direct thread because
+  the single room worker is saturated, not because of the mailboxes.
 - **Sharding does pay:** 4 x 8 workers reach 1.5-1.9x the single direct-call server, and about 2.5x the 1 x 1 system. That is
   far below 12 threads' worth, because of the handoffs and because 32 client threads and 12 workers share 22 logical cores
   with other jobs.
@@ -361,3 +361,34 @@ when a room's 256 typing slots were full.
 **What sharding cost in the design** (see DESIGN.md, "What one-way forwarding cannot do"): authors stored by value instead of
 `ref<sessions>`, so the `[deleted]` fallback is gone; `/stats` reports one shard; a directory owner is needed for room ids and
 the room list; creating a room is two committed steps on two workers, not one transaction.
+
+## Round 5 (2026-11-04): where the worker time goes
+Three changes to cut handoff cost: signal a mailbox's consumer only when it is actually asleep; take every queued message
+(up to 32) under one lock; split the in-flight table's free list into 16 locks. **They made no measurable difference** in
+three alternating before/after rounds (1 x 1: 46.2-47.8k vs 46.7-48.7k req/s; 2 x 4: 75-96k vs 75-98k; 4 x 8: 115-138k vs
+115-137k). They are kept (correct, tested, cheap), but they were aimed at the wrong cost.
+
+Each worker now reports how busy it is and how long its handler takes (`bench-system`, 32 clients, 100,000 requests):
+
+| Config | req/s | auth: busy, us per message (handler) | rooms: busy, us per message (handler) |
+|---|---|---|---|
+| 1 x 1 | 48,021 | 10%, 2.2 (1.9) | **100%**, 20.8 (17.6) |
+| 1 x 2 | 48,676-51,067 | 17%, 3.4 (2.8) | 93-95%, 37-38 (31-32) |
+| 2 x 4 | 99,920-102,634 | 17%, 3.4 (2.7) | 85-89%, 34-35 (30) |
+| 4 x 8 | 100,260-136,205 | 12-13%, 3.9-4.9 (2.6-3.0) | 35-98%, 37-40 (32-35) |
+
+The no-mailbox baseline in the same run: 70,947 req/s (14.1 us mean per request on one thread).
+
+**What it shows**
+- **The handoff is cheap:** an auth worker's whole cost per message is 2-5 us, of which the handler is 2-3 us; a room worker
+  adds 3-5 us beyond its handler (decode, encode the reply, answer). At low load (4 clients, 4 x 8) a GET took 38.6 us at the
+  client against about 19 us of handler work: roughly 6 us per thread crossing, three crossings per request.
+- **1 x 1 is limited by one saturated room worker:** 1 / 20.8 us = 48k req/s, exactly what was measured.
+- **With more threads, each handler gets slower:** 17.6 us alone, 30-35 us when 32 client threads and up to 12 workers share
+  22 logical cores (with other jobs on this machine). That is CPU contention (shared cores and hyperthreads), not queueing.
+  The same 4 x 8 config measured 251k req/s in a quieter moment (handler 22 us), and 100-136k in this run.
+- **Shards are unbalanced:** 20 rooms over 8 shards by `id % 8` leaves room workers between 35% and 98% busy.
+
+**So the levers are:** a cheaper handler (the interpreter's GET of 50 messages is about 18 us; the native loop is 6 us), fewer
+competing threads than cores, and placing rooms by load instead of by `id % count`. Cutting handoff cost further would gain
+at most a few microseconds per request.

@@ -1,206 +1,75 @@
 # Mitochondria design
 
-Mitochondria is an experimental language in which all program state is a declared tree of fixed-size values with declared
-maxima. The whole tree is reserved up front. The runtime knows, from the structure itself, which bytes are live, which are committed
-(backed by memory) and which are only reserved. It descends from StasisLang (one visible state model, ticks, bounded collections,
-data-oriented layout) and borrows from next-lang (allocate at startup, explicit over implicit, compile time first).
-
-This document is the current design. Measurements behind it are in [docs/measurements.md](docs/measurements.md) and
-[docs/chat-api-findings.md](docs/chat-api-findings.md). Section "Status" says what the prototype implements today.
+All of a program's state is a declared tree of fixed-size values with declared maxima, reserved up front. The runtime
+knows from the structure which bytes are live, which are committed and which are only reserved. It descends from
+StasisLang (one visible state, bounded collections, data-oriented layout) and next-lang (allocate at startup, explicit
+over implicit, compile time first). Measurements behind it: [docs/measurements.md](docs/measurements.md).
 
 ## Principles
-1. **Everything has a declared maximum.** Exceeding one is a typed failure, never a crash and never an out-of-memory kill.
+1. **Everything has a declared maximum.** Exceeding one is a typed failure, never a crash or an out-of-memory kill.
 2. **One reservation, commit on use.** Reserving address space is free; memory is committed only where bytes are live.
-3. **Liveness is structural.** Lengths and live bits say what is in use. Nothing is traced or guessed.
+3. **Liveness is structural.** Lengths and live bits say what is in use; nothing is traced or guessed.
 4. **No hidden work.** No garbage collector, no hidden allocation, no implicit copies of collections.
-5. **Few concepts.** Each new concept must absorb an existing need, not add a parallel way to do the same thing.
+5. **Every kind is known when compiling.** Values, request inputs and answers are all typed.
+6. **Few concepts.** A new one must absorb an existing need.
 
-## Terms
-- **Reserved:** address space claimed for the declared maximum. Costs no memory.
-- **Committed:** pages the operating system has promised to back with memory (Windows "commit charge").
-- **Resident:** committed pages currently in RAM (the "working set").
-- **Live:** bytes the program is using right now, known from lengths and live bits.
-- **Columns:** a collection of structs stored one array per field (structure of arrays) rather than one record after another.
+**Terms.** *Reserved*: address space set aside; costs nothing. *Committed*: pages the OS has promised to back with
+memory. *Live*: bytes in use now. *Columns*: a collection of structs stored one array per field.
 
-## The nine concepts
+## Memory
 
-### 1. State tree
-`struct` declarations and the program's one `state` form one tree: a program has exactly one state, a struct holding
-everything, and every path starts at its name. Its layout (every offset and size) is computed when the program is built.
-The program refuses to start if the declared total exceeds the configured budget.
+**The state.** A program has exactly one `state`, a struct holding everything; every path starts at its name. The
+layout (every offset and size) is fixed when the program is built, and the program refuses to start over `--budget`.
 
 ```
-struct Room { name: string<48>; created: i64; messages: list<Msg, 1000> drop_oldest; }
-struct Chat { rooms: pool<Room, 64>; }
+struct Room { name: string<48>; messages: list<Msg, 1000> drop_oldest; }
+struct Chat { sessions: pool<Session, 2000> checked; rooms: pool<Room, 64> checked; }
 state chat: Chat;
 ```
 
-### 2. Bounded values
-Scalars (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `bool`), `string<N>` (at most N bytes, length stored separately), and
-`T[N]` (exactly N elements, always present). Code can read every declared maximum (`x.capacity()`, `maxlen(s)`), so limits are
-never repeated by hand. A value that does not fit is a `TooLong` failure.
+**Values.** Scalars (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `bool`), `string<N>` (at most N bytes) and `T[N]`
+(exactly N). Code reads maxima rather than repeating them (`x.capacity()`, `maxlen(s)`).
 
-### 3. `list<T, N>`: ordered, with a declared full policy
-Items in insertion order. Operations: append, remove last, clear, read by position, iterate forward or in `reverse`.
-When full, the declared policy applies:
-- `fail` (default): the append fails with `Full`.
-- `drop_oldest`: the append overwrites the oldest item (a ring buffer).
+**`list<T, N>`** keeps insertion order: add, read by position, walk forwards or in `reverse`. When full it fails
+(`Full`), or with `drop_oldest` overwrites the oldest (a ring). Positions shift as items drop, so a list item is
+named by a key it carries, never referenced. Use it for messages, logs, recent events.
 
-Positions shift as the oldest items are dropped, so a list item is identified by a key it carries (for example a sequence
-number), never by a stored reference. There is no removal from the middle; mark the item instead.
+**`pool<T, N>`** keeps items in slots that never move, with a live bit each; new items take the lowest free slot. When
+full, `add` fails. `checked` adds a generation per slot, so a reference to a reused slot is detected (`Stale`). Use it
+for things that are referred to and come and go: sessions, users, rooms.
 
-### 4. `pool<T, N>`: unordered, stable slots
-Items live in slots that never move. A live bit per slot says which are in use. New items take the lowest free slot, and a
-high-water mark bounds scans and trimming. When full, `add` fails with `Full` (there is no natural victim to drop).
-`pool<T, N> checked` adds a generation per slot, so a reference to a freed and reused slot is detected (`Stale`).
+**`ref<path>`** refers to a slot of a pool that exists once (reached from the state through plain structs): 4 bytes, 8
+with a generation. Reading through it checks the slot; `or(a, b)` gives `b` when `a` is dead or null.
 
-Collections of structs (in lists and pools) are always stored as columns. A field scan reads only that field's array.
+**Nesting.** A collection can be a field of an item, with a maximum per parent: `Room.messages: list<Msg, 1000>`
+reserves 1000 per room. Each parent's items sit together, so a room's newest 50 messages are the last 50 of its list,
+with no index. A parent that does not exist costs nothing; removing it empties what it holds.
 
-**Choosing:** use a list for ordered things you append to and read in order or from the end (messages, logs, mailboxes,
-recent events). Use a pool for things other data refers to and that come and go in any order (sessions, users, rooms, units).
-Use `checked` when a stale reference would be costly, for example a handle that left the program.
+**Access is a lookup.** An id is a slot; every column's place is known, so reading is address arithmetic.
 
-### 5. `ref<pool>`: typed references
-A field or local of type `ref<sessions>` refers to a slot of that pool: 4 bytes, or 8 with a generation if the pool is `checked`.
-Reading through a reference checks the live bit (and the generation). Reading through a dead reference fails: `Stale` if the pool is `checked` and the slot was freed since the reference was made
-(reused or not), `NotLive` otherwise; `or(a, b)` gives `b` instead when `a` is null or a dead-reference read:
+**Epochs.** Each request gets a text area (every string it reads or builds is copied there) and a response area, both
+reset when it ends. Running out fails that request (507, or 413 if the request itself does not fit). There is no heap
+allocator anywhere.
 
-```
-"author": or(m.author.name, "[deleted]")
-```
+**Commit and trim.** Pages are committed when first written. A trim returns pages holding no live byte, one collection
+at a time, driven by pressure:
 
-References point at top-level pools only (for now). Lists are never referenced; see concept 3.
-
-### 6. Nesting
-A list or pool can be a field of a row. Its maximum is per parent: `Room.messages: list<Msg, 1000>` reserves 1000 messages for each
-of the 64 rooms. Reservation is free; only live messages commit memory. Each parent's items are stored contiguously in each column,
-so one room's messages are adjacent in memory and a partly used room leaves whole pages unused.
-Nesting replaces an index for "items grouped by parent": a room's newest 50 messages are the last 50 of its list, with no scan.
-
-The declared worst case multiplies: 64 rooms x 1000 messages. That product is what the budget check counts.
-A nested collection's header (its length, or a pool's high-water mark and counts) is committed when its parent item is created,
-so a parent that does not exist costs nothing. Freeing or dropping a parent empties what it holds.
-
-### 7. Epochs
-State lives as long as the program. Each request (or tick) gets a scratch region with a declared size that is reset when the request
-ends: a text area for every string the handler reads or builds (strings are copied in, so values never alias state) and a response
-area. Temporaries therefore need no per-value maximum, only the epoch total. Running out of either area fails that request (507,
-or 413 if the request itself does not fit). Locals, call arguments and item lists use buffers sized at startup and reused; the
-runtime has no heap allocator at all, and the HTTP server's buffers are reserved at start and committed as requests reach into them.
-
-### 8. Handlers and functions
-- `fn name(params) -> type { ... }` plain functions. Parameters are values or references. No closures, no captures.
-- `let` binds a value; `var` binds a mutable local; `+=`, `-=`, `*=`, `/=`.
-- **Every value's kind is known when the program is compiled.** A `var` keeps the kind of its first value, a function
-  returns one kind, and an operator's result kind follows from its operands; a program that would need a kind known only
-  at run time does not load.
-- **An endpoint is a function with an attribute** (`@get`, `@post`, `@put`, `@patch`, `@delete` and a path). Its parameters
-  are its typed inputs, checked before the body runs: from the path (`{p}`: an id gives the item), the JSON body (POST, PUT,
-  PATCH) or the query (GET, DELETE), a header (`who: Session from header("X-Session")` gives the session a token names),
-  or another worker (`forwarded`). An input absent, of the wrong kind or out of range is 400, one too long 413, an id
-  naming no live item 404, and a body field the endpoint does not take 400.
-- **It returns a `Response<T>`**: `ok(x)` 200, `created(x)` 201, `no_content()` 204, `status(code, x)`, and `T`, the answer's
-  JSON shape, is checked against every answer when the program is compiled. An item in an answer is written as its id
-  (`"slot.generation"` for a checked pool). `fail CODE "message"` ends a request with an error from any function.
-- State is read and written directly, as in Stasis; collections through their functions: `add` (or `add { field: value }`),
-  `try_add`, `remove`, `count`, `capacity`.
-- **Every handler is atomic.** The runtime records the old bytes of every write during a request. If the request fails, they are
-  written back: additions, list drops, counters and string bytes all return to where they were. `remove` is deferred: the item
-  stays visible until the request ends and is removed only if the request succeeds. A consequence: a slot removed in a request
-  cannot be reused by an `add` in the same request, so a pool full of expired items still reports `Full` there (503).
-
-Iteration: `each x in collection where cond limit n { ... }`, and `each x in list reverse limit n` for the newest items of a
-list; `each i in lo..hi` counts (with `reverse`, `where`, `limit`, and `while cond` to stop early). The same clauses work
-inside a JSON array in an answer. Order is kept in the data, not computed when read: a list is in arrival order, and a
-`sorted` collection (below) is in key order. Every loop is bounded by a capacity or a range, so every loop ends.
-
-### 9. Commit and trim policy
-Pages are committed when first written. `trim` returns pages that hold no live byte. Trimming is scoped (one collection,
-costing only that part) and driven by pressure, not by schedule:
-
-| Committed memory | Behavior |
+| Committed memory | Behaviour |
 |---|---|
-| below the soft mark | never trim; reuse stays a plain write |
-| above the soft mark | at each epoch boundary, trim the top-level collection with the most committed memory (one per boundary) |
-| above the hard mark | trim everything once; refuse new writes (503) while still above it; reads continue |
-| quiet (no request for a second) | trim the largest collection even below the soft mark, so a past burst does not stay committed (not yet in the C servers) |
+| below `--soft` | never trim |
+| above `--soft` | after each request, trim the collection with the most committed memory |
+| above `--hard` | trim everything; refuse writes (503) until below; reads continue |
 
-A collection whose trim released nothing is skipped until 256 of its items have been freed, popped or cleared since: growth adds
-live pages, only shrinking creates dead ones, so this keeps a steady state from rescanning. Marks are given in megabytes
-(`--soft`, `--hard`). Not done: marks as fractions of the budget, and machine-level free memory as an input.
+A collection whose trim released nothing is skipped until 256 of its items have gone since.
 
-## Modules and the standard library (built from concepts 1 to 8)
-A module is one `.mito` file in `lib/`: its parameters, its structs, a `state { ... }` block (what an instance holds) and
-its functions (docs/proposals/modules.md). A use is a field of a struct in the program's state,
-`scores: sorted<Score, 10000, points>;`, which must exist once (reached from the state through plain structs). It is
-expanded when the program is compiled into ordinary state (the instance's own structs and collections, under its path)
-and functions (`game.scores.add(...)`), one copy per use, so the memory model is unchanged: an instance's pools are
-reserved, committed, trimmed and rolled back like any others, and `ref<game.scores>` points into its items. In module
-code `self` is the instance. The instance's state changes only through its functions: outside them, writing its private
-state, adding or removing its items directly, assigning its key, and calling its private functions are load errors. A
-module that defines `iter_first`/`iter_next`/`iter_item` (and `iter_last`/`iter_prev`) can be walked: `each s in
-game.scores [from k] [reverse] ...`, in at most its capacity of steps, with a cursor that is an integer (-1 for none); a
-loop that changes the instance it walks does not load.
+## Code
 
-The standard library so far: `sorted<T, N, key>` (lib/sorted.mito), up to N items in order of a field, equal keys in the
-order added, written in the language as a skip list over two pools in step (items and their links): `add(k)`,
-`remove(it)`, `set_key(it, k)`, `first()`, `last()`, `get(slot)`, walks from a key either way; and `bag<T, N>`, the smallest
-module, used to test the mechanism.
+**Functions.** `fn name(params) -> type { ... }`; `let` and `var`; `+=` and friends. No closures. A `var` keeps the
+kind of its first value and a function returns one kind; a program needing a kind known only at run time does not load.
 
-## Workers and mailboxes (built from concepts 3, 7, 8 and 9)
-A **system** runs several programs as **workers**, each on its own OS thread with its own reservation, commit tracking and
-pressure policy. Workers share nothing. A system file (`.mito`, holding a `system { ... }` block) declares worker kinds,
-each a program file of its own, how many of each, and their mailboxes:
+**Endpoints** are functions with an attribute and typed inputs:
 
 ```
-system {
-    worker auth  { program "auth.mito";  count 2; mailbox 1024; slot 4096; }
-    worker rooms { program "rooms.mito"; count 4; mailbox 1024; slot 4096; }
-    entry auth;       // requests enter here (by session-token shard, otherwise round-robin)
-    inflight 4096;    // reply slots: the most requests in flight at once
-    budget 8192;      // MB: the sum of every worker's declared total must fit (checked when the system is built)
-}
-```
-
-- **A mailbox is a list with a full policy (concept 3):** a bounded ring of fixed-size message slots, allocated once. A sender
-  signals the worker only if it is asleep. A message is the request (method, target, body, headers) plus forwarded fields. A
-  full mailbox is `Full`: the sender answers 503.
-- **One message is one epoch (concept 7)** and one atomic handler (concept 8).
-- **`forward kind[key] { field: expr };`** is the one new statement. It ends the handler and hands the request to worker
-  `key % count` of that kind, with the fields, which the endpoint there takes as typed inputs (`forwarded user: string<16>`). The forward is part of the handler's
-  transaction: the message is queued first and the handler's writes are committed only if that worked; if the next mailbox
-  is full the writes roll back and the client gets 503. Worker-to-worker sends never block, so chains of forwards cannot deadlock.
-- **Every request is answered once,** through a fixed table of reply slots (`inflight`). When none is free, the front answers 503.
-- **A worker that fails is rebuilt** from its declarations with a fresh reservation, so its state is lost (as an Erlang
-  process's is); the message gets 500 and the restart is counted. So far the only such failure is `__crash()`, the test hook:
-  a real fault in the C code ends the whole process (see Status).
-- `worker_index()` and `worker_count("kind")` let handlers compute ids that are unique across shards. A session token carries
-  its auth shard (`shard.slot.generation.secret`), and a session input rejects a token for another shard.
-
-**What one-way forwarding cannot do (by choice, for now):** references do not cross workers, so data about another worker's
-items is copied by value (a message keeps its author's name and id); there is no fan-out, so nothing can total or list across
-shards unless one worker owns that list (the chat's room directory lives on rooms[0]); and a forward chain is not a distributed
-transaction: if a later worker fails, earlier workers' committed writes stay.
-
-## Failures
-| Failure | Meaning | Default HTTP status |
-|---|---|---|
-| `Full` | a collection, pool or epoch is at its maximum | 503 |
-| `TooLong` | a value exceeds its declared maximum | 413 |
-| `NotLive` | position or slot is not in use | 404 |
-| `Stale` | checked reference to a reused slot | 401 when it is a session, else 404 |
-| `fail CODE "msg"` | handler-defined | as given |
-
-A failure ends the handler and rolls it back (concept 8).
-
-## Example: chat hot state in this design
-```
-struct Session { name: string<32>; secret: i64; window: i64; sent: i64; }
-struct Msg     { seq: i64; at: i64; author: ref<chat.sessions>; body: string<2000>; }
-struct Room    { name: string<48>; messages: list<Msg, 1000> drop_oldest; }
-struct Chat    { sessions: pool<Session, 2000> checked; rooms: pool<Room, 64> checked; }
-state chat: Chat;
-
 @get("/rooms/{room}/messages")
 fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..100 = 50)
     -> Response<{ messages: [{ seq: i64, author: string, body: string }] }> {
@@ -208,69 +77,91 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
         seq: m.seq, author: or(m.author.name, "[deleted]"), body: m.body }] });
 }
 ```
-Compared with the prototype chat API: no scan to find a room's messages, no sort to evict the oldest, no copied author name,
-and the session, the room and the limit are checked before the body runs.
+
+- Inputs come from the path (`{room}`: an id gives the item), the JSON body (POST, PUT, PATCH) or the query (GET,
+  DELETE), a header (`from header("X-Session")`: a session token gives the session), or another worker
+  (`forwarded`). They are checked before the body runs: absent, wrong kind or out of range 400, too long 413, no such
+  item 404, a body field not taken 400.
+- `Response<T>` declares the answer's JSON shape, checked against every answer when compiling. `ok` 200, `created`
+  201, `no_content` 204, `status(code, x)`; `fail CODE "message"` ends a request with an error from any function. An
+  item is written as its id (`"slot.generation"` for a checked pool).
+- Collections are used through their functions: `add` (or `add { field: value }`), `try_add`, `remove`, `count`,
+  `capacity`.
+
+**Every request is atomic.** The runtime records the old bytes of each write; a failed request writes them back.
+`remove` takes effect when the request succeeds, so a removed slot cannot be reused in the same request.
+
+**Loops.** `each x in c where cond limit n`, `reverse` for newest first, `each i in lo..hi` (with `while` to stop
+early); the same clauses build JSON arrays. Order is kept in the data, never computed when read. Every loop is bounded
+by a capacity or a range.
+
+## Modules
+A module is a `.mito` file in `lib/`: parameters, structs, a `state { ... }` block (what an instance holds) and
+functions. A use is a field of the state, `scores: sorted<Score, 10000, points>;`, expanded when compiling into
+ordinary state and functions (`game.scores.add(...)`), one copy per use. Outside its functions, an instance's state
+cannot be written, its items not added or removed directly, and its key not assigned. A module with `iter_first`,
+`iter_next` and `iter_item` can be walked by `each`.
+
+Standard library: `sorted<T, N, key>` (a skip list, items in order of a field: `add(k)`, `remove`, `set_key`,
+`first`, `last`, walks from a key) and `bag<T, N>` (the smallest module, for tests).
+
+## Workers
+A system runs several programs as workers, each on its own thread with its own memory; they share nothing.
+
+```
+system {
+    worker auth  { program "auth.mito";  count 2; mailbox 1024; slot 4096; }
+    worker rooms { program "rooms.mito"; count 4; mailbox 1024; slot 4096; }
+    entry auth;       // requests enter here (by session-token shard, otherwise in turn)
+    inflight 4096;    // the most requests in flight at once
+    budget 8192;      // MB, checked when the system is built
+}
+```
+
+- A mailbox is a bounded ring of fixed-size slots; a full one is 503.
+- `forward kind[key] { field: expr };` ends the handler and hands the request to worker `key % count` of that kind,
+  whose endpoint takes the fields as inputs. The forward is part of the transaction: if the mailbox is full, the
+  sender's writes roll back. Sends never block, so forwards cannot deadlock.
+- A worker that fails (only `__crash()`, the test hook, so far) is rebuilt from its declarations; its state is lost.
+- Not possible by design, for now: references across workers (data is copied by value), fan-out, and distributed
+  transactions (a later worker's failure does not undo an earlier one's writes).
+
+## Failures
+| Failure | Meaning | HTTP |
+|---|---|---|
+| `Full` | a collection or area is at its maximum | 503 |
+| `TooLong` | a value exceeds its maximum | 413 |
+| `NotLive` | a slot or position is not in use | 404 |
+| `Stale` | a checked reference to a reused slot | 401 for a session, else 404 |
+| input | a request input absent, of the wrong kind or out of range | 400 |
+| `fail CODE "msg"` | the program's own | as given |
 
 ## Fit
-Good: games and simulations, servers' hot state (sessions, presence, queues, rate limits), embedded and real-time work, batch
-pipelines, phased tools, anything where peak memory must be known before launch. Poor: large irregular object graphs, unbounded or
-heavy-tailed sizes (editors, browsers, crawlers), dynamic shapes, exploratory scripting. Durable data belongs in a database; this
-is the layer above it. Details and the comparison with arenas, garbage collection and Erlang: docs/measurements.md.
+Good: game and simulation state, servers' hot state (sessions, queues, rate limits), embedded and real-time work,
+anything whose peak memory must be known before it runs. Poor: unbounded or heavy-tailed sizes (documents, editors,
+crawlers), irregular graphs, exploratory scripting. Durable data belongs in a database; this is the layer above it.
 
-## Deferred, with known limits
-- **Long uneven text.** `string<N>` reserves N bytes per slot. Measured: 2000-byte chat bodies averaging ~120 bytes left 39.5 MB committed
-  for 3.1 MB live, and trim could release none of it. Accepted for now; nesting improves locality but not this.
-- **Keyed indexes** for lookups that are not by parent. Not planned until nesting proves insufficient.
-- **Debug-only orphan report** (rows nothing refers to) and **FIFO slot reuse** for pools.
+## Status (2026-11-04)
+Everything above is built. A program or system compiles to one C program (runtime/mito.c, system.c, http.c), built by
+clang -O2 or, in milliseconds, the bundled TinyCC; Rust is only the compiler. The 24 cases in `tests/cases` and
+`tests/http.record` must give the same answers on the TinyCC build, the clang build and a clang build with
+undefined-behaviour checks. Windows only so far.
 
-## Status: prototype vs this design (2026-11-04)
-Every concept above, and the worker system, is built and tested. A program or a system compiles to one C program: the
-generated endpoints, the C runtime (runtime/mito.c), the worker system (runtime/system.c) and the HTTP server
-(runtime/http.c). `mitochondria build` makes an executable with clang -O2, or in milliseconds with the bundled TinyCC
-(`--tcc`); `serve` builds and runs one. Rust is only the compiler. Behaviour is specified by the cases in `tests/cases`
-(24 programs and systems with request scripts and recorded logs, including memory totals) and by `tests/http.record` (raw
-HTTP requests and answers); the TinyCC build, the clang build and a clang build with undefined-behaviour checks must all
-reproduce them. The C runtime has no allocator: it declares no malloc, and every buffer is a reservation made at start.
-Known differences:
-- Endpoints that use something the generator does not handle do not compile, and the program does not load. Refused:
-  wrong names and wrong kinds that would fail when reached (an unknown field, `count` of something that is not a
-  collection, ...), values whose kind would be known only at run time, and three narrow gaps: a struct field or fixed
-  array of an item passed to a recursive function, returned by a function or held in a `var`; values that mix a
-  collection or struct with other kinds; `maxlen` of an item held as a value. Recursive functions become C functions,
-  one per combination of argument kinds, with a limit of 64 nested calls (so request handling needs little stack: the
-  executables keep the default 1 MB). Generated C follows an enforced safety profile (docs/codegen-options.md).
-- Types in a plain `fn`'s signature are parsed but not checked: parameter kinds come from the calls (each combination
-  of kinds is compiled as its own copy). Endpoint inputs and answers are checked.
-- Only a string input can be optional (`?`, null when absent); a number takes a default instead. An item input cannot
-  be optional yet. A comparison with a literal `null` in a copy of a function made for a null argument fails if reached
-  (a branch that cannot run with it), rather than refusing the program.
-- A real fault in C (a bug in the runtime or the compiler, not a failed request) ends the whole process, every worker
-  with it. `__crash()`, the test hook for supervision, is the only failure a worker is restarted from.
-- `ref<...>` targets pools that exist once (reached from the state through plain structs).
-- The pressure policy's marks are absolute, not fractions of the budget; machine free memory is not consulted. The C
-  servers do not yet trim when idle (the Rust server released slack after a quiet second).
-- Workers: mailboxes are an SRW lock and a condition variable, not lock-free; only `forward` exists (no one-way
-  `send`/`on` messages, no fan-out); a restart is the whole supervision story (no supervision tree, links or monitors).
-- The write journal (for rollback) is a reservation that commits as a request writes; a very large request, such as
-  clearing a big pool, commits more of it. It is not counted in the epoch total.
-- HTTP: one request per connection, a thread per connection; see Next for keep-alive and an event loop.
-
-Measurements of the built design: docs/measurements.md ("Round 3") and docs/chat-api-findings.md.
+Limits:
+- Plain `fn` parameter types are parsed, not checked: kinds come from the calls (each combination compiles as its own
+  copy). Recursion is limited to 64 nested calls.
+- Only a string input can be optional; a number takes a default. An item input cannot be optional yet.
+- A real fault in the C code ends the whole process, every worker with it.
+- Pressure marks are absolute megabytes; no idle trim yet.
+- `string<N>` reserves N bytes per slot: 2000-byte chat bodies averaging 120 bytes left 39.5 MB committed for 3.1 MB
+  live. Packed text is planned (Next, 3).
+- HTTP serves one request per connection, on a thread per connection.
 
 ## Next
-1. Linux: an OS layer (memory, threads, locks, clock, randomness, sockets) with Windows and Linux behind it, and the
-   cases and the HTTP record passing on both (Linux in WSL2).
-2. HTTP: keep-alive with exact Content-Length framing, together with an event loop over a fixed table of connections
-   declared up front (a connection held open must not hold a thread): IOCP on Windows, epoll then io_uring with
-   registered buffers on Linux; then socket reuse (AcceptEx/DisconnectEx). Measured with `http_load`: a connection costs
-   Windows about 200-500 us, against about 2 us of handling (docs/measurements.md, Rounds 15 and 16).
-3. Long uneven text (the deferred 92% waste): `text<N>` fields packed into a per-collection text area, a ring for `drop_oldest` lists.
-4. Placing items on shards by load rather than `id % count` (20 rooms over 8 shards left workers 35-98% busy).
-5. Worker messages beyond `forward`: one-way `send` with `on Msg` handlers, fan-out with gathered replies, links and monitors.
-
-Low priority:
-- A faster TinyCC check: TinyCC's library crashes when it reports a compile error to this host, so generated C is first
-  checked by starting `tcc.exe` (15 ms of the 20-40 ms a reload takes). Checking in process, or catching the crash,
-  would cut reloads to a few ms.
-- Smaller generated code: module functions are inlined into every endpoint that calls them (sorted.case generates
-  almost 3x the chat's endpoint C). Compiling larger ones once, as C functions, would cut compile time and output size.
+1. Linux: an OS layer (memory, threads, locks, clock, randomness, sockets) with the cases and the HTTP record passing
+   on both systems (Linux in WSL2).
+2. HTTP: keep-alive with an event loop over a fixed table of connections (IOCP on Windows, epoll then io_uring on
+   Linux). A connection costs Windows 200-500 µs against about 2 µs of handling.
+3. Long uneven text: `text<N>` fields packed into a per-collection text area.
+4. Shards placed by load rather than `id % count`.
+5. Worker messages beyond `forward`: one-way `send`, fan-out with gathered replies, links and monitors.

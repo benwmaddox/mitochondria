@@ -1,0 +1,52 @@
+// strings compared where they are stored: a column against a literal (either side) and against another column, all six
+// operators, prefixes and the empty string; and loops of string comparisons and literals that once filled the text area
+--- program
+struct Word { a: string<8>; b: string<8>; }
+struct App { words: pool<Word, 4>; }
+state app: App;
+
+@post("/words")
+fn post_words(a: string<8>?, b: string<8>?) -> Response<{ slot: i64 }> { let w = app.words.add(); w.a = a; w.b = b; return created({ "slot": slot(w) }); }
+@get("/words/{i}/lit")
+fn get_lit(i: i64) -> Response<{ eq: bool, ne: bool, lt: bool, le: bool, gt: bool, ge: bool }> {
+    let w = app.words[i];
+    return ok({ "eq": w.a == "bob", "ne": w.a != "bob", "lt": w.a < "bob", "le": w.a <= "bob", "gt": w.a > "bob", "ge": w.a >= "bob" });
+}
+@get("/words/{i}/litleft")
+fn get_litleft(i: i64) -> Response<{ eq: bool, ne: bool, lt: bool, le: bool, gt: bool, ge: bool }> {
+    let w = app.words[i];
+    return ok({ "eq": "bob" == w.a, "ne": "bob" != w.a, "lt": "bob" < w.a, "le": "bob" <= w.a, "gt": "bob" > w.a, "ge": "bob" >= w.a });
+}
+@get("/words/{i}/cols")
+fn get_cols(i: i64) -> Response<{ eq: bool, ne: bool, lt: bool, le: bool, gt: bool, ge: bool }> {
+    let w = app.words[i];
+    return ok({ "eq": w.a == w.b, "ne": w.a != w.b, "lt": w.a < w.b, "le": w.a <= w.b, "gt": w.a > w.b, "ge": w.a >= w.b });
+}
+@get("/count/{n}")
+fn get_count(n: i64) -> Response<{ hits: i64, names: i64 }> {
+    var hits = 0; var names = 0;
+    each r in 0..n {
+        each w in app.words where w.a == "bob" { hits = hits + 1; }
+        if app.words[0].a != "zed" { names = names + 1; }
+    }
+    return ok({ "hits": hits, "names": names });
+}
+--- requests
+POST /words {"a": "bob", "b": "bob"}
+POST /words {"a": "bo", "b": "bob"}
+POST /words {"a": "bobby", "b": "bob"}
+POST /words {"a": "", "b": "alice"}
+GET /words/0/lit
+GET /words/1/lit
+GET /words/2/lit
+GET /words/3/lit
+GET /words/0/litleft
+GET /words/1/litleft
+GET /words/2/litleft
+GET /words/3/litleft
+GET /words/0/cols
+GET /words/1/cols
+GET /words/2/cols
+GET /words/3/cols
+GET /count/10
+GET /count/40000

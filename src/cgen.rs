@@ -64,6 +64,8 @@ struct H {
     int (*json_id)(Ctx *, u32, u32);                           /* an item written as its id: "slot.generation" or the slot */
     int (*wr_int)(Ctx *, u64, u32, i64);                       /* an integer of `size` bytes at a byte offset (the value already known to fit) */
     int (*move_elems)(Ctx *, u64, u32, i64, i64, i64);        /* move `count` elements of `esize` bytes within an array at byte offset `base`: from, to, count (already in range) */
+    int (*str_cmp_lit)(Ctx *, int, u32, u32, u32, u32, u32, int *); /* a string column against a literal (op in OPS order), compared where they are: no copy */
+    int (*str_cmp_col)(Ctx *, int, u32, u32, u32, u32, u32, u32, int *); /* a string column against another */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -118,6 +120,18 @@ pub const BUILTINS: [B; 17] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B
 pub const OPS: [&str; 11] = ["==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"];
 
 /// Plain (record-style) scalar and string kinds for `store_plain`.
+/// The offset of a string literal in the text area's fixed prefix (added once).
+fn intern_lit(b: &[u8]) -> u32 {
+    LITS.with(|l| {
+        let (bytes, at) = &mut *l.borrow_mut();
+        if let Some(&(o, n)) = at.iter().find(|&&(o, n)| n as usize == b.len() && &bytes[o as usize..(o + n) as usize] == b) { let _ = n; return o; }
+        let o = bytes.len() as u32;
+        bytes.extend_from_slice(b);
+        at.push((o, b.len() as u32));
+        o
+    })
+}
+
 pub fn plain_code(t: &Ty) -> Option<(u32, u32)> {
     use Scalar::*;
     Some(match t {
@@ -228,7 +242,7 @@ fn rtype_of(prog: &Program, t: &Ty) -> RType {
 }
 
 /// Generated endpoint C, and one note per endpoint that cannot be compiled (such a program does not load).
-pub struct Generated { pub src: String, pub notes: Vec<String> }
+pub struct Generated { pub src: String, pub notes: Vec<String>, pub lits: Vec<u8> }
 
 /// What an expression produced, in C terms. String-valued variants are C variable names.
 #[derive(Clone, Debug)]
@@ -287,6 +301,9 @@ fn unify(a: K, b: K) -> K {
 }
 
 thread_local! {
+    /// The string literals of the program, each once, back to back: the runtime keeps them at the start of every
+    /// request's text area, so a literal in generated code is a constant (offset, length) and costs nothing to use.
+    static LITS: std::cell::RefCell<(Vec<u8>, Vec<(u32, u32)>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
     /// Why a kind was widened to one known only at run time, while the kinds of an endpoint are being worked out.
     static WHY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -370,6 +387,10 @@ pub fn program_c_named(prog: &Program, api: &Api, source: Option<(&str, &str)>, 
     o += RUNTIME_TYPES;
     o += &format!("#define MITO(x) {}##x\n", prefix);
     o += &layout_c(prog, api);
+    o += &format!("/* the program's string literals, at the start of every request's text area */
+#define MITO_LITS_LEN {}
+static const unsigned char mito_lits[] = {{ {} }};
+", g.lits.len(), if g.lits.is_empty() { "0".to_string() } else { g.lits.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",") });
     o += RUNTIME;
     o += &direct(&g.src[PRELUDE.len()..]);
     Ok(o)
@@ -601,6 +622,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
 /// `linkage`: "static " in a whole C program (only its `mito_*` interface is external), "" when the Rust runtime looks
 /// endpoints up by name.
 fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str) -> Generated {
+    LITS.with(|l| *l.borrow_mut() = (Vec::new(), Vec::new()));
     let mut src = String::from(PRELUDE);
     let mut notes = Vec::new();
     let recursive = recursive_fns(api);
@@ -650,7 +672,8 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             }
         }
     }
-    Generated { src, notes }
+    let lits = LITS.with(|l| l.borrow().0.clone());
+    Generated { src, notes, lits }
 }
 
 /// What generating a C function's body for one guess of its result kind gave.
@@ -1357,7 +1380,7 @@ impl<'p> G<'p> {
     fn txt_of(&mut self, v: CV) -> R<String> {
         match v {
             CV::Txt(t) => Ok(t),
-            CV::Lit(s) => { let t = self.tmp("t"); self.line(&format!("Txt {};", t)); self.call(&format!("c->h->lit(c, {}, {}, &{})", c_lit(s.as_bytes()), s.len(), t)); Ok(t) }
+            CV::Lit(s) => { let t = self.tmp("t"); let off = intern_lit(s.as_bytes()); self.line(&format!("Txt {} = {{ {}, {}, 1 }};", t, off, s.len())); Ok(t) }
             CV::StateStr(c, idx, ci) => { let t = self.tmp("t"); self.line(&format!("Txt {};", t)); self.call(&format!("c->h->col_txt(c, {}, {}, {}, &{})", c, idx, ci, t)); Ok(t) }
             _ => no("expected a string"),
         }
@@ -1588,6 +1611,22 @@ impl<'p> G<'p> {
             return no(format!("operator `{}` does not fit {} and {}", op, lk, rk));
         }
         let code = OPS.iter().position(|o| *o == op).ok_or_else(|| format!("operator `{}`", op))?;
+        if compared {
+            // a string column against a literal or another column is compared where it is, without copying it into the text area
+            let flip = [0, 1, 4, 5, 2, 3][code];
+            let res = match (&l, &r) {
+                (CV::StateStr(c, i, ci), CV::Lit(s)) => Some((format!("c->h->str_cmp_lit(c, {}, {}, {}, {}, {}, {}, &@)", code, c, i, ci, intern_lit(s.as_bytes()), s.len()), ())),
+                (CV::Lit(s), CV::StateStr(c, i, ci)) => Some((format!("c->h->str_cmp_lit(c, {}, {}, {}, {}, {}, {}, &@)", flip, c, i, ci, intern_lit(s.as_bytes()), s.len()), ())),
+                (CV::StateStr(c, i, ci), CV::StateStr(d, j, cj)) => Some((format!("c->h->str_cmp_col(c, {}, {}, {}, {}, {}, {}, {}, &@)", code, c, i, ci, d, j, cj), ())),
+                _ => None,
+            };
+            if let Some((call, ())) = res {
+                let t = self.tmp("r");
+                self.line(&format!("int {};", t));
+                self.call(&call.replace('@', &t));
+                return Ok(CV::Bool(format!("({} != 0)", t)));
+            }
+        }
         let (lv, rv) = (self.val(l)?, self.val(r)?);
         let t = self.tmp("v");
         self.line(&format!("Val {};", t));

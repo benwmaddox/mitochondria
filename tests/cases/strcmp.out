@@ -1,0 +1,21 @@
+POST /words -> 201 {"slot":0}
+POST /words -> 201 {"slot":1}
+POST /words -> 201 {"slot":2}
+POST /words -> 201 {"slot":3}
+GET /words/0/lit -> 200 {"eq":true,"ne":false,"lt":false,"le":true,"gt":false,"ge":true}
+GET /words/1/lit -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+GET /words/2/lit -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+GET /words/3/lit -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+GET /words/0/litleft -> 200 {"eq":true,"ne":false,"lt":false,"le":true,"gt":false,"ge":true}
+GET /words/1/litleft -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+GET /words/2/litleft -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+GET /words/3/litleft -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+GET /words/0/cols -> 200 {"eq":true,"ne":false,"lt":false,"le":true,"gt":false,"ge":true}
+GET /words/1/cols -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+GET /words/2/cols -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+GET /words/3/cols -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+GET /count/10 -> 200 {"hits":10,"names":10}
+GET /count/40000 -> 200 {"hits":40000,"names":40000}
+state <plain values> 0
+state app.words 80
+memory reserved=4096 committed=4096 live=80

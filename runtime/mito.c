@@ -999,6 +999,18 @@ static int h_plain_txt(Ctx *c, u32 off, Txt *out) { Mito *m = M_(c); T t; if (t_
 
 static int num(const Val *v, double *f) { if (v->tag == 1) { *f = (double)v->i; return 1; } if (v->tag == 2) { *f = v->f; return 1; } return 0; }
 static int bytes_cmp(const u8 *a, u64 an, const u8 *b, u64 bn) { u64 n = an < bn ? an : bn; for (u64 i = 0; i < n; i++) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1; return an < bn ? -1 : an > bn ? 1 : 0; }
+/* A string column's bytes where they are (its length column, then its bytes). */
+static void col_view(Mito *m, u32 cid, u64 idx, u32 ci, const u8 **p, u32 *n) { *n = (u32)rd(&m->mem, caddr(m, cid, idx, ci), 4); *p = m->mem.base + caddr(m, cid, idx, ci + 1); }
+static int cmp_res(int op, int c) { switch (op) { case 0: return c == 0; case 1: return c != 0; case 2: return c < 0; case 3: return c <= 0; case 4: return c > 0; default: return c >= 0; } }
+/* A string column against a literal, or against another column, compared where they are (op in OPS order). */
+static int h_str_cmp_lit(Ctx *c, int op, u32 cid, u32 idx, u32 ci, u32 off, u32 len, int *out) {
+    Mito *m = M_(c); const u8 *p; u32 n; col_view(m, cid, idx, ci, &p, &n);
+    *out = cmp_res(op, bytes_cmp(p, n, t_ptr(m, (T){ off, len }), len)); return 0;
+}
+static int h_str_cmp_col(Ctx *c, int op, u32 ca, u32 ia, u32 cia, u32 cb, u32 ib, u32 cib, int *out) {
+    Mito *m = M_(c); const u8 *p, *q; u32 n, k; col_view(m, ca, ia, cia, &p, &n); col_view(m, cb, ib, cib, &q, &k);
+    *out = cmp_res(op, bytes_cmp(p, n, q, k)); return 0;
+}
 /* An operator (OPS order: == != < <= > >= + - * / %) on values of run-time kind, as the interpreter's binop. */
 static int h_binop(Ctx *c, int op, const Val *l, const Val *r, Val *out) {
     Mito *m = M_(c);
@@ -1255,7 +1267,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_int, h_move_elems,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_int, h_move_elems, h_str_cmp_lit, h_str_cmp_col,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */
@@ -1282,7 +1294,7 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
     m->areas = (u8 *)VirtualAlloc(0, TEXT_CAP + RESPONSE_CAP, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!m->areas) return 0;
-    m->text.p = m->areas; m->text.cap = TEXT_CAP; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
+    m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
     m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf;
     m->rng = seed;
     ensure(mem, 0, pg->plain_end);
@@ -1316,7 +1328,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
 /* Handle one request, with its headers and (in a system) the fields forwarded with it. Returns the status, or 0 when
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
-    m->out.len = 0; m->text.len = 0; m->ekind = E_NONE;
+    m->out.len = 0; m->text.len = MITO_LITS_LEN; m->ekind = E_NONE;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     u32 ei = route(m, (const u8 *)method, mn, t, q);

@@ -1,0 +1,2 @@
+closest-possible
+Same work (decode the Base64 text of 500,000 bytes of "a" per run, rejecting invalid text) but the reference calls the base64-simd crate (SIMD) while this is a plain scalar loop with a 256-entry lookup table; the Rust column is therefore a library comparison, not a language one. The message the reference hashes is built and hashed by the benchmark harness from the answered characters. Stores are checked and undo-logged.

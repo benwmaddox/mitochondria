@@ -1,0 +1,103 @@
+// LangArena Base64::Decode (kostya/LangArena, MIT): decode the standard Base64 text of `size` bytes of "a" (with padding), `iterations` times, checking the text is valid; the
+// checksum adds the decoded length of every run (warmup included) and the benchmark's final message names the first four characters of the encoded and of the decoded text. This
+// port answers those characters and the sum (GET /result); the benchmark harness builds the message and hashes it exactly as the reference does. The reference calls the
+// base64-simd library (SIMD); this is a plain scalar loop over four input characters at a time with a 256-entry lookup table (255 = not a Base64 character).
+struct B64 { encoded: u8[666672]; decoded: u8[500000]; alphabet: u8[64]; table: u8[256]; size: i64; encoded_len: i64; decoded_len: i64; result: i64; bad: i64; }
+state b: B64;
+
+fn encode_input() {
+    let full = b.size / 3;
+    // the input is `size` bytes of 'a' (97): the three-byte groups all encode to "YWFh"
+    each group in 0..full {
+        let to = group * 4;
+        b.encoded[to] = b.alphabet[97 >> 2];
+        b.encoded[to + 1] = b.alphabet[((97 & 3) << 4) | (97 >> 4)];
+        b.encoded[to + 2] = b.alphabet[((97 & 15) << 2) | (97 >> 6)];
+        b.encoded[to + 3] = b.alphabet[97 & 63];
+    }
+    let rest = b.size - full * 3;
+    let to = full * 4;
+    if rest == 1 {
+        b.encoded[to] = b.alphabet[97 >> 2];
+        b.encoded[to + 1] = b.alphabet[(97 & 3) << 4];
+        b.encoded[to + 2] = 61;
+        b.encoded[to + 3] = 61;
+    } else if rest == 2 {
+        b.encoded[to] = b.alphabet[97 >> 2];
+        b.encoded[to + 1] = b.alphabet[((97 & 3) << 4) | (97 >> 4)];
+        b.encoded[to + 2] = b.alphabet[(97 & 15) << 2];
+        b.encoded[to + 3] = 61;
+    }
+    b.encoded_len = (b.size + 2) / 3 * 4;
+}
+fn decode() {
+    let groups = b.encoded_len / 4;
+    var pad = 0;
+    if b.encoded[b.encoded_len - 1] == 61 { pad = 1; }
+    if b.encoded[b.encoded_len - 2] == 61 { pad = 2; }
+    // the last group is decoded on its own (padding); the others take four characters to three bytes
+    let plain = groups - 1;
+    var acc = 0;
+    each group in 0..plain {
+        let from = group * 4;
+        let to = group * 3;
+        let first = b.table[b.encoded[from]];
+        let second = b.table[b.encoded[from + 1]];
+        let third = b.table[b.encoded[from + 2]];
+        let fourth = b.table[b.encoded[from + 3]];
+        acc = acc | first | second | third | fourth;
+        b.decoded[to] = ((first << 2) | (second >> 4)) & 255;
+        b.decoded[to + 1] = ((second << 4) | (third >> 2)) & 255;
+        b.decoded[to + 2] = ((third << 6) | fourth) & 255;
+    }
+    let from = plain * 4;
+    let to = plain * 3;
+    let first = b.table[b.encoded[from]];
+    let second = b.table[b.encoded[from + 1]];
+    acc = acc | first | second;
+    b.decoded[to] = ((first << 2) | (second >> 4)) & 255;
+    if pad == 2 {
+        b.decoded_len = to + 1;
+    } else {
+        let third = b.table[b.encoded[from + 2]];
+        acc = acc | third;
+        b.decoded[to + 1] = ((second << 4) | (third >> 2)) & 255;
+        if pad == 1 {
+            b.decoded_len = to + 2;
+        } else {
+            let fourth = b.table[b.encoded[from + 3]];
+            acc = acc | fourth;
+            b.decoded[to + 2] = ((third << 6) | fourth) & 255;
+            b.decoded_len = to + 3;
+        }
+    }
+    b.bad = 0;
+    if acc > 63 { b.bad = 1; }
+}
+fn one_run() {
+    decode();
+    if b.bad == 0 { b.result = (b.result + b.decoded_len) % 4294967296; }
+}
+
+@post("/prepare/{size}")
+fn prepare(size: i64 in 4..500000) -> Response<{}> {
+    b.size = size;
+    b.result = 0;
+    each i in 0..26 { b.alphabet[i] = 65 + i; b.alphabet[26 + i] = 97 + i; }
+    each i in 0..10 { b.alphabet[52 + i] = 48 + i; }
+    b.alphabet[62] = 43;
+    b.alphabet[63] = 47;
+    b.table.fill(0, 256, 255);
+    each i in 0..64 { b.table[b.alphabet[i]] = i; }
+    encode_input();
+    decode();
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/result")
+fn result() -> Response<{ result: i64, encoded0: i64, encoded1: i64, encoded2: i64, encoded3: i64, decoded0: i64, decoded1: i64, decoded2: i64, decoded3: i64 }> {
+    return ok({ "result": b.result, "encoded0": b.encoded[0], "encoded1": b.encoded[1], "encoded2": b.encoded[2], "encoded3": b.encoded[3], "decoded0": b.decoded[0], "decoded1": b.decoded[1], "decoded2": b.decoded[2], "decoded3": b.decoded[3] });
+}

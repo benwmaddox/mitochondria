@@ -1,0 +1,63 @@
+// LangArena Base64::Encode (kostya/LangArena, MIT): encode `size` bytes of "a" to standard Base64 (with padding), `iterations` times; the checksum adds the encoded length
+// of every run (warmup included) and the benchmark's final message names the first four characters of the data and of the encoded text. This port answers those characters and the
+// sum (GET /result); the benchmark harness builds the message and hashes it exactly as the reference does. The reference calls the base64-simd library (SIMD); this is a plain
+// scalar loop over three input bytes at a time.
+struct B64 { data: u8[500000]; encoded: u8[666672]; alphabet: u8[64]; size: i64; encoded_len: i64; result: i64; }
+state b: B64;
+
+fn encode() {
+    let full = b.size / 3;
+    each group in 0..full {
+        let from = group * 3;
+        let to = group * 4;
+        let first = b.data[from];
+        let second = b.data[from + 1];
+        let third = b.data[from + 2];
+        b.encoded[to] = b.alphabet[first >> 2];
+        b.encoded[to + 1] = b.alphabet[((first & 3) << 4) | (second >> 4)];
+        b.encoded[to + 2] = b.alphabet[((second & 15) << 2) | (third >> 6)];
+        b.encoded[to + 3] = b.alphabet[third & 63];
+    }
+    let rest = b.size - full * 3;
+    let to = full * 4;
+    if rest == 1 {
+        let first = b.data[full * 3];
+        b.encoded[to] = b.alphabet[first >> 2];
+        b.encoded[to + 1] = b.alphabet[(first & 3) << 4];
+        b.encoded[to + 2] = 61;
+        b.encoded[to + 3] = 61;
+    } else if rest == 2 {
+        let first = b.data[full * 3];
+        let second = b.data[full * 3 + 1];
+        b.encoded[to] = b.alphabet[first >> 2];
+        b.encoded[to + 1] = b.alphabet[((first & 3) << 4) | (second >> 4)];
+        b.encoded[to + 2] = b.alphabet[(second & 15) << 2];
+        b.encoded[to + 3] = 61;
+    }
+    b.encoded_len = (b.size + 2) / 3 * 4;
+}
+fn one_run() {
+    encode();
+    b.result = (b.result + b.encoded_len) % 4294967296;
+}
+
+@post("/prepare/{size}")
+fn prepare(size: i64 in 4..500000) -> Response<{}> {
+    b.size = size;
+    b.result = 0;
+    each i in 0..26 { b.alphabet[i] = 65 + i; b.alphabet[26 + i] = 97 + i; }
+    each i in 0..10 { b.alphabet[52 + i] = 48 + i; }
+    b.alphabet[62] = 43;
+    b.alphabet[63] = 47;
+    b.data.fill(0, size, 97);
+    encode();
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/result")
+fn result() -> Response<{ result: i64, encoded0: i64, encoded1: i64, encoded2: i64, encoded3: i64 }> {
+    return ok({ "result": b.result, "encoded0": b.encoded[0], "encoded1": b.encoded[1], "encoded2": b.encoded[2], "encoded3": b.encoded[3] });
+}

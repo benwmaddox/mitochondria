@@ -125,7 +125,8 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 - **`utf8<N>`**: UTF-8 text. Read by byte index, never written by index (that could split a character); it changes only by whole text:
   appending, assigning, truncating at a character boundary. A byte index that is not a character's start is refused where a
   character is asked for.
-- Both: `s.append(x)` (text, integers and floats formatted), `s.clear()`, `s.truncate(n)`, `len(s)`, `maxlen(s)`, `substr(s, from, count)`
+- Both: `s += x` appends in place, everywhere a text value can be named (fields, items' fields, locals, inputs held in a
+  local): text, integers and floats (formatted), as `+` already joins them. `s.append(x)` is the same as a function call. Also `s.clear()`, `s.truncate(n)`, `len(s)`, `maxlen(s)`, `substr(s, from, count)`
   without copying, assignment from any text, comparison. Appending past N fails the request (413, naming the field), like a full collection.
   `ascii<N>` takes only ASCII: appending or assigning a byte above 127 is refused (400).
 - `string<N>` is another name for `utf8<N>`, now and later: existing programs keep working unchanged, and either name may be used.

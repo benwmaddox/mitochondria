@@ -66,6 +66,7 @@ struct H {
     int (*wr_int)(Ctx *, u64, u32, i64);                       /* an integer of `size` bytes at a byte offset (the value already known to fit) */
     int (*move_elems)(Ctx *, u64, u32, i64, i64, i64);        /* move `count` elements of `esize` bytes within an array at byte offset `base`: from, to, count (already in range) */
     int (*fill_elems)(Ctx *, u64, u32, i64, i64, i64, int);   /* set `count` elements of `esize` bytes of an array at a byte offset to a value (its bits), from a position; the last is 1 for plain state */
+    int (*clear_coll)(Ctx *, u32, u32);                         /* empty a collection (one instance) at once, with what its items hold; the writes are in the undo log */
     int (*count_below)(Ctx *, u64, u32, i64, i64, int, i64 *);      /* how many of the first n elements of an array (kind code, at a byte offset) are below a target (at most it when inclusive) */
     int (*str_cmp_lit)(Ctx *, int, u32, u32, u32, u32, u32, int *); /* a string column against a literal (op in OPS order), compared where they are: no copy */
     int (*str_cmp_col)(Ctx *, int, u32, u32, u32, u32, u32, u32, int *); /* a string column against another */
@@ -606,6 +607,7 @@ fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
             match s {
                 Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
                 Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
+                Stmt::Clear(c) => ex(c, out),
                 Stmt::Move(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Fill(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
@@ -651,6 +653,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
             match s {
                 Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
                 Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
+                Stmt::Clear(c) => ex(c, out),
                 Stmt::Move(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Fill(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
@@ -751,9 +754,10 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         }
     }
     stmts.iter().any(|s| match s {
-        Stmt::Alloc { .. } | Stmt::Move(..) | Stmt::Fill(..) | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
+        Stmt::Alloc { .. } | Stmt::Move(..) | Stmt::Fill(..) | Stmt::Clear(..) | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
+        Stmt::Clear(c) => ex(api, c, seen),
         Stmt::Move(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Fill(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
@@ -779,6 +783,7 @@ fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         Stmt::Alloc { .. } => true,
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
+        Stmt::Clear(c) => ex(api, c, seen),
         Stmt::Move(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Fill(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
@@ -1355,6 +1360,11 @@ impl<'p> G<'p> {
                 self.line(&format!("if (UNLIKELY({f} < 0 || {f} > {len}LL || {n} < 0 || {n} > {len}LL || {f} + {n} > {len}LL)) FAIL(400, \"fill out of range\", 17);"));
                 self.call(&format!("c->h->fill_elems(c, {}, {}, {}, {}, {}, {})", base, esize, f, n, bits, plain));
                 self.close("}");
+            }
+            Stmt::Clear(coll) => {
+                let CV::Coll(c, inst) = self.expr(coll, env, None)? else { return no("`clear` is a function of a collection") };
+                self.may_add_or_free(c, "clear")?;
+                self.call(&format!("c->h->clear_coll(c, {}, {})", c, inst));
             }
             Stmt::Remove(coll, e) => {
                 let CV::Coll(want, _) = self.expr(coll, env, None)? else { return no("`remove` is a function of a collection") };

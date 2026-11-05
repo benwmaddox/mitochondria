@@ -1,0 +1,60 @@
+// coll.clear(): every item leaves a pool or list at once, including what the items hold; references to cleared items are stale; the pool
+// can be filled again straight away (even in the same request); and a request that fails after clearing leaves everything as it was
+--- program
+struct Tag { t: i64; }
+struct Item { v: i64; tags: list<Tag, 3> drop_oldest; }
+struct Holder { it: ref<app.items>; }
+struct App { items: pool<Item, 3> checked; holder: Holder; log: list<Tag, 3> drop_oldest; }
+state app: App;
+
+@post("/add/{v}")
+fn post_add(v: i64) -> Response<{ slot: i64 }> { let x = app.items.add(); x.v = v; x.tags.add { t: v * 10 }; return created({ "slot": slot(x) }); }
+@post("/hold/{s}")
+fn post_hold(s: i64) -> Response<{}> { app.holder.it = app.items[s]; return ok({}); }
+@get("/held")
+fn get_held() -> Response<{ v: i64 }> { return ok({ "v": or(app.holder.it.v, -1) }); }
+@post("/clear")
+fn post_clear() -> Response<{ count: i64 }> { app.items.clear(); return ok({ "count": app.items.count() }); }
+@post("/clear-then-add/{v}")
+fn post_clear_add(v: i64) -> Response<{ slot: i64, count: i64 }> { app.items.clear(); let x = app.items.add(); x.v = v; return ok({ "slot": slot(x), "count": app.items.count() }); }
+@post("/clear-then-fail")
+fn post_clear_fail() -> Response<{}> { app.items.clear(); fail 422 "no"; }
+@get("/all")
+fn get_all() -> Response<{ items: [{ v: i64, tags: [i64] }], count: i64 }> {
+    return ok({ "items": [each i in app.items { "v": i.v, "tags": [each t in i.tags t.t] }], "count": app.items.count() });
+}
+@post("/log/{v}")
+fn post_log(v: i64) -> Response<{}> { app.log.add { t: v }; return ok({}); }
+@post("/log-clear")
+fn post_log_clear() -> Response<{ count: i64 }> { app.log.clear(); return ok({ "count": app.log.count() }); }
+@get("/log")
+fn get_log() -> Response<{ x: [i64] }> { return ok({ "x": [each t in app.log t.t] }); }
+--- requests
+POST /clear
+POST /add/1
+POST /add/2
+POST /add/3
+POST /add/4
+POST /hold/1
+GET /held
+GET /all
+POST /clear-then-fail
+GET /all
+GET /held
+POST /clear
+GET /all
+GET /held
+POST /clear
+POST /add/7
+GET /all
+POST /clear-then-add/9
+GET /all
+POST /log/1
+POST /log/2
+POST /log/3
+POST /log/4
+GET /log
+POST /log-clear
+GET /log
+POST /log/5
+GET /log

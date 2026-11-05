@@ -1,0 +1,102 @@
+// LangArena Brainfuck::Array (kostya/LangArena, MIT): a Brainfuck interpreter. Each run compiles the program text (keeps the eight command bytes, matches the brackets into a
+// jump table) and interprets it on a tape of 30,000 cells that grows if the pointer passes the end; `.` folds the cell into a 32-bit result (result = result * 4 + cell). The
+// program text and the warmup program (a small program run 1000 times before the timed run) are given to prepare; the checksum adds each run's result. The reference's
+// match on the command is an if-chain here (the language has no switch). The reference's u32 and u8 wrapping is masking.
+struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096]; srclen: i64; cmds: u8[4096]; ncmds: i64; jumps: i32[4096]; stack: i32[4096]; tape: u8[100000]; tlen: i64; out: i64; bad: i64; ok: i64; result: i64; }
+state g: BF;
+
+fn compile() {
+    g.ncmds = 0;
+    each i in 0..g.srclen {
+        let c = g.src[i];
+        if c == 43 || c == 45 || c == 62 || c == 60 || c == 91 || c == 93 || c == 46 || c == 44 { g.cmds[g.ncmds] = c; g.ncmds = g.ncmds + 1; }
+    }
+    var ok = 1;
+    if g.ncmds == 0 { ok = 0; }
+    var sp = 0;
+    each i in 0..g.ncmds {
+        let cmd = g.cmds[i];
+        if cmd == 91 {
+            g.stack[sp] = i;
+            sp = sp + 1;
+        } else if cmd == 93 {
+            if sp == 0 {
+                ok = 0;
+            } else {
+                sp = sp - 1;
+                let start = g.stack[sp];
+                g.jumps[start] = i;
+                g.jumps[i] = start;
+            }
+        }
+    }
+    if sp != 0 { ok = 0; }
+    g.ok = ok;
+}
+fn execute() {
+    g.tape.fill(0, 30000, 0);
+    g.tlen = 30000;
+    var pos = 0;
+    var pc = 0;
+    var result = 0;
+    var bad = 0;
+    each step in 0..9000000000000 while pc < g.ncmds && bad == 0 {
+        let cmd = g.cmds[pc];
+        if cmd == 43 {
+            g.tape[pos] = (g.tape[pos] + 1) & 255;
+        } else if cmd == 45 {
+            g.tape[pos] = (g.tape[pos] + 255) & 255;
+        } else if cmd == 62 {
+            pos = pos + 1;
+            if pos >= g.tlen { g.tape[pos] = 0; g.tlen = g.tlen + 1; }
+        } else if cmd == 60 {
+            if pos > 0 { pos = pos - 1; }
+        } else if cmd == 91 {
+            if g.tape[pos] == 0 { pc = g.jumps[pc]; }
+        } else if cmd == 93 {
+            if g.tape[pos] != 0 { pc = g.jumps[pc]; }
+        } else if cmd == 46 {
+            result = (((result << 2) & 0xFFFFFFFF) + g.tape[pos]) & 0xFFFFFFFF;
+        } else {
+            bad = 1;
+        }
+        pc = pc + 1;
+    }
+    g.out = result;
+    g.bad = bad;
+}
+// the reference's run_program: compile, and run if it compiled
+fn run_program() {
+    g.bad = 1;
+    compile();
+    if g.ok == 1 { execute(); }
+}
+
+@post("/prepare")
+fn prepare(program: string<4096>, warmup: string<4096>) -> Response<{}> {
+    g.proglen = len(program);
+    each i in 0..g.proglen { g.prog[i] = program[i]; }
+    g.warmlen = len(warmup);
+    each i in 0..g.warmlen { g.warm[i] = warmup[i]; }
+    g.result = 0;
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> {
+    g.srclen = g.warmlen;
+    each i in 0..g.warmlen { g.src[i] = g.warm[i]; }
+    each i in 0..n { run_program(); }
+    return ok({});
+}
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> {
+    g.srclen = g.proglen;
+    each i in 0..g.proglen { g.src[i] = g.prog[i]; }
+    each i in 0..n {
+        run_program();
+        if g.bad == 0 { g.result = (g.result + g.out) % 4294967296; }
+    }
+    return ok({});
+}
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": g.result }); }

@@ -46,9 +46,9 @@ def checksum_f64(v):
     return h
 
 
-def call(method, path):
+def call(method, path, body=None):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=3600)
-    c.request(method, path); r = c.getresponse(); body = r.read()
+    c.request(method, path, body=json.dumps(body) if body is not None else None, headers={"Content-Type": "application/json"} if body is not None else {}); r = c.getresponse(); body = r.read()
     if r.status >= 300: raise RuntimeError(f"{method} {path}: {r.status} {body[:200]}")
     h = r.getheader("X-Handler-Ns")
     return (int(h) / 1e9 if h else None), json.loads(body)
@@ -75,7 +75,8 @@ def run_mito(test, name, exe, cfg, params, float_result):
         for _ in range(300):
             try: socket.create_connection(("127.0.0.1", port), 0.2).close(); break
             except OSError: time.sleep(0.05)
-        call("POST", prepare_path(cfg, params))
+        if params == "program": call("POST", "/prepare", {"program": cfg["program"], "warmup": cfg["warmup_program"]})
+        else: call("POST", prepare_path(cfg, params))
         call("POST", f"/warmup/{warm}")
         secs, _ = call("POST", f"/run/{iters}")
         _, res = call("GET", "/result" if float_result else "/checksum")
@@ -121,6 +122,8 @@ META = {
     "maze_astar": (["w", "h"], False),
     "binarytrees_obj": (["depth"], False),
     "binarytrees_arena": (["depth"], False),
+    "brainfuck_array": ("program", False),
+    "brainfuck_recursion": ("program", False),
 }
 rows = []
 for test in tests:

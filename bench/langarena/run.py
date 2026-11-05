@@ -136,6 +136,8 @@ META = {
     "etc_textraytracer": (["w", "h"], False),
     "compress_bwtencode": (["size"], False),
     "compress_bwtdecode": (["size"], False),
+    "compress_huffencode": (["size"], False),
+    "compress_huffdecode": (["size"], False),
     "calculator_ast": (["operations"], False),
     "base64_encode": (["size"], "b64enc"),
     "base64_decode": (["size"], "b64dec"),

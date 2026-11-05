@@ -1,0 +1,152 @@
+// LangArena Compress::HuffEncode (kostya/LangArena, MIT): Huffman-code a repeating text, `iterations` times.
+// The input is `size` bytes of the repeating pattern "ABRACADABRA". The Huffman tree is the reference's: leaves for the bytes that occur, stably sorted by frequency, the two smallest
+// joined and the parent inserted at the position Rust's `binary_search_by` returns; codes are built by recursion, bits are packed most significant first. The reference's
+// Box nodes are arrays (the tree has 9 nodes). The checksum adds the length of every run's output, warmup included.
+struct HF {
+    data: u8[1048576]; out: u8[1048576]; freq: i32[256]; code_len: i32[256]; codes: i32[256];
+    node_freq: i32[600]; node_byte: i32[600]; node_leaf: i32[600]; node_left: i32[600]; node_right: i32[600]; nodes: i64;
+    list: i32[600]; list_len: i64; root: i64;
+    size: i64; out_len: i64; bit_count: i64; result: i64; 
+}
+state hf: HF;
+
+fn make_data(size) {
+    each i in 0..size {
+        let slot = i % 11;
+        var byte = 65;
+        if slot == 1 { byte = 66; } else if slot == 2 { byte = 82; } else if slot == 3 { byte = 65; } else if slot == 4 { byte = 67; }
+        else if slot == 5 { byte = 65; } else if slot == 6 { byte = 68; } else if slot == 7 { byte = 65; } else if slot == 8 { byte = 66; }
+        else if slot == 9 { byte = 82; } else if slot == 10 { byte = 65; }
+        hf.data[i] = byte;
+    }
+}
+fn new_node(freq, byte, leaf) {
+    let node = hf.nodes;
+    hf.nodes = hf.nodes + 1;
+    hf.node_freq[node] = freq;
+    hf.node_byte[node] = byte;
+    hf.node_leaf[node] = leaf;
+    hf.node_left[node] = -1;
+    hf.node_right[node] = -1;
+    return node;
+}
+// the reference's build_huffman_tree: leaves for the bytes that occur, sorted (stable) by frequency; then the two smallest are joined and the parent is
+// inserted where Rust's binary_search_by puts it. The nodes are arrays, the list a plain array of node numbers; remove(0) and insert are array moves.
+fn build_tree() {
+    hf.nodes = 0;
+    hf.list_len = 0;
+    each byte in 0..256 {
+        if hf.freq[byte] > 0 {
+            hf.list[hf.list_len] = new_node(hf.freq[byte], byte, 1);
+            hf.list_len = hf.list_len + 1;
+        }
+    }
+    // stable insertion sort by frequency (what the library does for a list this short)
+    each i in 1..hf.list_len {
+        let moving = hf.list[i];
+        var j = i;
+        each w in 0..1000 while j > 0 && hf.node_freq[hf.list[j - 1]] > hf.node_freq[moving] {
+            hf.list[j] = hf.list[j - 1];
+            j = j - 1;
+        }
+        hf.list[j] = moving;
+    }
+    if hf.list_len == 1 {
+        let only = hf.list[0];
+        let root = new_node(hf.node_freq[only], 0, 0);
+        hf.node_left[root] = only;
+        hf.node_right[root] = new_node(0, 0, 1);
+        hf.root = root;
+    } else {
+        each round in 0..1000 while hf.list_len > 1 {
+            let left = hf.list[0];
+            let right = hf.list[1];
+            hf.list.move(2, 0, hf.list_len - 2);
+            hf.list_len = hf.list_len - 2;
+            let parent = new_node(hf.node_freq[left] + hf.node_freq[right], 0, 0);
+            hf.node_left[parent] = left;
+            hf.node_right[parent] = right;
+            // binary_search_by(|n| n.frequency.cmp(&parent.frequency)).unwrap_or_else(|e| e)
+            var position = 0;
+            if hf.list_len > 0 {
+                var size = hf.list_len;
+                var base = 0;
+                each w in 0..64 while size > 1 {
+                    let half = size / 2;
+                    let mid = base + half;
+                    if hf.node_freq[hf.list[mid]] <= hf.node_freq[parent] { base = mid; }
+                    size = size - half;
+                }
+                position = base;
+                if hf.node_freq[hf.list[base]] < hf.node_freq[parent] { position = base + 1; }
+            }
+            hf.list.move(position, position + 1, hf.list_len - position);
+            hf.list[position] = parent;
+            hf.list_len = hf.list_len + 1;
+        }
+        hf.root = hf.list[0];
+    }
+}
+fn build_codes(node, code, length) {
+    if length < 0 { return 0; }
+    if hf.node_leaf[node] == 1 {
+        if length > 0 || hf.node_byte[node] != 0 {
+            hf.code_len[hf.node_byte[node]] = length;
+            hf.codes[hf.node_byte[node]] = code;
+        }
+    } else {
+        if hf.node_left[node] >= 0 { build_codes(hf.node_left[node], code << 1, length + 1); }
+        if hf.node_right[node] >= 0 { build_codes(hf.node_right[node], (code << 1) | 1, length + 1); }
+    }
+    return 0;
+}
+fn encode() {
+    hf.freq.fill(0, 256, 0);
+    each i in 0..hf.size { hf.freq[hf.data[i]] = hf.freq[hf.data[i]] + 1; }
+    build_tree();
+    hf.code_len.fill(0, 256, 0);
+    hf.codes.fill(0, 256, 0);
+    build_codes(hf.root, 0, 0);
+    var current = 0;
+    var bit_pos = 0;
+    var total_bits = 0;
+    var out_len = 0;
+    each i in 0..hf.size {
+        let byte = hf.data[i];
+        let code = hf.codes[byte];
+        let length = hf.code_len[byte];
+        each step in 0..length {
+            let shift = length - 1 - step;
+            if ((code >> shift) & 1) != 0 { current = current | (1 << (7 - bit_pos)); }
+            bit_pos = bit_pos + 1;
+            total_bits = total_bits + 1;
+            if bit_pos == 8 {
+                hf.out[out_len] = current;
+                out_len = out_len + 1;
+                current = 0;
+                bit_pos = 0;
+            }
+        }
+    }
+    if bit_pos > 0 { hf.out[out_len] = current; out_len = out_len + 1; }
+    hf.out_len = out_len;
+    hf.bit_count = total_bits;
+}
+
+fn one_run() {
+    encode();
+    hf.result = (hf.result + hf.out_len) % 4294967296;
+}
+@post("/prepare/{size}")
+fn prepare(size: i64 in 2..1048576) -> Response<{}> {
+    hf.size = size;
+    hf.result = 0;
+    make_data(size);
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": hf.result }); }

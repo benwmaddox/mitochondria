@@ -1,0 +1,2 @@
+rewritten-to-match
+Same algorithm: count the bytes, build the tree, build the codes, pack the bits one at a time (the reference's inner loop over a code's bits). The tree's Box nodes are arrays (9 nodes) and the list is an array moved with array.move where the reference uses Vec::remove/insert. Stores are checked and undo-logged.

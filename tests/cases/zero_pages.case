@@ -1,0 +1,38 @@
+// the undo log keeps one entry for a page still all zeros instead of copying it: a failed request that filled a fresh array
+// leaves it zeros again; once the array holds values, a failed request puts those values back
+--- program
+struct Big { a: i64[20000]; b: u8[10000]; n: i64; }
+state s: Big;
+
+@post("/fill/{v}/{fail_after}")
+fn fill(v: i64, fail_after: bool) -> Response<{}> {
+    foreach i in 0..19999 { s.a[i] = v + i; }
+    foreach i in 0..9999 { s.b[i] = v % 256; }
+    s.n = v;
+    if fail_after { fail 409 "failed after filling"; }
+    return ok({});
+}
+@post("/poke/{i}/{v}/{fail_after}")
+fn poke(i: i64 in 0..19999, v: i64, fail_after: bool) -> Response<{}> {
+    s.a[i] = v;
+    if fail_after { fail 409 "failed after poking"; }
+    return ok({});
+}
+@get("/look")
+fn look() -> Response<{ first: i64, mid: i64, last: i64, b: i64, n: i64, sum: i64 }> {
+    var sum = 0;
+    foreach i in 0..19999 { sum = sum + s.a[i]; }
+    return ok({ first: s.a[0], mid: s.a[10000], last: s.a[19999], b: s.b[5000], n: s.n, sum: sum });
+}
+--- requests
+POST /fill/7/true
+GET /look
+POST /poke/12345/99/true
+GET /look
+POST /fill/3/false
+GET /look
+POST /fill/5/true
+GET /look
+POST /poke/12345/99/false
+POST /poke/12345/1/true
+GET /look

@@ -1,0 +1,13 @@
+POST /fill/7/true -> 409 {"error":"failed after filling","line":9}
+GET /look -> 200 {"first":0,"mid":0,"last":0,"b":0,"n":0,"sum":0}
+POST /poke/12345/99/true -> 409 {"error":"failed after poking","line":15}
+GET /look -> 200 {"first":0,"mid":0,"last":0,"b":0,"n":0,"sum":0}
+POST /fill/3/false -> 200 {}
+GET /look -> 200 {"first":3,"mid":10003,"last":20002,"b":3,"n":3,"sum":200050000}
+POST /fill/5/true -> 409 {"error":"failed after filling","line":9}
+GET /look -> 200 {"first":3,"mid":10003,"last":20002,"b":3,"n":3,"sum":200050000}
+POST /poke/12345/99/false -> 200 {}
+POST /poke/12345/1/true -> 409 {"error":"failed after poking","line":15}
+GET /look -> 200 {"first":3,"mid":10003,"last":20002,"b":3,"n":3,"sum":200037751}
+state <plain values> 170008
+memory reserved=172032 committed=172032 live=170008

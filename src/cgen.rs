@@ -766,8 +766,55 @@ fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
 }
 
 /// Does a function body contain a loop (which may collect items and be left by `return`)?
-fn has_loop(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|s| match s { Stmt::Each(..) => true, Stmt::If(_, t, e) => has_loop(t) || has_loop(e), _ => false })
+/// The range of a load of a narrow integer from state (`LD_U8(...)`, `(i64)LD_I32(...)`): what its C type can hold.
+fn load_interval(e: &str) -> Option<(i64, i64)> {
+    let e = e.strip_prefix("(i64)").unwrap_or(e);
+    let (r, rest) = [("LD_I8(", (-128, 127)), ("LD_U8(", (0, 255)), ("LD_I16(", (-32768, 32767)), ("LD_U16(", (0, 65535)),
+                     ("LD_I32(", (i32::MIN as i64, i32::MAX as i64)), ("LD_U32(", (0, u32::MAX as i64))]
+        .iter().find_map(|(p, r)| e.strip_prefix(p).map(|rest| (*r, rest)))?;
+    // the load's own parenthesis must close at the very end (not `LD_U8(a, i) + 1`)
+    let mut depth = 1;
+    for (i, ch) in rest.char_indices() {
+        match ch { '(' => depth += 1, ')' => { depth -= 1; if depth == 0 { return if i + 1 == rest.len() { Some(r) } else { None }; } } _ => {} }
+    }
+    None
+}
+
+fn is_ident(x: &str) -> bool { x.bytes().next().map_or(false, |b| b.is_ascii_alphabetic() || b == b'_') && x.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') }
+
+/// Whether a line of generated C may change the variable `x`: an assignment (`x = `, `x += `, ...), `x++`/`x--`, `++x`/`--x`, or its
+/// address taken (`&x`). Errs on the side of yes.
+fn writes_name(line: &str, x: &str) -> bool {
+    let b = line.as_bytes();
+    let mut from = 0;
+    while let Some(p) = line[from..].find(x) {
+        let (at, end) = (from + p, from + p + x.len());
+        from = end;
+        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        if (at > 0 && word(b[at - 1])) || (end < b.len() && word(b[end])) { continue; }
+        let before = line[..at].trim_end();
+        if before.ends_with('&') && !before.ends_with("&&") || before.ends_with("++") || before.ends_with("--") { return true; }
+        let after = line[end..].trim_start().as_bytes();
+        match after {
+            [b'+', b'+', ..] | [b'-', b'-', ..] => return true,
+            [b'=', n, ..] if *n != b'=' => return true,
+            [b'='] => return true,
+            [op, b'=', ..] if b"+-*/%&|^".contains(op) => return true,
+            [b'<', b'<', b'=', ..] | [b'>', b'>', b'=', ..] => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether a function body holds a loop that collects items (the `collect` rule of `Stmt::Each`), at any depth: only then does the
+/// function need a selection mark to drop what such a loop collected when a `return` leaves it early.
+fn has_collecting_loop(api: &Api, stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Each(it, body) => allocates(api, body, &mut Vec::new()) || (it.wher.is_some() && writes(api, body, &mut Vec::new())) || has_collecting_loop(api, body),
+        Stmt::If(_, t, e) => has_collecting_loop(api, t) || has_collecting_loop(api, e),
+        _ => false,
+    })
 }
 
 /// Which functions are part of a cycle of calls (directly or through others).
@@ -1192,7 +1239,7 @@ impl<'p> G<'p> {
             g.dep = true;
             g.frame = Some(k);
             g.inlining.push(k);
-            let sel = if has_loop(&f.body) { Some("hm".to_string()) } else { None };
+            let sel = if has_collecting_loop(self.api, &f.body) { Some("hm".to_string()) } else { None };
             if sel.is_some() { g.line("u32 hm;"); g.call("c->h->sel_mark(c, &hm)"); }
             g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone() });
             let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
@@ -1291,11 +1338,13 @@ impl<'p> G<'p> {
     }
     fn line(&mut self, s: &str) {
         if s.ends_with(": ;") || s.contains("goto ") { self.checked.clear(); } // control joins or leaves here: a test seen before may not have run
+        else if !self.checked.is_empty() { self.checked.retain(|(x, _)| !writes_name(s, x)); } // an index given a new value must be tested again
         for _ in 0..self.depth + 1 { self.body.push_str("    "); } self.body.push_str(s); self.body.push('\n');
     }
     /// The interval a C integer is proven to lie in: a literal, or a name recorded in `ranges` (names that are never assigned again).
     fn interval(&self, s: &str) -> Option<(i64, i64)> {
         if let Some(d) = s.strip_suffix("LL") { if let Ok(v) = d.parse::<i64>() { return Some((v, v)); } }
+        if let Some(r) = load_interval(s) { return Some(r); }
         self.ranges.get(s).copied()
     }
     /// A value stored into a field declared with a range (`n: i64 in 0..100`): an integer, tested against the range unless the range analysis
@@ -1598,7 +1647,8 @@ impl<'p> G<'p> {
     fn block(&mut self, stmts: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<()> {
         let mut restore: Vec<(u32, CV)> = Vec::new();
         for (i, s) in stmts.iter().enumerate() {
-            self.checked.clear();
+            // a test of a plain C variable stays good into the next statement until a line writes that variable (see `line`)
+            self.checked.retain(|(x, _)| is_ident(x));
             self.stmt(s, env)?;
             // `if !exists(x) { ... }` (or `if x == null`) whose branch always leaves: x is a plain item for the rest of this block
             if let Stmt::If(c, t, e) = s {
@@ -2058,7 +2108,12 @@ impl<'p> G<'p> {
         // a `let` may share a C name with the value it is given, unless that name is a `var`'s (which a later assignment changes)
         let shared = |g: &Self, e: &str| !mutable && is_name(e) && !g.var_names.contains(e);
         Ok(match v {
-            CV::Int(e) if !shared(self, &e) => { let t = self.tmp("v"); self.line(&format!("i64 {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Int(t) }
+            CV::Int(e) if !shared(self, &e) => {
+                let t = self.tmp("v");
+                self.line(&format!("i64 {} = {};", t, e));
+                if mutable { self.var_names.insert(t.clone()); } else if let Some(r) = self.interval(&e) { self.ranges.insert(t.clone(), r); } // a `let` keeps its value's range
+                CV::Int(t)
+            }
             CV::Flt(e) if !shared(self, &e) => { let t = self.tmp("v"); self.line(&format!("double {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Flt(t) }
             CV::Bool(e) if !shared(self, &e) => { let t = self.tmp("v"); self.line(&format!("int {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Bool(t) }
             CV::Item(c, e) if !shared(self, &e) => { let t = self.tmp("i"); self.line(&format!("u32 {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Item(c, t) }
@@ -2084,7 +2139,13 @@ impl<'p> G<'p> {
             _ => { self.fail(code, msg); "0LL".into() }
         }
     }
-    fn hold_int(&mut self, e: String) -> String { if is_name(&e) { e } else { let t = self.tmp("v"); self.line(&format!("i64 {} = {};", t, e)); t } }
+    fn hold_int(&mut self, e: String) -> String {
+        if is_name(&e) { return e; }
+        let t = self.tmp("v");
+        self.line(&format!("i64 {} = {};", t, e));
+        if let Some(r) = load_interval(&e) { self.ranges.insert(t.clone(), r); } // a fresh name, never assigned again: it keeps the load's range
+        t
+    }
 
     fn assign_var(&mut self, cur: &CV, v: CV) -> R<()> {
         match (cur, v) {
@@ -2756,6 +2817,18 @@ impl<'p> G<'p> {
                 _ => {}
             }
         }
+        // `int` of a number: an integer as it is; a float truncated in line, as the runtime's builtin does (NaN is 0, beyond i64 the nearest end)
+        if bi == B::Int {
+            match a.first() {
+                Some(CV::Int(e)) => return Ok(CV::Int(e.clone())),
+                Some(CV::Flt(e)) => {
+                    let (f, r) = (self.tmp("f"), self.tmp("v"));
+                    self.line(&format!("double {f} = {e}; i64 {r} = {f} != {f} ? 0 : {f} >= 9223372036854775807.0 ? I64MAX : {f} <= -9223372036854775808.0 ? I64MIN : (i64){f};"));
+                    return Ok(CV::Int(r));
+                }
+                _ => {}
+            }
+        }
         let generic = match bi {
             B::Min | B::Max => !matches!(a.as_slice(), [CV::Int(_), CV::Int(_)]),
             B::Slot => !matches!(a.first(), Some(CV::Item(..) | CV::Ref(..))),
@@ -2965,7 +3038,7 @@ impl<'p> G<'p> {
         let saved = std::mem::take(&mut self.body);
         self.inlining.push(k);
         let forced = match &f.ret { Some(t) => Some(self.decl_kind(t, &f.name)?), None => self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1) };
-        let sel = if has_loop(&f.body) { Some(self.tmp("hm")) } else { None };
+        let sel = if has_collecting_loop(self.api, &f.body) { Some(self.tmp("hm")) } else { None };
         self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone() });
         self.depth += 1;
         let frame = std::mem::replace(&mut self.frame, Some(k));

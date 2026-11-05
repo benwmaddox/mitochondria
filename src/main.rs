@@ -5,6 +5,8 @@ mod cases;
 mod http_check;
 #[cfg(test)]
 mod error_corpus;
+#[cfg(test)]
+mod test_runner;
 mod lang;
 mod modules;
 mod layout;
@@ -25,6 +27,7 @@ A program is one `.mito` file: a program, or a system of workers (a file holding
   serve  <program> [--clang] [--watch] [executable options]
                                     build with TinyCC (or clang) and run it at once; --watch rebuilds and restarts
                                     when the program changes (state starts empty each time)
+  test   <program> [--clang]        run the program's tests (`test \"name\" { ... }`), each on a fresh state
   emit-c <program> [-o file.c]       (a system: -o dir, one file per worker kind and system.c)
                                     the generated C, to read or build yourself
 
@@ -59,6 +62,7 @@ fn main() {
         Some("check") => { let (_, name) = program(&inputs(rest)); println!("{}: loads", name); }
         Some("build") => build_exe(rest),
         Some("serve") => serve(rest),
+        Some("test") => test(rest),
         Some("emit-c") => emit_c(rest),
         Some("sigs") => sigs(rest),
         _ => { eprintln!("{}", USAGE); std::process::exit(2) }
@@ -244,4 +248,24 @@ fn sigs(args: &[String]) {
         let params: Vec<String> = ps.iter().map(|k| k.join("|")).collect();
         println!("{}\t({})\t-> {}", name, params.join(", "), rs.join("|"));
     }
+}
+
+/// `test <program> [--clang]`: the program's tests, built with TinyCC (or clang) into a runner and run; exits 1 if any fails.
+fn test(args: &[String]) {
+    let files = inputs(args);
+    let (f, text, system) = read_program(&files);
+    if system { die(format!("{}: a system's tests are not supported yet: test each worker's program", f)); }
+    let path = std::path::Path::new(&f);
+    let file = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let name = path.file_stem().map_or("app".into(), |n| n.to_string_lossy().into_owned());
+    let (s, code) = source::load(&text).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    if cgen::test_names(&a).is_empty() { println!("{}: no tests (write them as `test \"what it checks\" {{ ... }}`)", file); return; }
+    let units = cgen::program_test_exe(&prog, &a, Some((&file, &code))).unwrap_or_else(|e| die(e));
+    let exe = std::env::temp_dir().join(format!("mito-test-{}-{}.exe", name, std::process::id()));
+    build::exe(&units, &exe, !args.iter().any(|a| a == "--clang"), &[]).unwrap_or_else(|e| die(e));
+    let status = std::process::Command::new(&exe).arg(&file).status().unwrap_or_else(|e| die(format!("{}: {}", exe.display(), e)));
+    let _ = std::fs::remove_file(&exe);
+    std::process::exit(status.code().unwrap_or(1));
 }

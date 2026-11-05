@@ -1,0 +1,4 @@
+// expect: a test changes the state only through requests
+struct P { n: i64; } struct App { ps: pool<P, 8>; total: i64; } state app: App;
+@post("/p") fn add() -> Response<{}> { app.ps.add(); return ok({}); }
+test "sets" { app.total = 3; return true; }

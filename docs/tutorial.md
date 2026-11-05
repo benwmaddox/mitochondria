@@ -172,7 +172,24 @@ mark, and refuses writes (503) above the hard one.
 
 ## 9. Tests
 
-A case in `tests/cases/` is the program and its requests:
+Tests live in the program, written like functions: `test "what it checks" { ... }` returns `true` (passed), `false`, or a
+text saying what went wrong (an empty text passes). Inside, `get`, `post`, `put`, `patch` and `delete` make requests (a path, then
+the body's fields and the headers, each as `{ name: value }`) and answer `.status` and `.body`; `field(text, "name")` reads a field
+of a JSON answer; the state can be read directly, and changes only through requests:
+
+```
+test "an unbelievable score changes nothing" {
+    let r = post("/players", { name: "ann" });
+    let g = post("/players/" + field(r.body, "id") + "/games", { points: 2000000 });
+    if g.status != 422 { return "expected 422, got " + str(g.status); }
+    return game.games == 0 && game.recent.count() == 0;
+}
+```
+
+`mito test examples/scoreboard/score.mito` runs each test on an empty state (the clock fixed at 2026-01-01) and prints the
+line of the `return` that failed one, or of the statement whose error ended it. Tests are never part of a built or served program.
+
+The compiler's own tests record whole conversations: a case in `tests/cases/` is the program and its requests:
 
 ```
 --- program

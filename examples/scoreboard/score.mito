@@ -55,3 +55,44 @@ fn stats() -> Response<{ players: i64, games: i64, reserved_kb: i64, committed_k
         reserved_kb: stat("reserved_kb"), committed_kb: stat("committed_kb"), live_kb: stat("live_kb")
     });
 }
+
+// ---- tests (`mito test score.mito`): each starts from an empty game
+test "a player's best score is the highest they played" {
+    let r = post("/players", { name: "ann" });
+    if r.status != 201 { return "adding a player: " + str(r.status) + " " + r.body; }
+    let games = "/players/" + field(r.body, "id") + "/games";
+    post(games, { points: 40 });
+    post(games, { points: 25 });
+    let g = post(games, { points: 70 });
+    if field(g.body, "best") != "70" { return "best after 40, 25, 70: " + g.body; }
+    return game.games == 3;
+}
+test "the board lists the best first" {
+    let a = post("/players", { name: "ann" });
+    let b = post("/players", { name: "bo" });
+    post("/players/" + field(a.body, "id") + "/games", { points: 10 });
+    post("/players/" + field(b.body, "id") + "/games", { points: 90 });
+    let board = get("/board?top=2");
+    if board.body != "{\"top\":[{\"name\":\"bo\",\"points\":90},{\"name\":\"ann\",\"points\":10}]}" { return "board: " + board.body; }
+    return true;
+}
+test "an unbelievable score changes nothing" {
+    let r = post("/players", { name: "ann" });
+    let g = post("/players/" + field(r.body, "id") + "/games", { points: 2000000 });
+    if g.status != 422 { return "expected 422, got " + str(g.status); }
+    return game.games == 0 && game.recent.count() == 0;
+}
+test "a full pool answers 503" {
+    foreach i in 1..game.players.capacity() { post("/players", { name: "p" + str(i) }); }
+    let r = post("/players", { name: "one more" });
+    if r.status != 503 { return "expected 503, got " + str(r.status); }
+    return game.players.count() == game.players.capacity();
+}
+test "a removed player's games show as [left]" {
+    let r = post("/players", { name: "ann" });
+    let id = field(r.body, "id");
+    post("/players/" + id + "/games", { points: 5 });
+    let d = delete("/players/" + id);
+    if d.status != 204 { return "remove: " + str(d.status); }
+    return get("/recent").body == "{\"games\":[{\"name\":\"[left]\",\"points\":5}]}";
+}

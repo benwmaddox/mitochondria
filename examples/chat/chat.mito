@@ -91,3 +91,30 @@ fn stats() -> Response<{ sessions: i64, rooms: i64, messages: i64, next_seq: i64
         committed_kb: stat("committed_kb"), live_kb: stat("live_kb"), reserved_kb: stat("reserved_kb")
     });
 }
+
+// ---- tests (`mito test chat.mito`): each starts from an empty server
+test "a signed-in user posts and reads messages, newest first" {
+    let s = post("/sessions", { name: "ann" });
+    if s.status != 201 { return "sign in: " + str(s.status) + " " + s.body; }
+    let token = field(s.body, "token");
+    let room = post("/rooms", { name: "general" }, { "X-Session": token });
+    let msgs = "/rooms/" + field(room.body, "id") + "/messages";
+    post(msgs, { body: "first" }, { "X-Session": token });
+    post(msgs, { body: "second" }, { "X-Session": token });
+    let r = get(msgs + "?limit=1", { }, { "X-Session": token });
+    if r.status != 200 { return "read: " + str(r.status) + " " + r.body; }
+    return r.body == "{\"room\":\"general\",\"messages\":[{\"seq\":2,\"author\":\"ann\",\"at\":1767225600000,\"body\":\"second\"}]}";
+}
+test "a request without a session is refused" {
+    let r = get("/rooms");
+    if r.status != 401 { return "expected 401, got " + str(r.status); }
+    return get("/rooms", { }, { "X-Session": "1.2.3" }).status == 401;
+}
+test "the 31st message in a minute is refused" {
+    let token = field(post("/sessions", { name: "bo" }).body, "token");
+    let room = field(post("/rooms", { name: "busy" }, { "X-Session": token }).body, "id");
+    var last = 0;
+    foreach i in 1..31 { last = post("/rooms/" + room + "/messages", { body: "m" + str(i) }, { "X-Session": token }).status; }
+    if last != 429 { return "the 31st message answered " + str(last); }
+    return chat.meta.next_seq == 30;
+}

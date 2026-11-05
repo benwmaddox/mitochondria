@@ -75,6 +75,9 @@ struct H {
     int (*text_len)(Ctx *, u32 *);                             /* the text area's length now */
     int (*arr_txt)(Ctx *, u64, u32, Txt *);                    /* count bytes of a state byte array at a byte offset, copied into the text area as a string */
     int (*text_cut)(Ctx *, u32);                               /* cut the text area back to an earlier length (a loop body that keeps no string past its iteration) */
+    int (*rq_put)(Ctx *, int, const char *, u32, const Val *);  /* a test's request: a body field (0) or a header (1), by name */
+    int (*rq_send)(Ctx *, int, const Txt *, i64 *, Txt *);       /* a test's request: send it (method, path); its status and body */
+    int (*json_field)(Ctx *, const Txt *, const char *, u32, Txt *); /* a top-level field of a JSON object text, as text (null: absent) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -105,6 +108,8 @@ struct H {
 #define FAIL(code, msg, n) do { c->at = AT_; return c->h->fail(c, (code), (msg), (n)); } while (0)
 /* a round of a loop without a fixed extent (`while`, a `for` that is not counted), k its round counter: charged to the request's
    step budget 65536 rounds at a time (a test of the counter in a register, not a store each round) */
+/* a test's failure: its message and the line of the `return` that gave it */
+#define TEST_FAIL_(t) do { *tmsg = (t); c->at = AT_; return 1; } while (0)
 #define ROUND_(k) do { if (UNLIKELY(((k) & 65535) == 65535) && (c->steps -= 65536) < 0) FAIL(500, "loop ran too long", 17); } while (0)
 #define OVERFLOW_ FAIL(500, "integer overflow", 16)
 #ifdef __clang__
@@ -342,6 +347,7 @@ enum CV {
     Part(usize, String, String),    // a struct-valued field of an item: collection, item index, path of the field
     ArrCol(usize, String, usize),   // a fixed-array field of an item: collection, item index, column
     PlainArr(usize, Ty, usize),     // a plain fixed array: offset, element type, length
+    Resp(String, String),           // a test's request's answer: its status (i64) and body (Txt), read as `.status` and `.body`
     Null,
 }
 
@@ -399,7 +405,7 @@ fn type_text(prog: &Program, v: &CV) -> String {
         CV::Item(c, _) => item(*c), CV::Ref(c, ..) => format!("{}?", item(*c)),
         CV::Coll(c, _) => format!("coll {}", prog.colls[*c].name),
         CV::Plain(sd, o) => format!("plain {}@{}", prog.structs[*sd].name, o),
-        CV::Part(..) => "part".into(), CV::ArrCol(..) => "arrcol".into(), CV::PlainArr(_, t, n) => format!("plainarr {:?}[{}]", t, n),
+        CV::Part(..) => "part".into(), CV::ArrCol(..) => "arrcol".into(), CV::Resp(..) => "response".into(), CV::PlainArr(_, t, n) => format!("plainarr {:?}[{}]", t, n),
     }
 }
 /// For every function called anywhere: its name, each parameter's kinds and its result's kinds over all calls.
@@ -446,6 +452,7 @@ struct G<'p> {
     versioned: u32, // how many versioned loops enclose the code being generated (each doubles its body; at most 3 deep)
     loop_hint: Option<(i64, i64)>, // the next range loop's counter interval, proven by a versioning guard (its fast copy)
     at: (u32, u32), // the source line and column of the statement being generated (for error messages)
+    test: bool, // generating a test: `return` gives its result
     loop_n: u32, // labels of loops, numbered on their own
     loops: Vec<(String, String, bool, bool)>, // the loops being generated, innermost last: break label, continue label, whether each is used
     checked: Vec<(String, u64)>, // range tests done since the last statement start, block boundary, label or goto: (index, size) need not be tested again
@@ -480,7 +487,11 @@ fn json_lit(s: &str) -> String {
     o.push('"'); o
 }
 
-pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, api, None, "") }
+pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, api, None, "", false) }
+/// The same with the program's tests (`test "name" { ... }`) as functions `test<k>(Ctx *, Txt *)` after the endpoints.
+pub fn generate_tests(prog: &Program, api: &Api) -> Generated { generate_with(prog, api, None, "", true) }
+/// The names of the program's tests, in order.
+pub fn test_names(api: &Api) -> Vec<String> { api.fns.iter().filter_map(|f| f.test.clone()).collect() }
 
 /// Does a program load? Its api parses, every name binds, and every endpoint compiles. The error holds every independent
 /// problem found, one per line: parsing stops at the first; binding and code generation go on to the next function or
@@ -488,7 +499,7 @@ pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, ap
 pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
     let mut api = parse(api_src)?;
     crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table())?;
-    let notes = generate(prog, &api).notes;
+    let notes = generate_tests(prog, &api).notes;
     let mut seen: Vec<&str> = Vec::new();
     let mut out: Vec<&str> = Vec::new();
     for n in &notes {
@@ -506,10 +517,17 @@ pub const RUNTIME_TYPES: &str = include_str!("../runtime/types.h");
 /// A whole program as one C translation unit: the prelude, the layout and routes as data, the C runtime, and the
 /// endpoints. `mito_*` (runtime/mito.c) is its interface. Fails if an endpoint does not compile.
 pub fn program_c(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Result<String, String> { program_c_named(prog, api, source, "mito_") }
+/// A program with its tests, and the test runner's `main` (runtime/testmain.c), as an executable's source: `mito test`.
+pub fn program_test_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Result<Vec<String>, String> {
+    Ok(vec![program_c_full(prog, api, source, "mito_", true)? + TESTMAIN])
+}
+/// The test runner (runtime/testmain.c).
+pub const TESTMAIN: &str = include_str!("../runtime/testmain.c");
 
 /// The same, its interface named `prefix`start, `prefix`handle and so on (programs of a system share one build).
-pub fn program_c_named(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefix: &str) -> Result<String, String> {
-    let g = generate_with(prog, api, source, "static ");
+pub fn program_c_named(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefix: &str) -> Result<String, String> { program_c_full(prog, api, source, prefix, false) }
+fn program_c_full(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefix: &str, tests: bool) -> Result<String, String> {
+    let g = generate_with(prog, api, source, "static ", tests);
     if let Some(n) = g.notes.first() { return Err(n.clone()); }
     // The profile was checked on `c->h->helper`; in the unit itself the helper table is the runtime's own constant
     // `mito_h`, so the optimizer sees the calls go straight to the helpers and can inline them.
@@ -522,6 +540,16 @@ pub fn program_c_named(prog: &Program, api: &Api, source: Option<(&str, &str)>, 
     o += RUNTIME_TYPES;
     o += &format!("#define MITO(x) {}##x\n", prefix);
     o += &layout_c(prog, api);
+    if tests {
+        // the tests, for the runner (MITO(run_test))
+        let names = test_names(api);
+        for k in 0..names.len() { o += &format!("static int test{}(Ctx *c, Txt *tmsg);\n", k); }
+        o += "typedef int (*TestFn)(Ctx *, Txt *);\nstatic const TestFn mito_tests[] = {";
+        for k in 0..names.len() { o += &format!(" test{},", k); }
+        o += " 0 };\nstatic const char *const mito_test_names[] = {";
+        for n in &names { o += &format!(" {},", c_lit(n.as_bytes())); }
+        o += &format!(" 0 }};\n#define MITO_NTESTS {}\n", names.len());
+    }
     o += &format!("/* the program's string literals, at the start of every request's text area */
 #define MITO_LITS_LEN {}
 static const unsigned char mito_lits[] = {{ {} }};
@@ -762,7 +790,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
 
 /// `linkage`: "static " in a whole C program (only its `mito_*` interface is external), "" when the Rust runtime looks
 /// endpoints up by name.
-fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str) -> Generated {
+fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str, tests: bool) -> Generated {
     LITS.with(|l| *l.borrow_mut() = (Vec::new(), Vec::new()));
     let mut src = String::from(PRELUDE);
     let mut notes = Vec::new();
@@ -811,6 +839,48 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             Err(why) => {
                 if let Some(sf) = source { src += &source_comment(ep, sf); src += &format!("// not compiled: {}\n", why); }
                 notes.push(match split_place(&why) { Some((place, rest)) => format!("{}{}: {}", place, ep.text, rest), None => format!("{}: {}", ep.text, why) });
+            }
+        }
+    }
+    // the tests: each a function the runner calls outside any request (it reads the state; requests change it)
+    if tests {
+        for (fk, f) in api.fns.iter().enumerate().filter(|x| x.1.test.is_some()) {
+            let k = api.fns[..fk].iter().filter(|x| x.test.is_some()).count();
+            let title = f.test.clone().unwrap_or_default();
+            let ep = Endpoint { method: "TEST".into(), segs: Vec::new(), body: Vec::new(), text: format!("test \"{}\"", title), slots: f.slots, lines: (0, 0), name: f.name.clone(), resp: crate::lang::RType::Name("null".into()), inputs: Vec::new() };
+            if writes(api, &f.body, &mut Vec::new()) {
+                let at = match f.body.first() { Some(Stmt::At(l, c)) => format!("{}:{}: ", l, c), _ => String::new() };
+                notes.push(format!("{}{}: calls a function that changes the state: a test changes it only through requests", at, ep.text));
+                continue;
+            }
+            let mut slot_kinds: Vec<((Option<u32>, u32), K)> = Vec::new();
+            let ret_kinds: Vec<(u32, K)> = Vec::new();
+            let mut tries = 0;
+            let (res, body, specs) = loop {
+                tries += 1;
+                let specs = std::cell::RefCell::new(done.clone());
+                let mut g = G::new(prog, api, &ep, &slot_kinds, &ret_kinds, &recursive, &specs);
+                g.test = true;
+                let mut env: Vec<Option<CV>> = vec![None; f.slots as usize];
+                let r = g.block(&f.body, &mut env);
+                let (widen, body, at) = (g.widen, std::mem::take(&mut g.body), g.at);
+                drop(g);
+                let r = r.map_err(|e| place_err(at, e));
+                match (r, widen) {
+                    (Err(_), Some(Widen::Slot(fr, sl, kk))) if tries < 32 => match slot_kinds.iter_mut().find(|x| x.0 == (fr, sl)) { Some(x) => x.1 = unify(x.1, kk), None => slot_kinds.push(((fr, sl), kk)) },
+                    (r, _) => break (r, body, specs.into_inner()),
+                }
+            };
+            WHY.with(|w| w.borrow_mut().clear());
+            match res.and_then(|_| check_profile(&body).map_err(|e| format!("C safety profile: {}", e))) {
+                Ok(()) => {
+                    let new = &specs[done.len()..];
+                    for sp in new { src += &format!("{}int {}{};\n", linkage, sp.name, sp.proto); }
+                    for sp in new { src += &format!("{}int {}{} {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", linkage, sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
+                    done = specs;
+                    src += &format!("\n// {}\n{}int test{}(Ctx *c, Txt *tmsg) {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; (void)tmsg; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", ep.text, linkage, k, body);
+                }
+                Err(why) => notes.push(match split_place(&why) { Some((place, rest)) => format!("{}{}: {}", place, ep.text, rest), None => format!("{}: {}", ep.text, why) }),
             }
         }
     }
@@ -879,7 +949,7 @@ fn kind(v: &CV) -> Option<K> {
         CV::Int(_) => K::Int, CV::Flt(_) => K::Flt, CV::Bool(_) => K::Bool, CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) => K::Txt,
         CV::Any(_) => K::Any, CV::Item(c, _) => K::Item(*c), CV::Ref(c, ..) => K::Ref(*c), CV::Null => K::Null,
         CV::Coll(c, _) => K::Coll(*c), CV::Plain(s, o) => K::Plain(*s, *o),
-        CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => return None,
+        CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..) => return None,
     })
 }
 /// Can a value of kind `v` be stored where kind `k` is held? (Collections and structs are places, not values: they fit
@@ -889,7 +959,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), at: (0, 0), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), at: (0, 0), test: false, loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1760,6 +1830,16 @@ impl<'p> G<'p> {
                 if let Err(e) = fits_shape(self.prog, &shape, &self.ep.resp, "") { return no(format!("the answer is {}, not Response<{}>: {}", shape, show_rtype(&self.ep.resp), e)); }
                 self.line(&format!("return {};", code));
             }
+            Stmt::Return(e) if self.ret.is_empty() && self.test => {
+                // a test's result: `true` passes, `false` fails, a text fails with it as the message (empty: passes)
+                let v = match e { Some(e) => self.expr(e, env, None)?, None => CV::Bool("1".into()) };
+                match v {
+                    CV::Bool(b) => { self.open(&format!("if (!({})) {{", b)); let t = self.txt_of(CV::Lit("returned false".into()))?; self.line(&format!("TEST_FAIL_({});", t)); self.close("}"); }
+                    v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..)) => { let t = self.txt_of(v)?; self.line(&format!("if ({}.present && {}.len > 0) TEST_FAIL_({});", t, t, t)); }
+                    _ => return no("a test returns `true` or `false`, or a text (empty when it passed, otherwise what went wrong)"),
+                }
+                self.line("return 0;");
+            }
             Stmt::Return(e) => {
                 if self.ret.is_empty() { if let Some(e) = e { self.expr(e, env, None)?; } self.line("return 0;"); return Ok(()); }
                 let v = match e { Some(e) => self.expr(e, env, None)?, None => CV::Null };
@@ -1921,6 +2001,7 @@ impl<'p> G<'p> {
             CV::Ref(c, s, k) => self.line(&format!("Val {} = {{ {} == 0 ? 0 : 5, {}, {}, 0, 0 }};", t, s, c, k)),
             v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..)) => { let x = self.txt_of(v)?; self.line(&format!("Val {} = {{ {}.present ? 4 : 0, {}.off, {}.len, 0, 0 }};", t, x, x, x)); }
             CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => return no("a collection, struct or array used as a value is not compiled yet"),
+            CV::Resp(..) => return no("an answer is read through `.status` and `.body`"),
         }
         Ok(t)
     }
@@ -2049,6 +2130,9 @@ impl<'p> G<'p> {
     }
 
     fn field(&mut self, base: CV, f: &str, dead: Option<&str>) -> R<CV> {
+        if let CV::Resp(st, body) = &base {
+            return match f { "status" => Ok(CV::Int(st.clone())), "body" => Ok(CV::Txt(body.clone())), _ => no(format!("an answer has `.status` and `.body`, not `.{}`", f)) };
+        }
         let (c, idx, path) = match base {
             CV::Item(c, idx) => (c, idx, f.to_string()),
             CV::Part(c, idx, p) => (c, idx, format!("{}.{}", p, f)),
@@ -2337,6 +2421,36 @@ impl<'p> G<'p> {
     fn builtin(&mut self, bi: B, n: &str, _args: &'p [Expr], a: Vec<CV>, lit: impl Fn(Option<&Expr>) -> Option<String>,
         int_out: impl Fn(&mut Self, String) -> CV, txt_out: impl Fn(&mut Self, String) -> CV, val_out: impl Fn(&mut Self, String) -> CV) -> R<CV> {
         let _ = (&lit, &txt_out, &val_out);
+        if bi == B::JsonField {
+            // `field(text, "name")` in a test: the field of a JSON object (a string's characters, anything else as written)
+            let [j, k] = <[CV; 2]>::try_from(a).map_err(|_| "`field` takes a JSON text and a field name: `field(r.body, \"id\")`".to_string())?;
+            let CV::Lit(key) = k else { return no("`field`'s name is a string written in the test") };
+            let j = self.txt_of(j)?;
+            let r = self.tmp("t");
+            self.line(&format!("Txt {} = {{ 0, 0, 0 }};", r));
+            self.call(&format!("c->h->json_field(c, &{}, {}, {}, &{})", j, c_lit(key.as_bytes()), key.len(), r));
+            return Ok(CV::Txt(r));
+        }
+        if let B::ReqGet | B::ReqPost | B::ReqPut | B::ReqPatch | B::ReqDelete = bi {
+            // a test's request: path, the number of body fields, then (name, value) pairs for the body and the headers
+            let method = match bi { B::ReqGet => 0, B::ReqPost => 1, B::ReqPut => 2, B::ReqPatch => 3, _ => 4 };
+            let nb = match _args.get(1) { Some(Expr::Int(n)) => *n as usize, _ => 0 };
+            let mut it = a.into_iter();
+            let path = it.next().ok_or("a request needs its path")?;
+            let path = self.txt_of(path).map_err(|_| "a request's path is a string, as in `post(\"/players\", { name: \"ann\" })`".to_string())?;
+            let _ = it.next();
+            let rest: Vec<CV> = it.collect();
+            for (i, pair) in rest.chunks(2).enumerate() {
+                let CV::Lit(key) = &pair[0] else { return no("a request's field names are names") };
+                let vv = self.val(pair[1].clone())?;
+                self.call(&format!("c->h->rq_put(c, {}, {}, {}, &{})", (i >= nb) as i32, c_lit(key.as_bytes()), key.len(), vv));
+            }
+            let (st, bd) = (self.tmp("st"), self.tmp("rb"));
+            self.line(&format!("i64 {} = 0; Txt {} = {{ 0, 0, 0 }};", st, bd));
+            self.call(&format!("c->h->rq_send(c, {}, &{}, &{}, &{})", method, path, st, bd));
+            self.checked.clear(); // the request may have changed anything a test before it proved
+            return Ok(CV::Resp(st, bd));
+        }
         let generic = match bi {
             B::Min | B::Max => !matches!(a.as_slice(), [CV::Int(_), CV::Int(_)]),
             B::Slot => !matches!(a.first(), Some(CV::Item(..) | CV::Ref(..))),
@@ -2849,7 +2963,7 @@ impl<'p> G<'p> {
                 self.line(&format!("else CALL(c->h->json_id(c, {}, {}));", t, k));
             }
             CV::Item(c, i) if self.prog.colls[c].parent.is_none() && matches!(self.prog.colls[c].kind, Kind::Pool(_)) => self.call(&format!("c->h->json_id(c, {}, {})", c, i)),
-            CV::Item(..) | CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => self.fail(500, "cannot write this value as JSON"),
+            CV::Item(..) | CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..) => self.fail(500, "cannot write this value as JSON"),
         }
         Ok(())
     }
@@ -2875,7 +2989,7 @@ pub fn check_profile(body: &str) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];

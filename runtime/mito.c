@@ -584,6 +584,9 @@ typedef struct Mito {
     u8 *areas;
     i64 clock; int fixed_clock; u64 rng;
     i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
+    u32 text_base;   /* where a request's text starts: after the literals, or after a running test's own text */
+    /* a test's request being made: its body (JSON), its headers, as names and values in the text area */
+    u8 rqbuf[16384]; u32 nrqh; struct { T k, v; } rqh[16];
     Pressure pr;
     /* the request being handled */
     u32 ei; const MitoPair *hdrs; u32 nhdrs; const MitoPair *fwd; u32 nfwd; i64 now;
@@ -1357,10 +1360,93 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
     return fail(m, 500, "unknown builtin code");
 }
 
+/* ---- a test's requests: built field by field, then sent through the program's own request handling ---- */
+static int h_rq_put(Ctx *c, int hdr, const char *p, u32 n, const Val *v) {
+    Mito *m = M_(c);
+    if (hdr) {
+        if (m->nrqh == 16) return fail(m, 500, "a test's request has at most 16 headers");
+        T k; if (t_push(m, p, n, &k)) return -1;
+        u32 s = m->text.len;
+        if (v->tag != 0 && show(m, v)) return -1;
+        m->rqh[m->nrqh].k = k; m->rqh[m->nrqh].v = t_since(m, s); m->nrqh++;
+        return 0;
+    }
+    /* the body is built where the answer goes (a test gives no answer of its own), and moved out before the request */
+    if (!a_str(&m->out, m->out.len ? "," : "{") || !a_json_str(&m->out, (const u8 *)p, n) || !a_str(&m->out, ":")) return resp_full(m);
+    return json_val(m, v);
+}
+MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn);
+static int h_rq_send(Ctx *c, int method, const Txt *path, i64 *status, Txt *body) {
+    Mito *m = M_(c);
+    static const char *const verbs[] = { "GET", "POST", "PUT", "PATCH", "DELETE" };
+    u32 bn = 0;
+    if (m->out.len) {
+        if (!a_str(&m->out, "}")) return resp_full(m);
+        if (m->out.len > sizeof m->rqbuf) return fail(m, 500, "a test's request body is over 16 KB");
+        bn = (u32)m->out.len; memcpy(m->rqbuf, m->out.p, bn); m->out.len = 0;
+    }
+    MitoPair h[16];
+    for (u32 i = 0; i < m->nrqh; i++) { h[i].k = (const char *)t_ptr(m, m->rqh[i].k); h[i].kn = m->rqh[i].k.len; h[i].v = (const char *)t_ptr(m, m->rqh[i].v); h[i].vn = m->rqh[i].v.len; }
+    u32 nh = m->nrqh; m->nrqh = 0;
+    /* the request's text goes after the test's, which stays as it is */
+    u32 keep = m->text.len, base = m->text_base;
+    m->text_base = keep;
+    int code = MITO(handle)(m, verbs[method], (u32)c_len(verbs[method]), (const char *)t_ptr(m, (T){ path->off, path->len }), path->len, h, nh, 0, 0, (const char *)m->rqbuf, bn);
+    m->text_base = base; m->text.len = keep; m->ekind = E_NONE;
+    T t; if (t_push(m, m->out.p, m->out.len, &t)) return -1;
+    m->out.len = 0;
+    *status = code; body->off = t.off; body->len = t.len; body->present = 1;
+    return 0;
+}
+/* `field(text, name)`: a top-level field of a JSON object, as text: a string's characters (escapes kept as written), anything
+   else as written; absent (null) when the object has no such field. */
+static u32 jf_skip_str(const u8 *p, u32 n, u32 i) { while (i < n && p[i] != '"') { if (p[i] == '\\') i++; i++; } return i; }
+static u32 jf_skip_ws(const u8 *p, u32 n, u32 i) { while (i < n && (p[i] == ' ' || p[i] == '\n' || p[i] == '\r' || p[i] == '\t')) i++; return i; }
+static int h_json_field(Ctx *c, const Txt *j, const char *name, u32 nn, Txt *out) {
+    Mito *m = M_(c);
+    const u8 *p = m->text.p + j->off; u32 n = j->len, i = 0;
+    out->present = 0; out->off = 0; out->len = 0;
+    while (i < n && p[i] != '{') i++;
+    i++;
+    int depth = 0;
+    while (i < n) {
+        u8 ch = p[i];
+        if (ch == '"') {
+            u32 s = i + 1; i = jf_skip_str(p, n, s); u32 e = i++;
+            if (depth != 0) continue;
+            i = jf_skip_ws(p, n, i);
+            if (i >= n || p[i] != ':') continue; /* a string value, not a key */
+            i = jf_skip_ws(p, n, i + 1);
+            int match = e - s == nn && c_eq(name, p + s, nn);
+            u32 vs = i, ve;
+            if (i < n && p[i] == '"') { vs = i + 1; i = jf_skip_str(p, n, vs); ve = i++; }
+            else {
+                int d = 0;
+                while (i < n) {
+                    u8 x = p[i];
+                    if (x == '"') i = jf_skip_str(p, n, i + 1);
+                    else if (x == '{' || x == '[') d++;
+                    else if (x == '}' || x == ']') { if (d == 0) break; d--; }
+                    else if (x == ',' && d == 0) break;
+                    i++;
+                }
+                ve = i; while (ve > vs && (p[ve - 1] == ' ' || p[ve - 1] == '\n' || p[ve - 1] == '\r' || p[ve - 1] == '\t')) ve--;
+            }
+            if (match) { out->off = j->off + vs; out->len = ve - vs; out->present = !(ve - vs == 4 && c_eq("null", p + vs, 4)); return 0; }
+            continue;
+        }
+        if (ch == '{' || ch == '[') depth++;
+        else if (ch == '}' || ch == ']') { if (depth == 0) break; depth--; }
+        i++;
+    }
+    return 0;
+}
+
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
+    h_rq_put, h_rq_send, h_json_field,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */
@@ -1391,6 +1477,7 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf;
     m->rng = seed;
     m->loop_budget = 100000000;
+    m->text_base = MITO_LITS_LEN;
     /* State of at most COMMIT_ALL_MAX is committed whole at start: committing reserves the system's commit charge, not physical memory (a page takes
        memory when first written), and then no store, add or helper needs to test or commit pages. Trims happen only under memory pressure; turning
        pressure on (set_marks) gives back what is not live and returns to committing on demand, so its accounting is exact. */
@@ -1441,7 +1528,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
 /* Handle one request, with its headers and (in a system) the fields forwarded with it. Returns the status, or 0 when
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
-    m->out.len = 0; m->text.len = MITO_LITS_LEN; m->ekind = E_NONE;
+    m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     u32 ei = route(m, (const u8 *)method, mn, t, q);
@@ -1500,6 +1587,31 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     if (m->pr.on) relieve(&m->mem, &m->pr);
     return code;
 }
+#ifdef MITO_NTESTS
+/* Run test k on this instance: 0 passed, 1 failed (its message in msg), 2 its code failed (the error in msg); *line: the line
+   of the `return` that failed it, or of the statement that failed. */
+MITO_API int MITO(run_test)(void *mp_, u32 k, char *msg, u32 cap, u32 *line) { Mito *m = (Mito *)mp_;
+    m->out.len = 0; m->text.len = MITO_LITS_LEN; m->text_base = MITO_LITS_LEN; m->ekind = E_NONE; m->nrqh = 0;
+    m->now = m->fixed_clock ? m->clock : os_now_ms();
+    m->frees.len = 0; m->sel.len = 0;
+    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p, 0, m->loop_budget };
+    Txt r = { 0, 0, 0 };
+    int res = mito_tests[k](&ctx, &r);
+    *line = ctx.at;
+    u32 n = 0;
+    if (res == 0) { msg[0] = 0; return 0; }
+    if (res == 1) { n = r.len < cap - 1 ? r.len : cap - 1; memcpy(msg, m->text.p + r.off, n); msg[n] = 0; return 1; }
+    switch (m->ekind) {
+        case E_DEAD: { const char *s = "reference is not live"; n = (u32)c_len(s); memcpy(msg, s, n); break; }
+        case E_NONE: { const char *s = "compiled code failed without a reason"; n = (u32)c_len(s); memcpy(msg, s, n); break; }
+        default: n = (u32)(m->emsg.len < cap - 1 ? m->emsg.len : cap - 1); memcpy(msg, m->ebuf, n); break;
+    }
+    msg[n] = 0;
+    return 2;
+}
+MITO_API u32 MITO(test_count)(void) { return MITO_NTESTS; }
+MITO_API const char *MITO(test_name)(u32 k) { return mito_test_names[k]; }
+#endif
 MITO_API const char *MITO(response)(void *mp_, u32 *len) { Mito *m = (Mito *)mp_; *len = m->out.len; return (const char *)m->out.p; }
 
 /* ---- in a system of workers ---- */

@@ -3,10 +3,10 @@ POST /sessions -> 201 {"token":"1.0.ce7c497a6b09c3b","slot":1}
 POST /sessions -> 400 {"error":"`name` is required"}
 POST /sessions -> 400 {"error":"`name`: expected a string"}
 POST /rooms -> 201 {"id":"0.0","name":"lobby"}
-POST /rooms -> 413 {"error":"string of 12 bytes does not fit string<8>","line":120}
+POST /rooms -> 413 {"error":"string of 12 bytes does not fit string<8>","line":147}
 POST /rooms -> 400 {"error":"`name` is required"}
 POST /rooms -> 201 {"id":"1.0","name":"r2"}
-POST /rooms -> 503 {"error":"capacity: chat.rooms.items is full (2 of 2)","line":115}
+POST /rooms -> 503 {"error":"capacity: chat.rooms.items is full (2 of 2)","line":142}
 GET /rooms -> 200 {"rooms":[{"id":"0.0","name":"lobby"},{"id":"1.0","name":"r2"}]}
 POST /rooms/0.0/messages -> 201 {"seq":1}
 POST /rooms/0.0/messages -> 201 {"seq":2}

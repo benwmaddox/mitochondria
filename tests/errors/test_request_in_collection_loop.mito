@@ -1,0 +1,4 @@
+// expect: inside a loop over a collection: a request may change the collection
+struct P { n: i64; } struct App { ps: pool<P, 8>; total: i64; } state app: App;
+@post("/p") fn add() -> Response<{}> { app.ps.add(); return ok({}); }
+test "loops" { foreach p in app.ps { post("/p"); } return true; }

@@ -1,0 +1,4 @@
+// expect: a test returns `true` or `false`, or a text
+struct P { n: i64; } struct App { ps: pool<P, 8>; total: i64; } state app: App;
+@post("/p") fn add() -> Response<{}> { app.ps.add(); return ok({}); }
+test "number" { return 3; }

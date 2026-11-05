@@ -14,7 +14,7 @@ pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul }
+pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -125,7 +125,8 @@ pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64), Item(String, Option<Str
 /// A function. A module instance's functions are named `instance.name` (written by `modules::expand`); `public` ones
 /// (`pub fn`) can be called from outside the module.
 /// `ret_opt`: declared `-> T?`: the result may be null, and a caller must check it (`if exists(x)`) or give a fallback (`or`).
-pub struct Func { pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool }
+/// `test`: a test (`test "name" { ... }`): no parameters, a result of `bool` or text, run by `mito test` only.
+pub struct Func { pub test: Option<String>, pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool }
 /// A type in a function's signature, as written: `i64`, `f64`, `bool`, `string`, a struct whose items the function takes
 /// (`Player`, or `Player in game.players` when several collections hold it), the type of a struct's field (`T.key`, for
 /// modules), each with `?` for "or null".
@@ -202,12 +203,12 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
 /// `pre`: statements an initializer (`coll.add() { f: v }`) puts before the statement it is in; `init_ok`: whether
 /// an initializer may appear here (not in a condition, a loop's clauses or a JSON array, where it would run at a
 /// different time); `tmp`: hidden locals made so far.
-struct P { t: Vec<Tok>, i: usize, lines: Vec<(u32, u32)>, pre: Vec<Stmt>, init_ok: bool, tmp: u32, in_endpoint: bool }
+struct P { t: Vec<Tok>, i: usize, lines: Vec<(u32, u32)>, pre: Vec<Stmt>, init_ok: bool, tmp: u32, in_endpoint: bool, in_test: bool }
 type R<T> = Result<T, String>;
 
 pub fn parse(src: &str) -> R<Api> {
     let (t, lines) = lex_lines(src)?;
-    let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0, in_endpoint: false };
+    let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0, in_endpoint: false, in_test: false };
     let mut api = Api::default();
     parse_items(&mut p, &mut api).map_err(|e| {
         if starts_with_place(&e) { return e; }
@@ -242,7 +243,19 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             let ret = if p.sym("->") { Some(p.pty()?) } else { None };
             let ret_opt = ret.as_ref().map_or(false, |t| t.opt);
             let body = p.block()?;
-            api.fns.push(Func { name, params, ptys, ret, body, slots: 0, public, ret_opt });
+            api.fns.push(Func { test: None, name, params, ptys, ret, body, slots: 0, public, ret_opt });
+            continue;
+        }
+        // `test "name" { ... }`: a function the test runner calls; inside, `get`, `post`, `put`, `patch`, `delete` make requests
+        if p.is_kw("test") {
+            p.i += 1;
+            let title = match p.t.get(p.i) { Some(Tok::Str(s)) => { p.i += 1; s.clone() } _ => return Err(format!("a test is named by a string: `test \"what it checks\" {{ ... }}`, found {}", p.here())) };
+            if api.fns.iter().any(|f| f.test.as_deref() == Some(title.as_str())) { return Err(format!("two tests named \"{}\"", title)); }
+            p.in_test = true;
+            let body = p.block();
+            p.in_test = false;
+            let n = api.fns.iter().filter(|f| f.test.is_some()).count();
+            api.fns.push(Func { test: Some(title), name: format!("__mito__test{}", n), params: Vec::new(), ptys: Vec::new(), ret: None, body: body?, slots: 0, public: false, ret_opt: false });
             continue;
         }
         if p.is_kw("endpoint") { return Err("endpoints are functions with an attribute: `@post(\"/path\") fn name() -> Response<T> { ... }`".into()); }
@@ -669,6 +682,22 @@ impl P {
             Some(Tok::Id(n)) => {
                 self.i += 1;
                 match n.as_str() { "true" => return Ok(Expr::Bool(true)), "false" => return Ok(Expr::Bool(false)), "null" => return Ok(Expr::Null), _ => {} }
+                if self.in_test && matches!(n.as_str(), "get" | "post" | "put" | "patch" | "delete") && self.sym("(") {
+                    // arguments: the path, how many body fields, the body's (name, value) pairs, then the headers'
+                    let path = self.expr()?;
+                    let mut pairs = |p: &mut Self| -> R<Vec<Expr>> {
+                        let mut v = Vec::new();
+                        p.eat("{")?;
+                        while !p.sym("}") { let k = p.key()?; p.eat(":")?; v.push(Expr::Str(k)); v.push(p.expr()?); p.sym(","); }
+                        Ok(v)
+                    };
+                    let body = if self.sym(",") { pairs(self)? } else { Vec::new() };
+                    let hdrs = if self.sym(",") { pairs(self)? } else { Vec::new() };
+                    self.eat(")")?;
+                    let mut a = vec![path, Expr::Int(body.len() as i64 / 2)];
+                    a.extend(body); a.extend(hdrs);
+                    return Ok(Expr::Call(n, a, CallRes::Unbound));
+                }
                 if self.sym("(") {
                     let mut a = Vec::new();
                     while !self.sym(")") { a.push(self.expr()?); self.sym(","); }
@@ -689,7 +718,7 @@ pub fn path_of(e: &Expr) -> Option<String> {
 }
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums }
+struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums, test: bool, coll_loops: u32 }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
 pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> { bind_with(api, globals, &[]) }
@@ -700,17 +729,18 @@ pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: 
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
     let mut errs = Vec::new();
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0), loops: 0, enums };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0 };
         for p in &f.params { b.declare(p, false); }
         // a full signature: every parameter's type, and the result's when the function returns a value
         if let Some(Stmt::At(l, c)) = f.body.first() { b.at = (*l, *c); }
-        if let Some(i) = f.ptys.iter().position(|t| t.is_none()) { errs.push(b.err::<()>(format!("parameter `{}` needs a type: `{}: i64` (or f64, bool, string, an item type, ...)", f.params[i], f.params[i])).unwrap_err()); continue; }
-        if f.ret.is_none() && gives_value(&f.body) { errs.push(b.err::<()>(format!("`{}` returns a value: declare its result, `fn {}(...) -> T`", f.name, f.name)).unwrap_err()); continue; }
+        if f.test.is_some() { b.test = true; b.place = format!("test \"{}\"", f.test.as_deref().unwrap_or("")); }
+        if f.test.is_none() { if let Some(i) = f.ptys.iter().position(|t| t.is_none()) { errs.push(b.err::<()>(format!("parameter `{}` needs a type: `{}: i64` (or f64, bool, string, an item type, ...)", f.params[i], f.params[i])).unwrap_err()); continue; }
+        if f.ret.is_none() && gives_value(&f.body) { errs.push(b.err::<()>(format!("`{}` returns a value: declare its result, `fn {}(...) -> T`", f.name, f.name)).unwrap_err()); continue; } }
         if let Err(e) = b.block(&mut f.body) { errs.push(e); }
         f.slots = b.max;
     }
     for e in &mut api.eps {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0 };
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         if let Err(e) = b.block(&mut e.body) { errs.push(e); continue; }
         e.slots = b.max;
@@ -829,6 +859,8 @@ impl Binder<'_> {
             Stmt::At(..) => {}
             Stmt::Let(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, false); }
             Stmt::Var(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, true); }
+            Stmt::Alloc { .. } | Stmt::Remove(..) | Stmt::Clear(..) | Stmt::Move(..) | Stmt::Fill(..) if self.test => return self.err("a test changes the state only through requests (`post(...)` and the others); it can read the state directly".into()),
+            Stmt::Assign(lhs, _) if self.test && !matches!(lhs, Expr::Var(..)) => return self.err("a test changes the state only through requests (`post(...)` and the others); it can read the state directly".into()),
             Stmt::Alloc { var, slot, coll, .. } => { self.expr(coll)?; *slot = self.declare(var, false); }
             Stmt::Assign(lhs, rhs) => {
                 self.expr(rhs)?;
@@ -841,7 +873,16 @@ impl Binder<'_> {
                 } else { self.expr(lhs)?; }
             }
             Stmt::If(c, t, e) => { self.expr(c)?; self.block(t)?; self.block(e)?; }
-            Stmt::Each(it, body) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.loops += 1; let r = self.block(body); self.loops -= 1; r?; self.names.truncate(mark); self.next = next; }
+            Stmt::Each(it, body) => {
+                let (mark, next) = (self.names.len(), self.next);
+                self.iter_head(it)?;
+                // a loop over a collection (not a range) reads its extent once: a request inside could change it
+                let over_coll = it.hi.is_none();
+                self.loops += 1; if over_coll { self.coll_loops += 1; }
+                let r = self.block(body);
+                self.loops -= 1; if over_coll { self.coll_loops -= 1; }
+                r?; self.names.truncate(mark); self.next = next;
+            }
             Stmt::Break | Stmt::Continue => if self.loops == 0 { return self.err(format!("`{}` outside a loop", if matches!(s, Stmt::Break) { "break" } else { "continue" })); },
             Stmt::ContinueHere => {}
             Stmt::MatchArms(pats, has_else) => self.match_arms(pats, *has_else)?,
@@ -926,6 +967,15 @@ impl Binder<'_> {
                 if n == "auth" { return self.err("`auth(pool)` was replaced by a session input: `who: Session from header(\"X-Session\")`".into()); }
                 for a in args.iter_mut() { self.expr(a)?; }
                 if let (Some(rest), Some(o)) = (n.strip_prefix("self."), self.owner.as_ref()) { *n = format!("{}.{}", o, rest); }
+                // a test's requests (only in tests: elsewhere `get` and the others are ordinary names)
+                if self.test {
+                    let verb = match n.as_str() { "get" => Some(B::ReqGet), "post" => Some(B::ReqPost), "put" => Some(B::ReqPut), "patch" => Some(B::ReqPatch), "delete" => Some(B::ReqDelete), "field" => Some(B::JsonField), _ => None };
+                    if let Some(b) = verb {
+                        if self.coll_loops > 0 && b != B::JsonField { return self.err(format!("`{}(...)` inside a loop over a collection: a request may change the collection; loop over a range, or collect what to send first", n)); }
+                        *res = CallRes::Builtin(b);
+                        return Ok(());
+                    }
+                }
                 *res = if let Some(k) = self.fns.iter().position(|f| f.0 == *n) {
                     if self.fns[k].1 != args.len() { return self.err(format!("`{}` takes {} arguments, given {}", n, self.fns[k].1, args.len())); }
                     if let Some(i) = n.rfind('.') { if !self.fns[k].2 && self.owner.as_deref() != Some(&n[..i]) { return self.err(format!("`{}` is private to {}", n, &n[..i])); } }

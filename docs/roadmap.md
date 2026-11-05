@@ -142,7 +142,7 @@ signature there is nothing to guess.
 
 ## Phase 3: tests in the language
 
-### 3.1 `test` declarations and `mito test`
+### 3.1 `test` declarations and `mito test` (done 2026-11-05, except the items below)
 - A test is a special case of a function, as in Stasis: `test "name" { ... }` is shorthand for a function with no parameters whose
   result is `bool` or text (`utf8<N>`), named by the string, which the test runner calls and interprets. It lives in the program file or
   in `app.test.mito` beside it:
@@ -165,6 +165,17 @@ signature there is nothing to guess.
 - The recorded form stays available for whole conversations: a `.case`-style file (requests and the answers they must get, blessed
   with `--bless`) run by `mito test app.case`, as the compiler's own tests are now.
 - Done when: the examples ship with tests run by `mito test`, and failures point at the line.
+- Done: `test "name" { }` in the program file; `get`/`post`/`put`/`patch`/`delete(path, { body fields }, { headers })` answer
+  `.status` and `.body`, `field(text, "name")` reads a top-level field of a JSON text. A test is compiled into a runner (TinyCC, or
+  `--clang`) that calls it outside any request, on a fresh instance per test with the clock at 2026-01-01 and a fixed seed; a request
+  goes through the program's own request handling, its text placed after the test's (`text_base`), so the test's strings survive.
+  Results: `true`/`false`/text as above; a failure prints the line of its `return`, an error its message and line. A test reads the
+  state but changes it only through requests (assignments, `add`, `remove` and functions that change state are errors), and may
+  not make a request inside a loop over a collection (the loop reads the collection's extent once). `mito check` compiles tests;
+  `build`, `serve` and `emit-c` never include them. The scoreboard (5 tests, the full-pool 503 one included) and chat (3, with
+  sessions) examples ship with tests; `cargo test` runs them and a program whose failing tests must name their lines.
+- Not yet: `app.test.mito` beside the program (lines would need a file offset), `--dir`, a `.case` file run by `mito test` with
+  `--bless` (the recorded form is still `cargo test cases`), tests of a system of workers, and answers stored past `let r = ...`.
 
 ## Phase 4: text
 

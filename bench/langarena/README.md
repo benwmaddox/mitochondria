@@ -18,49 +18,49 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 
 | Workload | Mitochondria s | Rust (reference) s | Mito/Rust | Rust with overflow checks s | Mito/Rust (checked) | Crystal (original) s | Mito/Crystal | audit |
 |---|---|---|---|---|---|---|---|---|
-| Base64::Decode | 1.610 | 0.184 | 8.75x | 0.183 | 8.80x | 1.134 | 1.42x | closest-possible |
-| Base64::Encode | 2.534 | 0.165 | 15.35x | 0.167 | 15.17x | 1.101 | 2.30x | closest-possible |
-| Binarytrees::Arena | 1.213 | 0.563 | 2.16x | 0.532 | 2.28x | 0.547 | 2.22x | like-for-like |
-| Binarytrees::Obj | 3.213 | 2.952 | 1.09x | 2.902 | 1.11x | 1.478 | 2.17x | like-for-like |
-| Brainfuck::Array | 1.501 | 0.915 | 1.64x | 1.337 | 1.12x | 2.104 | 0.71x | rewritten-to-match |
-| Brainfuck::Recursion | 2.203 | 1.340 | 1.64x | 1.453 | 1.52x | 1.468 | 1.50x | closest-possible |
-| Calculator::Ast | 0.235 | 0.667 | 0.35x | 0.660 | 0.36x | 0.395 | 0.60x | closest-possible |
-| Calculator::Interpreter | 0.530 | 0.883 | 0.60x | 0.893 | 0.59x | 0.497 | 1.07x | closest-possible |
-| CLBG::Fannkuchredux | 1.371 | 0.920 | 1.49x | 0.932 | 1.47x | 1.005 | 1.36x | like-for-like |
-| CLBG::Mandelbrot | 0.688 | 0.721 | 0.95x | 0.717 | 0.96x | 0.708 | 0.97x | rewritten-to-match |
-| CLBG::Nbody | 0.938 | 0.699 | 1.34x | 0.691 | 1.36x | 0.804 | 1.17x | closest-possible |
-| CLBG::Spectralnorm | 0.751 | 1.076 | 0.70x | 1.093 | 0.69x | 0.753 | 1.00x | rewritten-to-match |
-| Compress::ArithDecode | 0.978 | 1.221 | 0.80x | 1.213 | 0.81x | 0.901 | 1.09x | rewritten-to-match |
-| Compress::ArithEncode | 1.059 | 0.883 | 1.20x | 0.958 | 1.11x | 1.143 | 0.93x | like-for-like |
-| Compress::BWTDecode | 0.878 | 1.083 | 0.81x | 1.049 | 0.84x | 0.921 | 0.95x | rewritten-to-match |
-| Compress::BWTEncode | 0.553 | 0.421 | 1.31x | 0.422 | 1.31x | 1.093 | 0.51x | closest-possible |
-| Compress::HuffDecode | 1.065 | 0.621 | 1.72x | 0.615 | 1.73x | 0.897 | 1.19x | rewritten-to-match |
-| Compress::HuffEncode | 0.641 | 0.591 | 1.08x | 0.601 | 1.07x | 0.903 | 0.71x | rewritten-to-match |
-| Compress::LZWDecode | 0.227 | 1.143 | 0.20x | 1.171 | 0.19x | 0.518 | 0.44x | closest-possible |
-| Compress::LZWEncode | 0.094 | 0.527 | 0.18x | 0.514 | 0.18x | 0.844 | 0.11x | closest-possible |
-| CSV::Parse | 0.562 | 0.615 | 0.91x | 0.610 | 0.92x | 3.168 | 0.18x | closest-possible |
-| Distance::Jaro | 0.964 | 1.083 | 0.89x | 0.996 | 0.97x | 1.150 | 0.84x | rewritten-to-match |
-| Distance::NGram | 0.421 | 0.349 | 1.21x | 0.361 | 1.17x | 0.631 | 0.67x | rewritten-to-match |
-| Etc::CacheSimulation | 0.469 | 0.804 | 0.58x | 0.795 | 0.59x | 2.022 | 0.23x | rewritten-to-match |
-| Etc::GameOfLife | 1.599 | 1.929 | 0.83x | 1.933 | 0.83x | 1.817 | 0.88x | like-for-like |
-| Etc::NeuralNet | 0.799 | 0.858 | 0.93x | 0.860 | 0.93x | 0.922 | 0.87x | closest-possible |
-| Etc::Sieve | 2.279 | 1.338 | 1.70x | 1.815 | 1.26x | 2.003 | 1.14x | rewritten-to-match |
-| Etc::TextRaytracer | 0.735 | 0.614 | 1.20x | 0.631 | 1.16x | 0.795 | 0.92x | rewritten-to-match |
-| Etc::Words | 0.559 | 0.774 | 0.72x | 0.769 | 0.73x | 0.796 | 0.70x | closest-possible |
-| Graph::AStar | 0.924 | 1.273 | 0.73x | 1.304 | 0.71x | 2.041 | 0.45x | rewritten-to-match |
-| Graph::BFS | 0.986 | 0.823 | 1.20x | 0.826 | 1.19x | 1.225 | 0.80x | rewritten-to-match |
-| Graph::DFS | 0.961 | 0.716 | 1.34x | 0.732 | 1.31x | 1.034 | 0.93x | rewritten-to-match |
-| Hash::CRC32 | 0.697 | 0.837 | 0.83x | 0.830 | 0.84x | 0.807 | 0.86x | like-for-like |
-| Hash::SHA256 | 1.000 | 0.661 | 1.51x | 0.660 | 1.51x | 0.658 | 1.52x | like-for-like |
-| Matmul::Single | 4.011 | 3.222 | 1.24x | 3.228 | 1.24x | 3.078 | 1.30x | closest-possible |
-| Maze::AStar | 0.957 | 1.078 | 0.89x | 1.103 | 0.87x | 3.968 | 0.24x | rewritten-to-match |
-| Maze::BFS | 0.460 | 0.740 | 0.62x | 0.733 | 0.63x | 1.476 | 0.31x | rewritten-to-match |
-| Maze::Generator | 0.513 | 0.720 | 0.71x | 0.725 | 0.71x | 1.418 | 0.36x | rewritten-to-match |
-| Sort::Merge | 1.821 | 1.289 | 1.41x | 1.284 | 1.42x | 2.155 | 0.85x | rewritten-to-match |
-| Sort::Quick | 1.383 | 1.136 | 1.22x | 1.150 | 1.20x | 1.541 | 0.90x | rewritten-to-match |
-| Template::Parse | 0.689 | 0.811 | 0.85x | 0.876 | 0.79x | 1.831 | 0.38x | closest-possible |
+| Base64::Decode | 1.632 | 0.184 | 8.87x | 0.184 | 8.87x | 1.136 | 1.44x | closest-possible |
+| Base64::Encode | 2.507 | 0.165 | 15.19x | 0.165 | 15.19x | 1.118 | 2.24x | closest-possible |
+| Binarytrees::Arena | 1.127 | 0.543 | 2.08x | 0.522 | 2.16x | 0.538 | 2.10x | like-for-like |
+| Binarytrees::Obj | 3.686 | 2.892 | 1.27x | 2.876 | 1.28x | 1.489 | 2.48x | like-for-like |
+| Brainfuck::Array | 1.373 | 0.918 | 1.50x | 1.313 | 1.05x | 2.065 | 0.66x | rewritten-to-match |
+| Brainfuck::Recursion | 1.994 | 1.330 | 1.50x | 1.462 | 1.36x | 1.471 | 1.36x | closest-possible |
+| Calculator::Ast | 0.223 | 0.680 | 0.33x | 0.672 | 0.33x | 0.398 | 0.56x | closest-possible |
+| Calculator::Interpreter | 0.522 | 0.864 | 0.60x | 0.872 | 0.60x | 0.476 | 1.10x | closest-possible |
+| CLBG::Fannkuchredux | 1.362 | 0.912 | 1.49x | 0.923 | 1.48x | 1.018 | 1.34x | like-for-like |
+| CLBG::Mandelbrot | 0.696 | 0.709 | 0.98x | 0.723 | 0.96x | 0.690 | 1.01x | rewritten-to-match |
+| CLBG::Nbody | 0.930 | 0.712 | 1.31x | 0.690 | 1.35x | 0.795 | 1.17x | closest-possible |
+| CLBG::Spectralnorm | 0.760 | 1.099 | 0.69x | 1.097 | 0.69x | 0.744 | 1.02x | rewritten-to-match |
+| Compress::ArithDecode | 1.001 | 1.251 | 0.80x | 1.227 | 0.82x | 0.905 | 1.11x | rewritten-to-match |
+| Compress::ArithEncode | 1.049 | 0.896 | 1.17x | 0.963 | 1.09x | 1.115 | 0.94x | like-for-like |
+| Compress::BWTDecode | 0.868 | 1.082 | 0.80x | 1.069 | 0.81x | 0.923 | 0.94x | rewritten-to-match |
+| Compress::BWTEncode | 0.488 | 0.443 | 1.10x | 0.435 | 1.12x | 1.126 | 0.43x | closest-possible |
+| Compress::HuffDecode | 1.036 | 0.614 | 1.69x | 0.615 | 1.68x | 0.904 | 1.15x | rewritten-to-match |
+| Compress::HuffEncode | 0.739 | 0.594 | 1.24x | 0.602 | 1.23x | 0.908 | 0.81x | rewritten-to-match |
+| Compress::LZWDecode | 0.202 | 1.120 | 0.18x | 1.123 | 0.18x | 0.513 | 0.39x | closest-possible |
+| Compress::LZWEncode | 0.094 | 0.520 | 0.18x | 0.514 | 0.18x | 0.867 | 0.11x | closest-possible |
+| CSV::Parse | 0.580 | 0.626 | 0.93x | 0.597 | 0.97x | 3.159 | 0.18x | closest-possible |
+| Distance::Jaro | 0.958 | 1.076 | 0.89x | 0.987 | 0.97x | 1.147 | 0.84x | rewritten-to-match |
+| Distance::NGram | 0.428 | 0.344 | 1.24x | 0.361 | 1.19x | 0.638 | 0.67x | rewritten-to-match |
+| Etc::CacheSimulation | 0.471 | 0.837 | 0.56x | 0.804 | 0.59x | 1.940 | 0.24x | rewritten-to-match |
+| Etc::GameOfLife | 1.586 | 1.901 | 0.83x | 1.958 | 0.81x | 1.829 | 0.87x | like-for-like |
+| Etc::NeuralNet | 0.876 | 0.859 | 1.02x | 0.859 | 1.02x | 0.927 | 0.94x | closest-possible |
+| Etc::Sieve | 1.725 | 1.312 | 1.31x | 1.785 | 0.97x | 1.991 | 0.87x | rewritten-to-match |
+| Etc::TextRaytracer | 0.760 | 0.618 | 1.23x | 0.617 | 1.23x | 0.787 | 0.97x | rewritten-to-match |
+| Etc::Words | 0.577 | 0.783 | 0.74x | 0.775 | 0.74x | 0.788 | 0.73x | closest-possible |
+| Graph::AStar | 0.888 | 1.288 | 0.69x | 1.302 | 0.68x | 2.047 | 0.43x | rewritten-to-match |
+| Graph::BFS | 0.988 | 0.825 | 1.20x | 0.830 | 1.19x | 1.208 | 0.82x | rewritten-to-match |
+| Graph::DFS | 0.944 | 0.713 | 1.32x | 0.726 | 1.30x | 1.036 | 0.91x | rewritten-to-match |
+| Hash::CRC32 | 0.807 | 0.825 | 0.98x | 0.837 | 0.96x | 0.800 | 1.01x | like-for-like |
+| Hash::SHA256 | 0.856 | 0.663 | 1.29x | 0.662 | 1.29x | 0.654 | 1.31x | like-for-like |
+| Matmul::Single | 3.270 | 3.291 | 0.99x | 3.376 | 0.97x | 3.129 | 1.04x | closest-possible |
+| Maze::AStar | 0.944 | 1.102 | 0.86x | 1.141 | 0.83x | 4.075 | 0.23x | rewritten-to-match |
+| Maze::BFS | 0.465 | 0.760 | 0.61x | 0.763 | 0.61x | 1.514 | 0.31x | rewritten-to-match |
+| Maze::Generator | 0.525 | 0.726 | 0.72x | 0.727 | 0.72x | 1.438 | 0.36x | rewritten-to-match |
+| Sort::Merge | 1.706 | 1.300 | 1.31x | 1.304 | 1.31x | 2.201 | 0.78x | rewritten-to-match |
+| Sort::Quick | 1.406 | 1.119 | 1.26x | 1.155 | 1.22x | 1.552 | 0.91x | rewritten-to-match |
+| Template::Parse | 0.699 | 0.833 | 0.84x | 0.837 | 0.83x | 1.803 | 0.39x | closest-possible |
 
-Geometric mean of the 27 like-for-like and rewritten-to-match ports: 1.07x of Rust and 0.82x of Crystal (the 14 closest-possible ports are left out; over all 41 it is 1.06x of Rust). All 41 ports were measured together in one run (3 rounds, best of rounds, 2026-11-04). Crystal is LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
+Geometric mean of the 27 like-for-like and rewritten-to-match ports: 1.06x of Rust and 0.81x of Crystal (the 14 closest-possible ports are left out; over all 41 it is 1.04x of Rust). All 41 ports were measured together in one run (3 rounds, best of rounds, 2026-11-05, after the pool, array.move, commit-test and loop-versioning changes below). Crystal is LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
 comparable, replaced by the standard library's), run with the same runner on the same core.
 
 How it got here (Mitochondria / Rust, best of 3; each step merged): the first run had Sieve 4.93x, Fannkuchredux 2.84x, Sort::Quick 1.61x, Sort::Merge 2.54x. Stores to plain
@@ -133,4 +133,6 @@ Also added: `substr(text, from, count)` (a piece of a string sharing its bytes, 
 
 `wrapping_add`, `wrapping_sub` and `wrapping_mul` (two's-complement arithmetic; the ordinary operators fail the request on overflow) were added for Calculator::Interpreter.
 
-Pool `add` was sped up afterwards (Binarytrees::Arena 3.76x to 2.16x of Rust, same-run table row above updated; the other pool-heavy ports measured within noise): a fast path for adding at the high-water mark in a pool with one instance and no generations or nested collections, `coll.clear()` zeroing the used slots in one pass per column (so refilling finds zeroed memory), and a small inline check-and-log for the few bytes each add touches. `array.move` now saves and commits only the range it writes; copying into a far-away range had made it pay for everything in between (200x on LZWDecode's copy into a 1 MB array).
+Pool `add` was sped up afterwards (Binarytrees::Arena 3.76x to about 2x of Rust; the other pool-heavy ports measured within noise): a fast path for adding at the high-water mark in a pool with one instance and no generations or nested collections, `coll.clear()` zeroing the used slots in one pass per column (so refilling finds zeroed memory), and a small inline check-and-log for the few bytes each add touches. `array.move` now saves and commits only the range it writes; copying into a far-away range had made it pay for everything in between (200x on LZWDecode's copy into a 1 MB array).
+
+Then two cuts to the per-store tests (2026-11-05): stores to live items no longer test whether their page is committed (`add` commits an item's memory and trimming never takes back a live range), and loops are versioned: when a loop's array indexes are its counter (or a variable it steps up to a limit) plus or minus a value the loop does not change, a test before the loop checks that every index stays in its array and saves the stored ranges to the undo log in one pass, and the loop then runs without per-access range and undo-log tests (the checked loop runs otherwise, and for loops of fewer than 32 steps). A/B against the previous compiler on the same core: Sieve 2.33 to 1.77 s, SHA256 1.02 to 0.86 s, Sort::Merge 1.93 to 1.74 s; Fannkuch, Quick, CRC32, GameOfLife within noise.

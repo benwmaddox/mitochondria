@@ -818,3 +818,7 @@ geometric mean 1.11x of Rust over the 28 like-for-like and rewritten-to-match po
 fastest: Compress::LZWEncode (0.18x, a different dictionary structure than the reference), Calculator::Ast (0.35x, bump nodes), Etc::CacheSimulation (0.59x).
 
 A mistake found on the way: a first version of the per-iteration text-area release called into the runtime on every iteration of every loop and made the store-heavy loops 8-14% slower (Sieve 2.26 s to 2.48 s, SHA256 1.01 s to 1.16 s); it now emits the call only for loop bodies whose code can build a string, and the timings are back (A/B against the earlier compiler on the same core: Sieve 2.27 / 2.29, SHA256 1.01 / 1.00).
+
+## Round 24: fewer per-store tests (2026-11-05)
+
+Pool add fast path and bulk zeroing in clear (Binarytrees::Arena 3.76x to about 2x of Rust), array.move saving only its destination, no commit test on stores to live items, and loop versioning (a guard before a loop proves its indexes in range and saves the stored ranges at once). Sieve 2.33 to 1.77 s, SHA256 1.02 to 0.86 s, Sort::Merge 1.93 to 1.74 s (A/B on one core). Full LangArena run after all of it: 1.06x of Rust over the 27 like-for-like and rewritten-to-match ports (0.81x of Crystal), 1.04x over all 41. A measuring mistake on the way: a crashed script left a server on its port and later comparisons were silently served by that stale build; scripts now must check the port is free.

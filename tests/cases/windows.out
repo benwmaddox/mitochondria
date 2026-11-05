@@ -1,0 +1,4 @@
+POST /a -> 200 {"before":"true","after":"one+two","kept":"one","note":"xy","same":true}
+state <plain values> 20
+state app.notes 30
+memory reserved=8192 committed=8192 live=50

@@ -1,0 +1,21 @@
+// a `let` that names a text field is a window onto it: no copy, and a later change to the field shows through it; a `var` holds a copy
+--- program
+struct Note { text: string<16>; }
+struct App { title: string<16>; notes: pool<Note, 4>; }
+state app: App;
+
+@post("/a")
+fn a() -> Response<{ before: string, after: string, kept: string, note: string, same: bool }> {
+    app.title = "one";
+    let t = app.title;
+    var copy = app.title;
+    let before = t == "one";
+    app.title += "+two";
+    let n = app.notes.add();
+    n.text = "x";
+    let w = n.text;
+    n.text += "y";
+    return ok({ before: str(before), after: t, kept: copy, note: w, same: w == n.text });
+}
+--- requests
+POST /a

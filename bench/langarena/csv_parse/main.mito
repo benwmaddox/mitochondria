@@ -4,34 +4,17 @@
 // benchmark harness formats and hashes them exactly as the reference does. The text is built in prepare with the reference's pieces and random sequence; a decimal is written as its ten digits (the random
 // numbers are multiples of 1/139968, so the correctly rounded ten digits are an exact integer division, never a tie) and read back as digits / 10^10, which is the correctly rounded value of the decimal text
 // (both are exact doubles). The parser is a quote-aware field scanner: a quoted field ends at a quote not followed by another, a record at a newline outside quotes. The reference's simd_csv is a SIMD library.
-struct Csv { text: u8[12582912]; text_len: i64; rows: i64; last: i64; x_avg: f64; y_avg: f64; z_avg: f64; }
+struct Csv { text: ascii<12582912>; rows: i64; last: i64; x_avg: f64; y_avg: f64; z_avg: f64; }
 state c: Csv;
 
-fn put(literal: string) {
-    foreach index in 0..len(literal) - 1 { c.text[c.text_len] = literal[index]; c.text_len = c.text_len + 1; }
-}
-fn put_byte(byte: i64) { c.text[c.text_len] = byte; c.text_len = c.text_len + 1; }
-fn put_int(value: i64) {
-    var digits = 1;
-    var rest = value;
-    foreach step in 0..19 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
-    var slot = c.text_len + digits - 1;
-    var remaining = value;
-    foreach step in 0..digits - 1 {
-        c.text[slot] = 48 + remaining % 10;
-        remaining = remaining / 10;
-        slot = slot - 1;
-    }
-    c.text_len = c.text_len + digits;
-}
 // a random number n / 139968 written as 0.dddddddddd: the ten digits are round(n * 10^10 / 139968), exact in integers
 fn put_digits(state: i64) {
     let digits = (state * 20000000000 + 139968) / 279936;
-    put("0.");
+    c.text += "0.";
     var place = 1000000000;
     var rest = digits;
     foreach step in 0..9 {
-        put_byte(48 + rest / place);
+        c.text += rest / place;
         rest = rest % place;
         place = place / 10;
     }
@@ -45,20 +28,21 @@ fn next_state() -> i64 {
 fn prepare(rows: i64 in 1..120000) -> Response<{}> {
     c.rows = rows;
     c.last = 42;
-    c.text_len = 0;
+    c.text = "";
     foreach i in 0..rows - 1 {
         // "point <letter>\n, ""<i % 100>""",x,,z,"[<flag>\n, <i % 100>]",y
-        put_byte(34); put("point "); put_byte(65 + i % 26); put_byte(92); put_byte(110); put(", "); put_byte(34); put_byte(34); put_int(i % 100); put_byte(34); put_byte(34); put_byte(34); put(",");
+        c.text += "\"point " + substr("ABCDEFGHIJKLMNOPQRSTUVWXYZ", i % 26, 1) + "\\n, \"\"" + (i % 100) + "\"\"\",";
         let x_state = next_state();
         let z_state = next_state();
         let y_state = next_state();
         put_digits(x_state);
-        put(",,");
+        c.text += ",,";
         put_digits(z_state);
-        put(",");
-        put_byte(34); put("["); if i % 2 == 0 { put("true"); } else { put("false"); } put_byte(92); put_byte(110); put(", "); put_int(i % 100); put("]"); put_byte(34); put(",");
+        c.text += ",\"[";
+        if i % 2 == 0 { c.text += "true"; } else { c.text += "false"; }
+        c.text += "\\n, " + (i % 100) + "]\",";
         put_digits(y_state);
-        put("\n");
+        c.text += "\n";
     }
     return ok({});
 }
@@ -82,7 +66,7 @@ fn parse_decimal(from: i64, to: i64) -> f64 {
     return mantissa / scale;
 }
 fn one_run() {
-    let size = c.text_len;
+    let size = len(c.text);
     var at = 0;
     var x_sum = 0.0;
     var y_sum = 0.0;
@@ -127,6 +111,6 @@ fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run();
 @get("/result")
 fn result() -> Response<{ x: f64, y: f64, z: f64, hash: i64 }> {
     var hash = 5381;
-    foreach index in 0..c.text_len - 1 { hash = (hash * 33 + c.text[index]) % 4294967296; }
+    foreach index in 0..len(c.text) - 1 { hash = (hash * 33 + c.text[index]) % 4294967296; }
     return ok({ "x": c.x_avg, "y": c.y_avg, "z": c.z_avg, "hash": hash });
 }

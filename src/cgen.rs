@@ -457,6 +457,7 @@ struct G<'p> {
     loop_hint: Option<(i64, i64)>, // the next range loop's counter interval, proven by a versioning guard (its fast copy)
     at: (u32, u32), // the source line and column of the statement being generated (for error messages)
     test: bool, // generating a test: `return` gives its result
+    str_lens: std::collections::HashMap<usize, String>, // plain text fields' lengths read before a loop that writes no state (by offset)
     loop_n: u32, // labels of loops, numbered on their own
     loops: Vec<(String, String, bool, bool)>, // the loops being generated, innermost last: break label, continue label, whether each is used
     checked: Vec<(String, u64)>, // range tests done since the last statement start, block boundary, label or goto: (index, size) need not be tested again
@@ -964,7 +965,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), at: (0, 0), test: false, loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1429,9 +1430,14 @@ impl<'p> G<'p> {
             self.line(&format!("if ({guard} && !({vmin} >= -{BIG} && {vmin} <= {BIG} && {vmax} >= -{BIG} && {vmax} <= {BIG})) {guard} = 0;"));
             // a short loop keeps its per-access tests: the test and the bulk save would cost more than they save
             self.line(&format!("if ({guard} && {vmax} - {vmin} < 32) {guard} = 0;"));
+            // a loop that writes no state cannot change a text field's length: its reads by index are bounded by the length read here
+            let reads_only = !writes(self.api, body, &mut Vec::new());
             for site in sites {
-                let CV::PlainArr(off, e, n) = self.expr(site.arr, env, None)? else { continue };
-                let esz = self.prog.plain_size(&e).0;
+                let (off, n, esz) = match self.expr(site.arr, env, None)? {
+                    CV::PlainArr(off, e, n) => (off, format!("{}LL", n), self.prog.plain_size(&e).0),
+                    CV::PlainStr(off) if reads_only && !site.store => (off + 4, format!("(i64)LD_U32({}, 0)", off), 1),
+                    _ => continue,
+                };
                 let (smin, smax) = match site.off {
                     Off::Zero => (vmin.clone(), vmax.clone()),
                     Off::Plus(c) | Off::Minus(c) | Off::From(c) => {
@@ -1445,7 +1451,7 @@ impl<'p> G<'p> {
                     }
                 };
                 let nonempty = format!("{} >= {}", vmax, vmin);
-                self.line(&format!("if ({guard} && {nonempty} && !({smin} >= 0 && {smax} < {n}LL)) {guard} = 0;"));
+                self.line(&format!("if ({guard} && {nonempty} && !({smin} >= 0 && {smax} < {n})) {guard} = 0;"));
                 if site.store { saves.push((nonempty, format!("{}ULL + (u64)({}) * {}ULL", off, smin, esz), format!("(u64)({} - {} + 1) * {}ULL", smax, smin, esz))); }
                 fast.insert(site.idx as *const Expr);
             }
@@ -1733,6 +1739,21 @@ impl<'p> G<'p> {
                     if changes_instance(self.api, n, body) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
                 let collect = allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
+                // a loop that writes no state cannot change a text field's length: read it once, here, for the reads by index inside
+                let mut cached = Vec::new();
+                if !writes(self.api, body, &mut Vec::new()) {
+                    let mut bases = Vec::new();
+                    index_bases(body, &mut bases);
+                    for arr in bases {
+                        if let CV::PlainStr(off) = self.expr(arr, env, None)? {
+                            if self.str_lens.contains_key(&off) { continue; }
+                            let t = self.tmp("sl");
+                            self.line(&format!("i64 {} = (i64)LD_U32({}, 0);", t, off));
+                            self.str_lens.insert(off, t);
+                            cached.push(off);
+                        }
+                    }
+                }
                 match self.version_guard(it, body, env)? {
                     Some((guard, sites, hints, counter)) => {
                         // the fast copy: the guard proved every listed array access of the loop in range and saved the stored ranges to the undo log
@@ -1755,6 +1776,7 @@ impl<'p> G<'p> {
                     }
                     None => self.loop_stmt(it, body, env, collect)?,
                 }
+                for off in cached { self.str_lens.remove(&off); }
             }
             Stmt::Move(arr, from, to, count) => {
                 let av = self.expr(arr, env, None)?;
@@ -2147,7 +2169,8 @@ impl<'p> G<'p> {
                     // a plain string: its length (u32) then its bytes, read where they are
                     CV::PlainStr(off) => {
                         let k = self.hold_int(k);
-                        self.line(&format!("if (RANGE_({k} < 0 || (u64){k} >= (u64)LD_U32({off}, 0))) FAIL(400, \"string index out of range\", 25);"));
+                        let len = self.str_lens.get(&off).cloned().unwrap_or_else(|| format!("(i64)LD_U32({}, 0)", off));
+                        if !self.fast_sites.contains(&(&**k_expr as *const Expr)) { self.line(&format!("if (RANGE_({k} < 0 || {k} >= {len})) FAIL(400, \"string index out of range\", 25);")); }
                         Ok(CV::Int(format!("(i64)LD_U8({}, {})", off + 4, k)))
                     }
                     _ => { self.fail(500, "cannot index this value"); Ok(CV::Null) }
@@ -3506,6 +3529,28 @@ fn returns_value(stmts: &[Stmt]) -> bool {
 }
 
 /// An error with the place (`line:col: `) of the statement it came from, unless it has one already.
+/// The state paths indexed anywhere in these statements (`x.text[i]`: `x.text`), loops and branches included.
+fn index_bases<'p>(stmts: &'p [Stmt], out: &mut Vec<&'p Expr>) {
+    fn ex<'p>(e: &'p Expr, out: &mut Vec<&'p Expr>) {
+        match e {
+            Expr::Index(a, i) => { if state_path(a) && !out.iter().any(|x| format!("{:?}", x) == format!("{:?}", a)) { out.push(a); } ex(a, out); ex(i, out); }
+            Expr::Field(b, _) | Expr::Un(_, b) => ex(b, out),
+            Expr::Bin(_, a, b) => { ex(a, out); ex(b, out); }
+            Expr::Call(_, args, _) => for a in args { ex(a, out); },
+            _ => {}
+        }
+    }
+    for st in stmts {
+        match st {
+            Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
+            Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
+            Stmt::If(c, t, e) => { ex(c, out); index_bases(t, out); index_bases(e, out); }
+            Stmt::Each(it, b) => { ex(&it.coll, out); if let Some(h) = &it.hi { ex(h, out); } if let Some(w) = &it.whil { ex(w, out); } if let Some(w) = &it.wher { ex(w, out); } index_bases(b, out); }
+            _ => {}
+        }
+    }
+}
+
 /// `target = a + b + ...` or `target += ...` (the parser's `target = target + ...`) on a string field, as pieces to append in place:
 /// (whether to empty it first, the pieces). Only a join that is surely text: an append (it starts with the field itself), or an
 /// assignment starting with a literal or `str(...)` and not reading the field. A right operand that is itself such a join is split too.

@@ -212,7 +212,13 @@ or had the benchmark harness generate the text). There are two text kinds, both 
   string results become errors that say what to write.
 - Done so far (2026-11-05): in-place appends and assignments-as-appends to fields (`tests/cases/append.case`); text windows for
   `let` of plain and item text fields (`windows.case`; reading through one still copies at the use, to be removed); `request` storage
-  (`request.case`). Next: the text ports, then string locals and string results as errors.
+  (`request.case`). `substr` of a text field is a window (`windows.case`), and copying a window into a field is one memcpy from field
+  to field (`row.name = substr(g.text, a, n)`; no separate copy function). Reads by index of a plain text field: the length is read
+  once before a loop that writes no state, and loop versioning bounds them as it does arrays.
+- Text ports (5 rounds, median, against the byte-array versions): Calculator::Ast 0.201 s (was 0.209), Calculator::Interpreter
+  0.359 s (0.385: names are windows, not copies), CSV::Parse 0.573 s (0.602), Template::Parse 0.651 s (0.644; its output stays a byte
+  array written a byte at a time, as the reference pushes characters). Their `put`/`put_int` helpers are gone.
+- Next: `ascii` rules (bytes 0..127; writing by index), string locals and string results as errors, Base64's message.
 
 ## Phase 5: later
 

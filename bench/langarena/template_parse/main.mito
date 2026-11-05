@@ -2,32 +2,16 @@
 // the value of the variable of that name (trimmed; unknown names give nothing), copying everything else; the text is built in prepare from the reference's pieces (a table of `count` rows, three
 // variables per row, a comment every third row, a few single-brace pieces the scanner leaves alone) together with the variables. The checksum adds the rendered length of every run, warmup
 // included, and the hash of the last rendered text. The reference's HashMap<String, String> variables are lib/strmap.mito mapping each name to a number that names its value text (a table of 23
-// texts); String texts are byte arrays (the text, 8 MB, and the rendered output), written a byte at a time; a name is cut out of the text with text_from (the bytes copied into the
-// request's text area, where the reference borrows them).
+// texts); the template is an ascii<8 MB> field built with `+=`, the rendered output a byte array written a byte at a time; a name is a window onto the text
+// (`substr`, nothing copied), as the reference borrows it.
 struct T {
-    text: u8[8388608]; text_len: i64; rendered: u8[8388608] unlogged; rendered_len: i64;
+    text: ascii<8388608>; rendered: u8[8388608] unlogged; rendered_len: i64;
     vars: strmap<150016>;
     names: u8[256]; name_off: i32[32]; name_len: i32[32]; names_len: i64;
     count: i64; result: i64;
 }
 state t: T;
 
-fn put(literal: string) {
-    foreach index in 0..len(literal) - 1 { t.text[t.text_len] = literal[index]; t.text_len = t.text_len + 1; }
-}
-fn put_int(value: i64) {
-    var digits = 1;
-    var rest = value;
-    foreach step in 0..19 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
-    var slot = t.text_len + digits - 1;
-    var remaining = value;
-    foreach step in 0..digits - 1 {
-        t.text[slot] = 48 + remaining % 10;
-        remaining = remaining / 10;
-        slot = slot - 1;
-    }
-    t.text_len = t.text_len + digits;
-}
 // value text number `code`: the characters kept in `names`
 fn define(code: i64, literal: string) {
     t.name_off[code] = t.names_len;
@@ -45,35 +29,35 @@ fn prepare(count: i64 in 1..60000) -> Response<{}> {
     define(1, "John"); define(2, "Jane"); define(3, "Bob"); define(4, "Alice"); define(5, "Charlie"); define(6, "Diana"); define(7, "Sarah"); define(8, "Mike");
     define(9, "Smith"); define(10, "Johnson"); define(11, "Brown"); define(12, "Taylor"); define(13, "Wilson"); define(14, "Davis"); define(15, "Miller"); define(16, "Jones");
     define(17, "New York"); define(18, "Los Angeles"); define(19, "Chicago"); define(20, "Houston"); define(21, "Phoenix"); define(22, "San Francisco");
-    t.text_len = 0;
-    put("<html><body>");
-    put("<h1>{{TITLE}}</h1>");
+    t.text = "";
+    t.text += "<html><body>";
+    t.text += "<h1>{{TITLE}}</h1>";
     t.vars.put("TITLE", 0);
-    put("<p>");
-    put("Lorem {ipsum} dolor {sit} amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore {et} dolore magna aliqua. ");
-    put("</p>");
-    put("<table>");
+    t.text += "<p>";
+    t.text += "Lorem {ipsum} dolor {sit} amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore {et} dolore magna aliqua. ";
+    t.text += "</p>";
+    t.text += "<table>";
     foreach i in 0..count - 1 {
-        if i % 3 == 0 { put("<!-- {comment} -->"); }
-        put("<tr>");
-        put("<td>{{ FIRST_NAME"); put_int(i); put(" }}</td>");
-        put("<td>{{LAST_NAME"); put_int(i); put("}}</td>");
-        put("<td>{{  CITY"); put_int(i); put("  }}</td>");
+        if i % 3 == 0 { t.text += "<!-- {comment} -->"; }
+        t.text += "<tr>";
+        t.text += "<td>{{ FIRST_NAME"; t.text += i; t.text += " }}</td>";
+        t.text += "<td>{{LAST_NAME"; t.text += i; t.text += "}}</td>";
+        t.text += "<td>{{  CITY"; t.text += i; t.text += "  }}</td>";
         t.vars.put("FIRST_NAME" + i, 1 + i % 8);
         t.vars.put("LAST_NAME" + i, 9 + i % 8);
         t.vars.put("CITY" + i, 17 + i % 6);
-        put("<td>{balance: "); put_int(i % 100); put("}</td>");
-        put("</tr>\n");
+        t.text += "<td>{balance: "; t.text += i % 100; t.text += "}</td>";
+        t.text += "</tr>\n";
     }
-    put("</table>");
-    put("</body></html>");
+    t.text += "</table>";
+    t.text += "</body></html>";
     t.result = 0;
     t.rendered_len = 0;
     return ok({});
 }
 
 fn one_run() {
-    let size = t.text_len;
+    let size = len(t.text);
     var at = 0;
     var out = 0;
     foreach step in 0..size while at < size {
@@ -87,7 +71,7 @@ fn one_run() {
                 var high = close;
                 foreach skip in 0..size while low < high && (t.text[low] == 32 || t.text[low] == 9 || t.text[low] == 10 || t.text[low] == 13) { low = low + 1; }
                 foreach skip in 0..size while high > low && (t.text[high - 1] == 32 || t.text[high - 1] == 9 || t.text[high - 1] == 10 || t.text[high - 1] == 13) { high = high - 1; }
-                let code = t.vars.get_or(text_from(t.text, low, high - low), -1);
+                let code = t.vars.get_or(substr(t.text, low, high - low), -1);
                 if code >= 0 {
                     foreach index in 0..t.name_len[code] - 1 { t.rendered[out + index] = t.names[t.name_off[code] + index]; }
                     out = out + t.name_len[code];

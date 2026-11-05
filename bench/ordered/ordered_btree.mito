@@ -3,7 +3,7 @@
 // request looping inside the program (a request costs hundreds of microseconds of connection handling), timed by the
 // driver (bench/ordered/run.py). `now()` is the request's start time, not a clock.
 struct KV { k: i64; v: i64; }
-struct Bench { m: btree<KV, 1048576, k>; sum: i64; }
+struct Bench { m: btree<KV, 1048576, k> unlogged; sum: i64; } // the map kept out of the undo log, as a Rust map has no rollback
 state b: Bench;
 
 @post("/insert/{n}")

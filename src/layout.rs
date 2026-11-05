@@ -324,7 +324,7 @@ impl Program {
                 prog.globals[g].coll = Some(cid);
             } else if let Ty::Struct(s) = ty {
                 let base = prog.globals[g].off;
-                prog.plain_struct_colls(s, base, &name, &mut cur)?;
+                prog.plain_struct_colls(s, base, &name, &mut cur, false)?;
             } else if contains_coll(&prog, &ty) {
                 return Err(format!("`{}`: collections inside fixed arrays are not supported; use a nested list", name));
             }
@@ -427,16 +427,18 @@ impl Program {
             if unl { let (sz, _) = self.plain_size(t); self.unlogged.push((o, o + up(sz, 64))); }
         }
     }
-    fn plain_struct_colls(&mut self, s: usize, base: usize, path: &str, cur: &mut usize) -> Result<(), String> {
+    /// `all`: the struct is inside an `unlogged` field, so its collections are unlogged too.
+    fn plain_struct_colls(&mut self, s: usize, base: usize, path: &str, cur: &mut usize, all: bool) -> Result<(), String> {
         let fields = self.structs[s].fields.clone();
         for (k, (n, t)) in fields.iter().enumerate() {
             let p = format!("{}.{}", path, n);
+            let unl = all || self.structs[s].unlogged[k];
             if t.is_coll() {
-                let cid = self.build_coll(&p, t, 1, None, self.structs[s].unlogged[k], cur, 0)?;
+                let cid = self.build_coll(&p, t, 1, None, unl, cur, 0)?;
                 self.plain_colls.push((base, s, n.clone(), cid));
             } else if let Ty::Struct(c) = t {
                 let o = base + self.structs[s].offs[k];
-                self.plain_struct_colls(*c, o, &p, cur)?;
+                self.plain_struct_colls(*c, o, &p, cur, unl)?;
             } else if contains_coll(self, t) {
                 return Err(format!("`{}`: collections inside fixed arrays are not supported; use a nested list", p));
             }

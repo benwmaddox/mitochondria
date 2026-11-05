@@ -179,6 +179,8 @@ fn expand_fields(state: &str, api: &mut String) -> Result<String, String> {
     let mut added = String::new();
     for s in &structs {
         for (fname, ty, range) in &s.fields {
+            // `m: ordmap<N> unlogged;`: the instance's state (its items and plain values) is kept out of the undo log
+            let (ty, unlogged) = match ty.strip_suffix("unlogged") { Some(t) if t.ends_with(char::is_whitespace) => (t.trim_end(), true), _ => (ty.as_str(), false) };
             let Some((m, args)) = ty.split_once('<') else { continue };
             if !STDLIB.iter().any(|x| x.0 == m.trim()) { continue; }
             let Some(args) = args.trim().strip_suffix('>') else { continue };
@@ -191,7 +193,7 @@ fn expand_fields(state: &str, api: &mut String) -> Result<String, String> {
             }
             let inst = format!("{}.{}", ps[0], fname);
             let (d, line, funcs) = instantiate(&inst, m.trim(), &args)?;
-            edits.push((range.clone(), format!("__mito__{}__state", inst.replace('.', "__"))));
+            edits.push((range.clone(), format!("__mito__{}__state{}", inst.replace('.', "__"), if unlogged { " unlogged" } else { "" })));
             added += &d; added += &line;
             *api += &funcs;
         }

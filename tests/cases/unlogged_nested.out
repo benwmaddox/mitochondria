@@ -1,0 +1,8 @@
+POST /put/3/false -> 200 {}
+POST /put/4/true -> 409 {"error":"failed after writing","line":12}
+GET /look/4 -> 200 {"m":40,"n":-1,"inner":2,"inner_total":7,"logged":1,"logged_total":3}
+GET /look/3 -> 200 {"m":30,"n":30,"inner":2,"inner_total":7,"logged":1,"logged_total":3}
+state <plain values> 1024
+state app.inner.items 40
+state app.logged.items 32
+memory reserved=12288 committed=12288 live=1096

@@ -31,7 +31,7 @@ state chat: Chat;
 **Values.** Scalars (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `bool`), enums (`enum Op { Plus, Minus }`, stored in the smallest
 integer), text of at most N bytes (`utf8<N>`, also written `string<N>`, or `ascii<N>` for bytes 0..127) and `T[N]` (exactly N). Code reads maxima rather than repeating them (`x.capacity()`, `maxlen(s)`). An integer field may declare a range,
 `limit: i64 in 0..3000000` (both ends included, 0 inside, since state starts zeroed): every write is tested (400 outside), and reads let the
-compiler drop overflow and index tests on what is computed from them. `unlogged` after a plain field or a collection keeps it out of the
+compiler drop overflow and index tests on what is computed from them. `unlogged` after a plain field, a collection, a struct field (with the collections inside it) or a module instance (`m: ordmap<N> unlogged;`) keeps it out of the
 undo log: a failed request leaves what it wrote there (for scratch state rebuilt by every request); removals still wait for success.
 
 **`list<T, N>`** keeps insertion order: add, read by position, walk forwards or in `reverse`. When full it fails

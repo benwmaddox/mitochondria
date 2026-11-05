@@ -108,6 +108,11 @@ struct H {
 /* The undo log and the page commit flags do not change for the length of a request, so a generated function keeps them in locals (jn_, dr_,
    cm_) and a store of a naturally aligned scalar (never across a 64-byte line or a page) is: commit test (pool items only), undo-log bit test,
    the store; the runtime is called only the first time a line is written or a page is touched. */
+#define NADD(r, x, y) i64 r = (x) + (y)
+#define NSUB(r, x, y) i64 r = (x) - (y)
+#define NMUL(r, x, y) i64 r = (x) * (y)
+#define NDIV(r, x, y) i64 r = (x) / (y)
+#define NMOD(r, x, y) i64 r = (x) % (y)
 #define SAVE_(a, size) do { if (UNLIKELY(jn_ && !((dr_[(a) >> 9] >> (((a) >> 6) & 7)) & 1))) { CALL(c->h->save_line(c, (a), (size))); } } while (0)
 #define COMMIT_(a, size) do { if (UNLIKELY(!cm_[(a) >> 12])) { CALL(c->h->commit_range(c, (a), (size))); } } while (0)
 #ifdef __clang__
@@ -358,7 +363,7 @@ struct G<'p> {
     specs: &'p std::cell::RefCell<Vec<Spec>>,            // C functions generated for recursive functions
     dep: bool,                                           // generating a C function: its call depth is the parameter `dep`
     inl: u32,                                            // inlined calls the code being generated is nested in
-    bounds: Vec<(String, i64, i64)>,                     // loop counters with constant bounds [lo, hi): in range for a fixed array of that size
+    ranges: std::collections::HashMap<String, (i64, i64)>, // C names that never change after they are set (inputs, loop counters, results of arithmetic) with an inclusive interval their value is proven to lie in
     or_dead: Option<String>,                             // inside or()/exists(): where a dead reference or slot not live goes
 }
 type R<T> = Result<T, String>;
@@ -777,7 +782,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, recursive, specs, dep: false, inl: 0, bounds: Vec::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -807,7 +812,15 @@ impl<'p> G<'p> {
                 (None, false) => { let msg = format!("`{}` is required", inp.name); self.line(&format!("if ({}.tag == 0) FAIL(400, {}, {});", v, c_lit(msg.as_bytes()), msg.len())); }
             }
             let cv = match &inp.ty {
-                InTy::Int(..) => { let x = self.tmp("i"); self.line(&format!("i64 {} = {}.i;", x, v)); CV::Int(x) }
+                InTy::Int(a, b) => {
+                    let x = self.tmp("i");
+                    self.line(&format!("i64 {} = {}.i;", x, v));
+                    // a value the runtime range-checked, or a default that is an integer literal inside the range (an optional input
+                    // with no default can be absent, and then it is 0)
+                    let inside = match &inp.default { None => !inp.optional, Some(Expr::Int(d)) => d >= a && d <= b, _ => false };
+                    if inside { self.ranges.insert(x.clone(), (*a, *b)); }
+                    CV::Int(x)
+                }
                 InTy::Flt => { let x = self.tmp("f"); self.line(&format!("double {} = {}.f;", x, v)); CV::Flt(x) }
                 InTy::Bool => { let x = self.tmp("b"); self.line(&format!("int {} = {}.i != 0;", x, v)); CV::Bool(x) }
                 InTy::Str(..) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, v, v, v)); CV::Txt(t) }
@@ -1025,11 +1038,16 @@ impl<'p> G<'p> {
         if ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"].contains(&t.as_str()) { format!("{}_{}", p, self.n) } else { t } // never a type's name
     }
     fn line(&mut self, s: &str) { for _ in 0..self.depth + 1 { self.body.push_str("    "); } self.body.push_str(s); self.body.push('\n'); }
+    /// The interval a C integer is proven to lie in: a literal, or a name recorded in `ranges` (names that are never assigned again).
+    fn interval(&self, s: &str) -> Option<(i64, i64)> {
+        if let Some(d) = s.strip_suffix("LL") { if let Ok(v) = d.parse::<i64>() { return Some((v, v)); } }
+        self.ranges.get(s).copied()
+    }
     /// Check that array position `k` is in 0..n: nothing for a constant in range, else a comparison in line, with the
     /// helper (which builds the error) only when it fails.
     fn elem_check(&mut self, k: &str, n: u64) {
         if let Some(v) = k.strip_suffix("LL").and_then(|d| d.parse::<u64>().ok()) { if v < n { return; } }
-        if self.bounds.iter().any(|(name, lo, hi)| name == k && *lo >= 0 && *hi as u64 <= n) { return; }
+        if let Some((lo, hi)) = self.interval(k) { if lo >= 0 && (hi as u64) < n { return; } }
         self.line(&format!("if (UNLIKELY({k} < 0 || {k} >= {n}LL)) {{"));
         self.depth += 1;
         self.call(&format!("c->h->elem(c, {}, {})", k, n));
@@ -1690,7 +1708,36 @@ impl<'p> G<'p> {
             let mac = match op { "+" => "ADD", "-" => "SUB", "*" => "MUL", "/" => "DIV", "%" => "MOD", _ => "" };
             match op {
                 "<" | "<=" | ">" | ">=" => return Ok(CV::Bool(format!("({} {} {})", x, op, y))),
-                "+" | "-" | "*" | "/" | "%" => { self.line(&format!("{}({}, {}, {});", mac, r, x, y)); return Ok(CV::Int(r)); }
+                "+" | "-" | "*" | "/" | "%" => {
+                    // with intervals for both operands, arithmetic that provably cannot overflow (or divide by zero) has no check; the
+                    // result's interval is recorded for what is computed from it
+                    let (ix, iy) = (self.interval(&x), self.interval(&y));
+                    let mut proven: Option<(i128, i128)> = None;
+                    if let (Some((xl, xh)), Some((yl, yh))) = (ix, iy) {
+                        let (xl, xh, yl, yh) = (xl as i128, xh as i128, yl as i128, yh as i128);
+                        proven = match op {
+                            "+" => Some((xl + yl, xh + yh)),
+                            "-" => Some((xl - yh, xh - yl)),
+                            "*" => { let c = [xl * yl, xl * yh, xh * yl, xh * yh]; Some((*c.iter().min().unwrap(), *c.iter().max().unwrap())) }
+                            "%" if yl > 0 => Some((if xl >= 0 { 0 } else { -(yh - 1) }, yh - 1)),
+                            _ => None,
+                        };
+                    } else if let (None, Some((yl, yh))) = (ix, iy) {
+                        // a positive divisor cannot be zero or -1 whatever the dividend is
+                        if yl > 0 && op == "%" { proven = Some((-((yh - 1) as i128), (yh - 1) as i128)); }
+                    }
+                    let fits = proven.filter(|(l, h)| *l >= i64::MIN as i128 && *h <= i64::MAX as i128);
+                    let safe_div = matches!(op, "/" | "%") && iy.map_or(false, |(yl, _)| yl > 0);
+                    if let Some((l, h)) = fits.filter(|_| matches!(op, "+" | "-" | "*" | "%")) {
+                        self.line(&format!("N{}({}, {}, {});", mac, r, x, y));
+                        self.ranges.insert(r.clone(), (l as i64, h as i64));
+                    } else if safe_div {
+                        self.line(&format!("N{}({}, {}, {});", mac, r, x, y));
+                    } else {
+                        self.line(&format!("{}({}, {}, {});", mac, r, x, y));
+                    }
+                    return Ok(CV::Int(r));
+                }
                 _ => {}
             }
         }
@@ -2082,8 +2129,8 @@ impl<'p> G<'p> {
         }
         if let Some(l) = &lim { self.line(&format!("if ({} >= {}) break;", hits, l)); }
         env[it.slot as usize] = Some(CV::Int(k.clone()));
-        let lit = |s: &str| s.strip_suffix("LL").and_then(|d| d.parse::<i64>().ok());
-        let bounded = match (lit(&lo), lit(&hi)) { (Some(a), Some(b)) => { self.bounds.push((k.clone(), a, b)); true } _ => false };
+        // the counter is never assigned in the body: between the smallest lower bound and one below the largest upper bound
+        if let (Some((lo_min, _)), Some((_, hi_max))) = (self.interval(&lo), self.interval(&hi)) { if hi_max > lo_min { self.ranges.insert(k.clone(), (lo_min, hi_max - 1)); } }
         if let Some(w) = &it.whil { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) break;", wc)); }
         if let Some(w) = &it.wher {
             let wv = self.expr(w, env, None)?;
@@ -2092,7 +2139,6 @@ impl<'p> G<'p> {
         }
         self.line(&format!("{}++;", hits));
         body(self, env, &hits)?;
-        if bounded { self.bounds.pop(); }
         self.close("}");
         self.close("}");
         Ok(())
@@ -2196,7 +2242,7 @@ impl<'p> G<'p> {
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
     let t = ctoks(body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "SAVE_", "COMMIT_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "SAVE_", "COMMIT_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
@@ -2226,7 +2272,7 @@ pub fn check_profile(body: &str) -> Result<(), String> {
                 j += 1;
             }
         }
-        if ["ADD", "SUB", "MUL", "DIV", "MOD", "NEG"].contains(&tok) && next == "(" { if let Some(r) = t.get(i + 2) { declared.push(r); } }
+        if ["ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "NADD", "NSUB", "NMUL", "NDIV", "NMOD"].contains(&tok) && next == "(" { if let Some(r) = t.get(i + 2) { declared.push(r); } }
         if is_id(tok) && next == "(" {
             let member = prev == "->";
             if member {

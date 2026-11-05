@@ -1,0 +1,53 @@
+// array bounds proven from value ranges: an input's declared range, loop counters, arithmetic on them. A proof may drop a check only when it
+// is sound: an index that can reach the end, a variable that is changed, a function parameter that is changed, must still be refused
+--- program
+struct A { arr: i64[4]; }
+state a: A;
+
+fn bumped(n) { var m = n; m = m + 5; return m; }
+@post("/fill")
+fn post_fill() -> Response<{}> { each i in 0..4 { a.arr[i] = 10 + i; } return ok({}); }
+@get("/safe/{n}")
+fn get_safe(n: i64 in 0..3) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n] }); }
+@get("/edge/{n}")
+fn get_edge(n: i64 in 0..4) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n] }); }
+@get("/negative/{n}")
+fn get_negative(n: i64 in -1..3) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n] }); }
+@get("/sum/{n}")
+fn get_sum(n: i64 in 0..3) -> Response<{ v: i64 }> { var s = 0; each i in 0..n + 1 { s = s + a.arr[i]; } return ok({ "v": s }); }
+@get("/sum5/{n}")
+fn get_sum5(n: i64 in 0..4) -> Response<{ v: i64 }> { var s = 0; each i in 0..n + 1 { s = s + a.arr[i]; } return ok({ "v": s }); }
+@get("/arith/{n}")
+fn get_arith(n: i64 in 0..1) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n * 2 + 1] }); }
+@get("/arith2/{n}")
+fn get_arith2(n: i64 in 0..2) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n * 2 + 1] }); }
+@get("/changed/{n}")
+fn get_changed(n: i64 in 0..3) -> Response<{ v: i64 }> { var m = n; m = m + 2; return ok({ "v": a.arr[m] }); }
+@get("/call/{n}")
+fn get_call(n: i64 in 0..3) -> Response<{ v: i64 }> { return ok({ "v": a.arr[bumped(n)] }); }
+@get("/default-ok")
+fn get_default_ok(x: i64 in 0..3 = 2) -> Response<{ v: i64 }> { return ok({ "v": a.arr[x] }); }
+@get("/mod/{n}")
+fn get_mod(n: i64) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n % 4] }); }
+--- requests
+POST /fill
+GET /safe/0
+GET /safe/3
+GET /safe/4
+GET /edge/3
+GET /edge/4
+GET /negative/-1
+GET /negative/2
+GET /sum/2
+GET /sum/3
+GET /sum5/3
+GET /sum5/4
+GET /arith/1
+GET /arith2/1
+GET /arith2/2
+GET /changed/1
+GET /changed/2
+GET /call/0
+GET /default-ok
+GET /mod/6
+GET /mod/-6

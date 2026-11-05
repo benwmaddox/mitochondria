@@ -1,19 +1,19 @@
 GET /grid -> 200 {"c0":0,"c3":0,"total":0}
 POST /grid/1 -> 200 {"cell":7}
 POST /grid/3 -> 200 {"cell":-2}
-POST /grid/4 -> 400 {"error":"index 4 out of range (fixed size 4)"}
-POST /grid/-1 -> 404 {"error":"index -1 is negative"}
+POST /grid/4 -> 400 {"error":"index 4 out of range (fixed size 4)","line":10}
+POST /grid/-1 -> 404 {"error":"index -1 is negative","line":10}
 GET /grid -> 200 {"c0":0,"c3":-2,"total":5}
 GET /grid/1 -> 200 {"v":7}
-GET /grid/9 -> 400 {"error":"index 9 out of range (fixed size 4)"}
+GET /grid/9 -> 400 {"error":"index 9 out of range (fixed size 4)","line":14}
 POST /players -> 201 {"slot":0}
 POST /players/0/hit/1 -> 200 {"hits":1}
 POST /players/0/hit/1 -> 200 {"hits":2}
 POST /players/0/hit/2 -> 200 {"hits":4}
-POST /players/0/hit/3 -> 400 {"error":"index 3 out of range (fixed size 3)"}
-POST /players/1/hit/0 -> 404 {"error":"slot 1 is not live"}
+POST /players/0/hit/3 -> 400 {"error":"index 3 out of range (fixed size 3)","line":21}
+POST /players/1/hit/0 -> 404 {"error":"slot 1 is not live","line":19}
 GET /players -> 200 {"x":[{"name":"ann","h0":1,"h1":2,"h2":4}]}
-POST /overflow -> 413 {"error":"40000 does not fit i16"}
+POST /overflow -> 413 {"error":"40000 does not fit i16","line":29}
 GET /players -> 200 {"x":[{"name":"ann","h0":1,"h1":2,"h2":4}]}
 state <plain values> 24
 state app.players 37

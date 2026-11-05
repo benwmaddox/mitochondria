@@ -10,7 +10,7 @@ POST /add/a/5 -> 200 {"value":15,"size":3}
 POST /add/new/7 -> 200 {"value":7,"size":4}
 POST /put/e/5 -> 200 {"added":true,"size":5}
 POST /put/f/6 -> 200 {"added":true,"size":6}
-POST /put/g/7 -> 507 {"error":"strmap: full"}
+POST /put/g/7 -> 507 {"error":"strmap: full","line":70}
 GET /get/g -> 200 {"value":-1,"has":false}
 DELETE /x/b -> 200 {"removed":true,"size":5}
 DELETE /x/b -> 200 {"removed":false,"size":5}
@@ -18,7 +18,7 @@ POST /put/g/7 -> 200 {"added":true,"size":6}
 GET /get/g -> 200 {"value":7,"has":true}
 DELETE /x/g -> 200 {"removed":true,"size":5}
 DELETE /x/f -> 200 {"removed":true,"size":4}
-POST /fail/h -> 400 {"error":"no"}
+POST /fail/h -> 400 {"error":"no","line":15}
 GET /get/h -> 200 {"value":-1,"has":false}
 POST /churn/1000 -> 200 {"size":4}
 POST /clear -> 200 {"size":0,"room":6}

@@ -2,18 +2,18 @@ GET /q?q0=0&q1=1&q2=2&q3=3&q4=4&q5=5&q6=6&q7=7&q8=8&q9=9&q10=10&q11=11&q12=12&q1
 GET /q?q0=0&q1=1&q2=2&q3=3&q4=4&q5=5&q6=6&q7=7&q8=8&q9=9&q10=10&q11=11&q12=12&q13=13&q14=14&q15=15&q16=16&q17=17&q18=18&q19=19&q20=20&q21=21&q22=22&q23=23&q24=24&q25=25&q26=26&q27=27&q28=28&q29=29&q30=30&q31=31&q32=32&q33=33&q34=34&q35=35&q36=36&q37=37&q38=38&q39=39&q40=40&q41=41&q42=42&q43=43&q44=44&q45=45&q46=46&q47=47&q48=48&q49=49&q50=50&q51=51&q52=52&q53=53&q54=54&q55=55&q56=56&q57=57&q58=58&q59=59&q60=60&q61=61&q62=62&q63=63&q64=64 -> 413 {"error":"request has more than 64 query parameters"}
 POST /f -> 200 {"f0":0,"f255":255}
 POST /f -> 413 {"error":"request body has more than 256 fields"}
-GET /n/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx -> 400 {"error":"`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...` is not a number"}
-GET /n/%ff%fe12 -> 400 {"error":"`��12` is not a number"}
-GET /n/%e2%82 -> 400 {"error":"`�` is not a number"}
-GET /n/%e2%82%ac -> 400 {"error":"`€` is not a number"}
-GET /n/%c3%a9yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy -> 400 {"error":"`éyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy...` is not a number"}
+GET /n/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx -> 400 {"error":"`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...` is not a number","line":12}
+GET /n/%ff%fe12 -> 400 {"error":"`��12` is not a number","line":12}
+GET /n/%e2%82 -> 400 {"error":"`�` is not a number","line":12}
+GET /n/%e2%82%ac -> 400 {"error":"`€` is not a number","line":12}
+GET /n/%c3%a9yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy -> 400 {"error":"`éyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy...` is not a number","line":12}
 GET /n/%20%0912%0b%0c%0d%0a -> 200 {"n":12}
-GET /n/%c2%a012 -> 400 {"error":"` 12` is not a number"}
+GET /n/%c2%a012 -> 400 {"error":"` 12` is not a number","line":12}
 POST /fill -> 200 {"n":70000}
 POST /free/65536 -> 200 {}
 GET /count -> 200 {"n":4464}
 POST /fill -> 200 {"n":70000}
-POST /free/65537 -> 507 {"error":"too many frees in one request"}
+POST /free/65537 -> 507 {"error":"too many frees in one request","line":16}
 GET /count -> 200 {"n":70000}
 POST /free/3 -> 200 {}
 GET /count -> 200 {"n":69997}

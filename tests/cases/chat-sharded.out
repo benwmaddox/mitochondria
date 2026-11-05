@@ -12,7 +12,7 @@ POST /rooms/2/messages -> 201 {"seq":2}
 POST /rooms/2/messages -> 201 {"seq":3}
 GET /rooms/2/messages -> 200 {"room":"b","messages":[{"seq":3,"author":"ann","at":1000,"body":"bye"},{"seq":2,"author":"bob","at":1000,"body":"hello"},{"seq":1,"author":"ann","at":1000,"body":"hi"}]}
 GET /rooms/2/messages?limit=1 -> 200 {"room":"b","messages":[{"seq":3,"author":"ann","at":1000,"body":"bye"}]}
-GET /rooms/9/messages -> 404 {"error":"no such room"}
+GET /rooms/9/messages -> 404 {"error":"no such room","line":22}
 GET /rooms/x/messages -> 400 {"error":"`room`: expected an integer"}
 POST /rooms/3/typing -> 200 {"ok":true}
 GET /rooms/3/typing -> 200 {"typing":[{"name":"ann"}]}

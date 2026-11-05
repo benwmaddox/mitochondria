@@ -3,16 +3,16 @@ POST /words -> 201 {"slot":1}
 POST /motd -> 200 {}
 GET /input/0?s=ABC -> 200 {"b":65,"len":3}
 GET /input/2?s=ABC -> 200 {"b":67,"len":3}
-GET /input/3?s=ABC -> 400 {"error":"string index out of range"}
-GET /input/-1?s=ABC -> 400 {"error":"string index out of range"}
+GET /input/3?s=ABC -> 400 {"error":"string index out of range","line":10}
+GET /input/-1?s=ABC -> 400 {"error":"string index out of range","line":10}
 GET /literal/0 -> 200 {"b":104}
 GET /literal/4 -> 200 {"b":111}
-GET /literal/5 -> 400 {"error":"string index out of range"}
+GET /literal/5 -> 400 {"error":"string index out of range","line":12}
 GET /item/0/1 -> 200 {"b":98}
-GET /item/0/3 -> 400 {"error":"string index out of range"}
+GET /item/0/3 -> 400 {"error":"string index out of range","line":14}
 GET /item/1/0 -> 200 {"b":122}
 GET /motd/3 -> 200 {"b":116}
-GET /motd/8 -> 400 {"error":"string index out of range"}
+GET /motd/8 -> 400 {"error":"string index out of range","line":16}
 GET /sum?s=123456789 -> 200 {"sum":477,"hash":902675330}
 GET /sum?s= -> 200 {"sum":0,"hash":5381}
 state <plain values> 20

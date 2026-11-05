@@ -3,10 +3,10 @@ POST /sessions -> 201 {"token":"1.0.ce7c497a6b09c3b","slot":1}
 POST /sessions -> 400 {"error":"`name` is required"}
 POST /sessions -> 400 {"error":"`name`: expected a string"}
 POST /rooms -> 201 {"id":"0.0","name":"lobby"}
-POST /rooms -> 413 {"error":"string of 12 bytes does not fit string<8>"}
+POST /rooms -> 413 {"error":"string of 12 bytes does not fit string<8>","line":120}
 POST /rooms -> 400 {"error":"`name` is required"}
 POST /rooms -> 201 {"id":"1.0","name":"r2"}
-POST /rooms -> 503 {"error":"capacity: chat.rooms.items is full (2 of 2)"}
+POST /rooms -> 503 {"error":"capacity: chat.rooms.items is full (2 of 2)","line":115}
 GET /rooms -> 200 {"rooms":[{"id":"0.0","name":"lobby"},{"id":"1.0","name":"r2"}]}
 POST /rooms/0.0/messages -> 201 {"seq":1}
 POST /rooms/0.0/messages -> 201 {"seq":2}
@@ -22,7 +22,7 @@ POST /rooms/9.0/messages -> 404 {"error":"`room`: no 9.0 in chat.rooms.items"}
 GET /rooms/0.0/messages -> 200 {"room":"lobby","messages":[{"seq":8,"author":"bob \"b\"","at":1000,"body":"m7 é"},{"seq":7,"author":"ann","at":1000,"body":"m6 é"},{"seq":6,"author":"bob \"b\"","at":1000,"body":"m5 é"},{"seq":5,"author":"ann","at":1000,"body":"m4 é"},{"seq":4,"author":"bob \"b\"","at":1000,"body":"m3 é"}]}
 GET /rooms/0.0/messages?limit=3 -> 200 {"room":"lobby","messages":[{"seq":8,"author":"bob \"b\"","at":1000,"body":"m7 é"},{"seq":7,"author":"ann","at":1000,"body":"m6 é"},{"seq":6,"author":"bob \"b\"","at":1000,"body":"m5 é"}]}
 GET /rooms/0.0/messages?limit=0 -> 200 {"room":"lobby","messages":[]}
-GET /rooms/0.0/messages?limit=-1 -> 400 {"error":"bad limit"}
+GET /rooms/0.0/messages?limit=-1 -> 400 {"error":"bad limit","line":71}
 GET /rooms/0.0/messages?limit=abc -> 400 {"error":"`limit`: expected an integer"}
 GET /rooms/0.0/messages?limit=1000 -> 200 {"room":"lobby","messages":[{"seq":8,"author":"bob \"b\"","at":1000,"body":"m7 é"},{"seq":7,"author":"ann","at":1000,"body":"m6 é"},{"seq":6,"author":"bob \"b\"","at":1000,"body":"m5 é"},{"seq":5,"author":"ann","at":1000,"body":"m4 é"},{"seq":4,"author":"bob \"b\"","at":1000,"body":"m3 é"}]}
 GET /rooms/x/messages -> 404 {"error":"`room`: expected an id slot.generation"}
@@ -65,20 +65,20 @@ POST /rooms/0.0/messages -> 201 {"seq":31}
 POST /rooms/0.0/messages -> 201 {"seq":32}
 POST /rooms/0.0/messages -> 201 {"seq":33}
 POST /rooms/0.0/messages -> 201 {"seq":34}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
-POST /rooms/0.0/messages -> 429 {"error":"slow down"}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
+POST /rooms/0.0/messages -> 429 {"error":"slow down","line":62}
 GET /nope -> 404 {"error":"no such endpoint"}
 state <plain values> 144
 state chat.sessions 95

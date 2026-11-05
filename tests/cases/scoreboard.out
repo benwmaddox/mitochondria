@@ -11,7 +11,7 @@ GET /board -> 200 {"top":[{"name":"ada","points":400},{"name":"bo","points":340}
 GET /board?top=2 -> 200 {"top":[{"name":"ada","points":400},{"name":"bo","points":340}]}
 GET /recent -> 200 {"games":[{"name":"ada","points":50},{"name":"ada","points":400},{"name":"cy","points":90},{"name":"bo","points":340},{"name":"ada","points":120}]}
 GET /stats -> 200 {"players":3,"games":5,"reserved_kb":172,"committed_kb":172,"live_kb":0}
-POST /players/1.0/games -> 422 {"error":"not a believable score"}
+POST /players/1.0/games -> 422 {"error":"not a believable score","line":30}
 GET /stats -> 200 {"players":3,"games":5,"reserved_kb":172,"committed_kb":172,"live_kb":0}
 GET /board -> 200 {"top":[{"name":"ada","points":400},{"name":"bo","points":340},{"name":"cy","points":90}]}
 POST /players/7.0/games -> 404 {"error":"`p`: no 7.0 in game.players"}

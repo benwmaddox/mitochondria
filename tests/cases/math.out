@@ -11,7 +11,7 @@ GET /floor/5.0 -> 200 {"r":5}
 GET /abs/-7 -> 200 {"r":7}
 GET /abs/7 -> 200 {"r":7}
 GET /abs/0 -> 200 {"r":0}
-GET /abs/-9223372036854775808 -> 500 {"error":"integer overflow"}
+GET /abs/-9223372036854775808 -> 500 {"error":"integer overflow","line":13}
 GET /absf/-2.5 -> 200 {"r":2.5}
 GET /combo/3.0 -> 200 {"r":119.83772233983161}
 GET /loop/100 -> 200 {"r":671.4629471031477}

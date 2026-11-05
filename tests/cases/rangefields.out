@@ -1,14 +1,14 @@
 POST /limit/3000000 -> 200 {"limit":3000000,"doubled":6000001}
-POST /limit/3000001 -> 400 {"error":"`limit` must be in 0..3000000"}
-POST /limit/-1 -> 400 {"error":"`limit` must be in 0..3000000"}
+POST /limit/3000001 -> 400 {"error":"`limit` must be in 0..3000000","line":7}
+POST /limit/-1 -> 400 {"error":"`limit` must be in 0..3000000","line":7}
 POST /slot/3 -> 200 {"cell":1}
 POST /slot/3 -> 200 {"cell":2}
-POST /slot/4 -> 400 {"error":"`slot` must be in 0..3"}
+POST /slot/4 -> 400 {"error":"`slot` must be in 0..3","line":9}
 POST /delta/-10/false -> 200 {"delta":-10}
-POST /delta/-11/false -> 400 {"error":"`delta` must be in -10..10"}
-POST /delta/5/true -> 409 {"error":"undone"}
+POST /delta/-11/false -> 400 {"error":"`delta` must be in -10..10","line":13}
+POST /delta/5/true -> 409 {"error":"undone","line":14}
 POST /items/-5 -> 201 {"slot":0,"level":-5}
-POST /items/6 -> 400 {"error":"`level` must be in -5..5"}
+POST /items/6 -> 400 {"error":"`level` must be in -5..5","line":18}
 GET /state -> 200 {"limit":3000000,"slot":3,"delta":-10,"plain":99,"items":1}
 state <plain values> 56
 state app.items 31

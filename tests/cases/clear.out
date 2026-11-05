@@ -2,11 +2,11 @@ POST /clear -> 200 {"count":0}
 POST /add/1 -> 201 {"slot":0}
 POST /add/2 -> 201 {"slot":1}
 POST /add/3 -> 201 {"slot":2}
-POST /add/4 -> 503 {"error":"capacity: app.items is full (3 of 3)"}
+POST /add/4 -> 503 {"error":"capacity: app.items is full (3 of 3)","line":8}
 POST /hold/1 -> 200 {}
 GET /held -> 200 {"v":2}
 GET /all -> 200 {"items":[{"v":1,"tags":[10]},{"v":2,"tags":[20]},{"v":3,"tags":[30]}],"count":3}
-POST /clear-then-fail -> 422 {"error":"no"}
+POST /clear-then-fail -> 422 {"error":"no","line":18}
 GET /all -> 200 {"items":[{"v":1,"tags":[10]},{"v":2,"tags":[20]},{"v":3,"tags":[30]}],"count":3}
 GET /held -> 200 {"v":2}
 POST /clear -> 200 {"count":0}

@@ -6,7 +6,7 @@ GET /index -> 400 {"error":"`k`: expected an integer"}
 GET /index -> 400 {"error":"`k`: expected an integer"}
 GET /index -> 400 {"error":"`k` is required"}
 GET /limit -> 200 {"x":[0,10]}
-GET /limit -> 400 {"error":"bad limit"}
+GET /limit -> 400 {"error":"bad limit","line":14}
 GET /limit -> 400 {"error":"`n`: expected an integer"}
 GET /minmax -> 200 {"min":1,"max":3}
 GET /minmax -> 200 {"min":5,"max":9}
@@ -21,11 +21,11 @@ GET /arith -> 400 {"error":"`x`: expected a number"}
 POST /set -> 200 {"n":7}
 POST /set -> 400 {"error":"`x`: expected an integer"}
 POST /set -> 400 {"error":"`x`: expected an integer"}
-GET /min_int -> 500 {"error":"integer overflow"}
-GET /divmin -> 500 {"error":"integer overflow"}
+GET /min_int -> 500 {"error":"integer overflow","line":38}
+GET /divmin -> 500 {"error":"integer overflow","line":32}
 GET /divmin -> 200 {"d":-4611686018427387904}
-GET /modmin -> 500 {"error":"integer overflow"}
-POST /setstr -> 400 {"error":"wrong type for this field"}
+GET /modmin -> 500 {"error":"integer overflow","line":34}
+POST /setstr -> 400 {"error":"wrong type for this field","line":36}
 GET /ornotlive -> 200 {"a":-1,"b":false,"c":0}
 GET /ornotlive -> 200 {"a":-1,"b":false,"c":10}
 GET /coll -> 200 {"n":3,"x":[7,10,20]}

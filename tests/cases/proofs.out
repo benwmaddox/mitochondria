@@ -3,21 +3,21 @@ GET /safe/0 -> 200 {"v":10}
 GET /safe/3 -> 200 {"v":13}
 GET /safe/4 -> 400 {"error":"`n`: 4 is outside 0..3"}
 GET /edge/3 -> 200 {"v":13}
-GET /edge/4 -> 400 {"error":"index 4 out of range (fixed size 4)"}
-GET /negative/-1 -> 404 {"error":"index -1 is negative"}
+GET /edge/4 -> 400 {"error":"index 4 out of range (fixed size 4)","line":10}
+GET /negative/-1 -> 404 {"error":"index -1 is negative","line":12}
 GET /negative/2 -> 200 {"v":12}
 GET /sum/2 -> 200 {"v":33}
 GET /sum/3 -> 200 {"v":46}
 GET /sum5/3 -> 200 {"v":46}
-GET /sum5/4 -> 400 {"error":"index 4 out of range (fixed size 4)"}
+GET /sum5/4 -> 400 {"error":"index 4 out of range (fixed size 4)","line":16}
 GET /arith/1 -> 200 {"v":13}
 GET /arith2/1 -> 200 {"v":13}
-GET /arith2/2 -> 400 {"error":"index 5 out of range (fixed size 4)"}
+GET /arith2/2 -> 400 {"error":"index 5 out of range (fixed size 4)","line":20}
 GET /changed/1 -> 200 {"v":13}
-GET /changed/2 -> 400 {"error":"index 4 out of range (fixed size 4)"}
-GET /call/0 -> 400 {"error":"index 5 out of range (fixed size 4)"}
+GET /changed/2 -> 400 {"error":"index 4 out of range (fixed size 4)","line":22}
+GET /call/0 -> 400 {"error":"index 5 out of range (fixed size 4)","line":4}
 GET /default-ok -> 200 {"v":12}
 GET /mod/6 -> 200 {"v":12}
-GET /mod/-6 -> 404 {"error":"index -2 is negative"}
+GET /mod/-6 -> 404 {"error":"index -2 is negative","line":28}
 state <plain values> 32
 memory reserved=4096 committed=4096 live=32

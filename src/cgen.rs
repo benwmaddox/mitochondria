@@ -18,7 +18,7 @@ typedef struct { u32 off, len; int present; } Txt;
 /* tag: 0 null, 1 int (i), 2 float (f), 3 bool (i), 4 string (a = offset, b = length), 5 item (a = collection, b = index) */
 typedef struct { int tag; u32 a, b; i64 i; double f; } Val;
 typedef struct H H;
-typedef struct { u8 *base; void *run; const H *h; u8 *dirty; u8 *committed; int jon; u8 *text; } Ctx; /* dirty, committed, jon: the undo log's line map, the page commit flags, whether the request journals: fixed for the request */
+typedef struct { u8 *base; void *run; const H *h; u8 *dirty; u8 *committed; int jon; u8 *text; u32 at; } Ctx; /* dirty, committed, jon: the undo log's line map, the page commit flags, whether the request journals: fixed for the request */
 /* The runtime's helpers. Every one returns 0, or a non-zero status after recording the error (the generated code then
    returns that status at once and the runtime rolls the request back). Collections, columns and items are numbered as
    in the layout table at the top of an emitted file; `idx` is an item's index across all instances of its collection. */
@@ -95,11 +95,14 @@ struct H {
 #define LD_U8(off, idx) LD_(u8, off, idx, 1)
 #define LD_F32(off, idx) LD_(float, off, idx, 4)
 #define LD_F64(off, idx) LD_(double, off, idx, 8)
-#define CALL(x) do { if ((st = (x)) != 0) return st; } while (0)
+/* AT_: the source line of the statement being run, defined before each statement's code (0 outside any); every way out with an error
+   records it in the context, so the answer can name the line. It costs nothing until something fails. */
+#define AT_ 0
+#define CALL(x) do { if ((st = (x)) != 0) { c->at = AT_; return st; } } while (0)
 /* inside the first argument of or() and exists(): a dead reference or a slot that is not live takes the fallback */
-#define CALL_OR_DEAD(x, l) do { if ((st = (x)) != 0) { if (st < 0 && c->h->was_dead(c)) goto l; return st; } } while (0)
-#define TAIL(x) return (x)
-#define FAIL(code, msg, n) return c->h->fail(c, (code), (msg), (n))
+#define CALL_OR_DEAD(x, l) do { if ((st = (x)) != 0) { if (st < 0 && c->h->was_dead(c)) goto l; c->at = AT_; return st; } } while (0)
+#define TAIL(x) do { c->at = AT_; return (x); } while (0)
+#define FAIL(code, msg, n) do { c->at = AT_; return c->h->fail(c, (code), (msg), (n)); } while (0)
 #define OVERFLOW_ FAIL(500, "integer overflow", 16)
 #ifdef __clang__
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -752,10 +755,10 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 if !new.is_empty() {
                     src += &format!("\n// functions for recursive calls, first used by {}, one per combination of argument kinds\n", ep.text);
                     for sp in new { src += &format!("{}int {}{};\n", linkage, sp.name, sp.proto); }
-                    for sp in new { src += &format!("{}int {}{} {{\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", linkage, sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
+                    for sp in new { src += &format!("{}int {}{} {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", linkage, sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
                 }
                 done = specs;
-                src += &format!("{}{}int {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", head, linkage, name, body);
+                src += &format!("{}{}int {}(Ctx *c) {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", head, linkage, name, body);
             }
             Err(why) => {
                 if let Some(sf) = source { src += &source_comment(ep, sf); src += &format!("// not compiled: {}\n", why); }
@@ -1416,7 +1419,7 @@ impl<'p> G<'p> {
 
     fn stmt(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<()> {
         match s {
-            Stmt::At(l, c) => { self.at = (*l, *c); }
+            Stmt::At(l, c) => { self.at = (*l, *c); self.line("#undef AT_"); self.line(&format!("#define AT_ {}", l)); }
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
                 let v = self.expr(e, env, None)?;
@@ -2677,7 +2680,9 @@ impl<'p> G<'p> {
 ///    `return` only of a status (a number or `st`).
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
-    let t = ctoks(body);
+    // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
+    let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
+    let t = ctoks(&body);
     const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",

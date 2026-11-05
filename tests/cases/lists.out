@@ -1,11 +1,11 @@
-GET /evs -> 404 {"error":"position 0 is past the end"}
-GET /evs/0 -> 404 {"error":"position 0 is past the end"}
+GET /evs -> 404 {"error":"position 0 is past the end","line":15}
+GET /evs/0 -> 404 {"error":"position 0 is past the end","line":13}
 POST /evs -> 201 {"count":1}
 POST /evs -> 201 {"count":2}
 GET /evs/0 -> 200 {"n":1,"who":"a"}
 GET /evs/1 -> 200 {"n":2,"who":"b"}
-GET /evs/2 -> 404 {"error":"position 2 is past the end"}
-GET /evs/-1 -> 404 {"error":"index -1 is negative"}
+GET /evs/2 -> 404 {"error":"position 2 is past the end","line":13}
+GET /evs/-1 -> 404 {"error":"index -1 is negative","line":13}
 GET /evs/x -> 400 {"error":"`k`: expected an integer"}
 POST /evs -> 201 {"count":3}
 POST /evs -> 201 {"count":3}
@@ -16,19 +16,19 @@ POST /copy -> 200 {"x":[100,100,100]}
 GET /evs -> 200 {"x":[100,100,100],"r":[100,100,100],"first":100}
 POST /strict -> 201 {"n":1}
 POST /strict -> 201 {"n":2}
-POST /strict -> 503 {"error":"capacity: app.strict is full (2 of 2)"}
+POST /strict -> 503 {"error":"capacity: app.strict is full (2 of 2)","line":17}
 POST /strict/try -> 200 {"got":false}
 POST /bags -> 201 {"n":2,"f":1}
 POST /bags/0/set -> 200 {"at":5}
 POST /bags/0/set -> 200 {"at":-6}
-POST /bags/0/set -> 404 {"error":"position 2 is past the end"}
-POST /bags/0/set -> 413 {"error":"3000000000 does not fit i32"}
-POST /bags/0/set -> 404 {"error":"index -1 is negative"}
+POST /bags/0/set -> 404 {"error":"position 2 is past the end","line":36}
+POST /bags/0/set -> 413 {"error":"3000000000 does not fit i32","line":36}
+POST /bags/0/set -> 404 {"error":"index -1 is negative","line":36}
 POST /bags/0/flag -> 200 {"flags":[true]}
 POST /bags/0/flag -> 400 {"error":"`on`: expected true or false"}
-POST /evs/0 -> 500 {"error":"only an item that is a plain value can be assigned; assign its fields"}
+POST /evs/0 -> 500 {"error":"only an item that is a plain value can be assigned; assign its fields","line":40}
 GET /bags/0 -> 200 {"sum":-1,"all":[5,-6],"rev":[-6,5],"at1":-6,"flags":[true]}
-GET /bags/1 -> 404 {"error":"slot 1 is not live"}
+GET /bags/1 -> 404 {"error":"slot 1 is not live","line":30}
 POST /bags/0/grow -> 200 {"n":4}
 GET /bags/0 -> 200 {"sum":-1,"all":[5,-6,0,0],"rev":[0,0,-6,5],"at1":-6,"flags":[true]}
 POST /bags/0/grow -> 200 {"n":4}

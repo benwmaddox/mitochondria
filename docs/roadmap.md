@@ -6,12 +6,16 @@ Decided against, for now: request-local scratch arrays (`unlogged` state covers 
 
 ## Phase 1: the everyday loop
 
-### 1.1 Line numbers in every error
+### 1.1 Line numbers in every error (done 2026-11-05)
 - Compile errors name `file:line:col` and quote the line with a caret under the place: `app.mito:14:31: no field `totl` (did you mean `total`?)`.
 - The lexer keeps a position per token; the parser and the binder carry it on expressions and statements; code generation
   errors use the position of the expression they are about.
 - Runtime errors name the endpoint and the source line in the message: `{"error":"integer overflow","at":"app.mito:22 (POST /games)"}`.
 - Done when: every message in `tests/cases` and the compile-error tests has a position, and the runtime test cases show them.
+- Done: compile errors print `file:line:col`, the line and a caret (parse errors at the token; binding and code-generation errors at
+  the start of their statement; layout errors at the declaration they name). Runtime errors from compiled code answer
+  `{"error":"...","line":N}` (N: the statement's line; zero cost until something fails). Not yet: "did you mean" (1.2), a column
+  for the exact expression in binding errors, the endpoint name in runtime errors (the request already names it).
 
 ### 1.2 Better error messages
 - No compiler internals in messages (`unexpected Some(Sym("="))` today): every parse error says what was expected, in words.

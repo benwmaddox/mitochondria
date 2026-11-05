@@ -9,7 +9,7 @@ GET /empty -> 200 {"a":[],"b":[],"c":[-1,-2,-3]}
 GET /bad -> 200 {"x":[0,1,2]}
 GET /bad -> 400 {"error":"`n`: expected an integer"}
 GET /badlimit -> 200 {"x":[0,1]}
-GET /badlimit -> 400 {"error":"bad limit"}
+GET /badlimit -> 400 {"error":"bad limit","line":18}
 POST /add -> 200 {"total":14}
 POST /add -> 200 {"total":28}
 GET /until/10 -> 200 {"t":14,"x":[9,8,7,6,5,4]}

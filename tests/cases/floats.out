@@ -1,4 +1,4 @@
-GET /mean -> 409 {"error":"no values"}
+GET /mean -> 409 {"error":"no values","line":9}
 POST /add -> 200 {"total":1.25}
 POST /add -> 200 {"total":3.25}
 POST /add -> 200 {"total":2.5}

@@ -1,6 +1,6 @@
 POST /w1 -> 201 {"slot":0}
 GET /w -> 200 {"w0":0,"w1":1}
-POST /t -> 409 {"error":"rolled back"}
+POST /t -> 409 {"error":"rolled back","line":19}
 GET /t -> 200 {"a":0,"b":0,"name":"","ms":0}
 POST /t -> 200 {"a":1}
 GET /t -> 200 {"a":1,"b":2,"name":"changed","ms":1}

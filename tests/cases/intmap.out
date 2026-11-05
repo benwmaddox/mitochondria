@@ -11,15 +11,15 @@ GET /get/4294967297 -> 200 {"value":-1,"has":false}
 POST /add/1/5 -> 200 {"value":16,"size":4}
 POST /add/100/7 -> 200 {"value":7,"size":5}
 POST /put/5/50 -> 200 {"added":true,"size":6}
-POST /put/6/60 -> 507 {"error":"intmap: full"}
-POST /put/7/70 -> 507 {"error":"intmap: full"}
+POST /put/6/60 -> 507 {"error":"intmap: full","line":58}
+POST /put/7/70 -> 507 {"error":"intmap: full","line":58}
 GET /get/7 -> 200 {"value":-1,"has":false}
 DELETE /x/2 -> 200 {"removed":true,"size":5}
 DELETE /x/2 -> 200 {"removed":false,"size":5}
 POST /put/7/70 -> 200 {"added":true,"size":6}
 DELETE /x/7 -> 200 {"removed":true,"size":5}
 DELETE /x/6 -> 200 {"removed":false,"size":5}
-POST /fail/8 -> 400 {"error":"no"}
+POST /fail/8 -> 400 {"error":"no","line":15}
 GET /get/8 -> 200 {"value":-1,"has":false}
 POST /churn/1000 -> 200 {"size":5}
 POST /clear -> 200 {"size":0,"room":6}

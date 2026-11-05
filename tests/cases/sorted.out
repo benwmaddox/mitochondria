@@ -15,7 +15,7 @@ GET /from/0 -> 200 {"up":["bob","eve","cy","dee","ann"],"down":[]}
 GET /from/99 -> 200 {"up":[],"down":["ann","dee","cy","eve","bob"]}
 GET /ends -> 200 {"first":"bob","last":"ann","room":1}
 GET /sum -> 200 {"t":90}
-POST /add -> 413 {"error":"string of 20 bytes does not fit string<8>"}
+POST /add -> 413 {"error":"string of 20 bytes does not fit string<8>","line":12}
 GET /asc -> 200 {"x":["bob:10","eve:10","cy:20","dee:20","ann:30"]}
 POST /fav/2 -> 200 {}
 POST /set/2 -> 200 {}
@@ -27,7 +27,7 @@ DELETE /x/3 -> 200 {"size":5}
 GET /asc -> 200 {"x":["cy:5","bob:10","eve:10","ann:20"]}
 POST /add -> 201 {"slot":3,"size":5}
 POST /add -> 201 {"slot":5,"size":6}
-POST /add -> 503 {"error":"capacity: app.board.items is full (6 of 6)"}
+POST /add -> 503 {"error":"capacity: app.board.items is full (6 of 6)","line":48}
 GET /asc -> 200 {"x":["cy:5","bob:10","eve:10","fay:15","ann:20","gus:40"]}
 GET /ends -> 200 {"first":"cy","last":"gus","room":0}
 DELETE /x/2 -> 200 {"size":6}
@@ -72,10 +72,10 @@ POST /churn/1 -> 200 {"size":6}
 POST /churn/1 -> 200 {"size":6}
 POST /churn/1 -> 200 {"size":6}
 POST /churn/1 -> 200 {"size":6}
-POST /churn/2 -> 503 {"error":"capacity: app.board.items is full (6 of 6)"}
+POST /churn/2 -> 503 {"error":"capacity: app.board.items is full (6 of 6)","line":48}
 GET /asc -> 200 {"x":["bob:10","eve:10","fay:15","ann:20","gus:40"]}
-DELETE /x/9 -> 404 {"error":"slot 9 is not live"}
-POST /set/9 -> 404 {"error":"slot 9 is not live"}
+DELETE /x/9 -> 404 {"error":"slot 9 is not live","line":16}
+POST /set/9 -> 404 {"error":"slot 9 is not live","line":14}
 POST /words -> 201 {}
 POST /words -> 201 {}
 POST /words -> 201 {}

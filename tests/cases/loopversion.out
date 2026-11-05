@@ -1,24 +1,24 @@
 POST /fill/0/64 -> 200 {"sum":873600,"last":630}
 POST /fill/2/4 -> 200 {"sum":873600,"last":630}
-POST /fill/20/65 -> 400 {"error":"index 64 out of range (fixed size 64)"}
+POST /fill/20/65 -> 400 {"error":"index 64 out of range (fixed size 64)","line":8}
 GET /sum/0/64 -> 200 {"total":20160}
 POST /shift/24 -> 200 {"sum":232124}
-POST /shift/25 -> 400 {"error":"index 64 out of range (fixed size 64)"}
+POST /shift/25 -> 400 {"error":"index 64 out of range (fixed size 64)","line":13}
 POST /mirror -> 200 {"first":63,"last":0,"sum":43680}
 POST /step/2/3/63 -> 200 {"sum":1387}
-POST /step/0/5/70 -> 400 {"error":"index 65 out of range (fixed size 64)"}
+POST /step/0/5/70 -> 400 {"error":"index 65 out of range (fixed size 64)","line":25}
 POST /step/3/0/50 -> 200 {"sum":2076}
-POST /fill-then-fail -> 409 {"error":"undone"}
+POST /fill-then-fail -> 409 {"error":"undone","line":31}
 GET /sum/0/64 -> 200 {"total":2016}
 POST /branch/100 -> 200 {"sum":-87360}
 GET /sum/0/64 -> 200 {"total":-2016}
-GET /sum/-1/40 -> 404 {"error":"index -1 is negative"}
+GET /sum/-1/40 -> 404 {"error":"index -1 is negative","line":41}
 POST /fill/40/40 -> 200 {"sum":-87360,"last":-63}
 POST /counted/0/1/64 -> 200 {"sum":89440}
 POST /counted/10/1/40 -> 200 {"sum":30340}
 POST /counted/0/2/32 -> 200 {"sum":22352}
-POST /counted/10/1/60 -> 400 {"error":"index 64 out of range (fixed size 64)"}
+POST /counted/10/1/60 -> 400 {"error":"index 64 out of range (fixed size 64)","line":49}
 POST /counted/63/0/40 -> 200 {"sum":52480}
-POST /counted/-1/1/40 -> 404 {"error":"index -1 is negative"}
+POST /counted/-1/1/40 -> 404 {"error":"index -1 is negative","line":49}
 state <plain values> 584
 memory reserved=4096 committed=4096 live=584

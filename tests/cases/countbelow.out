@@ -20,8 +20,8 @@ GET /count/0/7/1 -> 200 {"plain":0,"item":0}
 GET /count/3/7/1 -> 200 {"plain":3,"item":3}
 GET /count/5/7/0 -> 200 {"plain":3,"item":3}
 GET /count/6/7/1 -> 200 {"plain":6,"item":6}
-GET /count/10/7/1 -> 400 {"error":"count_below out of range"}
-GET /count/-1/7/1 -> 400 {"error":"count_below out of range"}
+GET /count/10/7/1 -> 400 {"error":"count_below out of range","line":9}
+GET /count/-1/7/1 -> 400 {"error":"count_below out of range","line":9}
 POST /small/0/-128 -> 200 {}
 POST /small/1/-1 -> 200 {}
 POST /small/2/0 -> 200 {}

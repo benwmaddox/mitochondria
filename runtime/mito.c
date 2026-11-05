@@ -1475,7 +1475,7 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     m->now = m->fixed_clock ? m->clock : os_now_ms();
     begin(&m->mem);
     m->frees.len = 0; m->sel.len = 0;
-    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p };
+    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p, 0 };
     int res = mito_eps[ei](&ctx);
     if (res < 0 && m->ekind == E_FORWARD) { m->out.len = 0; m->pending = 1; return 0; } /* committed or rolled back by MITO(finish_forward) */
     int code, ok;
@@ -1489,6 +1489,8 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
             case E_NONE: out_err_c(m, "compiled code failed without a reason"); code = 500; break;
             default: out_err(m, m->ebuf, m->emsg.len); code = m->ecode; break;
         }
+        /* the source line of the statement that failed, when the compiled code knew it */
+        if (ctx.at && m->out.len && m->out.p[m->out.len - 1] == '}') { m->out.len--; a_str(&m->out, ",\"line\":"); a_u64(&m->out, ctx.at); a_str(&m->out, "}"); }
     }
     if (ok) { u32 *f = (u32 *)m->frees.p; for (u64 i = 0; i < m->frees.len; i += 2) free_item(&m->mem, f[i], f[i + 1]); commit_changes(&m->mem); }
     else rollback(&m->mem);

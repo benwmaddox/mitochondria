@@ -1,6 +1,6 @@
 POST /motd -> 200 {"motd":"hello","len":5,"max":16}
-POST /motd -> 413 {"error":"string of 20 bytes does not fit string<16>"}
-GET /notes -> 404 {"error":"position 0 is past the end"}
+POST /motd -> 413 {"error":"string of 20 bytes does not fit string<16>","line":10}
+GET /notes -> 404 {"error":"position 0 is past the end","line":23}
 POST /notes -> 201 {"text":"[a]"}
 POST /notes -> 201 {"text":"[quote\"d]"}
 POST /notes -> 201 {"text":"[0123456789]"}

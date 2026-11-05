@@ -1,0 +1,79 @@
+// LangArena Graph::DFS (kostya/LangArena, MIT): depth-first search with an explicit stack from vertex 0 to the last vertex, keeping the best (shortest) path length found.
+// The reference's graph: 500,000 vertices, each an object with its own list of neighbours (a pool of vertices, each with a list; capacity 48 per
+// vertex, the largest degree the reference's generator makes for the run parameters is 47), built by the reference's generator (a path through all
+// vertices, then a random number of random jumps from each, undirected). The graph is built once, in prepare. The checksum adds the path length
+// of every run, warmup runs included, modulo 2^32.
+struct Edge { to: i32; }
+struct Vertex { adj: list<Edge, 48>; }
+struct G { vs: pool<Vertex, 500000>; visited: u8[500000]; sv: i32[65536]; sd: i32[65536]; vertices: i64; last: i64; result: i64; }
+state g: G;
+
+fn next_int(max) {
+    g.last = (g.last * 3877 + 29573) % 139968;
+    return int(g.last / 139968.0 * max);
+}
+// the reference's add_edge: both directions, only inside the graph
+fn add_edge(u, v) {
+    if u >= 0 && u < g.vertices && v >= 0 && v < g.vertices {
+        let a = g.vs[u];
+        a.adj.add { to: v };
+        let b = g.vs[v];
+        b.adj.add { to: u };
+    }
+}
+
+fn one_run() {
+    let target = g.vertices - 1;
+    g.visited.fill(0, g.vertices, 0);
+    g.sv[0] = 0;
+    g.sd[0] = 0;
+    var sp = 1;
+    var best = 2147483647;
+    each step in 0..100000000 while sp > 0 {
+        sp = sp - 1;
+        let v = g.sv[sp];
+        let dist = g.sd[sp];
+        if g.visited[v] == 0 && dist < best {
+            g.visited[v] = 1;
+            let vertex = g.vs[v];
+            each nb in vertex.adj {
+                if nb.to == target {
+                    if dist + 1 < best { best = dist + 1; }
+                } else if g.visited[nb.to] == 0 {
+                    g.sv[sp] = nb.to;
+                    g.sd[sp] = dist + 1;
+                    sp = sp + 1;
+                }
+            }
+        }
+    }
+    var length = best;
+    if best == 2147483647 { length = -1; }
+    g.result = (g.result + (length + 4294967296) % 4294967296) % 4294967296;
+}
+
+@post("/prepare/{vertices}/{jumps}/{jump_len}")
+fn prepare(vertices: i64 in 2..500000, jumps: i64 in 1..1000, jump_len: i64 in 1..100000) -> Response<{}> {
+    g.vs.clear();
+    g.vertices = vertices;
+    g.last = 42;
+    g.result = 0;
+    each i in 0..vertices { g.vs.add(); }
+    // generate_random: a path, then random jumps, in the reference's order and with its random generator
+    each i in 1..vertices { add_edge(i, i - 1); }
+    each v in 0..vertices {
+        let num_jumps = next_int(jumps);
+        each j in 0..num_jumps {
+            let offset = next_int(jump_len) - jump_len / 2;
+            let u = v + offset;
+            if u >= 0 && u < vertices && u != v { add_edge(v, u); }
+        }
+    }
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": g.result }); }

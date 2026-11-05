@@ -1,0 +1,74 @@
+// LangArena Etc::GameOfLife (kostya/LangArena, MIT): Conway's game of life on a w x h torus, `iterations` generations. The data-structure shape is the
+// reference's: every cell is an object holding its alive flag, its next state and its own precomputed list of its eight neighbours' (x, y) (a pool of
+// cells, each with a list), and a generation computes every cell's next state from its neighbour list and then updates every cell. Cell (x, y) is
+// slot y * w + x. The reference reads its checksum after the last generation: the number of live cells plus the FNV-1a hash of the alive flags
+// (hash = (hash ^ alive) * 16777619 in 32 bits, from 2166136261), which GET /checksum computes outside the timed generations as the reference does.
+// The seeding uses the reference's random generator (a cell is alive when next_float(1.0) < 0.1), which is reset before prepare.
+struct Pos { x: i32; y: i32; }
+struct Cell { alive: bool; next_state: bool; neighbors: list<Pos, 8>; }
+struct Life { cells: pool<Cell, 250000>; w: i64; h: i64; last: i64; }
+state life: Life;
+
+fn next_float() {
+    life.last = (life.last * 3877 + 29573) % 139968;
+    return 1.0 * life.last / 139968.0;
+}
+fn one_generation() {
+    let w = life.w;
+    let h = life.h;
+    each y in 0..h {
+        each x in 0..w {
+            let cell = life.cells[y * w + x];
+            var alive_neighbors = 0;
+            each nb in cell.neighbors { if life.cells[nb.y * w + nb.x].alive { alive_neighbors = alive_neighbors + 1; } }
+            if cell.alive { cell.next_state = alive_neighbors == 2 || alive_neighbors == 3; } else { cell.next_state = alive_neighbors == 3; }
+        }
+    }
+    each i in 0..w * h {
+        let cell = life.cells[i];
+        cell.alive = cell.next_state;
+    }
+}
+
+@post("/prepare/{w}/{h}")
+fn prepare(w: i64 in 1..500, h: i64 in 1..500) -> Response<{}> {
+    life.cells.clear();
+    life.w = w;
+    life.h = h;
+    life.last = 42;
+    each y in 0..h { each x in 0..w { let c = life.cells.add(); c.alive = false; c.next_state = false; } }
+    // link_neighbors: the eight neighbours in the reference's order (dy then dx, from -1), wrapping around
+    each y in 0..h {
+        each x in 0..w {
+            let cell = life.cells[y * w + x];
+            each dy in 0..3 {
+                each dx in 0..3 {
+                    if dx != 1 || dy != 1 {
+                        let ny = (y + dy - 1 + h) % h;
+                        let nx = (x + dx - 1 + w) % w;
+                        cell.neighbors.add { x: nx, y: ny };
+                    }
+                }
+            }
+        }
+    }
+    // the reference's prepare(): a cell is alive when the next random number in [0, 1) is below 0.1
+    life.last = 42;
+    each y in 0..h { each x in 0..w { if next_float() < 0.1 { life.cells[y * w + x].alive = true; } } }
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_generation(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_generation(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> {
+    var alive = 0;
+    var hash = 2166136261;
+    each i in 0..life.w * life.h {
+        var a = 0;
+        if life.cells[i].alive { a = 1; alive = alive + 1; }
+        hash = ((hash ^ a) * 16777619) % 4294967296;
+    }
+    return ok({ "checksum": (hash + alive) % 4294967296 });
+}

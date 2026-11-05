@@ -1,0 +1,2 @@
+like-for-like
+Same shape: a pool of cell objects, each with its alive flag, next state and its own list of its eight neighbours' coordinates, linked in the reference's order; same two-pass generation; same seeding with the reference's random generator. The reference's checksum (live cells plus the FNV-1a hash of the flags) is computed after the timed generations in both. Stores are checked and undo-logged.

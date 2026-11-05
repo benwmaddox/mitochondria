@@ -112,6 +112,10 @@ META = {
     "clbg_nbody": ([], "nbody"),
     "hash_crc32": (["size"], False),
     "hash_sha256": (["size"], False),
+    "etc_gameoflife": (["w", "h"], False),
+    "graph_bfs": (["vertices", "jumps", "jump_len"], False),
+    "graph_dfs": (["vertices", "jumps", "jump_len"], False),
+    "graph_astar": (["vertices", "jumps", "jump_len"], False),
 }
 rows = []
 for test in tests:

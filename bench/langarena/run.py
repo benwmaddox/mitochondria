@@ -25,6 +25,7 @@ from pin import pin
 mito = os.path.join(here, "..", "..", "target", "release", "mitochondria.exe")
 rust = os.environ.get("RUST_BENCH", os.path.join(here, "target-rust", "max-perf", "benchmarks.exe"))
 rust_checked = os.environ.get("RUST_CHECKED", os.path.join(here, "target-rust-checked", "max-perf", "benchmarks.exe"))
+crystal = os.environ.get("CRYSTAL", "D:/tools/langarena-crystal/target/bin_crystal.exe")  # LangArena's original (Crystal) implementation, built with `crystal build main.cr --release`
 arena = os.environ.get("LANGARENA", "D:/tmp/langarena")
 build_dir = os.path.join(here, "build")
 port = 18150
@@ -90,7 +91,7 @@ def run_mito(test, name, exe, cfg, params, float_result):
 
 
 def run_rust(exe, name):
-    p = subprocess.Popen([exe, os.path.join(arena, f"{mode}.js"), name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True); pin(p)
+    p = subprocess.Popen([exe, os.path.join(arena, f"{mode}.js"), name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=os.path.dirname(exe)); pin(p)
     out = p.communicate()[0]
     m = re.search(rf"{re.escape(name)}: (OK|ERR\[[^\]]*\]) in ([0-9.]+)s", out)
     if not m: return None, False
@@ -113,26 +114,30 @@ for test in tests:
     params, floaty = META[test]
     cfg = config[name]
     exe = build(test)
-    M, R, RC, ok_m, ok_r, ok_rc = [], [], [], True, True, True
+    M, R, RC, Y, ok_m, ok_r, ok_rc, ok_y = [], [], [], [], True, True, True, True
     for r in range(rounds):
-        order = ["m", "r", "c"] if r % 2 == 0 else ["c", "r", "m"]
+        order = ["m", "r", "c", "y"] if r % 2 == 0 else ["y", "c", "r", "m"]
         for who in order:
             if who == "m":
                 s, ok, got = run_mito(test, name, exe, cfg, params, floaty); M.append(s); ok_m &= ok
                 if not ok: print(f"  {name}: Mitochondria checksum {got}, expected {cfg['checksum']}", file=sys.stderr)
             elif who == "r":
                 s, ok = run_rust(rust, name); R.append(s); ok_r &= ok
-            elif os.path.exists(rust_checked):
+            elif who == "c" and os.path.exists(rust_checked):
                 s, ok = run_rust(rust_checked, name); RC.append(s); ok_rc &= ok
-    rows.append((name, M, R, RC, ok_m and ok_r))
+            elif who == "y" and os.path.exists(crystal):
+                s, ok = run_rust(crystal, name); Y.append(s); ok_y &= ok
+    rows.append((name, M, R, RC, Y, ok_m and ok_r and ok_y))
     print(f"  {name} done", file=sys.stderr)
 
 for label, agg in (("best of rounds", min), ("median of rounds", statistics.median)):
     print(f"\n{label} ({mode} parameters, {rounds} rounds, seconds for the timed iterations, ratio = Mitochondria / Rust):")
-    print(f"{'Workload':<26}{'Mitochondria s':>16}{'Rust (reference) s':>20}{'Mito/Rust':>11}{'Rust, overflow checks s':>25}{'Mito/Rust checked':>19}  checksums")
-    for name, M, R, RC, ok in rows:
+    print(f"{'Workload':<26}{'Mitochondria s':>16}{'Rust (reference) s':>20}{'Mito/Rust':>11}{'Rust, overflow checks s':>25}{'Mito/Rust checked':>19}{'Crystal (original) s':>22}{'Mito/Crystal':>14}  checksums")
+    for name, M, R, RC, Y, ok in rows:
         m, r = agg(M), agg(R)
         ratio = lambda a, b: f"{a / b:.2f}x" if b > 0 else "n/a"
         rc = f"{agg(RC):.3f}" if RC and None not in RC else "n/a"
         rcr = ratio(m, agg(RC)) if RC and None not in RC else "n/a"
-        print(f"{name:<26}{m:>16.3f}{r:>20.3f}{ratio(m, r):>11}{rc:>25}{rcr:>19}  {'verified' if ok else 'MISMATCH'}")
+        cy = f"{agg(Y):.3f}" if Y and None not in Y else "n/a"
+        cyr = ratio(m, agg(Y)) if Y and None not in Y else "n/a"
+        print(f"{name:<26}{m:>16.3f}{r:>20.3f}{ratio(m, r):>11}{rc:>25}{rcr:>19}{cy:>22}{cyr:>14}  {'verified' if ok else 'MISMATCH'}")

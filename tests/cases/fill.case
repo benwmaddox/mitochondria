@@ -1,0 +1,56 @@
+// array.fill(from, count, value): a range of a fixed array is set to one value, in plain state and in an item, for every
+// element width, bool and f64; the range and the value are checked, and a failed request leaves the array as it was
+--- program
+struct Row { w: i16[4]; ok: bool[3]; f: f64[3]; }
+struct App {
+    b: u8[6]; h: i32[5]; q: i64[3]; x: f64[3]; flag: bool[4];
+    rows: pool<Row, 2>;
+}
+state app: App;
+
+@post("/b/{from}/{n}/{v}")
+fn post_b(from: i64, n: i64, v: i64) -> Response<{}> { app.b.fill(from, n, v); return ok({}); }
+@post("/h/{from}/{n}/{v}")
+fn post_h(from: i64, n: i64, v: i64) -> Response<{}> { app.h.fill(from, n, v); return ok({}); }
+@post("/q/{from}/{n}/{v}")
+fn post_q(from: i64, n: i64, v: i64) -> Response<{}> { app.q.fill(from, n, v); return ok({}); }
+@post("/x/{from}/{n}/{v}")
+fn post_x(from: i64, n: i64, v: f64) -> Response<{}> { app.x.fill(from, n, v); return ok({}); }
+@post("/flag/{from}/{n}/{v}")
+fn post_flag(from: i64, n: i64, v: i64) -> Response<{}> { app.flag.fill(from, n, v > 0); return ok({}); }
+@get("/plain")
+fn get_plain() -> Response<{ b: [i64], h: [i64], q: [i64], x: [f64], flag: [bool] }> {
+    return ok({ "b": [each i in 0..6 app.b[i]], "h": [each i in 0..5 app.h[i]], "q": [each i in 0..3 app.q[i]], "x": [each i in 0..3 app.x[i]], "flag": [each i in 0..4 app.flag[i]] });
+}
+@post("/rows")
+fn post_rows() -> Response<{ slot: i64 }> { let r = app.rows.add(); return created({ "slot": slot(r) }); }
+@post("/rows/{s}/{from}/{n}/{v}")
+fn post_row(s: i64, from: i64, n: i64, v: i64) -> Response<{}> { let r = app.rows[s]; r.w.fill(from, n, v); r.ok.fill(from, n, v > 0); r.f.fill(from, n, v * 1.5); return ok({}); }
+@get("/rows/{s}")
+fn get_row(s: i64) -> Response<{ w: [i64], ok: [bool], f: [f64] }> { let r = app.rows[s]; return ok({ "w": [each i in 0..4 r.w[i]], "ok": [each i in 0..3 r.ok[i]], "f": [each i in 0..3 r.f[i]] }); }
+@post("/fill-then-fail")
+fn post_fail() -> Response<{}> { app.b.fill(0, 6, 9); app.q.fill(0, 3, 7); fail 422 "no"; }
+--- requests
+POST /b/0/6/7
+POST /b/2/3/200
+POST /b/6/0/1
+POST /b/0/0/1
+POST /b/5/1/255
+POST /b/0/6/256
+POST /b/0/6/-1
+POST /b/-1/2/1
+POST /b/0/7/1
+POST /b/4/3/1
+POST /h/1/3/-2147483648
+POST /h/0/5/2147483648
+POST /q/0/3/9223372036854775807
+POST /x/1/2/2.5
+POST /flag/1/2/1
+GET /plain
+POST /rows
+POST /rows/0/1/2/-5
+GET /rows/0
+POST /rows/0/0/4/40000
+GET /rows/0
+POST /fill-then-fail
+GET /plain

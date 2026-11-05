@@ -62,8 +62,10 @@ struct H {
     int (*input)(Ctx *, int, const char *, u32, int, i64, i64, Val *); /* a typed input of the endpoint (src, name, kind, lo, hi) */
     int (*fields)(Ctx *, const char *, u32);                   /* the body's fields are among these (NUL-separated) */
     int (*json_id)(Ctx *, u32, u32);                           /* an item written as its id: "slot.generation" or the slot */
+    int (*wr_plain)(Ctx *, u64, u32, i64);                     /* the same, for plain state: committed at start, never trimmed, so no commit check */
     int (*wr_int)(Ctx *, u64, u32, i64);                       /* an integer of `size` bytes at a byte offset (the value already known to fit) */
     int (*move_elems)(Ctx *, u64, u32, i64, i64, i64);        /* move `count` elements of `esize` bytes within an array at byte offset `base`: from, to, count (already in range) */
+    int (*fill_elems)(Ctx *, u64, u32, i64, i64, i64, int);   /* set `count` elements of `esize` bytes of an array at a byte offset to a value (its bits), from a position; the last is 1 for plain state */
     int (*count_below)(Ctx *, u64, u32, i64, i64, int, i64 *);      /* how many of the first n elements of an array (kind code, at a byte offset) are below a target (at most it when inclusive) */
     int (*str_cmp_lit)(Ctx *, int, u32, u32, u32, u32, u32, int *); /* a string column against a literal (op in OPS order), compared where they are: no copy */
     int (*str_cmp_col)(Ctx *, int, u32, u32, u32, u32, u32, u32, int *); /* a string column against another */
@@ -559,6 +561,7 @@ fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
                 Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
                 Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
                 Stmt::Move(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
+                Stmt::Fill(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); st(t, out); st(e, out); }
@@ -603,6 +606,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
                 Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(e, out),
                 Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
                 Stmt::Move(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
+                Stmt::Fill(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); calls(t, out); calls(e, out); }
@@ -701,10 +705,11 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         }
     }
     stmts.iter().any(|s| match s {
-        Stmt::Alloc { .. } | Stmt::Move(..) | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
+        Stmt::Alloc { .. } | Stmt::Move(..) | Stmt::Fill(..) | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
         Stmt::Move(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
+        Stmt::Fill(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || writes(api, t, seen) || writes(api, e, seen),
         Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || writes(api, b, seen),
@@ -729,6 +734,7 @@ fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
         Stmt::Move(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
+        Stmt::Fill(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || allocates(api, t, seen) || allocates(api, e, seen),
         Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || allocates(api, b, seen),
@@ -1021,12 +1027,13 @@ impl<'p> G<'p> {
         let (off, whole) = (col.off, col.kind.size());
         let size = scalar_bytes(code);
         let addr = match k { Some(k) => format!("{}ULL + (u64)({}) * {}ULL + (u64)({}) * {}ULL", off, idx, whole, k, size), None => format!("{}ULL + (u64)({}) * {}ULL", off, idx, whole) };
-        self.scalar_store(code, addr, v, slow)
+        self.scalar_store(code, addr, v, slow, false)
     }
     /// A typed store in line of an integer, bool or f64 `v` into a scalar of kind `code` (see `plain_code`) at byte
     /// offset `addr`: the generated code checks the value fits (an integer in a narrower column), and the generic helper
     /// (`slow`, with `@VAL` for the value) runs only for one that does not, to make the error. False if it does not apply.
-    fn scalar_store(&mut self, code: u32, addr: String, v: &CV, slow: &str) -> R<bool> {
+    fn scalar_store(&mut self, code: u32, addr: String, v: &CV, slow: &str, plain: bool) -> R<bool> {
+        let wr = if plain { "wr_plain" } else { "wr_int" };
         let w = self.tmp("w");
         let size = scalar_bytes(code);
         match (code, v) {
@@ -1051,16 +1058,16 @@ impl<'p> G<'p> {
                         self.depth -= 1;
                         self.line("} else {");
                         self.depth += 1;
-                        self.call(&format!("c->h->wr_int(c, {}, {}, {})", addr, size, w));
+                        self.call(&format!("c->h->{}(c, {}, {}, {})", wr, addr, size, w));
                         self.depth -= 1;
                         self.line("}");
                     }
-                    None => self.call(&format!("c->h->wr_int(c, {}, {}, {})", addr, size, w)),
+                    None => self.call(&format!("c->h->{}(c, {}, {}, {})", wr, addr, size, w)),
                 }
                 self.close("}");
             }
-            (11, CV::Bool(e)) => self.call(&format!("c->h->wr_int(c, {}, 1, ({}) ? 1 : 0)", addr, e)),
-            (10, CV::Flt(e)) => self.call(&format!("c->h->wr_int(c, {}, 8, BITS_F64({}))", addr, e)),
+            (11, CV::Bool(e)) => self.call(&format!("c->h->{}(c, {}, 1, ({}) ? 1 : 0)", wr, addr, e)),
+            (10, CV::Flt(e)) => self.call(&format!("c->h->{}(c, {}, 8, BITS_F64({}))", wr, addr, e)),
             _ => return Ok(false),
         }
         Ok(true)
@@ -1134,7 +1141,7 @@ impl<'p> G<'p> {
                         let at = off + sd.offs[k];
                         self.may_write_plain(at)?;
                         let v = self.expr(rhs, env, None)?;
-                        if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap))? { return Ok(()); }
+                        if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap), true)? { return Ok(()); }
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, {}, {}, {}, &{})", at, code, cap, vv));
                         return Ok(());
@@ -1185,7 +1192,7 @@ impl<'p> G<'p> {
                         self.elem_check(&k, n as u64);
                         let v = self.expr(rhs, env, None)?;
                         let esz = self.prog.plain_size(&e).0;
-                        if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap))? { return Ok(()); }
+                        if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap), true)? { return Ok(()); }
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, esz, code, cap, vv));
                     }
@@ -1235,6 +1242,43 @@ impl<'p> G<'p> {
                 };
                 self.line(&format!("if (UNLIKELY({f} < 0 || {f} > {len}LL || {t2} < 0 || {t2} > {len}LL || {n} < 0 || {n} > {len}LL || {f} + {n} > {len}LL || {t2} + {n} > {len}LL)) FAIL(400, \"move out of range\", 17);"));
                 self.call(&format!("c->h->move_elems(c, {}, {}, {}, {}, {})", base, esize, f, t2, n));
+            }
+            Stmt::Fill(arr, from, count, value) => {
+                let av = self.expr(arr, env, None)?;
+                let mut pos = |g: &mut Self, e: &'p Expr, env: &mut Vec<Option<CV>>| -> R<String> { let v = g.expr(e, env, None)?; let k = g.int_or(v, 400, "a position and a count must be integers"); Ok(g.hold_int(k)) };
+                let (f, n) = (pos(self, from, env)?, pos(self, count, env)?);
+                let v = self.expr(value, env, None)?;
+                let (base, code, len, plain) = match av {
+                    CV::ArrCol(c, idx, ci) => {
+                        self.may_write_col(c, &self.prog.colls[c].cols[ci].path.clone())?;
+                        let col = &self.prog.colls[c].cols[ci];
+                        let CKind::Arr(s, len) = col.kind else { unreachable!() };
+                        (format!("{}ULL + (u64)({}) * {}ULL", col.off, idx, col.kind.size()), plain_code(&Ty::Scalar(s)).map_or(0, |x| x.0), len, 0)
+                    }
+                    CV::PlainArr(off, e, len) => { self.may_write_plain(off)?; (format!("{}ULL", off), plain_code(&e).map_or(0, |x| x.0), len, 1) }
+                    _ => return no("`fill` works on a fixed array"),
+                };
+                let esize = scalar_bytes(code);
+                let w = self.tmp("w");
+                self.open("{");
+                let bits = match (code, &v) {
+                    (1..=8, CV::Int(e)) => {
+                        self.line(&format!("i64 {} = {};", w, e));
+                        let (lo, hi): (Option<&str>, Option<&str>) = match code {
+                            1 => (Some("-128"), Some("127")), 2 => (Some("-32768"), Some("32767")), 3 => (Some("(-2147483647LL - 1)"), Some("2147483647")),
+                            4 => (None, None), 5 => (Some("0"), Some("255")), 6 => (Some("0"), Some("65535")), 7 => (Some("0"), Some("4294967295LL")), _ => (Some("0"), None),
+                        };
+                        let cond = match (lo, hi) { (Some(l), Some(h)) => Some(format!("{w} < {l} || {w} > {h}")), (Some(l), None) => Some(format!("{w} < {l}")), _ => None };
+                        if let Some(cond) = cond { self.line(&format!("if (UNLIKELY({})) FAIL(413, \"value does not fit the array's elements\", 39);", cond)); }
+                        w.clone()
+                    }
+                    (11, CV::Bool(e)) => format!("(({}) ? 1 : 0)", e),
+                    (10, CV::Flt(e)) => format!("BITS_F64({})", e),
+                    _ => return no("`fill` stores an integer, bool or f64 matching the array"),
+                };
+                self.line(&format!("if (UNLIKELY({f} < 0 || {f} > {len}LL || {n} < 0 || {n} > {len}LL || {f} + {n} > {len}LL)) FAIL(400, \"fill out of range\", 17);"));
+                self.call(&format!("c->h->fill_elems(c, {}, {}, {}, {}, {}, {})", base, esize, f, n, bits, plain));
+                self.close("}");
             }
             Stmt::Remove(coll, e) => {
                 let CV::Coll(want, _) = self.expr(coll, env, None)? else { return no("`remove` is a function of a collection") };

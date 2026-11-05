@@ -1,4 +1,4 @@
-// LangArena Brainfuck::Recursion (kostya/LangArena, MIT): a Brainfuck interpreter that parses the program into nested operation lists and executes them by recursion
+// LangArena BF::Recursion (kostya/LangArena, MIT): a BF interpreter that parses the program into nested operation lists and executes them by recursion
 // (a loop runs its own list while the current cell is not zero). The reference's Vec<Op> with Loop(Vec<Op>) is a list of nodes linked by `next` with a loop's body as
 // the head of another list (nodes in arrays: the language has no variable-length nested vectors); parse and execute recurse as in the reference. The tape starts with one cell and grows
 // by one when the pointer passes the end. `.` folds the cell into a 64-bit result (result = result * 4 + cell); the checksum adds each run's result as u32. The program text and

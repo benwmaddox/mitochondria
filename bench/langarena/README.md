@@ -1,6 +1,6 @@
 # LangArena ports for Mitochondria
 
-Mitochondria ports of [LangArena](https://github.com/kostya/LangArena) tests (MIT, see `LICENSE-LangArena`), measured against LangArena's own Rust implementation on the same machine. `run.js` and `test.js` are LangArena's parameter files, vendored unchanged; each entry's `checksum` is what both sides must reproduce.
+Mitochondria ports of [LangArena](https://github.com/kostya/LangArena) tests (MIT, see `LICENSE-LangArena`), measured against LangArena's own Rust implementation on the same machine. `run.js` and `test.js` are LangArena's parameter files, vendored with one change: two test names shortened to `BF::Array` and `BF::Recursion` (run.py gives the reference binaries LangArena's own names); each entry's `checksum` is what both sides must reproduce.
 
 Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rust cargo build --profile max-perf --manifest-path <LangArena>/rust/Cargo.toml`, and the same with `--config 'profile.max-perf.overflow-checks=true'` into `target-rust-checked`), then `python -I bench/langarena/run.py [--mode run|test] [--rounds N] [test_dir ...]`. `LANGARENA` names the clone (default `D:/tmp/langarena`).
 
@@ -23,8 +23,8 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 | Base64::Encode | 1.179 | 0.167 | 7.06x | 0.167 | 7.06x | 1.116 | 1.06x | closest-possible |
 | Binarytrees::Arena | 0.983 | 0.541 | 1.82x | 0.520 | 1.89x | 0.544 | 1.81x | like-for-like |
 | Binarytrees::Obj | 2.836 | 3.009 | 0.94x | 2.970 | 0.95x | 1.511 | 1.88x | like-for-like |
-| Brainfuck::Array | 1.544 | 0.943 | 1.64x | 1.346 | 1.15x | 2.133 | 0.72x | rewritten-to-match |
-| Brainfuck::Recursion | 1.836 | 1.370 | 1.34x | 1.473 | 1.25x | 1.491 | 1.23x | closest-possible |
+| BF::Array | 1.544 | 0.943 | 1.64x | 1.346 | 1.15x | 2.133 | 0.72x | rewritten-to-match |
+| BF::Recursion | 1.836 | 1.370 | 1.34x | 1.473 | 1.25x | 1.491 | 1.23x | closest-possible |
 | Calculator::Ast | 0.209 | 0.686 | 0.30x | 0.688 | 0.30x | 0.415 | 0.50x | closest-possible |
 | Calculator::Interpreter | 0.529 | 0.885 | 0.60x | 0.891 | 0.59x | 0.513 | 1.03x | closest-possible |
 | CLBG::Fannkuchredux | 0.921 | 0.905 | 1.02x | 0.926 | 0.99x | 1.011 | 0.91x | like-for-like |
@@ -80,8 +80,8 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 |---|---|---|
 | 1 | Binarytrees::Obj | ported |
 | 2 | Binarytrees::Arena | ported |
-| 3 | Brainfuck::Array | ported |
-| 4 | Brainfuck::Recursion | ported |
+| 3 | BF::Array | ported |
+| 4 | BF::Recursion | ported |
 | 5 | Matmul::Single | ported |
 | 6-8 | Matmul::T4 / T8 / T16 | not comparable: the reference runs threads on a shared matrix; Mitochondria workers share nothing |
 | 9 | Base64::Encode | ported (the reference calls the base64-simd crate: a library comparison, kept out of the geometric mean) |
@@ -116,7 +116,7 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 47-48 | Compress::LZWEncode / LZWDecode | ported (encode keys its dictionary by (prefix code, byte) instead of the whole string; decode keeps its entries in one array instead of one Vec each; both favour Mitochondria: excluded from the geometric mean) |
 | 49-50 | Distance::Jaro / NGram | ported (NGram uses the new lib/intmap hash map) |
 
-Counts now: 41 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
+Counts now: 41 ported (the 7 in the first batch, both BF tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
 matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 0 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
 (`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only), `coll.clear()`, `array.fill`, `array.move` and `array.count_below`.
 Still blocked by something else: building text (Base64 output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.

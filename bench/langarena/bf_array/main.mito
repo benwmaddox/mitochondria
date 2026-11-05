@@ -1,4 +1,4 @@
-// LangArena Brainfuck::Array (kostya/LangArena, MIT): a Brainfuck interpreter. Each run compiles the program text (keeps the eight command bytes, matches the brackets into a
+// LangArena BF::Array (kostya/LangArena, MIT): a BF interpreter. Each run compiles the program text (keeps the eight command bytes, matches the brackets into a
 // jump table) and interprets it on a tape of 30,000 cells that grows if the pointer passes the end; `.` folds the cell into a 32-bit result (result = result * 4 + cell). The
 // program text and the warmup program (a small program run 1000 times before the timed run) are given to prepare; the checksum adds each run's result. The reference's
 // match on the command is an if-chain here (the language has no switch). The reference's u32 and u8 wrapping is masking.

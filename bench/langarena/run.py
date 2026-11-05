@@ -3,7 +3,7 @@
 usage: python -I run.py [--mode run|test] [--rounds N] [test_dir ...]      e.g.  python -I run.py --rounds 3 etc_sieve sort_quick
 
 Methodology (LangArena's, kostya/LangArena, MIT):
-  - the parameters are run.js (or test.js with --mode test), vendored unchanged;
+  - the parameters are run.js (or test.js with --mode test), vendored with two test names shortened (BF::Array, BF::Recursion);
   - LangArena times only `run_all()`, after `prepare()` and the warmup iterations (default max(0.2 * iterations, 1) unless the
     entry names warmup_iterations), and the checksum covers the warmup runs too. A Mitochondria port is a program with
         POST /prepare/...   untimed: builds the inputs and resets the state (and the random generator)
@@ -40,6 +40,14 @@ if "--cflags" in args: i = args.index("--cflags"); cflags = args[i + 1].split();
 mito_only = "--mito-only" in args
 if mito_only: args.remove("--mito-only")
 config = {c["name"]: c for c in json.load(open(os.path.join(here, f"{mode}.js")))}
+# The vendored run.js / test.js differ from LangArena's only in two test names (BF::Array, BF::Recursion). The reference binaries read
+# LangArena's own files and print its names, so a test's name there is the one at the same position in LangArena's file.
+def reference_names():
+    ours = [c["name"] for c in json.load(open(os.path.join(here, f"{mode}.js")))]
+    try: theirs = [c["name"] for c in json.load(open(os.path.join(arena, f"{mode}.js")))]
+    except OSError: return {}
+    return dict(zip(ours, theirs)) if len(ours) == len(theirs) else {}
+ref_name = reference_names()
 tests = args or sorted(d for d in os.listdir(here) if os.path.isfile(os.path.join(here, d, "main.mito")))
 if cflags: build_dir = os.path.join(here, "build", "flags-" + "_".join(f.strip("-").replace("=", "-") for f in cflags))
 if os.environ.get("MITO_BUILD_TAG"): build_dir = os.path.join(build_dir, os.environ["MITO_BUILD_TAG"])
@@ -129,6 +137,7 @@ def run_mito(test, name, exe, cfg, params, float_result):
 
 
 def run_rust(exe, name):
+    name = ref_name.get(name, name)
     p = subprocess.Popen([exe, os.path.join(arena, f"{mode}.js"), name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=os.path.dirname(exe)); pin(p)
     out = p.communicate()[0]
     m = re.search(rf"{re.escape(name)}: (OK|ERR\[[^\]]*\]) in ([0-9.]+)s", out)
@@ -177,8 +186,8 @@ META = {
     "calculator_ast": (["operations"], False),
     "base64_encode": (["size"], "b64enc"),
     "base64_decode": (["size"], "b64dec"),
-    "brainfuck_array": ("program", False),
-    "brainfuck_recursion": ("program", False),
+    "bf_array": ("program", False),
+    "bf_recursion": ("program", False),
 }
 rows = []
 for test in tests:

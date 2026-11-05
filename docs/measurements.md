@@ -801,7 +801,7 @@ rewritten-to-match ports 1.19x of Rust, 1.02x of Crystal; faster than Crystal on
 What did it (each merged): plain-state stores skip the page-commit check (plain state is committed at start and never trimmed); a bulk array.fill; stores of aligned scalars are inline with
 the undo-log and commit tests against per-request locals (jons, dirty map and commit flags are fixed for a request); value-range analysis for names that never change (sound, tested, no
 measurable effect on these ports). Attribution on the sieve per run: 24.7 ms as built, 19.6 without the undo log, 13.3 without the commit check, 7.8 without both, Rust 5.0.
-Language added: bit operators and hex literals, sqrt exp floor abs, string byte reads, coll.clear(), array.fill/move/count_below. They unblock Binarytrees, Brainfuck, NeuralNet, Nbody,
+Language added: bit operators and hex literals, sqrt exp floor abs, string byte reads, coll.clear(), array.fill/move/count_below. They unblock Binarytrees, BF, NeuralNet, Nbody,
 TextRaytracer, CRC32 and SHA256 for porting (not yet ported).
 
 ## Round 22 (2026-11-04): 19 LangArena tests ported
@@ -868,9 +868,9 @@ reference from round 24's full run (same day, same core).
 | CLBG::Nbody | 0.926 | 0.934 | 0.822 | 0.712 | 1.30x | 1.31x | 1.15x | closest-possible |
 | Graph::DFS | 0.952 | 0.930 | 0.846 | 0.713 | 1.34x | 1.30x | 1.19x | rewritten-to-match |
 | Etc::TextRaytracer | 0.735 | 0.750 | 0.743 | 0.618 | 1.19x | 1.21x | 1.20x | rewritten-to-match |
-| Brainfuck::Recursion | 1.981 | 1.881 | 1.734 | 1.330 | 1.49x | 1.41x | 1.30x | closest-possible |
+| BF::Recursion | 1.981 | 1.881 | 1.734 | 1.330 | 1.49x | 1.41x | 1.30x | closest-possible |
 | Etc::Sieve | 1.735 | 1.777 | 1.741 | 1.312 | 1.32x | 1.35x | 1.33x | rewritten-to-match |
-| Brainfuck::Array | 1.393 | 1.459 | 1.437 | 0.918 | 1.52x | 1.59x | 1.57x | rewritten-to-match |
+| BF::Array | 1.393 | 1.459 | 1.437 | 0.918 | 1.52x | 1.59x | 1.57x | rewritten-to-match |
 | Base64::Decode | 1.642 | 1.279 | 0.761 | 0.184 | 8.92x | 6.95x | 4.14x | closest-possible |
 | Base64::Encode | 2.509 | 2.242 | 0.782 | 0.165 | 15.21x | 13.59x | 4.74x | closest-possible |
 
@@ -878,7 +878,7 @@ geomean vs Rust, like-for-like + rewritten (27): as built 1.06x, no range/commit
 geomean vs Rust, all 41: 1.05x, 0.95x, 0.81x
 
 Reading it: the range and commit tests together cost about 10% overall (1.06x to 0.96x of Rust), the undo log another 12% (to 0.85x). They matter most where items are written a lot
-(Binarytrees::Obj 1.29x to 0.54x, Binarytrees::Arena 2.08x to 1.09x, Base64 4x) and in loops the versioning does not cover (GameOfLife, Huffman decode, Fannkuch). The sieve and Brainfuck
+(Binarytrees::Obj 1.29x to 0.54x, Binarytrees::Arena 2.08x to 1.09x, Base64 4x) and in loops the versioning does not cover (GameOfLife, Huffman decode, Fannkuch). The sieve and BF
 do not move: their loops are versioned already, and what is left against Rust is overflow checking (Rust with overflow checks takes 1.79 s on the sieve, Mitochondria 1.74 s).
 Run-to-run noise is a few percent (Binarytrees::Obj as built measured 3.2 s in round 24 and 3.7 s here).
 
@@ -919,9 +919,9 @@ Same compiler, logged sources against unlogged ones, best of 2 alternating round
 | Graph::AStar | 0.894 | 0.640 | -28% |
 | Compress::HuffEncode | 0.755 | 0.600 | -21% |
 | Compress::HuffDecode | 1.054 | 0.900 | -15% |
-| Template::Parse, Brainfuck::Recursion | | | -11% |
+| Template::Parse, BF::Recursion | | | -11% |
 | Calculator::Ast, Graph::DFS, Sort::Merge, Binarytrees::Arena, Sort::Quick, Distance::Jaro | | | -7% to -9% |
-| Compress::BWTEncode, Etc::Sieve, Brainfuck::Array, LZWEncode, Maze::AStar | | | -4% to -6% |
+| Compress::BWTEncode, Etc::Sieve, BF::Array, LZWEncode, Maze::AStar | | | -4% to -6% |
 | the other 10 | | | -3% to +3% |
 
 Geometric mean over the 31 measured: -10.9%. Maze::Generator was measured too and got 20-25% slower with its two stack arrays unlogged; with the undo log compiled out entirely it is also slower

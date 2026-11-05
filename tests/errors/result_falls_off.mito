@@ -1,0 +1,4 @@
+// expect: `sign` can end without returning its `i64`: return a value on every path
+struct P { name: string<16>; score: i64; } struct App { ps: pool<P, 8>; total: i64; } state app: App;
+fn sign(x: i64) -> i64 { if x > 0 { return 1; } }
+@get("/a") fn a() -> Response<{ n: i64 }> { return ok({ n: sign(2) }); }

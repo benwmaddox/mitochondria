@@ -385,6 +385,38 @@ thread_local! {
     static LITS: std::cell::RefCell<(Vec<u8>, Vec<(u32, u32)>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
     /// Why a kind was widened to one known only at run time, while the kinds of an endpoint are being worked out.
     static WHY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The kinds of every call's arguments and result, per function (for `mito sigs`, which writes signatures from them).
+    static SIGS: std::cell::RefCell<Vec<(u32, Vec<String>, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// A value's kind as a type name: what a parameter of a function that receives it would be declared as.
+fn type_text(prog: &Program, v: &CV) -> String {
+    let item = |c: usize| prog.colls[c].item.map_or(format!("?{}", prog.colls[c].name), |s| { let n = &prog.structs[s].name; let others = prog.colls.iter().filter(|x| x.item == Some(s)).count(); if others > 1 { format!("{} in {}", n, prog.colls[c].name) } else { n.clone() } });
+    match v {
+        CV::Int(_) => "i64".into(), CV::Flt(_) => "f64".into(), CV::Bool(_) => "bool".into(),
+        CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) => "string".into(), CV::Null => "null".into(), CV::Any(_) => "any".into(),
+        CV::Item(c, _) => item(*c), CV::Ref(c, ..) => format!("{}?", item(*c)),
+        CV::Coll(c, _) => format!("coll {}", prog.colls[*c].name),
+        CV::Plain(sd, o) => format!("plain {}@{}", prog.structs[*sd].name, o),
+        CV::Part(..) => "part".into(), CV::ArrCol(..) => "arrcol".into(), CV::PlainArr(_, t, n) => format!("plainarr {:?}[{}]", t, n),
+    }
+}
+/// For every function called anywhere: its name, each parameter's kinds and its result's kinds over all calls.
+pub fn sigs(prog: &Program, api: &Api) -> Vec<(String, Vec<Vec<String>>, Vec<String>)> {
+    SIGS.with(|s| s.borrow_mut().clear());
+    let _ = generate(prog, api);
+    let rec = SIGS.with(|s| s.borrow().clone());
+    let mut out = Vec::new();
+    for (k, f) in api.fns.iter().enumerate() {
+        let mut ps: Vec<Vec<String>> = vec![Vec::new(); f.params.len()];
+        let mut rs: Vec<String> = Vec::new();
+        for (fk, a, r) in rec.iter().filter(|x| x.0 == k as u32) {
+            let _ = fk;
+            for (i, t) in a.iter().enumerate() { if i < ps.len() && !ps[i].contains(t) { ps[i].push(t.clone()); } }
+            if !rs.contains(r) { rs.push(r.clone()); }
+        }
+        out.push((f.name.clone(), ps, rs));
+    }
+    out
 }
 fn why(m: String) { WHY.with(|w| { let mut w = w.borrow_mut(); if !w.contains(&m) { w.push(m); } }) }
 
@@ -1014,9 +1046,7 @@ impl<'p> G<'p> {
         Ok(out)
     }
 
-    /// Generate the C function for recursive function `k` with argument kinds `pks`. Its result kind is found by trying
-    /// kinds in turn (null, int, bool, float, string, then any kind a body's returns asked for, then any value): a kind
-    /// is kept when the body, generated with recursive calls returning that kind, returns only values of it.
+    /// Generate the C function for recursive function `k` with argument kinds `pks`; its result kind is its signature's.
     fn gen_spec(&mut self, k: u32, key: String, pks: &[PK]) -> R<usize> {
         let si = self.specs.borrow().len();
         let name = format!("fn_{}_{}", k, si);
@@ -1036,12 +1066,10 @@ impl<'p> G<'p> {
             }
         }
         self.specs.borrow_mut().push(Spec { key, name, ret: K::Null, proto: String::new(), body: None });
-        let mut tries = vec![K::Null, K::Int, K::Bool, K::Flt, K::Txt];
-        let mut t = 0;
-        while t < tries.len() {
-            let cand = tries[t];
-            t += 1;
-            { let mut sp = self.specs.borrow_mut(); sp.truncate(si + 1); sp[si].ret = cand; } // functions generated under an earlier guess go
+        // the declared result (a function without one gives no value)
+        let cand = match &self.api.fns[k as usize].ret { Some(t) => self.decl_kind(t, &self.api.fns[k as usize].name)?, None => K::Null };
+        {
+            self.specs.borrow_mut()[si].ret = cand;
             match self.spec_body(k, pks, cand) {
                 Ok(body) => {
                     let rp = match cand { K::Null | K::Plain(..) => "", K::Int => ", i64 *ret_v", K::Flt => ", double *ret_v", K::Bool => ", int *ret_v", K::Txt => ", Txt *ret_v", K::Any => ", Val *ret_v", K::Item(_) | K::Coll(_) => ", u32 *ret_v", K::Ref(_) => ", u32 *ret_s, u32 *ret_v" };
@@ -1050,17 +1078,10 @@ impl<'p> G<'p> {
                     sp[si].body = Some(body);
                     return Ok(si);
                 }
-                Err(SpecErr::Conflict(u)) => {
-                    // the first guess (no value) is a guess, not a `null` the function returns: replace it with what the body gives
-                    let next = if cand == K::Null { match u { K::Ref(c) => K::Item(c), o => o } } else { unify(cand, u) }; // (a real `null` widens it again on the next try)
-                    if !tries.contains(&next) { if next == K::Any { tries.push(K::Any); } else { tries.insert(t, next); } }
-                    else if !tries.contains(&K::Any) { tries.push(K::Any); }
-                }
-                Err(SpecErr::Other(e)) => { self.specs.borrow_mut().truncate(si); return Err(e); }
+                Err(SpecErr::Conflict(_)) => { self.specs.borrow_mut().truncate(si); no(format!("`{}` returns a value of another kind than it declares", self.api.fns[k as usize].name)) }
+                Err(SpecErr::Other(e)) => { self.specs.borrow_mut().truncate(si); Err(e) }
             }
         }
-        self.specs.borrow_mut().truncate(si);
-        no("no result kind fits a recursive function")
     }
 
     /// The body of a C function for `k`, assuming its result kind is `cand`; widens its own locals as endpoints do.
@@ -1095,7 +1116,7 @@ impl<'p> G<'p> {
             if sel.is_some() && r.is_ok() { g.call("c->h->sel_end(c, hm)"); } // falling off the end
             let ends_by_itself = matches!(f.body.last(), Some(Stmt::Return(_)) | Some(Stmt::Fail(..)) | Some(Stmt::Respond(..)) | Some(Stmt::Forward { .. }));
             match (r, g.widen) {
-                (Ok(()), _) if !ends_by_itself && !fits(K::Null, cand) => return Err(SpecErr::Conflict(K::Null)), // falling off the end returns null
+                (Ok(()), _) if !ends_by_itself && !fits(K::Null, cand) => return Err(SpecErr::Other(format!("`{}` can end without returning its `{}`: return a value on every path", f.name, f.ret.as_ref().map_or(String::new(), |t| t.to_string())))),
                 (Ok(()), _) => return check_profile(&g.body).map(|_| g.body).map_err(|e| SpecErr::Other(format!("C safety profile: {}", e))),
                 (Err(_), Some(Widen::Ret(f2, u))) if f2 == k => return Err(SpecErr::Conflict(u)),
                 (Err(_), Some(Widen::Slot(fr, sl, kk))) => match slot_kinds.iter_mut().find(|x| x.0 == (fr, sl)) { Some(x) => x.1 = unify(x.1, kk), None => slot_kinds.push(((fr, sl), kk)) },
@@ -1104,6 +1125,63 @@ impl<'p> G<'p> {
             }
         }
         Err(SpecErr::Other("kinds did not settle".into()))
+    }
+
+    /// The kind a signature's type stands for (an item type `T?` is a reference; a scalar `T?` is its scalar, and also takes null).
+    /// `f`: the function whose signature it is; in a module instance's function (`inst.f`), an item type names the instance's own items.
+    fn decl_kind(&self, t: &crate::lang::PTy, f: &str) -> R<K> {
+        let inst = f.rsplit_once('.').map(|x| format!("{}.", x.0));
+        let scalar = |n: &str| -> Option<K> { Some(match n {
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => K::Int, "f32" | "f64" => K::Flt, "bool" => K::Bool,
+            "string" | "utf8" | "ascii" => K::Txt, _ => return None }) };
+        if let Some(fld) = &t.field {
+            // `T.key`: the type of a struct's field
+            let Some(sd) = self.prog.structs.iter().find(|x| x.name == t.name) else { return no(format!("`{}` is not a struct", t.name)) };
+            let Some((_, ty)) = sd.fields.iter().find(|x| x.0 == *fld) else { return no(format!("`{}` has no field `{}`", t.name, fld)) };
+            let tn = self.prog.show(ty);
+            let base = tn.split(|c: char| c == '<' || c == ' ' || c == '[').next().unwrap_or("").to_string();
+            return scalar(&base).ok_or_else(|| format!("`{}.{}` is {}: a signature takes a field's type only when it is a number, bool or string", t.name, fld, tn));
+        }
+        if let Some(k) = scalar(&t.name) { return Ok(k); }
+        if t.name == "pool" || t.name == "list" {
+            // a collection: `pool<T>` / `list<T>` (`in path` when several hold T)
+            let Some(item) = &t.arg else { return no(format!("`{}` needs its item type: `{}<T>`", t.name, t.name)) };
+            let Some(sid) = self.prog.structs.iter().position(|x| x.name == *item) else { return no(format!("`{}` is not a struct", item)) };
+            let found: Vec<usize> = (0..self.prog.colls.len()).filter(|&c| { let x = &self.prog.colls[c]; x.item == Some(sid) && x.is_list() == (t.name == "list") && t.coll.as_ref().map_or(true, |p| x.name == *p) }).collect();
+            return match found.as_slice() {
+                [c] => Ok(K::Coll(*c)),
+                [] => no(format!("no {} of `{}` items{}", t.name, item, t.coll.as_ref().map_or(String::new(), |p| format!(" at `{}`", p)))),
+                _ => no(format!("several collections are `{}`: write `{} in path` ({})", t, t, found.iter().map(|&c| self.prog.colls[c].name.clone()).collect::<Vec<_>>().join(", "))),
+            };
+        }
+        let Some(sid) = self.prog.structs.iter().position(|x| x.name == t.name) else {
+            return no(format!("`{}` is not a type: a parameter is a number (i64, f64), bool, string, or an item (a struct held by a collection)", t.name));
+        };
+        let mut holders: Vec<usize> = (0..self.prog.colls.len()).filter(|&c| self.prog.colls[c].item == Some(sid) && t.coll.as_ref().map_or(true, |p| self.prog.colls[c].name == *p)).collect();
+        if holders.len() > 1 { if let Some(i) = &inst { let own: Vec<usize> = holders.iter().copied().filter(|&c| self.prog.colls[c].name.starts_with(i.as_str())).collect(); if own.len() == 1 { holders = own; } } }
+        let c = match holders.as_slice() {
+            [c] => *c,
+            [] => return no(match &t.coll { Some(p) => format!("`{}` is not held by `{}`", t.name, p), None => format!("no collection holds `{}` items", t.name) }),
+            _ => return no(format!("several collections hold `{}` items: write `{} in path` with the one this takes ({})", t.name, t.name, holders.iter().map(|&c| self.prog.colls[c].name.clone()).collect::<Vec<_>>().join(", "))),
+        };
+        Ok(if t.opt { K::Ref(c) } else { K::Item(c) })
+    }
+    /// A value given where a signature declares type `t` (`what`: "parameter `x` of `f`" or "result of `f`"): checked, an integer
+    /// widened to a number for a `f64`, an item kept as an item for `T?`.
+    fn to_declared(&mut self, v: CV, t: &crate::lang::PTy, f: &str, what: &str) -> R<CV> {
+        let want = self.decl_kind(t, f)?;
+        let got = kind(&v);
+        let ok = match (got, want) {
+            (Some(K::Int), K::Flt) => return Ok(match v { CV::Int(e) => CV::Flt(format!("((double)({}))", e)), v => v }),
+            (Some(K::Null), _) => t.opt,
+            (Some(K::Item(c)), K::Ref(d)) => c == d,
+            (Some(K::Ref(c)), K::Ref(d)) => c == d,
+            (Some(K::Ref(_)), K::Item(_)) => return no(format!("{} is `{}`, given a value that may be null: check it first with `if exists(x)`, or declare `{}?`", what, t, t)),
+            (Some(a), b) => a == b,
+            (None, _) => false,
+        };
+        if !ok { return no(format!("{} is `{}`, given {}", what, t, got.map_or("a struct field or array".to_string(), |k| kname(self.prog, k)))); }
+        Ok(v)
     }
 
     fn tmp(&mut self, p: &str) -> String {
@@ -1717,6 +1795,15 @@ impl<'p> G<'p> {
         let r = self.ret.last().unwrap();
         let (var, label, f) = (r.var.clone(), r.label.clone(), *self.inlining.last().unwrap());
         let k = match r.kind { None => { self.ret.last_mut().unwrap().kind = Some(kv); kv } Some(k) => k };
+        let declared = self.api.fns[f as usize].ret.clone();
+        if let Some(t) = &declared {
+            let what = format!("the result of `{}`", self.api.fns[f as usize].name);
+            let fname = self.api.fns[f as usize].name.clone();
+            let v2 = self.to_declared(v.clone(), t, &fname, &what)?;
+            if let (CV::Flt(_), CV::Int(_)) = (&v2, &v) { return self.ret_with(v2); }
+        } else if self.api.fns[f as usize].ptys.iter().any(|p| p.is_some()) && kv != K::Null {
+            return no(format!("`{}` returns a value: declare its result, `fn {}(...) -> T`", self.api.fns[f as usize].name, self.api.fns[f as usize].name));
+        }
         if !fits(kv, k) {
             if unify(k, kv) == K::Any { why(format!("`{}` returns {} and {}: a function returns one kind", self.api.fns[f as usize].name, kname(self.prog, k), kname(self.prog, kv))); }
             self.widen = Some(Widen::Ret(f, unify(k, kv))); return no("a function returns values of different kinds");
@@ -2385,7 +2472,17 @@ impl<'p> G<'p> {
 
     /// Call user function `k` with argument values already computed: inlined, or a generated C function if recursive.
     fn call_values(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>) -> R<CV> {
+        let f = &self.api.fns[k as usize];
+        if vals.len() != f.params.len() { return no(format!("`{}` takes {} argument{}, given {}", f.name, f.params.len(), if f.params.len() == 1 { "" } else { "s" }, vals.len())); }
+        let mut checked = Vec::with_capacity(vals.len());
+        for (i, v) in vals.into_iter().enumerate() {
+            checked.push(match &f.ptys[i] { Some(t) => self.to_declared(v, t, &f.name, &format!("parameter `{}` of `{}`", f.params[i], f.name))?, None => v });
+        }
+        let vals = checked;
+        let args: Vec<String> = vals.iter().map(|v| type_text(self.prog, v)).collect();
         let r = self.call_values_inner(k, vals, dead)?;
+        let rt = if returns_value(&self.api.fns[k as usize].body) { type_text(self.prog, &r) } else { "-".into() };
+        SIGS.with(|s| s.borrow_mut().push((k, args, rt)));
         let (opt, name) = (self.api.fns[k as usize].ret_opt, self.api.fns[k as usize].name.clone());
         let gives = returns_value(&self.api.fns[k as usize].body); // a function without `return value` gives nothing, which is not null
         Ok(match r {
@@ -2429,7 +2526,7 @@ impl<'p> G<'p> {
         let (var, label) = (self.tmp("ret"), self.tmp("end"));
         let saved = std::mem::take(&mut self.body);
         self.inlining.push(k);
-        let forced = self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1);
+        let forced = match &f.ret { Some(t) => Some(self.decl_kind(t, &f.name)?), None => self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1) };
         let sel = if has_loop(&f.body) { Some(self.tmp("hm")) } else { None };
         self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone() });
         self.depth += 1;
@@ -2444,6 +2541,7 @@ impl<'p> G<'p> {
         let ends_by_itself = matches!(f.body.last(), Some(Stmt::Return(_)) | Some(Stmt::Fail(..)) | Some(Stmt::Respond(..)) | Some(Stmt::Forward { .. }));
         let kind = ret.kind.unwrap_or(K::Null);
         if !ends_by_itself && kind != K::Null {
+            if let Some(t) = &f.ret { if !t.opt { return no(format!("`{}` can end without returning its `{}`: return a value on every path", f.name, t)); } }
             // falling off the end returns null, as in the interpreter
             if !fits(K::Null, kind) {
             if unify(kind, K::Null) == K::Any { why(format!("`{}` returns {} on one path and nothing on another: return a value on every path", self.api.fns[k as usize].name, kname(self.prog, kind))); }
@@ -2885,10 +2983,10 @@ mod profile_tests {
         for (api, want) in [
             ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": nope }); }", "unknown name `nope`"),
             ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": frob(1) }); }", "unknown function `frob`"),
-            ("fn f(a, b) { return a; } @get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": f(1) }); }", "`f` takes 2 arguments, given 1"),
+            ("fn f(a: i64, b: i64) -> i64 { return a; } @get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": f(1) }); }", "`f` takes 2 arguments, given 1"),
             ("@get(\"/a\") fn get_a() -> Response<{}> { x = 1; return ok({}); }", "unknown variable `x`"),
             ("@get(\"/a\") fn get_a() -> Response<{}> { if true { let y = 1; } return ok({ \"y\": y }); }", "unknown name `y`"), // block scope
-            ("fn len(s) { return 1; }", "name of a builtin"),
+            ("fn len(s: string) -> i64 { return 1; }", "name of a builtin"),
             (&format!("@get(\"{}\") fn a() -> Response<{{}}> {{ return ok({{}}); }}", "/a".repeat(33)), "at most 32 parts"),
             (&format!("@get(\"/a\") fn a() -> Response<{{}}> {{ let {} = 1; return ok({{}}); }}", "n".repeat(129)), "a name longer than 128 bytes"),
             (&format!("@get(\"/a\") fn a() -> Response<{{}}> {{ fail 400 \"{}\"; }}", "m".repeat(1025)), "a fail message longer than 1024 bytes"),
@@ -2930,7 +3028,7 @@ mod profile_tests {
     fn values_that_may_be_null_are_checked_before_use() {
         let st = "struct I { n: i64; name: string<8>; } struct App { items: pool<I, 4>; } state app: App;";
         let load = |api: &str| -> String { super::check(&Program::parse(st).unwrap(), api).err().unwrap_or_default() };
-        let find = "fn find(n) -> I? { foreach it in app.items { if it.n == n { return it; } } return null; }\n";
+        let find = "fn find(n: i64) -> I? { foreach it in app.items { if it.n == n { return it; } } return null; }\n";
         for (api, want) in [
             // reading, writing, removing and slot() of a value that may be null
             (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = find(k); return ok({{ n: it.n }}); }}", find), "`.n` of a value that may be null"),
@@ -2940,7 +3038,7 @@ mod profile_tests {
             // try_add gives a value that may be null
             ("@post(\"/a\") fn a() -> Response<{}> { let it = app.items.try_add(); it.n = 1; return ok({}); }".to_string(), "may be null"),
             // a function that can return null must say so
-            ("fn find(n) { foreach it in app.items { if it.n == n { return it; } } return null; }\n@get(\"/a\") fn a(k: i64) -> Response<{ n: i64 }> { return ok({ n: or(find(k).n, 0) }); }".to_string(), "declare it `fn find(...) -> T?`"),
+            ("fn find(n: i64) -> I { foreach it in app.items { if it.n == n { return it; } } return null; }\n@get(\"/a\") fn a(k: i64) -> Response<{ n: i64 }> { return ok({ n: or(find(k).n, 0) }); }".to_string(), "the result of `find` is `I`, given null"),
             // the narrowing ends with its branch, and does not hold when the branch assigns the variable
             (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = find(k); if exists(it) {{ }} return ok({{ n: it.n }}); }}", find), "may be null"),
             (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ var it = find(k); if exists(it) {{ it = find(k + 1); return ok({{ n: it.n }}); }} return ok({{ n: 0 }}); }}", find), "may be null"),
@@ -2985,8 +3083,12 @@ mod profile_tests {
             ("@get(\"/a\") fn a() -> Response<{}> { if app.total > 1 { return ok({}); } }", "can finish without an answer"),
             // every value's kind is known when the program is compiled
             ("@get(\"/a\") fn a() -> Response<{ n: i64 }> { var v = 1; v = \"x\"; return ok({ n: 1 }); }", "`v` holds an integer and then a string: a var keeps the kind of its first value"),
-            ("fn f(k: i64) { if k > 0 { return 1; } return \"x\"; } @get(\"/a\") fn a() -> Response<{}> { let x = f(1); return ok({}); }", "`f` returns an integer and a string: a function returns one kind"),
-            ("fn f(k: i64) { if k > 0 { return 1; } } @get(\"/a\") fn a() -> Response<{}> { let x = f(1); return ok({}); }", "returns an integer on one path and nothing on another"),
+            ("fn f(k: i64) -> i64 { if k > 0 { return 1; } return \"x\"; } @get(\"/a\") fn a() -> Response<{}> { let x = f(1); return ok({}); }", "the result of `f` is `i64`, given a string"),
+            ("fn f(k: i64) { if k > 0 { return 1; } } @get(\"/a\") fn a() -> Response<{}> { f(1); return ok({}); }", "`f` returns a value: declare its result"),
+            ("fn f(k) -> i64 { return k; } @get(\"/a\") fn a() -> Response<{}> { let x = f(1); return ok({}); }", "parameter `k` needs a type"),
+            ("fn f(k: i64) -> i64 { return k; } @get(\"/a\") fn a() -> Response<{}> { let x = f(\"one\"); return ok({}); }", "parameter `k` of `f` is `i64`, given a string"),
+            ("fn f(k: Nope) -> i64 { return 1; } @get(\"/a\") fn a() -> Response<{}> { let x = f(1); return ok({}); }", "`Nope` is not a type"),
+            ("fn f(k: i64) -> i64 { if k > 0 { return 1; } } @get(\"/a\") fn a() -> Response<{}> { let x = f(1); return ok({}); }", "`f` can end without returning its `i64`"),
             ("@get(\"/a\") fn a() -> Response<{ n: string }> { return ok({ n: \"x\" - 1 }); }", "operator `-` does not fit string and i64"),
         ] {
             let e = load(api);

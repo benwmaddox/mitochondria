@@ -60,6 +60,7 @@ fn main() {
         Some("build") => build_exe(rest),
         Some("serve") => serve(rest),
         Some("emit-c") => emit_c(rest),
+        Some("sigs") => sigs(rest),
         _ => { eprintln!("{}", USAGE); std::process::exit(2) }
     }
 }
@@ -230,4 +231,17 @@ fn emit_c(args: &[String]) {
     let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(report(&file, &text, &e)));
     let c = cgen::emit(&prog, &a, (&file, &code)).unwrap_or_else(|e| die(e));
     match out { Some(p) => { std::fs::write(&p, c).unwrap_or_else(|e| die(format!("{}: {}", p, e))); println!("wrote {}", p); } None => print!("{}", c) }
+}
+
+/// `sigs <program>` (a tool, not in the usage): every function's parameter and result kinds as the compiler sees them at its calls.
+fn sigs(args: &[String]) {
+    let (f, text, _) = read_program(&inputs(args));
+    let file = std::path::Path::new(&f).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let (state, code) = source::load(&text).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let prog = layout::Program::parse(&state).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    for (name, ps, rs) in cgen::sigs(&prog, &a) {
+        let params: Vec<String> = ps.iter().map(|k| k.join("|")).collect();
+        println!("{}\t({})\t-> {}", name, params.join(", "), rs.join("|"));
+    }
 }

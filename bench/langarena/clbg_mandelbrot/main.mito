@@ -7,9 +7,9 @@
 struct Mandel { buf: u8[2500000] unlogged; pos: i64; w: i64; h: i64; }
 state md: Mandel;
 
-fn put_byte(b) { md.buf[md.pos] = b; md.pos = md.pos + 1; }
+fn put_byte(b: i64) { md.buf[md.pos] = b; md.pos = md.pos + 1; }
 // the decimal digits of n (n > 0) at the end of the buffer
-fn put_number(n) {
+fn put_number(n: i64) {
     var digits = 1;
     var rest = n / 10;
     foreach t in 0..19 while rest > 0 { digits = digits + 1; rest = rest / 10; }

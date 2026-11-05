@@ -7,7 +7,7 @@ struct AR {
 }
 state ar: AR;
 
-fn make_data(size) {
+fn make_data(size: i64) {
     foreach i in 0..size - 1 {
         let slot = i % 11;
         var byte = 65;
@@ -30,7 +30,7 @@ fn make_tables() {
     ar.total = total;
 }
 // the reference's BitOutputStream
-fn write_bit(bit) {
+fn write_bit(bit: i64) {
     ar.buffer = (ar.buffer << 1) | (bit & 1);
     ar.bit_pos = ar.bit_pos + 1;
     if ar.bit_pos == 8 {
@@ -97,7 +97,7 @@ fn encode() {
 }
 
 // the reference's BitInputStream::read_bit
-fn read_bit() {
+fn read_bit() -> i64 {
     if ar.in_bit == 8 {
         ar.in_pos = ar.in_pos + 1;
         ar.in_bit = 0;

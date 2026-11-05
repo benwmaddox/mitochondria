@@ -4,7 +4,7 @@
 struct A { arr: i64[4]; }
 state a: A;
 
-fn bumped(n) { var m = n; m = m + 5; return m; }
+fn bumped(n: i64) -> i64 { var m = n; m = m + 5; return m; }
 @post("/fill")
 fn post_fill() -> Response<{}> { foreach i in 0..3 { a.arr[i] = 10 + i; } return ok({}); }
 @get("/safe/{n}")

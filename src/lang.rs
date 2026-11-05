@@ -118,7 +118,22 @@ pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64), Item(String, Option<Str
 /// A function. A module instance's functions are named `instance.name` (written by `modules::expand`); `public` ones
 /// (`pub fn`) can be called from outside the module.
 /// `ret_opt`: declared `-> T?`: the result may be null, and a caller must check it (`if exists(x)`) or give a fallback (`or`).
-pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool }
+pub struct Func { pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool }
+/// A type in a function's signature, as written: `i64`, `f64`, `bool`, `string`, a struct whose items the function takes
+/// (`Player`, or `Player in game.players` when several collections hold it), the type of a struct's field (`T.key`, for
+/// modules), each with `?` for "or null".
+#[derive(Debug, Clone, PartialEq)]
+pub struct PTy { pub name: String, pub arg: Option<String>, pub field: Option<String>, pub coll: Option<String>, pub opt: bool }
+impl std::fmt::Display for PTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some(a) = &self.arg { write!(f, "<{}>", a)?; }
+        if let Some(x) = &self.field { write!(f, ".{}", x)?; }
+        if let Some(c) = &self.coll { write!(f, " in {}", c)?; }
+        if self.opt { write!(f, "?")?; }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Default)]
 pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 
@@ -215,12 +230,12 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             let mut name = p.id()?;
             while p.sym(".") { name = format!("{}.{}", name, p.id()?); } // instance.function, from module expansion
             p.eat("(")?;
-            let mut params = Vec::new();
-            while !p.sym(")") { params.push(p.id()?); if p.sym(":") { p.skip_type()?; p.sym("?"); } p.sym(","); }
-            let mut ret_opt = false;
-            if p.sym("->") { p.skip_type()?; ret_opt = p.sym("?"); }
+            let (mut params, mut ptys) = (Vec::new(), Vec::new());
+            while !p.sym(")") { params.push(p.id()?); ptys.push(if p.sym(":") { Some(p.pty()?) } else { None }); p.sym(","); }
+            let ret = if p.sym("->") { Some(p.pty()?) } else { None };
+            let ret_opt = ret.as_ref().map_or(false, |t| t.opt);
             let body = p.block()?;
-            api.fns.push(Func { name, params, body, slots: 0, public, ret_opt });
+            api.fns.push(Func { name, params, ptys, ret, body, slots: 0, public, ret_opt });
             continue;
         }
         if p.is_kw("endpoint") { return Err("endpoints are functions with an attribute: `@post(\"/path\") fn name() -> Response<T> { ... }`".into()); }
@@ -347,12 +362,17 @@ impl P {
     fn kw(&mut self, k: &str) -> R<()> { if self.is_kw(k) { self.i += 1; Ok(()) } else { Err(format!("expected `{}`, found {}", k, self.here())) } }
     fn id(&mut self) -> R<String> { match self.t.get(self.i) { Some(Tok::Id(x)) => { self.i += 1; Ok(x.clone()) } _ => Err(format!("expected a name, found {}", self.here())) } }
     fn int(&mut self) -> R<i64> { match self.t.get(self.i) { Some(Tok::Int(n)) => { self.i += 1; Ok(*n) } _ => Err(format!("expected a number, found {}", self.here())) } }
-    /// `name`, `name<...>` or `name[N]`: types in signatures are read but not checked yet.
-    fn skip_type(&mut self) -> R<()> {
-        self.id()?;
-        if self.sym("<") { let mut depth = 1; while depth > 0 { if self.sym("<") { depth += 1; } else if self.sym(">") { depth -= 1; } else if self.peek().is_none() { return Err("unfinished type".into()); } else { self.i += 1; } } }
-        while self.sym("[") { self.int()?; self.eat("]")?; }
-        Ok(())
+
+    /// A signature's type: `name`, `name.field`, `name in a.b`, `name<...>` (read, not used yet), then `?`.
+    fn pty(&mut self) -> R<PTy> {
+        let name = self.id()?;
+        let field = if self.sym(".") { Some(self.id()?) } else { None };
+        let mut arg = None;
+        if self.sym("<") { if let Some(Tok::Id(a)) = self.peek() { arg = Some(a.clone()); } let mut depth = 1; while depth > 0 { if self.sym("<") { depth += 1; } else if self.sym(">") { depth -= 1; } else if self.peek().is_none() { return Err("unfinished type".into()); } else { self.i += 1; } } }
+        if self.sym("[") { return Err(format!("a fixed array as a parameter or result (`{}[...]`) is not supported: pass the item or plain struct that holds it", name)); }
+        let coll = if self.is_kw("in") { self.i += 1; let mut path = self.id()?; while self.sym(".") { path = format!("{}.{}", path, self.id()?); } Some(path) } else { None };
+        let opt = self.sym("?");
+        Ok(PTy { name, arg, field, coll, opt })
     }
 
     fn block(&mut self) -> R<Vec<Stmt>> {
@@ -633,6 +653,10 @@ pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
     for f in &mut api.fns {
         let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0), loops: 0 };
         for p in &f.params { b.declare(p, false); }
+        // a full signature: every parameter's type, and the result's when the function returns a value
+        if let Some(Stmt::At(l, c)) = f.body.first() { b.at = (*l, *c); }
+        if let Some(i) = f.ptys.iter().position(|t| t.is_none()) { errs.push(b.err::<()>(format!("parameter `{}` needs a type: `{}: i64` (or f64, bool, string, an item type, ...)", f.params[i], f.params[i])).unwrap_err()); continue; }
+        if f.ret.is_none() && gives_value(&f.body) { errs.push(b.err::<()>(format!("`{}` returns a value: declare its result, `fn {}(...) -> T`", f.name, f.name)).unwrap_err()); continue; }
         if let Err(e) = b.block(&mut f.body) { errs.push(e); }
         f.slots = b.max;
     }
@@ -867,6 +891,16 @@ fn assigns_name(stmts: &[Stmt], name: &str) -> bool {
         Stmt::Assign(Expr::Var(n, _), _) => n == name,
         Stmt::If(_, t, e) => assigns_name(t, name) || assigns_name(e, name),
         Stmt::Each(_, b) => assigns_name(b, name),
+        _ => false,
+    })
+}
+
+/// Does any `return` in these statements give a value?
+fn gives_value(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Return(Some(_)) => true,
+        Stmt::If(_, t, e) => gives_value(t) || gives_value(e),
+        Stmt::Each(_, b) => gives_value(b),
         _ => false,
     })
 }

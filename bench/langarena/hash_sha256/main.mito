@@ -6,7 +6,7 @@
 struct Buf { data: u8[1100000]; hashes: u32[8] unlogged; digest: u8[32] unlogged; size: i64 in 0..1100000; last: i64 in 0..139967; result: i64 in 0..4294967295; }
 state h: Buf;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     h.last = (h.last * 3877 + 29573) % 139968;
     return int(h.last / 139968.0 * max);
 }

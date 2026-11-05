@@ -11,7 +11,7 @@ struct App {
 }
 state app: App;
 
-fn items() { return app.items; }
+fn items() -> pool<Item> { return app.items; }
 
 @post("/items")
 fn post_items(n: i64, name: string<4096>?) -> Response<{ id: i64, entry: i64, total: i64 }> {

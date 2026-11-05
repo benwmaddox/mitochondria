@@ -8,12 +8,12 @@ struct Vertex { adj: list<Edge, 48>; }
 struct G { vs: pool<Vertex, 500000>; visited: u8[500000] unlogged; qv: i32[500000] unlogged; qd: i32[500000] unlogged; vertices: i64 in 0..500000; last: i64 in 0..139967; result: i64 in 0..4294967295; }
 state g: G;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     g.last = (g.last * 3877 + 29573) % 139968;
     return int(g.last / 139968.0 * max);
 }
 // the reference's add_edge: both directions, only inside the graph
-fn add_edge(u, v) {
+fn add_edge(u: i64, v: i64) {
     if u >= 0 && u < g.vertices && v >= 0 && v < g.vertices {
         let a = g.vs[u];
         a.adj.add { to: v };

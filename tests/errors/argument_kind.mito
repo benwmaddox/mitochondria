@@ -1,0 +1,4 @@
+// expect: parameter `p` of `score_of` is `P`, given a string
+struct P { name: string<16>; score: i64; } struct App { ps: pool<P, 8>; total: i64; } state app: App;
+fn score_of(p: P) -> i64 { return p.score; }
+@get("/a") fn a() -> Response<{ n: i64 }> { return ok({ n: score_of("x") }); }

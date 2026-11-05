@@ -87,13 +87,23 @@ Decided against, for now: request-local scratch arrays (`unlogged` state covers 
   parser takes a trailing `- 1` off again, so 47 of 52 programs give byte-identical C and 5 fold a `constant + 1` they computed before.
   The half-open form is still open: `0..n - 1` costs nothing, so it is only a question of how it reads.
 
-### 2.3 Typed function parameters and results
+### 2.3 Typed function parameters and results (done 2026-11-05)
 - Every function has a full signature: `fn build(item: i32, depth: i64) -> Node { }`; `-> T?` as today; no arrow for no result.
 - Parameter types and the result type are required (as Stasis); a call with a value of another kind is a compile error at the call,
   and a body that returns something other than its declared result is an error in the body.
 - This removes the recursion rule (below) and the guessing behind it, gives better errors, and lets functions be compiled once
   instead of once per argument kind.
 - Done when: the library modules, ports and examples are typed, and the per-kind specialisation of recursive functions is gone.
+- Done: parameters and results are required and checked at each call and `return` (`parameter `p` of `f` is `P`, given a string`;
+  a value that may be null passed for `P` says to check it or declare `P?`; an integer widens to `f64`). Types: integers, `f32`/`f64`,
+  `bool`, `string`, item types (`Player`, or `Player in game.players` when several collections hold it; inside a module instance
+  its own items), `T?`, `pool<T>` / `list<T>`, and `T.key` (the type of a field: generic modules name their key type this way).
+  The result kind of a recursive function is its declared one: the guessing loop is gone, and so is the rule of returning before
+  the first recursive call (`fn fact(n: i64) -> i64 { if n > 1 { return n * fact(n - 1); } return 1; }` compiles). The 12 dummy
+  guards in the calculator ports are removed. About 135 program signatures were written from the kinds the compiler saw at the
+  calls (a one-time tool, `mito sigs`), the library modules' 106 by hand; the generated C is unchanged.
+- Not yet: compiling a function once instead of inlining it at every call. Inlining is part of the speed (constants and ranges flow
+  into the body), so it stays the default; a C function per signature is the natural next step for large, often-called functions.
 
 **The recursion rule today, and why it goes.** Parameters and results are not declared, so the compiler works out each function's
 kinds from its calls. A normal function is inlined at every call with the argument kinds of that call. A recursive one cannot be

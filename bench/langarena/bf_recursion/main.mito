@@ -7,7 +7,7 @@ struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[
 state g: BF;
 
 // the reference's parse: the list of operations up to the matching `]` (or the end of the text); returns its first node, -1 for an empty list
-fn parse() {
+fn parse() -> i64 {
     if g.pos >= g.srclen { return -1; }
     var head = -1;
     var tail = -1;
@@ -35,7 +35,7 @@ fn parse() {
     return head;
 }
 // the reference's execute: run a list; a loop runs its body while the current cell is not zero
-fn execute(head) {
+fn execute(head: i64) {
     var node = head;
     foreach step in 0..g.nops while node >= 0 {
         let kind = g.op[node];

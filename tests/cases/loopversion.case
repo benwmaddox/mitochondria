@@ -5,8 +5,8 @@
 struct App { cells: i64[64]; bytes: u8[64]; total: i64; }
 state app: App;
 
-fn sum_cells() { var total = 0; foreach i in 0..63 { total = total + app.cells[i] * (i + 1); } return total; }
-fn sum_bytes() { var total = 0; foreach i in 0..63 { total = total + app.bytes[i] * (i + 1); } return total; }
+fn sum_cells() -> i64 { var total = 0; foreach i in 0..63 { total = total + app.cells[i] * (i + 1); } return total; }
+fn sum_bytes() -> i64 { var total = 0; foreach i in 0..63 { total = total + app.bytes[i] * (i + 1); } return total; }
 @post("/fill/{from}/{to}")
 fn post_fill(from: i64, to: i64) -> Response<{ sum: i64, last: i64 }> {
     foreach i in from..to - 1 { app.cells[i] = i * 10; }

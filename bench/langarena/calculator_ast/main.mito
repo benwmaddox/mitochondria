@@ -11,15 +11,15 @@ struct Calc {
 }
 state g: Calc;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     g.last = (g.last * 3877 + 29573) % 139968;
     return int(g.last / 139968.0 * max);
 }
 // the program text
-fn put(text) {
+fn put(text: string) {
     foreach index in 0..len(text) - 1 { g.text[g.text_len] = text[index]; g.text_len = g.text_len + 1; }
 }
-fn put_int(value) {
+fn put_int(value: i64) {
     var digits = 1;
     var rest = value;
     foreach step in 0..19 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
@@ -32,7 +32,7 @@ fn put_int(value) {
     }
     g.text_len = g.text_len + digits;
 }
-fn put_var(value) { put("v"); put_int(value); }
+fn put_var(value: i64) { put("v"); put_int(value); }
 
 @post("/prepare/{operations}")
 fn prepare(operations: i64 in 1..12000) -> Response<{}> {
@@ -76,7 +76,7 @@ fn prepare(operations: i64 in 1..12000) -> Response<{}> {
 }
 
 // the parser
-fn new_node(kind, op, left, right, number, name_start, name_len) {
+fn new_node(kind: i64, op: i64, left: i64, right: i64, number: i64, name_start: i64, name_len: i64) -> i64 {
     let node = g.nodes;
     g.nodes = g.nodes + 1;
     g.kind[node] = kind;
@@ -95,11 +95,10 @@ fn advance() {
 fn skip_whitespace() {
     foreach step in 0..g.text_len while g.cur == 32 || g.cur == 9 || g.cur == 10 || g.cur == 13 { advance(); }
 }
-fn is_digit(byte) { return byte >= 48 && byte <= 57; }
-fn is_letter(byte) { return (byte >= 97 && byte <= 122) || (byte >= 65 && byte <= 90); }
+fn is_digit(byte: i64) -> bool { return byte >= 48 && byte <= 57; }
+fn is_letter(byte: i64) -> bool { return (byte >= 97 && byte <= 122) || (byte >= 65 && byte <= 90); }
 
-fn parse_expression_rest(left_node) {
-    if g.pos < 0 { return 0; }
+fn parse_expression_rest(left_node: i64) -> i64 {
     var current = left_node;
     var going = 1;
     foreach step in 0..g.text_len while going == 1 {
@@ -115,8 +114,7 @@ fn parse_expression_rest(left_node) {
     }
     return current;
 }
-fn parse_term_rest(left_node) {
-    if g.pos < 0 { return 0; }
+fn parse_term_rest(left_node: i64) -> i64 {
     var current = left_node;
     var going = 1;
     foreach step in 0..g.text_len while going == 1 {
@@ -132,7 +130,7 @@ fn parse_term_rest(left_node) {
     }
     return current;
 }
-fn parse_number() {
+fn parse_number() -> i64 {
     var value = 0;
     foreach step in 0..g.text_len while is_digit(g.cur) {
         value = value * 10 + (g.cur - 48);
@@ -140,8 +138,7 @@ fn parse_number() {
     }
     return new_node(0, 0, -1, -1, value, 0, 0);
 }
-fn parse_variable() {
-    if g.pos < 0 { return 0; }
+fn parse_variable() -> i64 {
     let start = g.pos;
     foreach step in 0..g.text_len while is_letter(g.cur) || is_digit(g.cur) { advance(); }
     let length = g.pos - start;
@@ -153,8 +150,7 @@ fn parse_variable() {
     }
     return new_node(1, 0, -1, -1, 0, start, length);
 }
-fn parse_factor() {
-    if g.pos < 0 { return 0; }
+fn parse_factor() -> i64 {
     skip_whitespace();
     var node = 0;
     if is_digit(g.cur) {
@@ -172,13 +168,11 @@ fn parse_factor() {
     }
     return node;
 }
-fn parse_term() {
-    if g.pos < 0 { return 0; }
+fn parse_term() -> i64 {
     let node = parse_factor();
     return parse_term_rest(node);
 }
-fn parse_expression() {
-    if g.pos < 0 { return 0; }
+fn parse_expression() -> i64 {
     let node = parse_term();
     return parse_expression_rest(node);
 }

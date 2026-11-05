@@ -7,7 +7,7 @@
 struct Spec { u: f64[1200]; v: f64[1200]; tmp: f64[1200] unlogged; size: i64; }
 state sp: Spec;
 
-fn eval_a(i, j) {
+fn eval_a(i: i64, j: i64) -> f64 {
     let ij = (i + j) * 1.0;
     return 1.0 / (ij * (ij + 1.0) / 2.0 + i + 1.0);
 }

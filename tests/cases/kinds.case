@@ -8,7 +8,7 @@ struct App {
 state app: App;
 struct Top { head: i64; }
 
-fn find(name) -> Node? { foreach n in app.nodes { if n.name == name { return n; } } return null; }
+fn find(name: string) -> Node? { foreach n in app.nodes { if n.name == name { return n; } } return null; }
 @post("/nodes")
 fn post_nodes(name: string<4096>?) -> Response<{ slot: i64 }> {
     let n = app.nodes.add();

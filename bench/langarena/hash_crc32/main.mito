@@ -5,11 +5,11 @@
 struct Buf { data: u8[1200000]; size: i64; last: i64; result: i64; }
 state h: Buf;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     h.last = (h.last * 3877 + 29573) % 139968;
     return int(h.last / 139968.0 * max);
 }
-fn crc32() {
+fn crc32() -> i64 {
     var crc = 0xFFFFFFFF;
     foreach i in 0..h.size - 1 {
         crc = crc ^ h.data[i];

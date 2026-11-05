@@ -8,12 +8,12 @@ struct Vertex { adj: list<Edge, 48>; }
 struct G { vs: pool<Vertex, 500000>; gs: i32[500000] unlogged; bf: i32[500000] unlogged; hf: i32[65536] unlogged; hv: i32[65536] unlogged; hn: i64; cur_f: i64; cur_v: i64; vertices: i64; last: i64; result: i64; }
 state g: G;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     g.last = (g.last * 3877 + 29573) % 139968;
     return int(g.last / 139968.0 * max);
 }
 // the reference's add_edge: both directions, only inside the graph
-fn add_edge(u, v) {
+fn add_edge(u: i64, v: i64) {
     if u >= 0 && u < g.vertices && v >= 0 && v < g.vertices {
         let a = g.vs[u];
         a.adj.add { to: v };
@@ -24,7 +24,7 @@ fn add_edge(u, v) {
 
 // the heap holds (f, vertex); smaller f first, then smaller vertex (the reference's Node ordering). Any correct heap pops the same sequence: every
 // (f, vertex) pair is pushed at most once (a vertex is pushed again only with a smaller f).
-fn heap_push(f, v) {
+fn heap_push(f: i64, v: i64) {
     var i = g.hn;
     g.hn = g.hn + 1;
     var going = 1;

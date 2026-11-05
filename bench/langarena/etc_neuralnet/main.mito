@@ -13,7 +13,7 @@ struct NN {
 }
 state nn: NN;
 
-fn next_float() {
+fn next_float() -> f64 {
     nn.last = (nn.last * 3877 + 29573) % 139968;
     return nn.last / 139968.0;
 }
@@ -29,7 +29,7 @@ fn feed_forward() {
     activation = activation - nn.out_th;
     nn.out_out = 1.0 / (1.0 + exp(-activation));
 }
-fn train(in0, in1, target) {
+fn train(in0: f64, in1: f64, target: f64) {
     nn.in_out[0] = in0;
     nn.in_out[1] = in1;
     feed_forward();

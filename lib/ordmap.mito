@@ -19,34 +19,34 @@ state {
     head: Head;
 }
 
-pub fn size() { return self.head.size; }
-pub fn leaf_count() { return self.leaves.count(); }
-pub fn inner_count() { return self.inners.count(); }
+pub fn size() -> i64 { return self.head.size; }
+pub fn leaf_count() -> i64 { return self.leaves.count(); }
+pub fn inner_count() -> i64 { return self.inners.count(); }
 
 // ---- searching
 // In leaf `leaf` (its id): how many keys are below target.
-fn leaf_pos(leaf, target) {
+fn leaf_pos(leaf: i64, target: i64) -> i64 {
     let node = self.leaves[leaf - 1];
     var pos = 0;
     foreach at in 0..16 while at < node.count && node.keys[at] < target { pos = at + 1; }
     return pos;
 }
 // In inner node `node_id`: which child holds target: the number of separators at or below it.
-fn kid_pos(node_id, target) {
+fn kid_pos(node_id: i64, target: i64) -> i64 {
     let node = self.inners[node_id - 1];
     var pos = 0;
     foreach at in 0..15 while at < node.count - 1 && node.keys[at] <= target { pos = at + 1; }
     return pos;
 }
 // The leaf where a search for target ends, 0 if the map is empty.
-fn descend(target) {
+fn descend(target: i64) -> i64 {
     var node = self.head.root;
     foreach level in 0..self.head.height - 1 { node = self.inners[node - 1].kids[self.kid_pos(node, target)]; }
     return node;
 }
 
 // The value of key target, or dflt when there is none.
-pub fn get_or(target, dflt) {
+pub fn get_or(target: i64, dflt: i64) -> i64 {
     var found = dflt;
     if self.head.root != 0 {
         let leaf = self.descend(target);
@@ -57,7 +57,7 @@ pub fn get_or(target, dflt) {
     return found;
 }
 // Add delta to the value of key target if there is one; true if there was.
-pub fn add_to(target, delta) {
+pub fn add_to(target: i64, delta: i64) -> bool {
     var done = false;
     if self.head.root != 0 {
         let leaf = self.descend(target);
@@ -68,7 +68,7 @@ pub fn add_to(target, delta) {
     return done;
 }
 // The sum of the values of up to limit entries from the first key at or above start, in key order.
-pub fn range_sum(start, limit) {
+pub fn range_sum(start: i64, limit: i64) -> i64 {
     var total = 0;
     var taken = 0;
     if self.head.root != 0 {
@@ -89,9 +89,9 @@ pub fn range_sum(start, limit) {
 }
 
 // ---- inserting
-fn new_leaf() { let made = self.leaves.add(); return slot(made) + 1; }
+fn new_leaf() -> i64 { let made = self.leaves.add(); return slot(made) + 1; }
 // Set the value of key new_key, adding the key if it is not there.
-pub fn put(new_key, value) {
+pub fn put(new_key: i64, value: i64) {
     if self.head.root == 0 {
         let only = self.new_leaf();
         self.head.root = only;
@@ -116,7 +116,7 @@ pub fn put(new_key, value) {
     }
 }
 // leaf `leaf` holds 17: the first 9 stay, the last 8 move to a new leaf after it
-fn split_leaf(leaf) {
+fn split_leaf(leaf: i64) {
     let right = self.new_leaf();
     let from = self.leaves[leaf - 1];
     let to = self.leaves[right - 1];
@@ -135,7 +135,7 @@ fn split_leaf(leaf) {
 }
 // node `right_node` (at level `first_level`: 0 leaves, 1 their parents, ...) now follows node `left_node`, and its keys
 // start at `separator`: record that in the left node's parent, splitting parents that overflow
-fn insert_up(left_node, right_node, separator, first_level) {
+fn insert_up(left_node: i64, right_node: i64, separator: i64, first_level: i64) {
     var left = left_node;
     var right = right_node;
     var up_key = separator;
@@ -190,10 +190,10 @@ fn insert_up(left_node, right_node, separator, first_level) {
     }
 }
 // the parent of a node at the given level (0 for a leaf), 0 for the root
-fn parent_of(node, level) { if level == 0 { return self.leaves[node - 1].parent; } return self.inners[node - 1].parent; }
-fn set_parent(node, level, parent) { if level == 0 { self.leaves[node - 1].parent = parent; } else { self.inners[node - 1].parent = parent; } }
+fn parent_of(node: i64, level: i64) -> i64 { if level == 0 { return self.leaves[node - 1].parent; } return self.inners[node - 1].parent; }
+fn set_parent(node: i64, level: i64, parent: i64) { if level == 0 { self.leaves[node - 1].parent = parent; } else { self.inners[node - 1].parent = parent; } }
 // the position of child `child` in inner node `node`
-fn kid_index(node, child) {
+fn kid_index(node: i64, child: i64) -> i64 {
     var index = 0;
     foreach step in 0..16 while self.inners[node - 1].kids[index] != child { index = index + 1; }
     return index;
@@ -201,7 +201,7 @@ fn kid_index(node, child) {
 
 // ---- removing
 // Remove key target if it is there; true if it was.
-pub fn del(target) {
+pub fn del(target: i64) -> bool {
     var done = false;
     if self.head.root != 0 {
         let leaf = self.descend(target);
@@ -220,7 +220,7 @@ pub fn del(target) {
     return done;
 }
 // leaf `leaf` is empty: out of the list and the tree
-fn drop_leaf(leaf) {
+fn drop_leaf(leaf: i64) {
     let before = self.leaves[leaf - 1].prev;
     let after = self.leaves[leaf - 1].next;
     if before != 0 { self.leaves[before - 1].next = after; } else { self.head.first = after; }
@@ -231,7 +231,7 @@ fn drop_leaf(leaf) {
 }
 // child `gone` of inner node `first_node` is already freed: take it out; a node left without children goes too, and
 // a root left with one child gives way to it
-fn drop_kid(first_node, gone) {
+fn drop_kid(first_node: i64, gone: i64) {
     var node = first_node;
     var child = gone;
     var going = 1;
@@ -268,7 +268,7 @@ fn collapse_root() {
     }
 }
 // leaf `leaf` lost an entry: when it and a neighbour under the same parent fit in one leaf, they become one
-fn merge_leaf(leaf) {
+fn merge_leaf(leaf: i64) {
     let count = self.leaves[leaf - 1].count;
     let after = self.leaves[leaf - 1].next;
     let before = self.leaves[leaf - 1].prev;
@@ -280,7 +280,7 @@ fn merge_leaf(leaf) {
     }
 }
 // leaf `later` (the one after leaf `earlier`) moves its entries into `earlier` and is freed
-fn absorb(earlier, later) {
+fn absorb(earlier: i64, later: i64) {
     let into = self.leaves[earlier - 1];
     let from = self.leaves[later - 1];
     let into_count = into.count;

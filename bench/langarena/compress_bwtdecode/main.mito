@@ -7,10 +7,10 @@ struct BW { data: u8[1048576]; trans: u8[1048576]; sa: i32[1048576]; rank: i32[1
 state bw: BW;
 
 // a before b (or equal): the reference's comparison of the pairs, ties keep their order
-fn before(left, right) {
+fn before(left: i64, right: i64) -> bool {
     return bw.pr0[left] < bw.pr0[right] || (bw.pr0[left] == bw.pr0[right] && bw.pr1[left] <= bw.pr1[right]);
 }
-fn merge(low, mid, high) {
+fn merge(low: i64, mid: i64, high: i64) {
     foreach x in low..high { bw.tmp[x] = bw.sa[x]; }
     var i = low;
     var j = mid + 1;
@@ -21,7 +21,7 @@ fn merge(low, mid, high) {
     }
     while i <= mid { bw.sa[k] = bw.tmp[i]; i = i + 1; k = k + 1; }
 }
-fn msort(low, high) {
+fn msort(low: i64, high: i64) {
     if low < high {
         let mid = (low + high) / 2;
         msort(low, mid);
@@ -75,7 +75,7 @@ fn bwt_transform() {
         }
     }
 }
-fn make_data(size) {
+fn make_data(size: i64) {
     foreach i in 0..size - 1 {
         let slot = i % 11;
         var byte = 65;

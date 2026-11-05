@@ -8,13 +8,13 @@ struct Cell { kind: u8; x: i32; y: i32; ny: i32[4]; nx: i32[4]; }
 struct M { cells: pool<Cell, 1960000>; w: i64; h: i64; last: i64; result: i64; sy: i32[262144]; sx: i32[262144]; visited: u8[1960000] unlogged; py: i32[262144] unlogged; px: i32[262144] unlogged; pp: i32[262144] unlogged; q: i32[262144] unlogged; mid: i64; }
 state m: M;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     m.last = (m.last * 3877 + 29573) % 139968;
     return int(m.last / 139968.0 * max);
 }
 
 // the reference's Maze::new and link_neighbors
-fn build(width, height) {
+fn build(width: i64, height: i64) {
     m.cells.clear();
     m.w = max(width, 5);
     m.h = max(height, 5);
@@ -47,7 +47,7 @@ fn build(width, height) {
     m.cells[(h - 2) * w + (w - 2)].kind = 3;
 }
 // the reference's dig: an explicit stack of cells to look at
-fn dig(y0, x0) {
+fn dig(y0: i64, x0: i64) {
     let w = m.w;
     var sp = 1;
     m.sy[0] = y0;
@@ -77,7 +77,7 @@ fn dig(y0, x0) {
     }
 }
 // the reference's ensure_open_finish, recursive: which neighbours are walls is decided before any recursion, as the reference collects them first
-fn ensure_open_finish(y, x) {
+fn ensure_open_finish(y: i64, x: i64) {
     let w = m.w;
     let c = m.cells[y * w + x];
     c.kind = 1;

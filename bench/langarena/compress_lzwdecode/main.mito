@@ -7,7 +7,7 @@ struct LZ {
 }
 state lz: LZ;
 
-fn make_data(size) {
+fn make_data(size: i64) {
     foreach i in 0..size - 1 {
         let slot = i % 11;
         var byte = 65;
@@ -18,8 +18,8 @@ fn make_data(size) {
     }
 }
 // the dictionary: a string already in it is (the code of its prefix, its last byte); this is an open-addressing table keyed by prefix * 256 + byte
-fn slot_of(key) { return ((key * 2654435761) >> 7) & 16383; }
-fn lookup(prefix, byte) {
+fn slot_of(key: i64) -> i64 { return ((key * 2654435761) >> 7) & 16383; }
+fn lookup(prefix: i64, byte: i64) -> i64 {
     let key = prefix * 256 + byte;
     var slot = slot_of(key);
     var found = -1;
@@ -28,14 +28,14 @@ fn lookup(prefix, byte) {
     }
     return found;
 }
-fn insert(prefix, byte, code) {
+fn insert(prefix: i64, byte: i64, code: i64) {
     let key = prefix * 256 + byte;
     var slot = slot_of(key);
     foreach probe in 0..16383 while lz.keys[slot] >= 0 { slot = (slot + 1) & 16383; }
     lz.keys[slot] = key;
     lz.values[slot] = code;
 }
-fn put_code(code) {
+fn put_code(code: i64) {
     lz.codes[lz.codes_len] = (code >> 8) & 255;
     lz.codes[lz.codes_len + 1] = code & 255;
     lz.codes_len = lz.codes_len + 2;

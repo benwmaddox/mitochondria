@@ -7,7 +7,7 @@
 struct NB { x: f64[5]; y: f64[5]; z: f64[5]; vx: f64[5]; vy: f64[5]; vz: f64[5]; mass: f64[5]; v1: f64; }
 state nb: NB;
 
-fn energy() {
+fn energy() -> f64 {
     var e = 0.0;
     foreach i in 0..4 {
         e = e + 0.5 * nb.mass[i] * (nb.vx[i] * nb.vx[i] + nb.vy[i] * nb.vy[i] + nb.vz[i] * nb.vz[i]);

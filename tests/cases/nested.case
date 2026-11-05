@@ -10,7 +10,7 @@ struct App {
 }
 state app: App;
 
-fn width(u) { return u.area.hi.x - u.area.lo.x; }
+fn width(u: Unit) -> i64 { return u.area.hi.x - u.area.lo.x; }
 @post("/units")
 fn post_units(x: i64, y: i64, name: string<4096>?) -> Response<{ slot: i64, w: i64 }> {
     let u = app.units.add();

@@ -3,11 +3,11 @@
 struct C { n: i64; }
 state c: C;
 
-fn sum_to(n) { var t = 0; if n > 0 { t = n + sum_to(n - 1); } return t; }
-fn fib(n) { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
-fn even(n) { if n == 0 { return true; } return odd(n - 1); }
-fn odd(n) { if n == 0 { return false; } return even(n - 1); }
-fn count_down(n) { if n > 0 { c.n = c.n + 1; count_down(n - 1); } }
+fn sum_to(n: i64) -> i64? { var t = 0; if n > 0 { t = n + sum_to(n - 1); } return t; }
+fn fib(n: i64) -> i64 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
+fn even(n: i64) -> bool { if n == 0 { return true; } return odd(n - 1); }
+fn odd(n: i64) -> bool { if n == 0 { return false; } return even(n - 1); }
+fn count_down(n: i64) { if n > 0 { c.n = c.n + 1; count_down(n - 1); } }
 @get("/sum/{n}")
 fn get_sum_n(n: i64) -> Response<{ s: i64 }> { return ok({ "s": sum_to(n) }); }
 @get("/sum2/{n}")

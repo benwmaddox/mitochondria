@@ -7,11 +7,11 @@
 struct Csv { text: u8[12582912]; text_len: i64; rows: i64; last: i64; x_avg: f64; y_avg: f64; z_avg: f64; }
 state c: Csv;
 
-fn put(literal) {
+fn put(literal: string) {
     foreach index in 0..len(literal) - 1 { c.text[c.text_len] = literal[index]; c.text_len = c.text_len + 1; }
 }
-fn put_byte(byte) { c.text[c.text_len] = byte; c.text_len = c.text_len + 1; }
-fn put_int(value) {
+fn put_byte(byte: i64) { c.text[c.text_len] = byte; c.text_len = c.text_len + 1; }
+fn put_int(value: i64) {
     var digits = 1;
     var rest = value;
     foreach step in 0..19 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
@@ -25,7 +25,7 @@ fn put_int(value) {
     c.text_len = c.text_len + digits;
 }
 // a random number n / 139968 written as 0.dddddddddd: the ten digits are round(n * 10^10 / 139968), exact in integers
-fn put_digits(state) {
+fn put_digits(state: i64) {
     let digits = (state * 20000000000 + 139968) / 279936;
     put("0.");
     var place = 1000000000;
@@ -36,7 +36,7 @@ fn put_digits(state) {
         place = place / 10;
     }
 }
-fn next_state() {
+fn next_state() -> i64 {
     c.last = (c.last * 3877 + 29573) % 139968;
     return c.last;
 }
@@ -64,7 +64,7 @@ fn prepare(rows: i64 in 1..120000) -> Response<{}> {
 }
 
 // the decimal in text[from..to] (digits, a point, digits): its digits as an integer over a power of ten, one correctly rounded division
-fn parse_decimal(from, to) {
+fn parse_decimal(from: i64, to: i64) -> f64 {
     var mantissa = 0;
     var fraction = 0;
     var seen_point = 0;

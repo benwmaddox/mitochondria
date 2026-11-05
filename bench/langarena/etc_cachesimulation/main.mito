@@ -11,12 +11,12 @@ struct Cache {
 }
 state c: Cache;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     c.last = (c.last * 3877 + 29573) % 139968;
     return int(c.last / 139968.0 * max);
 }
 // the node's value text: `prefix` then the run number (the reference's format!("updated_{}", id) / format!("new_{}", id))
-fn set_value(node, updated) {
+fn set_value(node: i64, updated: i64) {
     let base = (node - 1) * 24;
     var at = 0;
     if updated == 1 {
@@ -36,7 +36,7 @@ fn set_value(node, updated) {
     }
     c.vlen[node - 1] = at + digits;
 }
-fn move_to_front(node) {
+fn move_to_front(node: i64) {
     if node != c.head {
         let before = c.prev[node - 1];
         let after = c.next[node - 1];
@@ -50,7 +50,7 @@ fn move_to_front(node) {
         if c.tail == 0 { c.tail = node; }
     }
 }
-fn add_to_front(node) {
+fn add_to_front(node: i64) {
     c.next[node - 1] = c.head;
     if c.head != 0 { c.prev[c.head - 1] = node; }
     c.head = node;
@@ -68,12 +68,12 @@ fn remove_oldest() {
     }
 }
 // the reference's get: the node (0 if the key is not cached), refreshed to the front
-fn cache_get(key) {
+fn cache_get(key: string) -> i64 {
     let node = c.map.entry_of(key);
     if node != 0 { move_to_front(node); }
     return node;
 }
-fn cache_put(key, updated) {
+fn cache_put(key: string, updated: i64) {
     let node = c.map.entry_of(key);
     if node != 0 {
         set_value(node, updated);

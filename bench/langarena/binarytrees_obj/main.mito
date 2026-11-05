@@ -6,7 +6,7 @@ struct Node { item: i32; left: i32; right: i32; } // children: their slots + 1, 
 struct T { nodes: pool<Node, 2097151> checked unlogged; depth: i64; result: i64; }
 state tree: T;
 
-fn build(item, depth) {
+fn build(item: i64, depth: i64) -> Node {
     let node = tree.nodes.add();
     node.item = item;
     if depth == 0 { return node; }
@@ -15,7 +15,7 @@ fn build(item, depth) {
     node.right = slot(build(item + half, depth - 1)) + 1;
     return node;
 }
-fn sum(node) {
+fn sum(node: Node) -> i64 {
     var total = (node.item + 4294967297) % 4294967296;
     if node.left == 0 && node.right == 0 { return total; }
     if node.left != 0 { total = (total + sum(tree.nodes[node.left - 1])) % 4294967296; }

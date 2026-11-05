@@ -9,7 +9,7 @@ struct Cell { alive: bool; next_state: bool; neighbors: list<Pos, 8>; }
 struct Life { cells: pool<Cell, 250000>; w: i64 in 0..500; h: i64 in 0..500; last: i64 in 0..139967; }
 state life: Life;
 
-fn next_float() {
+fn next_float() -> f64 {
     life.last = (life.last * 3877 + 29573) % 139968;
     return 1.0 * life.last / 139968.0;
 }

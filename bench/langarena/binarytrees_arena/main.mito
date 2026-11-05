@@ -6,7 +6,7 @@ struct Node { item: i32; left: i32; right: i32; }
 struct T { arena: pool<Node, 2097151> unlogged; depth: i64; result: i64; }
 state tree: T;
 
-fn build(item, depth) {
+fn build(item: i64, depth: i64) -> i64 {
     let node = tree.arena.add();
     let idx = slot(node);
     node.item = item;
@@ -21,7 +21,7 @@ fn build(item, depth) {
     again.right = right_idx;
     return idx;
 }
-fn sum(idx) {
+fn sum(idx: i64) -> i64 {
     let node = tree.arena[idx];
     var total = (node.item + 4294967297) % 4294967296;
     if node.left < 0 && node.right < 0 { return total; }

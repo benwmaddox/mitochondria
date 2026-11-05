@@ -4,11 +4,11 @@
 struct Pairs { text: u8[200000]; off1: i32[1024]; len1: i32[1024]; off2: i32[1024]; len2: i32[1024]; flags1: u8[64] unlogged; flags2: u8[64] unlogged; count: i64; last: i64; result: i64; }
 state p: Pairs;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     p.last = (p.last * 3877 + 29573) % 139968;
     return int(p.last / 139968.0 * max);
 }
-fn jaro(off1, len1, off2, len2) {
+fn jaro(off1: i64, len1: i64, off2: i64, len2: i64) -> f64 {
     if len1 == 0 || len2 == 0 { return 0.0; }
     let longest = max(len1, len2);
     var window = longest / 2;

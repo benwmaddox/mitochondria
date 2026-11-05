@@ -8,23 +8,23 @@ state {
     counts: Counts;
 }
 
-pub fn add() {
+pub fn add() -> T {
     let it = self.items.add();
     self.counts.added = self.counts.added + 1;
     return it;
 }
-pub fn remove(it) {
+pub fn remove(it: T) {
     self.items.remove(it);
     self.counts.removed = self.counts.removed + 1;
 }
-pub fn size() { return self.items.count(); }
-pub fn room() { return N - self.items.count(); }
-pub fn get(k) { return self.items[k]; }
-pub fn added() { return self.counts.added; }
-pub fn removed() { return self.counts.removed; }
+pub fn size() -> i64 { return self.items.count(); }
+pub fn room() -> i64 { return N - self.items.count(); }
+pub fn get(k: i64) -> T { return self.items[k]; }
+pub fn added() -> i64 { return self.counts.added; }
+pub fn removed() -> i64 { return self.counts.removed; }
 // iteration (foreach s in bag [from slot] [reverse] ...): slot order; a cursor is a slot number, -1 for none
-fn iter_first(from) { foreach i in or(from, 0)..N - 1 where exists(self.items[i]) limit 1 { return i; } return -1; }
-fn iter_next(cur) { foreach i in cur + 1..N - 1 where exists(self.items[i]) limit 1 { return i; } return -1; }
-fn iter_last(from) { foreach i in 0..or(from, N - 1) reverse where exists(self.items[i]) limit 1 { return i; } return -1; }
-fn iter_prev(cur) { foreach i in 0..cur - 1 reverse where exists(self.items[i]) limit 1 { return i; } return -1; }
-fn iter_item(cur) { return self.items[cur]; }
+fn iter_first(from: i64?) -> i64 { foreach i in or(from, 0)..N - 1 where exists(self.items[i]) limit 1 { return i; } return -1; }
+fn iter_next(cur: i64) -> i64 { foreach i in cur + 1..N - 1 where exists(self.items[i]) limit 1 { return i; } return -1; }
+fn iter_last(from: i64?) -> i64 { foreach i in 0..or(from, N - 1) reverse where exists(self.items[i]) limit 1 { return i; } return -1; }
+fn iter_prev(cur: i64) -> i64 { foreach i in 0..cur - 1 reverse where exists(self.items[i]) limit 1 { return i; } return -1; }
+fn iter_item(cur: i64) -> T { return self.items[cur]; }

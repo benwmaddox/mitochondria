@@ -12,16 +12,16 @@ state {
     head: Head;
 }
 
-pub fn size() { return self.head.size; }
-pub fn room() { return N - self.head.size; }
+pub fn size() -> i64 { return self.head.size; }
+pub fn room() -> i64 { return N - self.head.size; }
 
 // the bucket of a key: its bits mixed a little so that keys differing in high bytes only still spread
-fn bucket_of(key) {
+fn bucket_of(key: i64) -> i64 {
     let mixed = (key % 4294967296 + 4294967296) % 4294967296;
     return ((mixed ^ (mixed >> 15)) * 40503 + (mixed >> 7)) % N;
 }
 // the entry for key, 0 if there is none
-fn find(key) {
+fn find(key: i64) -> i64 {
     var cur = self.heads[self.bucket_of(key)];
     var found = 0;
     foreach step in 0..N while cur != 0 && found == 0 {
@@ -29,16 +29,16 @@ fn find(key) {
     }
     return found;
 }
-pub fn has(key) { return self.find(key) != 0; }
+pub fn has(key: i64) -> bool { return self.find(key) != 0; }
 // The value of key, or dflt when there is none.
-pub fn get_or(key, dflt) {
+pub fn get_or(key: i64, dflt: i64) -> i64 {
     let found = self.find(key);
     var value = dflt;
     if found != 0 { value = self.values[found - 1]; }
     return value;
 }
 // A new entry for key at the front of its chain; the caller knows the key is not there.
-fn insert(key, value) {
+fn insert(key: i64, value: i64) {
     var entry = self.head.free;
     if entry != 0 {
         self.head.free = self.links[entry - 1];
@@ -55,7 +55,7 @@ fn insert(key, value) {
     self.head.size = self.head.size + 1;
 }
 // Set the value of key (adding the key if it is new); true if it was new.
-pub fn put(key, value) {
+pub fn put(key: i64, value: i64) -> bool {
     let found = self.find(key);
     var added = false;
     if found != 0 {
@@ -67,7 +67,7 @@ pub fn put(key, value) {
     return added;
 }
 // Add delta to the value of key, starting from 0 when the key is new; the new value.
-pub fn add_to(key, delta) {
+pub fn add_to(key: i64, delta: i64) -> i64 {
     let found = self.find(key);
     var value = delta;
     if found != 0 {
@@ -79,7 +79,7 @@ pub fn add_to(key, delta) {
     return value;
 }
 // Remove key; true if it was there.
-pub fn remove(key) {
+pub fn remove(key: i64) -> bool {
     let bucket = self.bucket_of(key);
     var cur = self.heads[bucket];
     var prev = 0;

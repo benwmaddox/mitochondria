@@ -5,11 +5,11 @@
 struct Pairs { text: u8[600000]; off1: i32[16]; len1: i32[16]; off2: i32[16]; len2: i32[16]; first: intmap<16384>; second: intmap<16384>; count: i64; last: i64; result: i64; }
 state p: Pairs;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     p.last = (p.last * 3877 + 29573) % 139968;
     return int(p.last / 139968.0 * max);
 }
-fn ngram(off1, len1, off2, len2) {
+fn ngram(off1: i64, len1: i64, off2: i64, len2: i64) -> f64 {
     if len1 < 4 || len2 < 4 { return 0.0; }
     p.first.clear();
     foreach i in 0..len1 - 3 - 1 {

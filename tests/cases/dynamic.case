@@ -24,8 +24,8 @@ fn get_arith(x: f64 from body) -> Response<{ sum: f64, lt: bool }> { return ok({
 fn post_set(x: i64) -> Response<{ n: i64 }> { let t = app.ts[0]; t.n = x; return ok({ "n": t.n }); }
 @get("/ornotlive")
 fn get_ornotlive(k: i64 from body) -> Response<{ a: i64, b: bool, c: i64 }> { return ok({ "a": or(app.ts[3].n, -1), "b": exists(app.ts[9]), "c": or(app.ts[k].n, 0) }); }
-fn pool_of() { return app.ts; }
-fn find(k) -> T? { if k < 0 { return app.ts[99]; } if k == 0 { return app.ts[0]; } return find(k - 1); }
+fn pool_of() -> pool<T> { return app.ts; }
+fn find(k: i64) -> T? { if k < 0 { return app.ts[99]; } if k == 0 { return app.ts[0]; } return find(k - 1); }
 @get("/coll")
 fn get_coll() -> Response<{ n: i64, x: [i64] }> { return ok({ "n": pool_of().count(), "x": [foreach t in pool_of() t.n] }); }
 @get("/recor")

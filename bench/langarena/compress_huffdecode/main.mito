@@ -10,7 +10,7 @@ struct HF {
 }
 state hf: HF;
 
-fn make_data(size) {
+fn make_data(size: i64) {
     foreach i in 0..size - 1 {
         let slot = i % 11;
         var byte = 65;
@@ -20,7 +20,7 @@ fn make_data(size) {
         hf.data[i] = byte;
     }
 }
-fn new_node(freq, byte, leaf) {
+fn new_node(freq: i64, byte: i64, leaf: i64) -> i64 {
     let node = hf.nodes;
     hf.nodes = hf.nodes + 1;
     hf.node_freq[node] = freq;
@@ -87,7 +87,7 @@ fn build_tree() {
         hf.root = hf.list[0];
     }
 }
-fn build_codes(node, code, length) {
+fn build_codes(node: i64, code: i64, length: i64) -> i64 {
     if length < 0 { return 0; }
     if hf.node_leaf[node] == 1 {
         if length > 0 || hf.node_byte[node] != 0 {

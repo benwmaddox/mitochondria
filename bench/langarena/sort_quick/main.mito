@@ -6,11 +6,11 @@
 struct Sort { data: i32[400000]; t: i32[400000] unlogged; size: i64 in 0..400000; last: i64 in 0..139967; result: i64 in 0..4294967295; }
 state so: Sort;
 
-fn next_int(max) {
+fn next_int(max: i64) -> i64 {
     so.last = (so.last * 3877 + 29573) % 139968;
     return int(so.last / 139968.0 * max);
 }
-fn qs(lo, hi) {
+fn qs(lo: i64, hi: i64) {
     let len = hi - lo + 1;
     if len > 1 {
         let pivot = so.t[lo + len / 2];

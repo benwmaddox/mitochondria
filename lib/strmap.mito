@@ -16,23 +16,23 @@ state {
     head: Head;
 }
 
-pub fn size() { return self.head.size; }
-pub fn room() { return N - self.head.size; }
+pub fn size() -> i64 { return self.head.size; }
+pub fn room() -> i64 { return N - self.head.size; }
 
-fn hash_of(key) {
+fn hash_of(key: string) -> i64 {
     var hash = 5381;
     foreach at in 0..len(key) - 1 { hash = (hash * 33 + key[at]) % 4294967296; }
     return hash;
 }
 // does entry `entry` (slot + 1) hold key?
-fn same(entry, key) {
+fn same(entry: i64, key: string) -> bool {
     let base = (entry - 1) * 64;
     var equal = self.key_len[entry - 1] == len(key);
     foreach at in 0..len(key) - 1 while equal { if self.key_bytes[base + at] != key[at] { equal = false; } }
     return equal;
 }
 // the entry for key (its hash given), 0 if there is none
-fn find(key, hash) {
+fn find(key: string, hash: i64) -> i64 {
     var cur = self.heads[hash % N];
     var found = 0;
     foreach step in 0..N while cur != 0 && found == 0 {
@@ -40,16 +40,16 @@ fn find(key, hash) {
     }
     return found;
 }
-pub fn has(key) { return self.find(key, self.hash_of(key)) != 0; }
+pub fn has(key: string) -> bool { return self.find(key, self.hash_of(key)) != 0; }
 // The value of key, or dflt when there is none.
-pub fn get_or(key, dflt) {
+pub fn get_or(key: string, dflt: i64) -> i64 {
     let found = self.find(key, self.hash_of(key));
     var value = dflt;
     if found != 0 { value = self.values[found - 1]; }
     return value;
 }
 // A new entry for key at the front of its chain, value as given; the caller knows the key is not there. Its entry number.
-fn insert(key, hash, value) {
+fn insert(key: string, hash: i64, value: i64) -> i64 {
     if len(key) > 64 { fail 413 "strmap: key longer than 64 bytes"; }
     var entry = self.head.free;
     if entry != 0 {
@@ -70,7 +70,7 @@ fn insert(key, hash, value) {
     return entry;
 }
 // Set the value of key (adding the key if it is new); true if it was new.
-pub fn put(key, value) {
+pub fn put(key: string, value: i64) -> bool {
     let hash = self.hash_of(key);
     let found = self.find(key, hash);
     var added = false;
@@ -83,7 +83,7 @@ pub fn put(key, value) {
     return added;
 }
 // Add delta to the value of key, starting from 0 when the key is new; the new value.
-pub fn add_to(key, delta) {
+pub fn add_to(key: string, delta: i64) -> i64 {
     let hash = self.hash_of(key);
     let found = self.find(key, hash);
     var value = delta;
@@ -96,13 +96,13 @@ pub fn add_to(key, delta) {
     return value;
 }
 // The entry number (slot + 1) of key, 0 if there is none. Callers that keep their own data per entry (an LRU list, say) index their arrays by entry - 1.
-pub fn entry_of(key) { return self.find(key, self.hash_of(key)); }
+pub fn entry_of(key: string) -> i64 { return self.find(key, self.hash_of(key)); }
 // A new entry for key (the caller knows it is not there) with value 0; its entry number.
-pub fn add_key(key) {
+pub fn add_key(key: string) -> i64 {
     return self.insert(key, self.hash_of(key), 0);
 }
 // Remove entry number `entry` (as entry_of or add_key gave it).
-pub fn remove_entry(entry) {
+pub fn remove_entry(entry: i64) {
     let bucket = self.hashes[entry - 1] % N;
     var cur = self.heads[bucket];
     var prev = 0;
@@ -115,7 +115,7 @@ pub fn remove_entry(entry) {
     }
 }
 // Remove key; true if it was there.
-pub fn remove(key) {
+pub fn remove(key: string) -> bool {
     let found = self.find(key, self.hash_of(key));
     if found != 0 { self.remove_entry(found); }
     return found != 0;

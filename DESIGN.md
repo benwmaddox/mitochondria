@@ -168,8 +168,9 @@ clang -O3 or, in milliseconds, the bundled TinyCC; Rust is only the compiler. Th
 undefined-behaviour checks. Windows only so far.
 
 Limits:
-- Plain `fn` parameter types are parsed, not checked: kinds come from the calls (each combination compiles as its own
-  copy). Recursion is limited to 64 nested calls.
+- Functions have full signatures (`fn f(p: Player, n: i64) -> f64`, `-> T?` for a result that may be null, no arrow for none;
+  `pool<T>`, `list<T>`, and in modules `T.key`, the type of a field), checked at every call and return. Calls are still
+  inlined (a recursive function is one C function per combination of argument places); recursion is limited to 64 nested calls.
 - Only a string input can be optional; a number takes a default. An item input cannot be optional yet.
 - A real fault in the C code ends the whole process, every worker with it.
 - Pressure marks are absolute megabytes; no idle trim yet.

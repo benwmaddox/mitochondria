@@ -1,25 +1,26 @@
 // LangArena BF::Array (kostya/LangArena, MIT): a BF interpreter. Each run compiles the program text (keeps the eight command bytes, matches the brackets into a
 // jump table) and interprets it on a tape of 30,000 cells that grows if the pointer passes the end; `.` folds the cell into a 32-bit result (result = result * 4 + cell). The
 // program text and the warmup program (a small program run 1000 times before the timed run) are given to prepare; the checksum adds each run's result. The reference's
-// match on the command is an if-chain here (the language has no switch). The reference's u32 and u8 wrapping is masking.
-struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096] unlogged; srclen: i64; cmds: u8[4096] unlogged; ncmds: i64; jumps: i32[4096] unlogged; stack: i32[4096] unlogged; tape: u8[100000] unlogged; tlen: i64; out: i64; bad: i64; ok: i64; result: i64; }
+// commands are an enum of their bytes, and its match on them a `match`. The reference's u32 and u8 wrapping is masking.
+enum Cmd: u8 { Inc = 43, Dec = 45, Right = 62, Left = 60, Open = 91, Close = 93, Out = 46, In = 44 }
+struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096] unlogged; srclen: i64; cmds: Cmd[4096] unlogged; ncmds: i64; jumps: i32[4096] unlogged; stack: i32[4096] unlogged; tape: u8[100000] unlogged; tlen: i64; out: i64; bad: i64; ok: i64; result: i64; }
 state g: BF;
 
 fn compile() {
     g.ncmds = 0;
     foreach i in 0..g.srclen - 1 {
         let c = g.src[i];
-        if c == 43 || c == 45 || c == 62 || c == 60 || c == 91 || c == 93 || c == 46 || c == 44 { g.cmds[g.ncmds] = c; g.ncmds = g.ncmds + 1; }
+        match c { Cmd.Inc, Cmd.Dec, Cmd.Right, Cmd.Left, Cmd.Open, Cmd.Close, Cmd.Out, Cmd.In => { g.cmds[g.ncmds] = c; g.ncmds = g.ncmds + 1; } else => { } }
     }
     var ok = 1;
     if g.ncmds == 0 { ok = 0; }
     var sp = 0;
     foreach i in 0..g.ncmds - 1 {
         let cmd = g.cmds[i];
-        if cmd == 91 {
+        if cmd == Cmd.Open {
             g.stack[sp] = i;
             sp = sp + 1;
-        } else if cmd == 93 {
+        } else if cmd == Cmd.Close {
             if sp == 0 {
                 ok = 0;
             } else {
@@ -40,25 +41,19 @@ fn execute() {
     var pc = 0;
     var result = 0;
     var bad = 0;
-    while pc < g.ncmds && bad == 0 {
-        let cmd = g.cmds[pc];
-        if cmd == 43 {
-            g.tape[pos] = (g.tape[pos] + 1) & 255;
-        } else if cmd == 45 {
-            g.tape[pos] = (g.tape[pos] + 255) & 255;
-        } else if cmd == 62 {
-            pos = pos + 1;
-            if pos >= g.tlen { g.tape[pos] = 0; g.tlen = g.tlen + 1; }
-        } else if cmd == 60 {
-            if pos > 0 { pos = pos - 1; }
-        } else if cmd == 91 {
-            if g.tape[pos] == 0 { pc = g.jumps[pc]; }
-        } else if cmd == 93 {
-            if g.tape[pos] != 0 { pc = g.jumps[pc]; }
-        } else if cmd == 46 {
-            result = (((result << 2) & 0xFFFFFFFF) + g.tape[pos]) & 0xFFFFFFFF;
-        } else {
-            bad = 1;
+    while pc < g.ncmds {
+        match g.cmds[pc] {
+            Cmd.Inc => { g.tape[pos] = (g.tape[pos] + 1) & 255; }
+            Cmd.Dec => { g.tape[pos] = (g.tape[pos] + 255) & 255; }
+            Cmd.Right => {
+                pos = pos + 1;
+                if pos >= g.tlen { g.tape[pos] = 0; g.tlen = g.tlen + 1; }
+            }
+            Cmd.Left => { if pos > 0 { pos = pos - 1; } }
+            Cmd.Open => { if g.tape[pos] == 0 { pc = g.jumps[pc]; } }
+            Cmd.Close => { if g.tape[pos] != 0 { pc = g.jumps[pc]; } }
+            Cmd.Out => { result = (((result << 2) & 0xFFFFFFFF) + g.tape[pos]) & 0xFFFFFFFF; }
+            Cmd.In => { bad = 1; break; }
         }
         pc = pc + 1;
     }

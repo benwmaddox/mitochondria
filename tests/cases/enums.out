@@ -1,0 +1,9 @@
+POST /steps -> 200 {"count":4,"last":"Left","code":"Minus"}
+GET /run -> 200 {"acc":9,"ops":["Plus","Right","Minus","Out"],"raw":[0,2,1,4]}
+GET /sizes -> 200 {"a":"none","b":"few","c":"negative","d":"many","plus":43}
+POST /bad/3 -> 200 {}
+POST /bad/9 -> 400 {"error":"`last` must be in 0..4","line":48}
+GET /run -> 200 {"acc":9,"ops":["Plus","Right","Minus","Out"],"raw":[0,2,1,4]}
+state <plain values> 2
+state app.steps 44
+memory reserved=8192 committed=8192 live=46

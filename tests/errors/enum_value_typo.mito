@@ -1,0 +1,3 @@
+// expect: enum `Op` has no value `Minis` (did you mean `Minus`?)
+enum Op { Plus, Minus, Out } struct App { op: Op; total: i64; } state app: App;
+@post("/a") fn a() -> Response<{}> { app.op = Op.Minis; return ok({}); }

@@ -87,7 +87,13 @@ pub struct Global { pub name: String, pub ty: Ty, pub off: usize, pub coll: Opti
 #[derive(Clone, Debug)]
 pub struct ModInst { pub name: String, pub module: String, pub key: Option<String> }
 
+/// `enum Op { Plus, Minus }` or `enum Cmd: u8 { Plus = 43, Minus = 45 }`: named integer values, each the one before plus one
+/// unless given; stored in the smallest integer that holds them (or the declared one).
+#[derive(Clone, Debug)]
+pub struct EnumDef { pub name: String, pub base: Scalar, pub values: Vec<(String, i64)> }
+
 pub struct Program {
+    pub enums: Vec<EnumDef>,
     /// byte ranges kept out of the undo log (unlogged plain fields, unlogged collections), each on whole 64-byte lines
     pub unlogged: Vec<(usize, usize)>,
     pub instances: Vec<ModInst>,
@@ -102,6 +108,8 @@ pub struct Program {
 pub fn up(n: usize, to: usize) -> usize { (n + to - 1) / to * to }
 
 impl Program {
+    /// The enums as the binder takes them.
+    pub fn enum_table(&self) -> Vec<(String, Vec<(String, i64)>)> { self.enums.iter().map(|e| (e.name.clone(), e.values.clone())).collect() }
     /// Size and alignment of a plain (record-style) value. Collections inside a plain struct take no bytes there.
     pub fn plain_size(&self, t: &Ty) -> (usize, usize) {
         match t {
@@ -164,8 +172,34 @@ impl Program {
         let mut structs: Vec<StructDef> = Vec::new();
         let mut globals: Vec<(String, Ty)> = Vec::new();
         let mut instances: Vec<ModInst> = Vec::new();
+        let mut enums: Vec<EnumDef> = Vec::new();
         while p.i < p.t.len() {
             match p.ident()?.as_str() {
+                "enum" => {
+                    let name = p.ident()?;
+                    let declared = if p.peek() == Some(":") { p.eat(":")?; let b = p.ident()?; Some(Scalar::parse(&b).filter(|s| !matches!(s, Scalar::F32 | Scalar::F64 | Scalar::Bool)).ok_or(format!("enum `{}`: `{}` is not an integer type", name, b))?) } else { None };
+                    p.eat("{")?;
+                    let (mut values, mut next): (Vec<(String, i64)>, i64) = (Vec::new(), 0);
+                    while p.peek() != Some("}") {
+                        let v = p.ident()?;
+                        if p.peek() == Some("=") { p.eat("=")?; next = p.signed()?; }
+                        if values.iter().any(|x: &(String, i64)| x.0 == v) { return Err(format!("enum `{}` has `{}` twice", name, v)); }
+                        if let Some(o) = values.iter().find(|x| x.1 == next) { return Err(format!("enum `{}`: `{}` and `{}` are both {}", name, o.0, v, next)); }
+                        values.push((v, next));
+                        next += 1;
+                        if p.peek() == Some(",") { p.eat(",")?; }
+                    }
+                    p.eat("}")?;
+                    if values.is_empty() { return Err(format!("enum `{}` has no values", name)); }
+                    let (lo, hi) = (values.iter().map(|x| x.1).min().unwrap_or(0), values.iter().map(|x| x.1).max().unwrap_or(0));
+                    let fits = |s: Scalar| -> bool { let (a, b): (i128, i128) = match s { Scalar::I8 => (-128, 127), Scalar::I16 => (-32768, 32767), Scalar::I32 => (i32::MIN as i128, i32::MAX as i128), Scalar::U8 => (0, 255), Scalar::U16 => (0, 65535), Scalar::U32 => (0, u32::MAX as i128), _ => (i64::MIN as i128, i64::MAX as i128) }; lo as i128 >= a && hi as i128 <= b };
+                    let base = match declared {
+                        Some(b) => { if !fits(b) { return Err(format!("enum `{}`: its values ({}..{}) do not fit {:?}", name, lo, hi, b).to_lowercase()); } b }
+                        None => [Scalar::U8, Scalar::I8, Scalar::U16, Scalar::I16, Scalar::U32, Scalar::I32, Scalar::I64].into_iter().find(|s| fits(*s)).unwrap_or(Scalar::I64),
+                    };
+                    if enums.iter().any(|e| e.name == name) { return Err(format!("enum `{}` is declared twice", name)); }
+                    enums.push(EnumDef { name, base, values });
+                }
                 "struct" => {
                     let name = p.ident()?; p.eat("{")?;
                     let mut fields = Vec::new();
@@ -207,7 +241,18 @@ impl Program {
             }
         }
         if globals.is_empty() { return Err("a program has one state (`state game: Game;`), and this one has none".into()); }
-        let mut prog = Program { unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
+        // a field of an enum type is its integer, checked to hold one of the enum's values' range (which includes 0, the value it starts with)
+        for sd in structs.iter_mut() {
+            for k in 0..sd.fields.len() {
+                let named = match &sd.fields[k].1 { Ty::Named(n) => Some((n.clone(), false)), Ty::Arr(e, _) => match &**e { Ty::Named(n) => Some((n.clone(), true)), _ => None }, _ => None };
+                let Some((n, arr)) = named else { continue };
+                let Some(en) = enums.iter().find(|e| e.name == n) else { continue };
+                let (lo, hi) = (en.values.iter().map(|x| x.1).min().unwrap_or(0).min(0), en.values.iter().map(|x| x.1).max().unwrap_or(0).max(0));
+                if arr { if let Ty::Arr(_, len) = sd.fields[k].1 { sd.fields[k].1 = Ty::Arr(Box::new(Ty::Scalar(en.base)), len); } }
+                else { sd.fields[k].1 = Ty::Scalar(en.base); if sd.ranges[k].is_none() { sd.ranges[k] = Some((lo, hi)); } }
+            }
+        }
+        let mut prog = Program { enums, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
             let fs = std::mem::take(&mut prog.structs[i].fields);

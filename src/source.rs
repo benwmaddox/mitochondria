@@ -26,7 +26,7 @@ pub fn split(src: &str) -> Result<(String, String), String> {
         let word = &src[i..word_end];
         let line = src[..i].matches('\n').count() + 1;
         match word {
-            "struct" => { let e = end_of_block(src, i).ok_or_else(|| format!("line {}: unclosed struct", line))?; put(&mut state, &mut code, &src[i..e]); i = e; }
+            "struct" | "enum" => { let e = end_of_block(src, i).ok_or_else(|| format!("line {}: unclosed struct", line))?; put(&mut state, &mut code, &src[i..e]); i = e; }
             "state" | "instance" => { let e = src[i..].find(';').map(|e| i + e + 1).ok_or_else(|| format!("line {}: expected `;`", line))?; put(&mut state, &mut code, &src[i..e]); i = e; }
             "fn" | "pub" | "endpoint" => {
                 // an endpoint's path may hold `{param}`: its body starts after the path
@@ -37,7 +37,7 @@ pub fn split(src: &str) -> Result<(String, String), String> {
             "system" => return Err(format!("line {}: a `system` block is a file of its own, not part of a program", line)),
             "global" => return Err(format!("line {}: `global` was replaced by `state`: a program has one state, a struct holding everything (`state game: Game;`)", line)),
             "" => return Err(format!("line {}: unexpected `{}`", line, &src[i..i + src[i..].chars().next().map_or(1, |c| c.len_utf8())])),
-            w => return Err(format!("line {}: expected `struct`, `state`, `fn` or `endpoint`, found `{}`", line, w)),
+            w => return Err(format!("line {}: expected `struct`, `enum`, `state`, `fn` or `endpoint`, found `{}`", line, w)),
         }
     }
     Ok((state, code))

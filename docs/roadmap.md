@@ -115,18 +115,30 @@ the guess fits. A guess that is wrong in a way the body cannot even express ends
 before the guess is needed. The ports used dummy guards like `if g.pos < 0 { return 0; }` for it. With the result type written in the
 signature there is nothing to guess.
 
-### 2.4 Enums
+### 2.4 Enums (done 2026-11-05)
 - `enum Op { Plus, Minus, Right, Left, Open, Close, Out }`: named values, stored in the smallest integer that holds them,
   usable as field types, parameters, `match` subjects and in answers (as their name in JSON).
 - Optional explicit values: `enum Cmd: u8 { Plus = 43, Minus = 45 }` (for byte codes such as the BF interpreter's).
 - Open: values carrying data (Rust-style variants)? Proposal: not now; plain enums first.
 - Done when: the BF interpreters and the compress ports use enums where they use magic numbers today.
+- Done: declarations in the state part; `Op.Plus` folds to its integer when names are bound; fields of an enum type are stored in
+  the smallest integer (or the declared one) with a write check over the values' range, widened to include 0, the value a field
+  starts with (so `enum Cmd: u8 { Plus = 43, Minus = 45 }` accepts 0..45: a range check, not a membership check); parameters of an
+  enum type are integers; answer fields declared with an enum type are written as names (`"op":"Plus"`), others as numbers. Both BF
+  ports use enums (`Op` in BF::Recursion, the byte-valued `Cmd` in BF::Array), at the same speed.
+- Not yet: enum inputs (an endpoint parameter `op: Op` reading a name), enums kept apart from integers (an `i64` can be assigned
+  to an `Op` field, checked only by its range), and the compress ports.
 
-### 2.5 `match`
+### 2.5 `match` (done 2026-11-05)
 - `match x { Op.Plus => { ... } Op.Minus, Op.Left => { ... } 0..10 => { ... } else => { ... } }`: on integers and enums; arms are
   constants, lists of constants and ranges; no fall-through; on an enum every value must be handled (or `else`).
 - Compiles to a C `switch` (clang already turns if-chains into jump tables; this is readability and exhaustiveness, and speed under TinyCC).
 - Done when: exhaustiveness errors are tested and the BF ports use it.
+- Done: arms are numbers, `-n`, enum values, lists of them and inclusive ranges; `else` last; each value at most once (`a match
+  covers 5 twice`); arms of one enum must cover it or have an `else` (`does not handle Op.Out`). The parser turns a `match` into an
+  `if` chain over a hidden local (the subject is read once), so every analysis applies unchanged; clang makes a jump table of it.
+  Both BF ports use it (their `bad` and `done` flags became `break`). A function ending in a `match` that returns on every arm still
+  needs a `return` after it (the end-of-function check does not know the arms are exhaustive).
 
 ## Phase 3: tests in the language
 

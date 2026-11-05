@@ -115,6 +115,12 @@ never required. A `foreach` is bounded by a capacity or a range; a `while` or `f
 budget (100 million, `--loop-budget N`), past which the request fails with "loop ran too long". A counted `for` (`i < n` or
 `i <= n`, step `i += 1`, neither changed in the body) compiles as a range loop.
 
+**Enums and match.** `enum Op { Plus, Minus }` (or `enum Cmd: u8 { Plus = 43, Minus = 45 }`) names integer values; a field of an
+enum type is stored in the smallest integer that holds them and a write outside their range fails (400), and an answer field
+declared with an enum type is written as the value's name. `Op.Plus` is its integer in code. `match x { Op.Plus => { } Op.Minus,
+Op.Out => { } 0..9 => { } else => { } }` tests constants, lists and ranges in order, without fall-through; on an enum every value
+must be handled or an `else` given, and no value may be covered twice. It runs as an `if` chain (clang turns it into a jump table).
+
 ## Modules
 A module is a `.mito` file in `lib/`: parameters, structs, a `state { ... }` block (what an instance holds) and
 functions. A use is a field of the state, `scores: sorted<Score, 10000, points>;`, expanded when compiling into

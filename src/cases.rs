@@ -109,7 +109,7 @@ impl CBackend {
     pub fn start_flags(case: &Case, use_clang: bool, flags: &[&str]) -> CBackend {
         let prog = Program::parse(&case.state).unwrap_or_else(|e| panic!("{}: state: {}", case.name, e));
         let mut api = crate::lang::parse(&case.api).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
-        crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
+        crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table()).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
         let src = crate::cgen::program_c(&prog, &api, None).unwrap_or_else(|e| panic!("{}: {}", case.name, e));
         // the C runtime makes no heap allocations because it has no allocator: check the program names none
         for w in ["malloc", "calloc", "realloc", "HeapAlloc", "LocalAlloc", "GlobalAlloc", "_alloca"] { assert!(!src.contains(w), "{}: the C program uses {}", case.name, w); }

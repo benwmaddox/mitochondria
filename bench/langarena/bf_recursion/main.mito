@@ -3,7 +3,8 @@
 // the head of another list (nodes in arrays: the language has no variable-length nested vectors); parse and execute recurse as in the reference. The tape starts with one cell and grows
 // by one when the pointer passes the end. `.` folds the cell into a 64-bit result (result = result * 4 + cell); the checksum adds each run's result as u32. The program text and
 // the warmup program (run 1000 times before the timed run) are given to prepare.
-struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096] unlogged; srclen: i64; pos: i64; op: u8[4096] unlogged; nxt: i32[4096] unlogged; body: i32[4096] unlogged; nops: i64; tape: u8[100000] unlogged; tlen: i64; tpos: i64; result: i64; total: i64; }
+enum Op { Dec, Inc, Left, Right, Out, Loop }
+struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096] unlogged; srclen: i64; pos: i64; op: Op[4096] unlogged; nxt: i32[4096] unlogged; body: i32[4096] unlogged; nops: i64; tape: u8[100000] unlogged; tlen: i64; tpos: i64; result: i64; total: i64; }
 state g: BF;
 
 // the reference's parse: the list of operations up to the matching `]` (or the end of the text); returns its first node, -1 for an empty list
@@ -11,20 +12,26 @@ fn parse() -> i64 {
     if g.pos >= g.srclen { return -1; }
     var head = -1;
     var tail = -1;
-    var done = 0;
-    foreach step in 0..g.srclen while done == 0 && g.pos < g.srclen {
+    while g.pos < g.srclen {
         let byte = g.src[g.pos];
         g.pos = g.pos + 1;
         var kind = -1;
-        if byte == 45 { kind = 0; } else if byte == 43 { kind = 1; } else if byte == 60 { kind = 2; } else if byte == 62 { kind = 3; }
-        else if byte == 46 { kind = 4; } else if byte == 91 { kind = 5; } else if byte == 93 { done = 1; }
+        match byte {
+            45 => { kind = Op.Dec; }
+            43 => { kind = Op.Inc; }
+            60 => { kind = Op.Left; }
+            62 => { kind = Op.Right; }
+            46 => { kind = Op.Out; }
+            91 => { kind = Op.Loop; }
+            93 => { break; }
+        }
         if kind >= 0 {
             let node = g.nops;
             g.nops = g.nops + 1;
             g.op[node] = kind;
             g.nxt[node] = -1;
             g.body[node] = -1;
-            if kind == 5 {
+            if kind == Op.Loop {
                 let inner = parse();
                 g.body[node] = inner;
             }
@@ -38,20 +45,16 @@ fn parse() -> i64 {
 fn execute(head: i64) {
     var node = head;
     foreach step in 0..g.nops while node >= 0 {
-        let kind = g.op[node];
-        if kind == 0 {
-            g.tape[g.tpos] = (g.tape[g.tpos] + 255) & 255;
-        } else if kind == 1 {
-            g.tape[g.tpos] = (g.tape[g.tpos] + 1) & 255;
-        } else if kind == 2 {
-            if g.tpos > 0 { g.tpos = g.tpos - 1; }
-        } else if kind == 3 {
-            g.tpos = g.tpos + 1;
-            if g.tpos >= g.tlen { g.tape[g.tpos] = 0; g.tlen = g.tpos + 1; }
-        } else if kind == 4 {
-            g.result = (g.result << 2) + g.tape[g.tpos];
-        } else {
-            while g.tape[g.tpos] != 0 { execute(g.body[node]); }
+        match g.op[node] {
+            Op.Dec => { g.tape[g.tpos] = (g.tape[g.tpos] + 255) & 255; }
+            Op.Inc => { g.tape[g.tpos] = (g.tape[g.tpos] + 1) & 255; }
+            Op.Left => { if g.tpos > 0 { g.tpos = g.tpos - 1; } }
+            Op.Right => {
+                g.tpos = g.tpos + 1;
+                if g.tpos >= g.tlen { g.tape[g.tpos] = 0; g.tlen = g.tpos + 1; }
+            }
+            Op.Out => { g.result = (g.result << 2) + g.tape[g.tpos]; }
+            Op.Loop => { while g.tape[g.tpos] != 0 { execute(g.body[node]); } }
         }
         node = g.nxt[node];
     }

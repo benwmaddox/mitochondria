@@ -1,0 +1,59 @@
+// enums (named integer values, smallest storage, answers by name) and `match` (constants, lists, ranges, `else`; on an enum every value)
+--- program
+enum Op { Plus, Minus, Right, Left, Out }
+enum Cmd: u8 { Plus = 43, Minus = 45, Out = 46 }
+struct Step { op: Op; n: i64; }
+struct App { steps: list<Step, 8>; last: Op; code: Cmd; }
+state app: App;
+
+fn apply(op: Op, acc: i64, n: i64) -> i64 {
+    match op {
+        Op.Plus => { return acc + n; }
+        Op.Minus => { return acc - n; }
+        Op.Right, Op.Left => { return acc * 2; }
+        Op.Out => { return acc; }
+    }
+    return 0;
+}
+fn size(n: i64) -> string {
+    match n {
+        0 => { return "none"; }
+        1..9 => { return "few"; }
+        -5..-1 => { return "negative"; }
+        else => { return "many"; }
+    }
+    return "";
+}
+
+@post("/steps")
+fn post_steps() -> Response<{ count: i64, last: Op, code: Cmd }> {
+    app.steps.add { op: Op.Plus, n: 5 };
+    app.steps.add { op: Op.Right, n: 0 };
+    app.steps.add { op: Op.Minus, n: 3 };
+    app.steps.add { op: Op.Out, n: 0 };
+    app.last = Op.Left;
+    app.code = Cmd.Minus;
+    return ok({ count: app.steps.count(), last: app.last, code: app.code });
+}
+@get("/run")
+fn run() -> Response<{ acc: i64, ops: [Op], raw: [i64] }> {
+    var acc = 1;
+    foreach s in app.steps { acc = apply(s.op, acc, s.n); }
+    return ok({ acc: acc, ops: [foreach s in app.steps s.op], raw: [foreach s in app.steps s.op] });
+}
+@get("/sizes")
+fn sizes() -> Response<{ a: string, b: string, c: string, d: string, plus: i64 }> {
+    return ok({ a: size(0), b: size(7), c: size(-3), d: size(40), plus: Cmd.Plus });
+}
+@post("/bad/{v}")
+fn bad(v: i64) -> Response<{}> {
+    app.last = v;
+    return ok({});
+}
+--- requests
+POST /steps
+GET /run
+GET /sizes
+POST /bad/3
+POST /bad/9
+GET /run

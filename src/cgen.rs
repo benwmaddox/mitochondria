@@ -297,6 +297,8 @@ fn fits_shape(prog: &Program, shape: &Shape, want: &RType, at: &str) -> Result<(
                 "bool" => *shape == Shape::Bool,
                 "string" => *shape == Shape::Str,
                 "null" => *shape == Shape::Nothing, // no body
+                // an enum: written as its value's name
+                n if prog.enums.iter().any(|e| e.name == n) => *shape == Shape::Int,
                 // an item type: the answer holds an item of a pool of that struct, written as its id
                 _ if matches!(shape, Shape::Id(..)) => { let Shape::Id(c, _) = shape else { unreachable!() }; prog.colls[*c].item.map_or(false, |s| prog.structs[s].name == *n) }
                 _ => {
@@ -485,7 +487,7 @@ pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, ap
 /// endpoint (a problem in a function several endpoints call is reported once, at its place).
 pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
     let mut api = parse(api_src)?;
-    bind(&mut api, &|n| prog.global(n))?;
+    crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table())?;
     let notes = generate(prog, &api).notes;
     let mut seen: Vec<&str> = Vec::new();
     let mut out: Vec<&str> = Vec::new();
@@ -565,7 +567,7 @@ pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
         let prog = Program::parse(&k.state).map_err(|e| format!("worker {}: {}", k.name, e))?;
         total = total.saturating_add(prog.total.saturating_mul(k.count));
         let mut api = crate::lang::parse(&k.api).map_err(|e| format!("worker {}: {}", k.name, e))?;
-        crate::lang::bind(&mut api, &|n| prog.global(n)).map_err(|e| format!("worker {}: {}", k.name, e))?;
+        crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table()).map_err(|e| format!("worker {}: {}", k.name, e))?;
         let pre = format!("k{}_", i);
         units.push(program_c_named(&prog, &api, None, &pre).map_err(|e| format!("worker {}: {}", k.name, e))?);
         for s in &sigs { table += &s.replace("{}", &pre); table.push('\n'); }
@@ -1143,6 +1145,7 @@ impl<'p> G<'p> {
             return scalar(&base).ok_or_else(|| format!("`{}.{}` is {}: a signature takes a field's type only when it is a number, bool or string", t.name, fld, tn));
         }
         if let Some(k) = scalar(&t.name) { return Ok(k); }
+        if self.prog.enums.iter().any(|e| e.name == t.name) { return Ok(K::Int); }
         if t.name == "pool" || t.name == "list" {
             // a collection: `pool<T>` / `list<T>` (`in path` when several hold T)
             let Some(item) = &t.arg else { return no(format!("`{}` needs its item type: `{}<T>`", t.name, t.name)) };
@@ -1514,6 +1517,7 @@ impl<'p> G<'p> {
             Stmt::At(l, c) => { self.at = (*l, *c); self.line("#undef AT_"); self.line(&format!("#define AT_ {}", l)); }
             Stmt::Break => { let l = self.loops.last_mut().ok_or("`break` outside a loop")?; l.2 = true; let g = format!("goto {};", l.0); self.line(&g); }
             Stmt::Continue => { let l = self.loops.last_mut().ok_or("`continue` outside a loop")?; l.3 = true; let g = format!("goto {};", l.1); self.line(&g); }
+            Stmt::MatchArms(..) => {}
             Stmt::ContinueHere => { let l = self.loops.last_mut().ok_or("misplaced loop step")?; l.3 = false; let g = format!("{}: ;", l.1); self.line(&g); }
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
@@ -1751,7 +1755,8 @@ impl<'p> G<'p> {
             }
             Stmt::Fail(code, m) => self.fail(*code, m),
             Stmt::Respond(code, j) => {
-                let shape = self.json(j, env)?;
+                let resp = self.ep.resp.clone();
+                let shape = self.json(j, env, Some(&resp))?;
                 if let Err(e) = fits_shape(self.prog, &shape, &self.ep.resp, "") { return no(format!("the answer is {}, not Response<{}>: {}", shape, show_rtype(&self.ep.resp), e)); }
                 self.line(&format!("return {};", code));
             }
@@ -2737,7 +2742,34 @@ impl<'p> G<'p> {
     }
 
     /// Write `j` as JSON; returns the shape it has (known while generating), for checking against `Response<T>`.
-    fn json(&mut self, j: &'p Json, env: &mut Vec<Option<CV>>) -> R<Shape> {
+    /// An enum value (an integer) as the name of its value; a number that is none of them is written as the number.
+    fn write_enum(&mut self, en: usize, e: &str) -> R<()> {
+        let x = self.tmp("ev");
+        self.line(&format!("i64 {} = {};", x, e));
+        let vals = self.prog.enums[en].values.clone();
+        for (i, (n, v)) in vals.iter().enumerate() {
+            self.open(&format!("{}if ({} == {}) {{", if i > 0 { "else " } else { "" }, x, c_i64(*v)));
+            let t = json_lit(n);
+            self.out(&t);
+            self.close("}");
+        }
+        self.open("else {");
+        self.call(&format!("c->h->json_i64(c, {})", x));
+        self.close("}");
+        Ok(())
+    }
+    /// The enum a declared answer type names, if it is one (`Op` or `Op?`).
+    fn enum_of(&self, want: Option<&crate::lang::RType>) -> Option<usize> {
+        match want {
+            Some(crate::lang::RType::Name(n)) => self.prog.enums.iter().position(|e| e.name == *n),
+            Some(crate::lang::RType::Opt(t)) => self.enum_of(Some(t)),
+            _ => None,
+        }
+    }
+
+    /// Write `j` as JSON (`want`: its declared type, for enums written by name).
+    fn json(&mut self, j: &'p Json, env: &mut Vec<Option<CV>>, want: Option<&crate::lang::RType>) -> R<Shape> {
+        let want = match want { Some(crate::lang::RType::Opt(t)) if !matches!(**t, crate::lang::RType::Name(_)) => Some(&**t), w => w };
         match j {
             Json::Obj(fields) => {
                 let mut text = String::from("{");
@@ -2746,7 +2778,8 @@ impl<'p> G<'p> {
                     if i > 0 { text.push(','); }
                     text += &json_lit(k); text.push(':');
                     self.out(&text); text.clear();
-                    shape.push((k.clone(), self.json(v, env)?));
+                    let fw = match want { Some(crate::lang::RType::Obj(fs)) => fs.iter().find(|x| x.0 == *k).map(|x| x.1.clone()), _ => None };
+                    shape.push((k.clone(), self.json(v, env, fw.as_ref())?));
                 }
                 text.push('}'); self.out(&text);
                 Ok(Shape::Obj(shape))
@@ -2758,9 +2791,10 @@ impl<'p> G<'p> {
                     if changes_instance(self.api, n, &[Stmt::Respond(200, (**inner).clone())]) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
                 let mut elem = Shape::Any;
+                let ew = match want { Some(crate::lang::RType::Arr(t)) => Some((**t).clone()), _ => None };
                 self.each(it, env, false, |g, env, hits| {
                     g.line(&format!("if ({} > 1) {{ CALL(c->h->out(c, \",\", 1)); }}", hits));
-                    elem = g.json(inner, env)?;
+                    elem = g.json(inner, env, ew.as_ref())?;
                     Ok(())
                 })?;
                 self.out("]");
@@ -2787,7 +2821,12 @@ impl<'p> G<'p> {
                 self.line(&format!("{}: ;", end));
                 Ok(Shape::either(a, b))
             }
-            Json::E(e) => { let v = self.expr(e, env, None)?; let s = Shape::of(&v); self.write(v)?; Ok(s) }
+            Json::E(e) => {
+                let v = self.expr(e, env, None)?;
+                let s = Shape::of(&v);
+                match (self.enum_of(want), &v) { (Some(en), CV::Int(x)) => { let x = x.clone(); self.write_enum(en, &x)?; } _ => self.write(v)? }
+                Ok(s)
+            }
             Json::Empty => Ok(Shape::Nothing),
         }
     }

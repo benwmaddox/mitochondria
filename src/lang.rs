@@ -91,9 +91,16 @@ pub enum Stmt {
     Continue,
     /// Where `continue` lands in a `for` loop: before its step (the end of the body elsewhere).
     ContinueHere,
+    /// A `match`'s arms as written, for the binder's checks (each value once; on an enum, every value or `else`); the
+    /// `match` itself runs as the `if` chain after it. Generates nothing.
+    MatchArms(Vec<Pat>, bool),
     /// Where the next statement starts in the source (line, column): kept for error messages; generates nothing.
     At(u32, u32),
 }
+
+/// A `match` arm's pattern: a constant (a number, `-n`, an enum value) or a range of them, both ends included.
+#[derive(Debug, Clone)]
+pub enum Pat { One(Expr), Range(Expr, Expr) }
 
 #[derive(Debug, Clone)]
 pub enum Seg { Lit(String), Param(String) }
@@ -184,7 +191,7 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
         }
         else {
             let two: String = c[i..(i + 2).min(c.len())].iter().collect();
-            if ["==", "!=", "<=", ">=", "&&", "||", "->", "..", "+=", "-=", "*=", "/=", "<<", ">>"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
+            if ["==", "!=", "<=", ">=", "&&", "||", "->", "..", "+=", "-=", "*=", "/=", "<<", ">>", "=>"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
             else { out.push(Tok::Sym(ch.to_string())); i += 1; }
         }
     }
@@ -426,6 +433,7 @@ impl P {
         }
         if self.is_kw("while") { self.i += 1; let c = self.no_init(|p| p.expr())?; let b = self.block()?; return Ok(Stmt::Each(unbounded(Some(c)), b)); }
         if self.is_kw("for") { return self.for_stmt(); }
+        if self.is_kw("match") { return self.match_stmt(); }
         if self.is_kw("break") { self.i += 1; self.eat(";")?; return Ok(Stmt::Break); }
         if self.is_kw("continue") { self.i += 1; self.eat(";")?; return Ok(Stmt::Continue); }
         if self.is_kw("let") || self.is_kw("var") {
@@ -531,6 +539,44 @@ impl P {
         b.push(step);
         // a block of its own (an `if` that always holds) keeps `i` inside the loop
         Ok(Stmt::If(Expr::Bool(true), vec![Stmt::Var(v, 0, init), Stmt::Each(unbounded(Some(cond)), b)], Vec::new()))
+    }
+    /// `match x { A.b => { } A.c, A.d => { } 0..9 => { } else => { } }`: the subject is read once (a hidden local), each arm is
+    /// tested in order, no fall-through. Runs as an `if` chain (clang makes a jump table of it); `MatchArms` keeps the arms for
+    /// the binder's checks.
+    fn match_stmt(&mut self) -> R<Stmt> {
+        self.kw("match")?;
+        let subject = self.no_init(|p| p.expr())?;
+        self.eat("{")?;
+        let (mut arms, mut all, mut otherwise): (Vec<(Vec<Pat>, Vec<Stmt>)>, Vec<Pat>, Option<Vec<Stmt>>) = (Vec::new(), Vec::new(), None);
+        while !self.sym("}") {
+            if self.peek().is_none() { return Err("missing `}` at the end of a `match`".into()); }
+            if otherwise.is_some() { return Err("`else` is the last arm of a `match`".into()); }
+            if self.is_kw("else") { self.i += 1; self.eat("=>")?; otherwise = Some(self.block()?); continue; }
+            let mut pats = Vec::new();
+            loop {
+                let a = self.no_init(|p| p.expr())?;
+                pats.push(if self.sym("..") { let b = self.no_init(|p| p.expr())?; Pat::Range(a, b) } else { Pat::One(a) });
+                if !self.sym(",") { break; }
+            }
+            self.eat("=>")?;
+            let body = self.block()?;
+            all.extend(pats.iter().cloned());
+            arms.push((pats, body));
+        }
+        let m = || Expr::Var("__mito__match".into(), VarRes::Unbound);
+        let test = |p: &Pat| -> Expr { match p {
+            Pat::One(e) => Expr::Bin("==".into(), Box::new(m()), Box::new(e.clone())),
+            Pat::Range(a, b) => Expr::Bin("&&".into(), Box::new(Expr::Bin(">=".into(), Box::new(m()), Box::new(a.clone()))), Box::new(Expr::Bin("<=".into(), Box::new(m()), Box::new(b.clone())))),
+        } };
+        let mut chain: Vec<Stmt> = otherwise.clone().unwrap_or_default();
+        for (pats, body) in arms.into_iter().rev() {
+            let mut cond = test(&pats[0]);
+            for p in &pats[1..] { cond = Expr::Bin("||".into(), Box::new(cond), Box::new(test(p))); }
+            chain = vec![Stmt::If(cond, body, chain)];
+        }
+        let mut block = vec![Stmt::Let("__mito__match".into(), 0, subject), Stmt::MatchArms(all, otherwise.is_some())];
+        block.extend(chain);
+        Ok(Stmt::If(Expr::Bool(true), block, Vec::new()))
     }
     fn sym_kw(&mut self, k: &str) -> bool { if self.is_kw(k) { self.i += 1; true } else { false } }
 
@@ -643,15 +689,18 @@ pub fn path_of(e: &Expr) -> Option<String> {
 }
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32 }
+struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
-pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
+pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> { bind_with(api, globals, &[]) }
+/// The enums' names and values, for `Name.Value` in code.
+pub type Enums = [(String, Vec<(String, i64)>)];
+pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: &Enums) -> R<()> {
     let fns: Vec<(String, usize, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
     let mut errs = Vec::new();
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0), loops: 0 };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0), loops: 0, enums };
         for p in &f.params { b.declare(p, false); }
         // a full signature: every parameter's type, and the result's when the function returns a value
         if let Some(Stmt::At(l, c)) = f.body.first() { b.at = (*l, *c); }
@@ -661,7 +710,7 @@ pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
         f.slots = b.max;
     }
     for e in &mut api.eps {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0 };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums };
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         if let Err(e) = b.block(&mut e.body) { errs.push(e); continue; }
         e.slots = b.max;
@@ -710,6 +759,35 @@ impl Binder<'_> {
         if let Some((n, slot)) = &mut it.index { *slot = self.declare(n, false); }
         if let Some(w) = &mut it.whil { if it.hi.is_none() && it.via.is_none() { return self.err(format!("`foreach {} in ... while`: only ranges and module instances stop early; a list or pool is walked whole", it.var)); } self.expr(w)?; }
         if let Some(w) = &mut it.wher { self.expr(w)?; }
+        Ok(())
+    }
+    /// A `match`'s arms: constants only, each value once; arms naming an enum's values name one enum, and cover all of it
+    /// unless there is an `else`.
+    fn match_arms(&mut self, pats: &mut [Pat], has_else: bool) -> R<()> {
+        let mut used_enum: Option<String> = None;
+        let mut seen: Vec<(i64, i64)> = Vec::new();
+        for p in pats.iter_mut() {
+            let (a, b) = match p { Pat::One(e) => (e.clone(), e.clone()), Pat::Range(a, b) => (a.clone(), b.clone()) };
+            let mut ends = Vec::new();
+            for mut e in [a, b] {
+                if let Expr::Field(base, _) = &e { if let Expr::Var(n, _) = &**base { if self.enums.iter().any(|x| x.0 == *n) {
+                    if let Some(u) = &used_enum { if u != n { return self.err(format!("a `match` on values of `{}` has an arm of `{}`", u, n)); } }
+                    used_enum = Some(n.clone());
+                } } }
+                self.expr(&mut e)?;
+                let v = match &e { Expr::Int(v) => *v, Expr::Un('-', x) => match **x { Expr::Int(v) => -v, _ => return self.err("a `match` arm is a constant: a number, an enum value, or a range of them".into()) }, _ => return self.err("a `match` arm is a constant: a number, an enum value, or a range of them".into()) };
+                ends.push(v);
+            }
+            let (lo, hi) = (ends[0], ends[1]);
+            if lo > hi { return self.err(format!("the range {}..{} in a `match` is empty", lo, hi)); }
+            if let Some(o) = seen.iter().find(|o| lo <= o.1 && o.0 <= hi) { let (a, b) = (lo.max(o.0), hi.min(o.1)); return self.err(format!("a `match` covers {} twice", if a == b { a.to_string() } else { format!("{}..{}", a, b) })); }
+            seen.push((lo, hi));
+        }
+        if let (Some(n), false) = (&used_enum, has_else) {
+            let vals: Vec<(String, i64)> = self.enums.iter().find(|x| x.0 == *n).map(|x| x.1.clone()).unwrap_or_default();
+            let missing: Vec<&str> = vals.iter().filter(|v| !seen.iter().any(|s| s.0 <= v.1 && v.1 <= s.1)).map(|v| v.0.as_str()).collect();
+            if !missing.is_empty() { return self.err(format!("this `match` on `{}` does not handle {}: add {} or an `else` arm", n, missing.iter().map(|m| format!("`{}.{}`", n, m)).collect::<Vec<_>>().join(", "), if missing.len() == 1 { "it" } else { "them" })); }
+        }
         Ok(())
     }
     /// `x.f(args)` naming no function of a module instance: a collection operation, `.f(x, args)`.
@@ -766,6 +844,7 @@ impl Binder<'_> {
             Stmt::Each(it, body) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.loops += 1; let r = self.block(body); self.loops -= 1; r?; self.names.truncate(mark); self.next = next; }
             Stmt::Break | Stmt::Continue => if self.loops == 0 { return self.err(format!("`{}` outside a loop", if matches!(s, Stmt::Break) { "break" } else { "continue" })); },
             Stmt::ContinueHere => {}
+            Stmt::MatchArms(pats, has_else) => self.match_arms(pats, *has_else)?,
             Stmt::Remove(c, e) => { self.expr(c)?; self.expr(e)?; }
             Stmt::Clear(c) => { self.expr(c)?; }
             Stmt::Move(a, f, t2, n) => { self.expr(a)?; self.expr(f)?; self.expr(t2)?; self.expr(n)?; }
@@ -795,6 +874,18 @@ impl Binder<'_> {
             let mut p = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
             for f in parts { p = Expr::Field(Box::new(p), f.to_string()); }
             *e = p;
+        }
+        // `Op.Plus`: an enum's value is its integer (unless `Op` is a local)
+        if let Expr::Field(b, v) = e {
+            if let Expr::Var(n, _) = &**b {
+                if !self.names.iter().any(|x| x.0 == *n) {
+                    if let Some((en, vals)) = self.enums.iter().find(|x| x.0 == *n) {
+                        let Some(x) = vals.iter().find(|x| x.0 == *v) else { let hint = suggest(v, vals.iter().map(|x| x.0.as_str())); return self.err(format!("enum `{}` has no value `{}`{}", en, v, hint)) };
+                        *e = Expr::Int(x.1);
+                        return Ok(());
+                    }
+                }
+            }
         }
         self.operation(e);
         match e {

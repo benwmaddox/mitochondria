@@ -106,7 +106,7 @@ fn compile(f: &str, text: &str, system: bool) -> Result<(Vec<String>, String), S
 fn build_exe(args: &[String]) {
     let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1)).cloned();
     let (units, name) = program(&inputs(args));
-    let out = std::path::PathBuf::from(out.unwrap_or_else(|| format!("{}.exe", name)));
+    let out = std::path::PathBuf::from(out.unwrap_or_else(|| format!("{}{}", name, std::env::consts::EXE_SUFFIX)));
     // `--cflag X` (repeatable) hands X to clang in place of the default `-O3`, e.g. `--cflag -O2 --cflag -mavx2`
     let cflags: Vec<String> = args.windows(2).filter(|w| w[0] == "--cflag").map(|w| w[1].clone()).collect();
     let cflags: Vec<&str> = cflags.iter().map(|s| s.as_str()).collect();
@@ -121,7 +121,7 @@ fn serve(args: &[String]) {
     let pass: Vec<&String> = args[files.len()..].iter().filter(|a| *a != "--clang" && *a != "--watch").collect();
     if args.iter().any(|a| a == "--watch") { return serve_watch(&files, clang, &pass); }
     let (units, name) = program(&files);
-    let exe = std::env::temp_dir().join(format!("mito-serve-{}-{}.exe", name, std::process::id()));
+    let exe = std::env::temp_dir().join(format!("mito-serve-{}-{}{}", name, std::process::id(), std::env::consts::EXE_SUFFIX));
     build::exe(&units, &exe, !clang, &[]).unwrap_or_else(|e| die(e));
     let status = std::process::Command::new(&exe).args(pass).status().unwrap_or_else(|e| die(format!("{}: {}", exe.display(), e)));
     let _ = std::fs::remove_file(&exe);
@@ -153,7 +153,7 @@ fn serve_watch(files: &[&String], clang: bool, pass: &[&String]) {
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", f, e));
         let built = text.and_then(|t| compile(&f, &t, system)).and_then(|(units, name)| {
             generation += 1;
-            let next = std::env::temp_dir().join(format!("mito-serve-{}-{}-{}.exe", name, std::process::id(), generation));
+            let next = std::env::temp_dir().join(format!("mito-serve-{}-{}-{}{}", name, std::process::id(), generation, std::env::consts::EXE_SUFFIX));
             build::exe(&units, &next, !clang, &[]).map(|_| next)
         });
         match built {
@@ -264,7 +264,7 @@ fn test(args: &[String]) {
     let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(report(&file, &text, &e)));
     if cgen::test_names(&a).is_empty() { println!("{}: no tests (write them as `test \"what it checks\" {{ ... }}`)", file); return; }
     let units = cgen::program_test_exe(&prog, &a, Some((&file, &code))).unwrap_or_else(|e| die(e));
-    let exe = std::env::temp_dir().join(format!("mito-test-{}-{}.exe", name, std::process::id()));
+    let exe = std::env::temp_dir().join(format!("mito-test-{}-{}{}", name, std::process::id(), std::env::consts::EXE_SUFFIX));
     build::exe(&units, &exe, !args.iter().any(|a| a == "--clang"), &[]).unwrap_or_else(|e| die(e));
     let status = std::process::Command::new(&exe).arg(&file).status().unwrap_or_else(|e| die(format!("{}: {}", exe.display(), e)));
     let _ = std::fs::remove_file(&exe);

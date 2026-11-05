@@ -6,7 +6,7 @@ fn run_tests(file: &str, text: &str) -> (i32, String) {
     let prog = crate::layout::Program::parse(&s).unwrap();
     let api = crate::cgen::check(&prog, &code).unwrap_or_else(|e| panic!("{}: {}", file, e));
     let units = crate::cgen::program_test_exe(&prog, &api, Some((file, &code))).unwrap();
-    let exe = std::env::temp_dir().join(format!("mito-test-check-{}-{}.exe", file.replace('.', "_"), std::process::id()));
+    let exe = std::env::temp_dir().join(format!("mito-test-check-{}-{}{}", file.replace('.', "_"), std::process::id(), std::env::consts::EXE_SUFFIX));
     crate::build::exe(&units, &exe, true, &[]).unwrap();
     let out = std::process::Command::new(&exe).arg(file).output().unwrap();
     let _ = std::fs::remove_file(&exe);

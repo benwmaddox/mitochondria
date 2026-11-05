@@ -149,7 +149,7 @@ fn http_servers_match_their_record() {
         let mut builds = vec![("TinyCC", true)];
         if crate::build::clang().is_some() { builds.push(("clang", false)); }
         for (name, tcc) in builds {
-            let exe = dir.join(format!("{}-{}.exe", target, name));
+            let exe = dir.join(format!("{}-{}{}", target, name, std::env::consts::EXE_SUFFIX));
             crate::build::exe(&units, &exe, tcc, &[]).unwrap_or_else(|e| panic!("{} {}: {}", target, name, e));
             let p = free_port();
             let _server = start_exe(&exe, p);
@@ -207,7 +207,7 @@ fn http_load() {
     let rounds: usize = std::env::var("MITO_LOAD_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let mut servers = Vec::new();
     for (k, (name, units)) in variants.iter().enumerate() {
-        let exe = std::env::temp_dir().join(format!("mito-load-{}-{}.exe", std::process::id(), k));
+        let exe = std::env::temp_dir().join(format!("mito-load-{}-{}{}", std::process::id(), k, std::env::consts::EXE_SUFFIX));
         crate::build::exe(units, &exe, tcc, &[]).unwrap();
         let port = free_port();
         let server = start_exe(&exe, port);
@@ -276,7 +276,7 @@ fn connection_floor() {
     let (s, a) = crate::source::load(include_str!("../examples/chat/chat.mito")).unwrap();
     let prog = crate::layout::Program::parse(&s).unwrap();
     let api = crate::cgen::check(&prog, &a).unwrap();
-    let exe = std::env::temp_dir().join(format!("mito-floor-{}.exe", std::process::id()));
+    let exe = std::env::temp_dir().join(format!("mito-floor-{}{}", std::process::id(), std::env::consts::EXE_SUFFIX));
     crate::build::exe(&crate::cgen::program_exe(&prog, &api, None).unwrap(), &exe, crate::build::clang().is_none(), &[]).unwrap();
     let port = free_port();
     let _server = start_exe(&exe, port);

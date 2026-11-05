@@ -66,10 +66,7 @@ pub struct CBackend { _code: Code, m: *mut std::ffi::c_void, f: CFns, pairs: Vec
 #[derive(Clone, Copy)]
 pub struct MitoPair { pub k: *const u8, pub kn: u32, pub v: *const u8, pub vn: u32 }
 enum Code { Tcc(crate::tcc::Unit), Dll(*mut std::ffi::c_void) }
-extern "system" {
-    fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
-    fn GetProcAddress(m: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
-}
+use crate::tcc::{dl_open, dl_sym};
 /// clang's undefined-behaviour checks in trap mode (no runtime library: a violation stops the process at once), and
 /// array bounds: overflow of signed integers, shifts, out-of-range indexes into the C runtime's fixed arrays.
 pub const UBSAN: &[&str] = &["-O1", "-fsanitize=undefined,bounds", "-fsanitize-trap=undefined,bounds"];
@@ -83,14 +80,13 @@ pub fn clang_dll_units(srcs: &[&str], name: &str, extra: &[&str]) -> Result<*mut
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let stem = format!("{}-{}-{}", name, std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let dll = dir.join(format!("{}.dll", stem));
+    let dll = dir.join(format!("{}.{}", stem, std::env::consts::DLL_EXTENSION));
     let mut cs = Vec::new();
     for (k, src) in srcs.iter().enumerate() { let c = dir.join(format!("{}-{}.c", stem, k)); std::fs::write(&c, src).map_err(|e| e.to_string())?; cs.push(c); }
-    let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(extra).arg("-o").arg(&dll).args(&cs).arg("-lkernel32").args(crate::tcc::LIBS.iter().map(|l| format!("-l{}", l)))
+    let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(if cfg!(windows) { &[][..] } else { &["-fPIC"][..] }).args(extra).arg("-o").arg(&dll).args(&cs).args(if cfg!(windows) { &["-lkernel32"][..] } else { &[][..] }).args(crate::tcc::LIBS.iter().map(|l| format!("-l{}", l)))
         .output().map_err(|e| e.to_string())?;
     if !out.status.success() { return Err(format!("clang failed:\n{}", String::from_utf8_lossy(&out.stderr))); }
-    let w: Vec<u16> = dll.to_string_lossy().encode_utf16().chain([0]).collect();
-    let h = unsafe { LoadLibraryW(w.as_ptr()) };
+    let h = dl_open(&dll.to_string_lossy());
     if h.is_null() { return Err(format!("could not load {}", dll.display())); }
     Ok(h)
 }
@@ -113,10 +109,11 @@ impl CBackend {
         let src = crate::cgen::program_c(&prog, &api, None).unwrap_or_else(|e| panic!("{}: {}", case.name, e));
         // the C runtime makes no heap allocations because it has no allocator: check the program names none
         for w in ["malloc", "calloc", "realloc", "HeapAlloc", "LocalAlloc", "GlobalAlloc", "_alloca"] { assert!(!src.contains(w), "{}: the C program uses {}", case.name, w); }
+        let use_clang = use_clang || !crate::tcc::available();
         let code = if use_clang { Code::Dll(clang_dll(&src, &case.name, flags).unwrap_or_else(|e| panic!("{}: {}", case.name, e))) }
             else { Code::Tcc(crate::tcc::Unit::compile(&src, &[]).unwrap_or_else(|e| { let _ = std::fs::write(std::env::temp_dir().join(format!("mito-{}.c", case.name)), &src); panic!("{}: C runtime: {}", case.name, e) })) };
         let sym = |n: &str| -> *const std::ffi::c_void {
-            let p = match &code { Code::Tcc(u) => u.symbol(n), Code::Dll(h) => { let c = std::ffi::CString::new(n).unwrap(); let p = unsafe { GetProcAddress(*h, c.as_ptr()) }; if p.is_null() { None } else { Some(p as *const std::ffi::c_void) } } };
+            let p = match &code { Code::Tcc(u) => u.symbol(n), Code::Dll(h) => { let p = dl_sym(*h, n); if p.is_null() { None } else { Some(p as *const std::ffi::c_void) } } };
             p.unwrap_or_else(|| panic!("no {}", n))
         };
         unsafe {
@@ -173,7 +170,7 @@ impl CSystemBackend {
         let code = if use_clang { Code::Dll(clang_dll_units(&refs, &case.name, flags).unwrap_or_else(|e| panic!("{}: {}", case.name, e))) }
             else { Code::Tcc(crate::tcc::Unit::compile_units(&refs, &[]).unwrap_or_else(|e| panic!("{}: C system: {}", case.name, e))) };
         let sym = |n: &str| -> *const std::ffi::c_void {
-            let p = match &code { Code::Tcc(u) => u.symbol(n), Code::Dll(h) => { let c = std::ffi::CString::new(n).unwrap(); let p = unsafe { GetProcAddress(*h, c.as_ptr()) }; if p.is_null() { None } else { Some(p as *const std::ffi::c_void) } } };
+            let p = match &code { Code::Tcc(u) => u.symbol(n), Code::Dll(h) => { let p = dl_sym(*h, n); if p.is_null() { None } else { Some(p as *const std::ffi::c_void) } } };
             p.unwrap_or_else(|| panic!("no {}", n))
         };
         unsafe {
@@ -503,7 +500,7 @@ MITO_API int t_reply(void *sp) {
         let case = Case { name: "forward-rollback".into(), state: "struct C { n: i64; } state c: C;".into(),
             api: "@post(\"/f\") fn post_f() -> Response<{}> { c.n = c.n + 1; forward next[0] { \"n\": c.n }; }\n@get(\"/n\") fn get_n() -> Response<{ n: i64 }> { return ok({ \"n\": c.n }); }".into(), requests: String::new(), system: None, files: Vec::new() };
         let mut be = CBackend::start(&case);
-        let sym = |n: &str| match &be._code { Code::Tcc(u) => u.symbol(n).unwrap(), Code::Dll(_) => unreachable!() };
+        let sym = |n: &str| match &be._code { Code::Tcc(u) => u.symbol(n).unwrap(), Code::Dll(h) => { let p = dl_sym(*h, n); assert!(!p.is_null(), "no {}", n); p as *const std::ffi::c_void } };
         unsafe {
             let set_system: unsafe extern "C" fn(*mut std::ffi::c_void, u32, *const *const u8, *const u32, u32, u32) = std::mem::transmute(sym("mito_set_system"));
             let forward_to: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u32, *mut i64, *mut MitoPair, u32) -> u32 = std::mem::transmute(sym("mito_forward_to"));

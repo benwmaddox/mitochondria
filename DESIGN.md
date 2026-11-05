@@ -199,7 +199,10 @@ the last good build when a change does not compile. Errors name `file:line:col` 
 name for a misspelt one, list every independent error of a file, and say what to write for a habit from other languages (`i++`,
 `each`); `tests/errors` holds a program per mistake with its expected message. The 51 cases in `tests/cases` and
 `tests/http.record` must give the same answers on the TinyCC build, the clang build and a clang build with
-undefined-behaviour checks. VS Code highlighting is in `editors/vscode`. Windows only so far.
+undefined-behaviour checks. VS Code highlighting is in `editors/vscode`. Windows and Linux: everything the runtime asks of the
+system is runtime/os.c (memory, clock, randomness, threads, locks, sockets and poll); on Linux programs build with the system's
+clang (`--tcc` uses a `tcc` on the path, else clang -O0), and the cases, the HTTP record and the test runner pass there (WSL2,
+Ubuntu 24.04, clang 18).
 
 Limits:
 - Functions have full signatures (`fn f(p: Player, n: i64) -> f64`, `-> T?` for a result that may be null, no arrow for none;
@@ -216,8 +219,7 @@ Limits:
   an event loop on IOCP would serve more connections with fewer threads. One program handles one request at a time.
 
 ## Next
-1. Linux: an OS layer (memory, threads, locks, clock, randomness, sockets) with the cases and the HTTP record passing
-   on both systems (Linux in WSL2).
+1. Linux: done (2026-11-05), see Status. The LangArena runner still pins processes with Windows calls.
 2. HTTP: an event loop over a fixed table of connections (IOCP on Windows, epoll then io_uring on Linux) in place of
    the poller and connection threads. Keep-alive is done (2026-11-05): a kept connection costs about 100 µs a request
    on Windows loopback against 1-1.5 ms for a new connection each time.

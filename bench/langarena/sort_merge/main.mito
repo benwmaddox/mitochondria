@@ -1,0 +1,52 @@
+// LangArena Sort::Merge (kostya/LangArena, MIT): the reference's top-down merge sort (recursive halves, a temp array the size of
+// the input, merge back) of a copy of 400,000 pseudo-random i32 values, `iterations` times. As in sort_quick: index ranges instead of
+// slices, a second array for the copy, and the temp array lives in the state instead of being allocated per run. The checksum
+// adds one random element of the input and one of the sorted output per run, warmup runs included, modulo 2^32; the random
+// generator is reset after warmup.
+struct Sort { data: i32[400000]; t: i32[400000]; tmp: i32[400000]; size: i64; last: i64; result: i64; }
+state so: Sort;
+
+fn next_int(max) {
+    so.last = (so.last * 3877 + 29573) % 139968;
+    return int(so.last / 139968.0 * max);
+}
+fn merge(left, mid, right) {
+    each x in left..right + 1 { so.tmp[x] = so.t[x]; }
+    var i = left;
+    var j = mid + 1;
+    var k = left;
+    each w in 0..1000000000 while i <= mid && j <= right {
+        if so.tmp[i] <= so.tmp[j] { so.t[k] = so.tmp[i]; i = i + 1; } else { so.t[k] = so.tmp[j]; j = j + 1; }
+        k = k + 1;
+    }
+    each w in 0..1000000000 while i <= mid { so.t[k] = so.tmp[i]; i = i + 1; k = k + 1; }
+}
+fn msort(left, right) {
+    if left < right {
+        let mid = (left + right) / 2;
+        msort(left, mid);
+        msort(mid + 1, right);
+        merge(left, mid, right);
+    }
+}
+fn one_run() {
+    so.result = (so.result + so.data[next_int(so.size)]) % 4294967296;
+    each i in 0..so.size { so.t[i] = so.data[i]; }
+    msort(0, so.size - 1);
+    so.result = (so.result + so.t[next_int(so.size)]) % 4294967296;
+}
+
+@post("/prepare/{size}")
+fn prepare(size: i64 in 2..400000) -> Response<{}> {
+    so.size = size;
+    so.last = 42;
+    so.result = 0;
+    each i in 0..size { so.data[i] = next_int(1000000); }
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { so.last = 42; each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": so.result }); }

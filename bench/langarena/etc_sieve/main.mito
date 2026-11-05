@@ -1,0 +1,38 @@
+// LangArena Etc::Sieve (kostya/LangArena, MIT): count primes up to `limit` with a sieve of Eratosthenes, `iterations` times;
+// the checksum adds last_prime + count of every run (warmup runs included, as in the reference).
+// The reference takes (limit as f64).sqrt(); the language has no sqrt, so the integer square root is found by a short loop
+// (at most 1,733 steps for the run parameters, negligible next to the sieve).
+struct Sieve { primes: u8[3000001]; limit: i64; checksum: i64; }
+state s: Sieve;
+
+fn one_run() {
+    let limit = s.limit;
+    each i in 0..limit + 1 { s.primes[i] = 1; }
+    s.primes[0] = 0;
+    s.primes[1] = 0;
+    var root = 0;
+    each step in 0..limit while (root + 1) * (root + 1) <= limit { root = root + 1; }
+    each p in 2..root + 1 {
+        if s.primes[p] == 1 {
+            var multiple = p * p;
+            each step in 0..limit while multiple <= limit { s.primes[multiple] = 0; multiple = multiple + p; }
+        }
+    }
+    var last_prime = 2;
+    var count = 1;
+    var n = 3;
+    each step in 0..limit while n <= limit {
+        if s.primes[n] == 1 { last_prime = n; count = count + 1; }
+        n = n + 2;
+    }
+    s.checksum = (s.checksum + last_prime + count) % 4294967296;
+}
+
+@post("/prepare/{limit}")
+fn prepare(limit: i64 in 2..3000000) -> Response<{}> { s.limit = limit; s.checksum = 0; return ok({}); }
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": s.checksum }); }

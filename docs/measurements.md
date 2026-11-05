@@ -782,3 +782,13 @@ Other findings: SIMD (AVX2 compare of four 64-bit keys, `array.count_below`) is 
 about 11 keys (hit 41 ns with the loop, 45 with count_below); it is kept as a language operation and opt-in build flag. A hit at
 1M costs more than a miss because the value is a second array in the leaf, a second cache line. `-O3` over `-O2` on `ordmap` at
 10k: range scan 1.10x -> 0.81x, increment 0.92x -> 0.88x, insert 1.71x -> 1.56x.
+
+## Round 20 (2026-11-04): LangArena tests against the Rust reference
+Seven of LangArena's 50 tests are ported (bench/langarena, with the parameters and licence vendored and a README with the method, the
+audit verdicts and the triage of all 50), measured against LangArena's own Rust implementation (its max-perf profile, overflow checks off) on the
+same pinned core, alternating rounds, the checksum verified on both sides in every measured run. Mitochondria / Rust, best of 3: Etc::Sieve
+4.93x, CLBG::Fannkuchredux 2.84x, Sort::Quick 1.61x, Sort::Merge 2.54x, CLBG::Spectralnorm 0.70x, CLBG::Mandelbrot 1.00x, Matmul::Single 1.25x
+(closest-possible); headline geometric mean of the six like-for-like and rewritten-to-match ports 1.85x. Rust built with overflow checks on is an
+extra column (it moves Sieve 1.35 -> 1.80 s, so checked arithmetic alone does not explain the gap): loops of many small array stores are the
+slow case, because every store is range-checked, committed and undo-logged. Seven more tests are portable with the language as it is;
+27 need a language feature (bit operators, string bytes, sqrt/exp, a pool reset) and 9 are not comparable (threads, library).

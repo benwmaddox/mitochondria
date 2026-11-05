@@ -1,0 +1,61 @@
+// LangArena CLBG::Fannkuchredux (kostya/LangArena, MIT): the fannkuch-redux benchmark, n = 8. Same algorithm and the same
+// 32-element working arrays as the reference; the reference's `loop`/`return` are state machines here (the language has no
+// break), and `x >> 1` is `x / 2` (the values are never negative). The checksum adds checksum*100 + max_flips of every run,
+// warmup runs included, modulo 2^32.
+struct Fannkuch { perm1: i32[32]; perm: i32[32]; count: i32[32]; n: i64; result: i64; }
+state f: Fannkuch;
+
+fn one_run() {
+    let n = f.n;
+    each i in 0..32 { f.perm1[i] = i; }
+    var max_flips = 0;
+    var perm_count = 0;
+    var checksum = 0;
+    var r = n;
+    var running = 1;
+    each outer in 0..1000000000 while running == 1 {
+        each w in 0..32 while r > 1 { f.count[r - 1] = r; r = r - 1; }
+        each i in 0..n { f.perm[i] = f.perm1[i]; }
+        var flips = 0;
+        var k = f.perm[0];
+        each w in 0..1000 while k != 0 {
+            let k2 = (k + 1) / 2;
+            each i in 0..k2 {
+                let j = k - i;
+                let tmp = f.perm[i];
+                f.perm[i] = f.perm[j];
+                f.perm[j] = tmp;
+            }
+            flips = flips + 1;
+            k = f.perm[0];
+        }
+        if flips > max_flips { max_flips = flips; }
+        if perm_count % 2 == 0 { checksum = checksum + flips; } else { checksum = checksum - flips; }
+        var inner = 1;
+        each w in 0..64 while inner == 1 {
+            if r == n {
+                running = 0;
+                inner = 0;
+            } else {
+                let perm0 = f.perm1[0];
+                each i in 0..r { f.perm1[i] = f.perm1[i + 1]; }
+                f.perm1[r] = perm0;
+                f.count[r] = f.count[r] - 1;
+                if f.count[r] > 0 { inner = 0; } else { r = r + 1; }
+            }
+        }
+        if running == 1 { perm_count = perm_count + 1; }
+    }
+    var cs = checksum % 4294967296;
+    if cs < 0 { cs = cs + 4294967296; }
+    f.result = (f.result + (cs * 100 + max_flips) % 4294967296) % 4294967296;
+}
+
+@post("/prepare/{n}")
+fn prepare(n: i64 in 2..32) -> Response<{}> { f.n = n; f.result = 0; return ok({}); }
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": f.result }); }

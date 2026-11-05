@@ -1,0 +1,2 @@
+rewritten-to-match
+Same top-down merge sort. Slices become index ranges; the per-run clone becomes a copy into a second array, and the temp array lives in the state instead of being allocated per run. Stores are checked and undo-logged.

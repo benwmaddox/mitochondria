@@ -1,0 +1,2 @@
+rewritten-to-match
+Same quicksort (middle pivot, Hoare-style partition, both halves recursed). Slices become index ranges (the language has none), and the per-run clone becomes a copy into a second array of the same size (the reference allocates a new Vec). Recursion stays within the 64-deep call limit for the run data. Stores are checked and undo-logged.

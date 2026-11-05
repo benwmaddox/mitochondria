@@ -1,0 +1,62 @@
+// LangArena CLBG::Spectralnorm (kostya/LangArena, MIT): the spectral norm of the matrix A(i, j) = 1 / ((i+j)(i+j+1)/2 + i + 1) by power
+// iteration, size 1200, `iterations` times: each run is v = AtA(u); u = AtA(v), with AtA(x) = At(A(x)), the reference's order of
+// operations and accumulation (each sum starts at 0.0 and adds term by term). The reference allocates the result vectors per call; here
+// they are state arrays (the language has no per-call allocation). The reference's checksum is taken once, after the last run, from
+// sqrt(vBv / vv) of the final u and v; the language has no sqrt, so this port answers vBv / vv (GET /result) and the benchmark
+// harness takes that one square root and hashes the formatted value exactly as the reference does.
+struct Spec { u: f64[1200]; v: f64[1200]; tmp: f64[1200]; size: i64; }
+state sp: Spec;
+
+fn eval_a(i, j) {
+    let ij = (i + j) * 1.0;
+    return 1.0 / (ij * (ij + 1.0) / 2.0 + i + 1.0);
+}
+// v = At(A(u))
+fn ata_u_to_v() {
+    each i in 0..sp.size {
+        var s = 0.0;
+        each j in 0..sp.size { s = s + eval_a(i, j) * sp.u[j]; }
+        sp.tmp[i] = s;
+    }
+    each i in 0..sp.size {
+        var s = 0.0;
+        each j in 0..sp.size { s = s + eval_a(j, i) * sp.tmp[j]; }
+        sp.v[i] = s;
+    }
+}
+// u = At(A(v))
+fn ata_v_to_u() {
+    each i in 0..sp.size {
+        var s = 0.0;
+        each j in 0..sp.size { s = s + eval_a(i, j) * sp.v[j]; }
+        sp.tmp[i] = s;
+    }
+    each i in 0..sp.size {
+        var s = 0.0;
+        each j in 0..sp.size { s = s + eval_a(j, i) * sp.tmp[j]; }
+        sp.u[i] = s;
+    }
+}
+fn one_run() { ata_u_to_v(); ata_v_to_u(); }
+
+@post("/prepare/{size}")
+fn prepare(size: i64 in 2..1200) -> Response<{}> {
+    sp.size = size;
+    each i in 0..size { sp.u[i] = 1.0; sp.v[i] = 1.0; }
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/result")
+fn result() -> Response<{ result: f64 }> {
+    var vbv = 0.0;
+    var vv = 0.0;
+    each i in 0..sp.size {
+        let vi = sp.v[i];
+        vbv = vbv + sp.u[i] * vi;
+        vv = vv + vi * vi;
+    }
+    return ok({ "result": vbv / vv });
+}

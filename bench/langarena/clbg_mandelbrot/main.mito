@@ -1,0 +1,79 @@
+// LangArena CLBG::Mandelbrot (kostya/LangArena, MIT): a w x h Mandelbrot set as a binary PBM image, 50 iterations per pixel, bits packed
+// eight to a byte, `iterations` times. Same loop and the same floating-point expressions as the reference. As in the reference, every
+// run appends its header ("P4\n<w> <h>\n") and rows to one growing byte buffer (here a fixed array sized for the run parameters),
+// and the checksum hashes the whole buffer after the last run (hash = hash * 33 + byte, modulo 2^32), outside the timed runs.
+// The language has no bit operators, so the shifts and the or are arithmetic: `acc << 1` is acc * 2, `acc |= 1` is acc + 1 on a
+// value whose low bit is zero, `acc <<= k` is acc * 2^k.
+struct Mandel { buf: u8[2500000]; pos: i64; w: i64; h: i64; }
+state md: Mandel;
+
+fn put_byte(b) { md.buf[md.pos] = b; md.pos = md.pos + 1; }
+// the decimal digits of n (n > 0) at the end of the buffer
+fn put_number(n) {
+    var digits = 1;
+    var rest = n / 10;
+    each t in 0..20 while rest > 0 { digits = digits + 1; rest = rest / 10; }
+    var divisor = 1;
+    each t in 1..digits { divisor = divisor * 10; }
+    each t in 0..digits {
+        put_byte(48 + (n / divisor) % 10);
+        divisor = divisor / 10;
+    }
+}
+fn one_run() {
+    let w = md.w;
+    let h = md.h;
+    put_byte(80); put_byte(52); put_byte(10);
+    put_number(w);
+    put_byte(32);
+    put_number(h);
+    put_byte(10);
+    var bit_num = 0;
+    var byte_acc = 0;
+    each y in 0..h {
+        let ci = (2.0 * y / h) - 1.0;
+        each x in 0..w {
+            var zr = 0.0;
+            var zi = 0.0;
+            var tr = 0.0;
+            var ti = 0.0;
+            let cr = (2.0 * x / w) - 1.5;
+            var i = 0;
+            each step in 0..50 while i < 50 && (tr + ti) <= 4.0 {
+                zi = 2.0 * zr * zi + ci;
+                zr = tr - ti + cr;
+                tr = zr * zr;
+                ti = zi * zi;
+                i = i + 1;
+            }
+            byte_acc = byte_acc * 2;
+            if tr + ti <= 4.0 { byte_acc = byte_acc + 1; }
+            bit_num = bit_num + 1;
+            if bit_num == 8 {
+                put_byte(byte_acc);
+                byte_acc = 0;
+                bit_num = 0;
+            } else if x == w - 1 {
+                var shift = 1;
+                each t in 0..8 - w % 8 { shift = shift * 2; }
+                byte_acc = byte_acc * shift;
+                put_byte(byte_acc);
+                byte_acc = 0;
+                bit_num = 0;
+            }
+        }
+    }
+}
+
+@post("/prepare/{w}/{h}")
+fn prepare(w: i64 in 1..400, h: i64 in 1..400) -> Response<{}> { md.w = w; md.h = h; md.pos = 0; return ok({}); }
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> {
+    var hash = 5381;
+    each i in 0..md.pos { hash = (hash * 33 + md.buf[i]) % 4294967296; }
+    return ok({ "checksum": hash });
+}

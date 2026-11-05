@@ -1,0 +1,2 @@
+like-for-like
+Same algorithm and the same 32-element working arrays. The reference's loop/return are state machines (the language has no break) and x >> 1 is x / 2 (values are never negative). Stores are checked and undo-logged.

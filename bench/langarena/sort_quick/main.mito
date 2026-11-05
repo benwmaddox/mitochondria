@@ -1,0 +1,54 @@
+// LangArena Sort::Quick (kostya/LangArena, MIT): sort a copy of 400,000 pseudo-random i32 values with the reference's quicksort
+// (middle pivot, Hoare-style partition, both halves recursed), `iterations` times. The reference sorts slices; here the same
+// code works on index ranges (lo..=hi) of the copy, because the language has no slices. The reference clones the data into a new
+// Vec each run; here the copy goes into a second array of the same size. The checksum adds one random element of the input
+// and one of the sorted output per run, warmup runs included, modulo 2^32; the random generator is reset after warmup.
+struct Sort { data: i32[400000]; t: i32[400000]; size: i64; last: i64; result: i64; }
+state so: Sort;
+
+fn next_int(max) {
+    so.last = (so.last * 3877 + 29573) % 139968;
+    return int(so.last / 139968.0 * max);
+}
+fn qs(lo, hi) {
+    let len = hi - lo + 1;
+    if len > 1 {
+        let pivot = so.t[lo + len / 2];
+        var i = lo;
+        var j = hi;
+        each outer in 0..1000000 while i <= j {
+            each w in 0..1000000 while so.t[i] < pivot { i = i + 1; }
+            each w in 0..1000000 while so.t[j] > pivot { j = j - 1; }
+            if i <= j {
+                let tmp = so.t[i];
+                so.t[i] = so.t[j];
+                so.t[j] = tmp;
+                i = i + 1;
+                if j > lo { j = j - 1; }
+            }
+        }
+        if j > lo { qs(lo, j); }
+        if i <= hi { qs(i, hi); }
+    }
+}
+fn one_run() {
+    so.result = (so.result + so.data[next_int(so.size)]) % 4294967296;
+    each i in 0..so.size { so.t[i] = so.data[i]; }
+    qs(0, so.size - 1);
+    so.result = (so.result + so.t[next_int(so.size)]) % 4294967296;
+}
+
+@post("/prepare/{size}")
+fn prepare(size: i64 in 2..400000) -> Response<{}> {
+    so.size = size;
+    so.last = 42;
+    so.result = 0;
+    each i in 0..size { so.data[i] = next_int(1000000); }
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { so.last = 42; each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": so.result }); }

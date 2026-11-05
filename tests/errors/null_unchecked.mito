@@ -1,0 +1,4 @@
+// expect: 4:61: GET /a: `.score` of a value that may be null: check it first with `if exists(x)
+struct P { name: string<16>; score: i64; } struct App { ps: pool<P, 8>; total: i64; } state app: App;
+fn best() -> P? { each p in app.ps { return p; } return null; }
+@get("/a") fn a() -> Response<{ n: i64 }> { let p = best(); return ok({ n: p.score }); }

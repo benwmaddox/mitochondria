@@ -381,6 +381,17 @@ impl P {
     }
 
     fn stmt(&mut self) -> R<Stmt> {
+        if self.is_kw("for") || self.is_kw("while") || self.is_kw("foreach") {
+            return Err(format!("`{}` loops are not in the language yet (they are planned): loop with `each i in 0..n {{ ... }}` (the end excluded), \
+                over a collection with `each item in coll {{ ... }}`, and while a condition holds with `each i in 0..limit while cond {{ ... }}`", self.here_word()));
+        }
+        if self.is_kw("break") || self.is_kw("continue") {
+            return Err(format!("`{}` is not in the language yet (it is planned): end a loop early with `each ... while cond`, and skip an item with `if`", self.here_word()));
+        }
+        if matches!(self.t.get(self.i), Some(Tok::Id(_))) && matches!((self.t.get(self.i + 1), self.t.get(self.i + 2)), (Some(Tok::Sym(a)), Some(Tok::Sym(b))) if a == b && (a == "+" || a == "-")) {
+            let (n, op) = (self.here_word(), match self.t.get(self.i + 1) { Some(Tok::Sym(a)) => a.clone(), _ => String::new() });
+            return Err(format!("`{}{}{}` does not exist: write `{} {}= 1;`", n, op, op, n, op));
+        }
         if self.is_kw("let") || self.is_kw("var") {
             let is_var = self.is_kw("var");
             self.i += 1; let n = self.id()?; self.eat("=")?;
@@ -553,20 +564,22 @@ struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, global
 pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
     let fns: Vec<(String, usize, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
+    let mut errs = Vec::new();
     for f in &mut api.fns {
         let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0) };
         for p in &f.params { b.declare(p, false); }
-        b.block(&mut f.body)?;
+        if let Err(e) = b.block(&mut f.body) { errs.push(e); }
         f.slots = b.max;
     }
     for e in &mut api.eps {
         let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0) };
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
-        b.block(&mut e.body)?;
+        if let Err(e) = b.block(&mut e.body) { errs.push(e); continue; }
         e.slots = b.max;
-        if !answers(&e.body) { return Err(format!("endpoint {} ({}) can finish without an answer: end every path with `return ok(...)` (or created, no_content, status), `fail` or `forward`", e.name, e.text)); }
+        if !answers(&e.body) { errs.push(format!("endpoint {} ({}) can finish without an answer: end every path with `return ok(...)` (or created, no_content, status), `fail` or `forward`", e.name, e.text)); }
     }
-    Ok(())
+    // every function and endpoint is bound on its own: their errors are independent, one per line
+    if errs.is_empty() { Ok(()) } else { Err(errs.join("\n")) }
 }
 
 /// Does every path through `body` end in an answer, a `fail`, a `forward` (or the test hook `__crash()`)?
@@ -696,7 +709,10 @@ impl Binder<'_> {
             Expr::Var(n, res) => {
                 *res = match self.names.iter().rev().find(|x| x.0 == *n) {
                     Some(x) => VarRes::Local(x.1),
-                    None => match (self.globals)(n) { Some(g) => VarRes::Global(g as u32), None => return self.err(format!("unknown name `{}`", n)) },
+                    None => match (self.globals)(n) { Some(g) => VarRes::Global(g as u32), None => {
+                        let hint = if ["nil", "none", "None", "NULL", "Null", "undefined", "nullptr"].contains(&n.as_str()) { " (the value that is not there is written `null`)".to_string() }
+                            else { suggest(n, self.names.iter().map(|x| x.0.as_str())) };
+                        return self.err(format!("unknown name `{}`{}", n, hint)) } },
                 };
             }
             Expr::Field(b, _) => self.expr(b)?,
@@ -732,7 +748,7 @@ impl Binder<'_> {
                     if let Some(i) = n.rfind('.') { if !self.fns[k].2 && self.owner.as_deref() != Some(&n[..i]) { return self.err(format!("`{}` is private to {}", n, &n[..i])); } }
                     CallRes::User(k as u32)
                 } else if let Some(b) = B::from(n) { CallRes::Builtin(b) }
-                else { return self.err(format!("unknown function `{}`", n)); };
+                else { let hint = suggest(n, self.fns.iter().map(|f| f.0.as_str()).chain(BUILTIN_NAMES.iter().copied())); return self.err(format!("unknown function `{}`{}", n, hint)); };
             }
             _ => {}
         }
@@ -751,3 +767,23 @@ fn describe(t: Option<&Tok>) -> String {
         Some(Tok::Str(x)) => format!("the text \"{}\"", x.chars().take(20).collect::<String>()),
     }
 }
+
+/// " (did you mean `x`?)" when one of `candidates` is within two edits of `name`, else "".
+pub fn suggest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> String {
+    fn dist(a: &str, b: &str) -> usize {
+        let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+        let mut prev: Vec<usize> = (0..=b.len()).collect();
+        for i in 1..=a.len() {
+            let mut cur = vec![i; b.len() + 1];
+            for j in 1..=b.len() { cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + usize::from(a[i - 1] != b[j - 1])); }
+            prev = cur;
+        }
+        prev[b.len()]
+    }
+    // one edit turns a short name into an unrelated one: none below three letters, one edit up to three
+    let limit = match name.chars().count() { 0..=2 => return String::new(), 3 => 1, _ => 2 };
+    let best = candidates.filter(|c| *c != name && !c.starts_with("__mito__")).map(|c| (dist(name, c), c)).filter(|(d, _)| *d <= limit).min_by_key(|(d, _)| *d);
+    best.map_or(String::new(), |(_, c)| format!(" (did you mean `{}`?)", c))
+}
+/// The builtin functions, for suggestions.
+pub const BUILTIN_NAMES: &[&str] = &["int", "str", "len", "now", "random", "min", "max", "slot", "stat", "token", "or", "exists", "maxlen", "sqrt", "exp", "floor", "abs", "substr", "text_from", "wrapping_add", "wrapping_sub", "wrapping_mul", "ok", "created", "no_content", "status"];

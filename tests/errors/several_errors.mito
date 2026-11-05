@@ -1,0 +1,8 @@
+// expect: 6:45: endpoint GET /a: unknown name `coutn`
+// expect: 7:45: endpoint GET /b: unknown function `maxx` (did you mean `max`?)
+// expect: 8:56: endpoint GET /c: unknown name `y`
+struct App { total: i64; } state app: App;
+fn sc() -> i64 { return app.total; }
+@get("/a") fn a() -> Response<{ n: i64 }> { return ok({ n: coutn }); }
+@get("/b") fn b() -> Response<{ n: i64 }> { let x = maxx(1, 2); return ok({ n: x }); }
+@get("/c") fn c() -> Response<{ n: i64 }> { let x = 1; return ok({ n: y }); }

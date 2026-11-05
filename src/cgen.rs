@@ -442,12 +442,20 @@ fn json_lit(s: &str) -> String {
 
 pub fn generate(prog: &Program, api: &Api) -> Generated { generate_with(prog, api, None, "") }
 
-/// Does a program load? Its api parses, every name binds, and every endpoint compiles; the error is the first problem.
+/// Does a program load? Its api parses, every name binds, and every endpoint compiles. The error holds every independent
+/// problem found, one per line: parsing stops at the first; binding and code generation go on to the next function or
+/// endpoint (a problem in a function several endpoints call is reported once, at its place).
 pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
     let mut api = parse(api_src)?;
     bind(&mut api, &|n| prog.global(n))?;
-    if let Some(n) = generate(prog, &api).notes.first() { return Err(n.clone()); }
-    Ok(api)
+    let notes = generate(prog, &api).notes;
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out: Vec<&str> = Vec::new();
+    for n in &notes {
+        match split_place(n) { Some((place, _)) if seen.contains(&place) => continue, Some((place, _)) => seen.push(place), None => {} }
+        out.push(n);
+    }
+    if out.is_empty() { Ok(api) } else { Err(out.join("\n")) }
 }
 
 /// The C runtime (runtime/*.c), compiled in the same translation unit as a program.
@@ -1446,7 +1454,7 @@ impl<'p> G<'p> {
                     CV::Ref(..) => return no(format!("assigning `.{}` of a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`", f)),
                     CV::Plain(sid, off) => {
                         let sd = &self.prog.structs[sid];
-                        let Some(k) = sd.fields.iter().position(|x| x.0 == *f) else { return no(format!("no field `{}`", f)) };
+                        let Some(k) = sd.fields.iter().position(|x| x.0 == *f) else { return no(format!("no field `{}`{}", f, crate::lang::suggest(f, sd.fields.iter().map(|x| x.0.as_str())))) };
                         let (code, cap) = plain_code(&sd.fields[k].1).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))?;
                         let at = off + sd.offs[k];
                         let range = sd.ranges[k];
@@ -1951,7 +1959,7 @@ impl<'p> G<'p> {
             }
             CV::Plain(sid, off) => {
                 let sd = &self.prog.structs[sid];
-                let Some(k) = sd.fields.iter().position(|x| x.0 == f) else { return no(format!("no field `{}`", f)) };
+                let Some(k) = sd.fields.iter().position(|x| x.0 == f) else { return no(format!("no field `{}`{}", f, crate::lang::suggest(f, sd.fields.iter().map(|x| x.0.as_str())))) };
                 let ty = sd.fields[k].1.clone();
                 let range = sd.ranges[k];
                 if ty.is_coll() { return Ok(CV::Coll(self.prog.plain_coll(off, sid, f).ok_or("plain collection")?, "0".into())); }
@@ -1975,7 +1983,8 @@ impl<'p> G<'p> {
         if let Some(ci) = coll.cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_))) { return self.col_value(c, idx, ci, dead); }
         let inner = format!("{}.", path);
         if coll.cols.iter().any(|x| x.path.starts_with(&inner)) || coll.children.iter().any(|x| x.0.starts_with(&inner)) { return Ok(CV::Part(c, idx, path)); }
-        no(format!("no field `{}`", path))
+        let names: Vec<&str> = coll.cols.iter().map(|x| x.path.as_str()).chain(coll.children.iter().map(|x| x.0.as_str())).collect();
+        no(format!("no field `{}`{}", path, crate::lang::suggest(&path, names.into_iter())))
     }
 
     /// The value of column `ci` of item `idx`: scalars are loaded, strings are read where used, references followed.
@@ -2392,7 +2401,15 @@ impl<'p> G<'p> {
         r
     }
 
+    /// An error inside a function names the function's statement, not the call (the endpoint is named beside it).
     fn inline_body(&mut self, k: u32, f: &'p Func, fenv: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<CV> {
+        let caller_at = self.at;
+        if let Some(Stmt::At(l, c)) = f.body.first() { self.at = (*l, *c); }
+        let r = self.inline_body_at(k, f, fenv, dead).map_err(|e| place_err(self.at, e));
+        self.at = caller_at;
+        r
+    }
+    fn inline_body_at(&mut self, k: u32, f: &'p Func, fenv: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<CV> {
         // a function that is just `return e;` needs no block
         if let Some(Stmt::Return(Some(body))) = only_stmt(&f.body) {
             self.inlining.push(k);

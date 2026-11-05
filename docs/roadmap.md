@@ -14,16 +14,21 @@ Decided against, for now: request-local scratch arrays (`unlogged` state covers 
 - Done when: every message in `tests/cases` and the compile-error tests has a position, and the runtime test cases show them.
 - Done: compile errors print `file:line:col`, the line and a caret (parse errors at the token; binding and code-generation errors at
   the start of their statement; layout errors at the declaration they name). Runtime errors from compiled code answer
-  `{"error":"...","line":N}` (N: the statement's line; zero cost until something fails). Not yet: "did you mean" (1.2), a column
+  `{"error":"...","line":N}` (N: the statement's line; zero cost until something fails). Not yet: a column
   for the exact expression in binding errors, the endpoint name in runtime errors (the request already names it).
 
-### 1.2 Better error messages
+### 1.2 Better error messages (done 2026-11-05)
 - No compiler internals in messages (`unexpected Some(Sym("="))` today): every parse error says what was expected, in words.
 - Hints for what people coming from other languages write: a C-style `for`, `++`, `while` before 1.3 lands, `null` misspelt,
   a missing semicolon at the end of the previous line (point at that line, not the next token).
 - "Did you mean" for unknown fields, functions, endpoints' inputs and builtins (edit distance 1-2).
 - Report every independent error in a file, not only the first (parse errors stop at the first; binding and type errors continue).
 - Done when: a corpus of common mistakes (`tests/errors/`, one per file, expected message beside it) reads well and is run by `cargo test`.
+- Done: `for`, `while`, `foreach`, `break`, `continue` and `x++` explain what to write today; `nil`/`none`/`NULL` point to
+  `null`; unknown names, functions and fields suggest the nearest declared one (one edit for three-letter names, two for longer,
+  none for shorter); a missing `;` points at the end of what came before. Binding and code generation report every function and
+  endpoint with a problem (a problem inside a function is reported once, at its own line); parsing still stops at the first.
+  `tests/errors/*.mito` (first lines `// expect: <text>`) is run by `cargo test`.
 
 ### 1.3 `mito` as the command
 - The executable is `mito` (`mito check`, `mito build`, `mito serve`, `mito test`); `mitochondria` stays as a second name for a while.

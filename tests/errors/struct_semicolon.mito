@@ -1,0 +1,2 @@
+// expect: 2:20: expected `;`, found `}`
+struct App { n: i64 } state app: App;

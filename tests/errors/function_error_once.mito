@@ -1,0 +1,7 @@
+// expect: 4:45: GET /a: no field `totl`
+// expect: 5:24: GET /d: no field `scroe` (did you mean `score`?)
+struct P { score: i64; } struct App { ps: pool<P, 8>; total: i64; } state app: App;
+@get("/a") fn a() -> Response<{ n: i64 }> { return ok({ n: app.totl }); }
+fn sc(i: i64) -> i64 { return app.ps[i].scroe; }
+@get("/d") fn d() -> Response<{ n: i64 }> { return ok({ n: sc(0) }); }
+@get("/e") fn e() -> Response<{ n: i64 }> { return ok({ n: sc(1) }); }

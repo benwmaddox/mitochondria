@@ -3,6 +3,8 @@ mod build;
 mod cases;
 #[cfg(test)]
 mod http_check;
+#[cfg(test)]
+mod error_corpus;
 mod lang;
 mod modules;
 mod layout;
@@ -31,8 +33,10 @@ memory pressure); --conns N (a system's connection threads, 16); --seed N and --
 fn die(e: String) -> ! { eprintln!("error: {}", e); std::process::exit(1) }
 
 /// A program's error as `file:line:col: message`, with the line quoted and a caret under the column, when it names a
-/// place (`line:col: ...`) inside the file; otherwise `file: message`.
+/// place (`line:col: ...`) inside the file; otherwise `file: message`. Several errors (one per line) are reported one by one.
 fn report(file: &str, text: &str, e: &str) -> String {
+    // several independent errors, one per line: each reported on its own
+    if e.contains('\n') { return e.lines().map(|x| report(file, text, x)).collect::<Vec<_>>().join("\nerror: "); }
     let mut parts = e.splitn(3, ':');
     let (Some(l), Some(c), Some(rest)) = (parts.next(), parts.next(), parts.next()) else { return format!("{}: {}", file, e) };
     let (Ok(l), Ok(c)) = (l.parse::<usize>(), c.parse::<usize>()) else { return format!("{}: {}", file, e) };

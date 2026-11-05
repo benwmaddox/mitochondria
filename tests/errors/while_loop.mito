@@ -1,0 +1,3 @@
+// expect: `while` loops are not in the language yet
+struct P { name: string<16>; score: i64; } struct App { ps: pool<P, 8>; total: i64; } state app: App;
+@get("/a") fn a() -> Response<{ n: i64 }> { while true { } return ok({ n: 1 }); }

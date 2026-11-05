@@ -3,7 +3,7 @@
 // output code, 16-bit big-endian codes, no reset). The checksum adds the length of every run's decoded text, warmup included; plus 100000 when the decoded text equals the input.
 struct LZ {
     data: u8[1048576]; codes: u8[16384]; keys: i32[16384]; values: i32[16384];
-    size: i64; next_code: i64; codes_len: i64; result: i64; decoded: u8[1048576]; decoded_len: i64; buf: u8[4194304]; off: i32[16384]; elen: i32[16384];
+    size: i64; next_code: i64; codes_len: i64; result: i64; decoded_len: i64; buf: u8[5242880]; off: i32[16384]; elen: i32[16384];
 }
 state lz: LZ;
 
@@ -68,7 +68,7 @@ fn decode() {
     var buf_end = 256;
     var out_len = 0;
     var old_code = lz.codes[0] * 256 + lz.codes[1];
-    each i in 0..lz.elen[old_code] { lz.decoded[out_len + i] = lz.buf[lz.off[old_code] + i]; }
+    lz.buf.move(lz.off[old_code], 4194304 + out_len, lz.elen[old_code]);
     out_len = out_len + lz.elen[old_code];
     let pairs = lz.codes_len / 2;
     each pair in 1..pairs {
@@ -79,11 +79,11 @@ fn decode() {
         lz.buf.move(lz.off[old_code], entry, old_len);
         if new_code < dict_len {
             lz.buf[entry + old_len] = lz.buf[lz.off[new_code]];
-            each i in 0..lz.elen[new_code] { lz.decoded[out_len + i] = lz.buf[lz.off[new_code] + i]; }
+            lz.buf.move(lz.off[new_code], 4194304 + out_len, lz.elen[new_code]);
             out_len = out_len + lz.elen[new_code];
         } else {
             lz.buf[entry + old_len] = lz.buf[entry];
-            each i in 0..old_len + 1 { lz.decoded[out_len + i] = lz.buf[entry + i]; }
+            lz.buf.move(entry, 4194304 + out_len, old_len + 1);
             out_len = out_len + old_len + 1;
         }
         lz.off[dict_len] = entry;
@@ -104,7 +104,7 @@ fn prepare(size: i64 in 2..1048576) -> Response<{}> {
     lz.result = 0;
     make_data(size);
     encode();
-    lz.decoded.fill(0, size, 0);
+    lz.buf.fill(4194304, size, 0);
     return ok({});
 }
 @post("/warmup/{n}")
@@ -115,6 +115,6 @@ fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } retu
 fn checksum() -> Response<{ checksum: i64 }> {
     var same = 0;
     if lz.decoded_len == lz.size { same = 1; }
-    each i in 0..lz.size { if lz.decoded[i] != lz.data[i] { same = 0; } }
+    each i in 0..lz.size { if lz.buf[4194304 + i] != lz.data[i] { same = 0; } }
     return ok({ "checksum": (lz.result + same * 100000) % 4294967296 });
 }

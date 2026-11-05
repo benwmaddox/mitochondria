@@ -36,7 +36,7 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 | Compress::BWTEncode | 0.553 | 0.421 | 1.31x | 0.422 | 1.31x | 1.093 | 0.51x | closest-possible |
 | Compress::HuffDecode | 1.065 | 0.621 | 1.72x | 0.615 | 1.73x | 0.897 | 1.19x | rewritten-to-match |
 | Compress::HuffEncode | 0.641 | 0.591 | 1.08x | 0.601 | 1.07x | 0.903 | 0.71x | rewritten-to-match |
-| Compress::LZWDecode | 2.102 | 1.160 | 1.81x | 1.187 | 1.77x | 0.522 | 4.03x | rewritten-to-match |
+| Compress::LZWDecode | 0.227 | 1.143 | 0.20x | 1.171 | 0.19x | 0.518 | 0.44x | closest-possible |
 | Compress::LZWEncode | 0.094 | 0.527 | 0.18x | 0.514 | 0.18x | 0.844 | 0.11x | closest-possible |
 | CSV::Parse | 0.562 | 0.615 | 0.91x | 0.610 | 0.92x | 3.168 | 0.18x | closest-possible |
 | Distance::Jaro | 0.964 | 1.083 | 0.89x | 0.996 | 0.97x | 1.150 | 0.84x | rewritten-to-match |
@@ -60,7 +60,7 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 | Sort::Quick | 1.383 | 1.136 | 1.22x | 1.150 | 1.20x | 1.541 | 0.90x | rewritten-to-match |
 | Template::Parse | 0.689 | 0.811 | 0.85x | 0.876 | 0.79x | 1.831 | 0.38x | closest-possible |
 
-Geometric mean of the 28 like-for-like and rewritten-to-match ports: 1.09x of Rust and 0.86x of Crystal (the 13 closest-possible ports are left out; over all 41 it is 1.12x of Rust). All 41 ports were measured together in one run (3 rounds, best of rounds, 2026-11-04). Crystal is LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
+Geometric mean of the 27 like-for-like and rewritten-to-match ports: 1.07x of Rust and 0.82x of Crystal (the 14 closest-possible ports are left out; over all 41 it is 1.06x of Rust). All 41 ports were measured together in one run (3 rounds, best of rounds, 2026-11-04). Crystal is LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
 comparable, replaced by the standard library's), run with the same runner on the same core.
 
 How it got here (Mitochondria / Rust, best of 3; each step merged): the first run had Sieve 4.93x, Fannkuchredux 2.84x, Sort::Quick 1.61x, Sort::Merge 2.54x. Stores to plain
@@ -112,7 +112,7 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 41-42 | Compress::BWTEncode / BWTDecode | ported (encode's merge sort skips ordered merges: first version without that was 4.98x of Rust, because the reference's library sort detects ordered runs) |
 | 43-44 | Compress::HuffEncode / HuffDecode | ported |
 | 45-46 | Compress::ArithEncode / ArithDecode | ported |
-| 47-48 | Compress::LZWEncode / LZWDecode | ported (encode keys its dictionary by (prefix code, byte) instead of the whole string, which favours Mitochondria: excluded from the geometric mean) |
+| 47-48 | Compress::LZWEncode / LZWDecode | ported (encode keys its dictionary by (prefix code, byte) instead of the whole string; decode keeps its entries in one array instead of one Vec each; both favour Mitochondria: excluded from the geometric mean) |
 | 49-50 | Distance::Jaro / NGram | ported (NGram uses the new lib/intmap hash map) |
 
 Counts now: 41 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
@@ -122,7 +122,6 @@ Still blocked by something else: building text (Base64 output, the parsers' stri
 Where the time goes in what is slower than the reference: Binarytrees::Arena (was 3.98x of Rust, now 2.16x) is pool `add` (now about 12 ns, was 28; a `Vec` push is a few); the sieve, Fannkuchredux and
 the merge sort are loops of many small array stores, which pay for atomic requests.
 
-Finding while porting LZWDecode: using `array.move` to copy each decoded string into a 1 MB array (instead of a byte loop) made a run about 200x slower (0.2 s against 1 ms); `array.move` between small ranges is fine. Not investigated yet, probably the undo log handling of the destination range.
 
 Language and library added for the string tests: `lib/strmap.mito` (hash map from string keys to i64, chained, entries numbered so a caller can keep its own data per entry, slots reused at once) and a text-area rule: strings built in a loop body are dropped at the end of each iteration unless the body assigns one to a variable declared before the loop (the 256 KB text area of a request otherwise fills after about 20,000 string keys; CacheSimulation builds 5.8 million).
 

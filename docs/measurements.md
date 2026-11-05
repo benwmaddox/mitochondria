@@ -927,3 +927,5 @@ Same compiler, logged sources against unlogged ones, best of 2 alternating round
 Geometric mean over the 31 measured: -10.9%. Maze::Generator was measured too and got 20-25% slower with its two stack arrays unlogged; with the undo log compiled out entirely it is also slower
 (0.63-0.65 s against 0.49 s logged, and Round 25 showed the same: 0.37 s without range and commit tests, 0.42 s with the log also off). Something about journaling those lines makes this
 port faster; not explained yet, so Maze::Generator keeps its arrays logged.
+
+Full run after all of it (3 rounds, 41 ports, 2026-11-05 evening): 0.97x of Rust over the 27 like-for-like and rewritten-to-match ports (0.74x of Crystal), 0.94x over all 41 (morning: 1.06x and 1.04x).

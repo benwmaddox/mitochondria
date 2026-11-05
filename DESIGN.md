@@ -119,7 +119,8 @@ budget (100 million, `--loop-budget N`), past which the request fails with "loop
 are written and saved to the undo log; past the capacity the request fails, 413), and `s = "n=" + str(n)` is written as the same
 appends. A `let` that names a text field is a window onto it: nothing is copied, and a later change to the field shows through.
 Text for the work of one request goes in `request work: Work;`, a struct of plain fields beside the state, zeroed before each
-request, kept out of the undo log and never kept. Literals are stored once in the program and copied with memcpy where used.
+request, kept out of the undo log and never kept. Literals are stored once in the program and copied with memcpy where used. `ascii<N>` text holds bytes 0..127 and can be written by index
+(`s[i] = b`); `utf8<N>` (also written `string<N>`) holds any bytes and changes only by assigning or appending.
 
 **Enums and match.** `enum Op { Plus, Minus }` (or `enum Cmd: u8 { Plus = 43, Minus = 45 }`) names integer values; a field of an
 enum type is stored in the smallest integer that holds them and a write outside their range fails (400), and an answer field

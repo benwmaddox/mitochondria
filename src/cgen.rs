@@ -626,7 +626,7 @@ pub fn layout_c(prog: &Program, api: &Api) -> String {
             let (kind, sc, n) = match &col.kind {
                 CKind::Scalar(s) => (0, plain_code(&Ty::Scalar(*s)).unwrap().0, 0),
                 CKind::Arr(s, n) => (1, plain_code(&Ty::Scalar(*s)).unwrap().0, *n as u32),
-                CKind::StrLen => (2, 0, 0),
+                CKind::StrLen => (2, col.range.is_some() as u32, 0), // 1: an ascii<N> column
                 CKind::StrBytes(m) => (3, 0, *m as u32),
             };
             o += &format!("    {{ {}, {}, {}, {}, {}, {} }},\n", c_lit(col.path.as_bytes()), kind, sc, n, col.off, col.kind.size());
@@ -1640,9 +1640,12 @@ impl<'p> G<'p> {
                         let at = off + sd.offs[k];
                         let range = sd.ranges[k];
                         self.may_write_plain(at)?;
-                        if code == 20 { if let Some((clear, pieces)) = str_pieces(&Expr::Field(base.clone(), f.clone()), rhs) { return self.str_append(0, format!("{}ULL", at), format!("{}ULL", cap), 0, clear, &pieces, env); } }
+                        let ascii = code == 20 && range.is_some();
+                        if code == 20 { if let Some((clear, pieces)) = str_pieces(&Expr::Field(base.clone(), f.clone()), rhs) { return self.str_append(if ascii { 4 } else { 0 }, format!("{}ULL", at), format!("{}ULL", cap), 0, clear, &pieces, env); } }
                         let v = self.expr(rhs, env, None)?;
-                        let v = match range { Some(r) => self.in_field_range(v, r, f)?, None => v };
+                        if ascii { self.ascii_lit(&v, f)?; }
+                        let v = match range { Some(r) if code != 20 => self.in_field_range(v, r, f)?, _ => v };
+                        let code = if ascii { 21 } else { code };
                         self.skip_save = self.unlogged_at(at);
                         if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap), true, at % scalar_bytes(code) as usize == 0)? { return Ok(()); }
                         self.skip_save = false;
@@ -1660,11 +1663,14 @@ impl<'p> G<'p> {
                     return no(if known { format!("assigning `.{}` as a whole is not supported yet; assign its fields", path) } else { format!("no field `{}`", path) });
                 };
                 self.may_write_col(c, &path)?;
-                if matches!(self.prog.colls[c].cols[ci].kind, CKind::StrLen) {
-                    if let Some((clear, pieces)) = str_pieces(&Expr::Field(base.clone(), f.clone()), rhs) { return self.str_append(1, format!("{}ULL", c), format!("(u64)({})", idx), ci as u32, clear, &pieces, env); }
+                let is_text = matches!(self.prog.colls[c].cols[ci].kind, CKind::StrLen);
+                let ascii = is_text && self.prog.colls[c].cols[ci].range.is_some();
+                if is_text {
+                    if let Some((clear, pieces)) = str_pieces(&Expr::Field(base.clone(), f.clone()), rhs) { return self.str_append(if ascii { 5 } else { 1 }, format!("{}ULL", c), format!("(u64)({})", idx), ci as u32, clear, &pieces, env); }
                 }
                 let v = self.expr(rhs, env, None)?;
-                let v = match self.prog.colls[c].cols[ci].range { Some(r) => self.in_field_range(v, r, &path)?, None => v };
+                if ascii { self.ascii_lit(&v, &path)?; }
+                let v = match self.prog.colls[c].cols[ci].range { Some(r) if !is_text => self.in_field_range(v, r, &path)?, _ => v };
                 self.skip_save = self.prog.colls[c].unlogged;
                 let inline = self.int_store(c, &idx, ci, None, &v, &format!("c->h->store(c, {}, {}, {}, &@VAL)", c, idx, ci))?;
                 self.skip_save = false;
@@ -1677,6 +1683,21 @@ impl<'p> G<'p> {
                 let bv = self.expr(base, env, None)?;
                 let kv = self.expr(k_expr, env, None)?;
                 let k = self.int_or(kv, 400, "an index must be an integer");
+                if let CV::PlainStr(_) | CV::StateStr(..) = &bv {
+                    // `s[i] = b` on ascii text: a byte 0..127 at a position below its length
+                    if !self.is_ascii(&bv) { return no("utf8 text is not written by index (a character may take several bytes): assign it or append to it, or make the field ascii<N>"); }
+                    match &bv { CV::PlainStr(off) => self.may_write_plain(*off)?, CV::StateStr(c, _, ci) => { let p = self.prog.colls[*c].cols[*ci].path.clone(); self.may_write_col(*c, &p)? } _ => {} }
+                    let k = self.hold_int(k);
+                    let len = self.field_len(&bv);
+                    self.line(&format!("if (RANGE_({k} < 0 || {k} >= {len})) FAIL(400, \"string index out of range\", 25);"));
+                    let v = self.expr(rhs, env, None)?;
+                    let x = self.int_or(v, 400, "a byte of ascii text is an integer 0..127");
+                    let x = self.hold_int(x);
+                    self.line(&format!("if (RANGE_({x} < 0 || {x} > 127)) FAIL(400, \"not an ASCII byte\", 17);"));
+                    let at = self.sub_bytes_at(&bv, &k);
+                    self.call(&format!("c->h->wr_int(c, {}, 1, {})", at, x));
+                    return Ok(());
+                }
                 if let CV::Coll(..) | CV::ArrCol(..) | CV::PlainArr(..) = bv {} else { self.fail(500, "only fixed arrays and collections can be assigned by index"); return Ok(()); }
                 match bv {
                     CV::ArrCol(c, idx, ci) => {
@@ -2037,6 +2058,7 @@ impl<'p> G<'p> {
     fn str_append(&mut self, kind: i32, a: String, b: String, cc: u32, clear: bool, pieces: &[&'p Expr], env: &mut Vec<Option<CV>>) -> R<()> {
         // no window among the pieces: all of them in one call
         let vals: Vec<CV> = pieces.iter().map(|p| self.expr(p, env, None)).collect::<R<Vec<CV>>>()?;
+        if kind & 4 != 0 { for v in &vals { self.ascii_lit(v, "the field")?; } }
         if !vals.iter().any(|v| matches!(v, CV::Sub(..) | CV::PlainStr(_) | CV::StateStr(..))) {
             let mut names = Vec::new();
             for v in vals {
@@ -2063,6 +2085,32 @@ impl<'p> G<'p> {
             self.call(&format!("c->h->str_app(c, {}, {}, {}, {}, &{})", k, a, b, cc, vv));
         }
         Ok(())
+    }
+
+    /// A literal put into `ascii` text: refused when compiling if it holds a byte above 127.
+    fn ascii_lit(&self, v: &CV, f: &str) -> R<()> {
+        if let CV::Lit(s) = v { if let Some(b) = s.bytes().find(|b| *b > 127) { return no(format!("`{}` is ascii text: the literal \"{}\" holds byte {}, which is not ASCII", f, s, b)); } }
+        Ok(())
+    }
+    /// Is this text field `ascii<N>`?
+    fn is_ascii(&self, base: &CV) -> bool {
+        match base {
+            CV::StateStr(c, _, ci) => self.prog.colls[*c].cols[*ci].range.is_some(),
+            CV::PlainStr(off) => self.plain_ascii(*off),
+            _ => false,
+        }
+    }
+    /// Whether the plain text field at `off` is ascii (its struct's field range says so).
+    fn plain_ascii(&self, off: usize) -> bool {
+        fn walk(p: &Program, s: usize, base: usize, off: usize) -> Option<bool> {
+            let sd = &p.structs[s];
+            for (k, (_, t)) in sd.fields.iter().enumerate() {
+                let o = base + sd.offs[k];
+                match t { Ty::Str(_) if o == off => return Some(sd.ranges[k].is_some()), Ty::Struct(c) => if let Some(r) = walk(p, *c, o, off) { return Some(r); }, _ => {} }
+            }
+            None
+        }
+        self.prog.globals.iter().find_map(|g| match g.ty { Ty::Struct(s) => walk(self.prog, s, g.off, off), _ => None }).unwrap_or(false)
     }
 
     /// The byte offset in state of byte `from` of a text field (a window's base).

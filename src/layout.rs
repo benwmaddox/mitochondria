@@ -37,6 +37,7 @@ pub enum Ty {
 }
 impl Ty { pub fn is_coll(&self) -> bool { matches!(self, Ty::List(..) | Ty::Pool(..)) } }
 
+/// (For a text field, `ranges[k]` is the range of its bytes: Some((0, 127)) for `ascii<N>`.)
 /// `ranges[k]`: field k's declared range (`limit: i64 in 0..3000000`, both ends included), when it has one: every write is checked against it,
 /// and reads give the range analysis that interval.
 /// `unlogged[k]`: field k is kept out of the undo log (`scratch: u8[4096] unlogged`): a failed request leaves what it wrote there.
@@ -210,7 +211,9 @@ impl Program {
                     let mut ranges = Vec::new();
                     let mut unlogged = Vec::new();
                     while p.peek() != Some("}") {
-                        let f = p.ident()?; p.eat(":")?; let ty = p.ty()?;
+                        let f = p.ident()?; p.eat(":")?;
+                        let ascii = p.peek() == Some("ascii");
+                        let ty = p.ty()?;
                         // `in lo..hi`: a declared range for an integer field, both ends included
                         let range = if p.word("in") { let lo = p.signed()?; p.eat(".")?; p.eat(".")?; let hi = p.signed()?; Some((lo, hi)) } else { None };
                         if let Some((lo, hi)) = range {
@@ -223,7 +226,8 @@ impl Program {
                         // `unlogged`: kept out of the undo log (a plain field, or a whole collection with what its items hold)
                         let unl = p.word("unlogged");
                         p.eat(";")?;
-                        fields.push((f, ty)); ranges.push(range); unlogged.push(unl);
+                        // an `ascii<N>` field: its bytes are 0..127 (the range of a text field is the range of its bytes)
+                        fields.push((f, ty)); ranges.push(if ascii { Some((0, 127)) } else { range }); unlogged.push(unl);
                     }
                     p.eat("}")?;
                     structs.push(StructDef { name, fields, ranges, unlogged, offs: Vec::new(), size: 0, align: 1, state: 0 });
@@ -395,7 +399,7 @@ impl Program {
             match t {
                 Ty::Scalar(s) => { let mut col = place(CKind::Scalar(s), &mut o); col.range = range; c.cols.push(col); }
                 Ty::Arr(e, k) => { let Ty::Scalar(s) = *e else { unreachable!() }; let col = place(CKind::Arr(s, k), &mut o); c.cols.push(col); }
-                Ty::Str(m) => { let a = place(CKind::StrLen, &mut o); c.cols.push(a); let b = place(CKind::StrBytes(m), &mut o); c.cols.push(b); }
+                Ty::Str(m) => { let mut a = place(CKind::StrLen, &mut o); a.range = range; c.cols.push(a); let b = place(CKind::StrBytes(m), &mut o); c.cols.push(b); }
                 _ => unreachable!(),
             }
         }

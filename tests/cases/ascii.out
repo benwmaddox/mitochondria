@@ -1,0 +1,13 @@
+POST /code -> 200 {"code":"abc-12"}
+POST /code -> 400 {"error":"ascii text cannot hold byte 195 (at 3)","line":6}
+POST /name -> 200 {"name":"café"}
+POST /append -> 400 {"error":"ascii text cannot hold byte 195 (at 1)","line":10}
+POST /copy -> 400 {"error":"ascii text cannot hold byte 195 (at 3)","line":12}
+POST /code -> 200 {"code":"hello"}
+POST /upper -> 200 {"code":"HELLO","word":"aBc"}
+POST /poke/1/200 -> 400 {"error":"not an ASCII byte","line":22}
+POST /poke/9/65 -> 400 {"error":"string index out of range","line":22}
+POST /poke/0/104 -> 200 {"code":"hELLO"}
+state <plain values> 40
+state app.words 31
+memory reserved=8192 committed=8192 live=71

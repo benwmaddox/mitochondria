@@ -224,7 +224,9 @@ or had the benchmark harness generate the text). There are two text kinds, both 
   Etc::CacheSimulation builds its key in `work.key` (0.450 s against 0.441 s for the old text-area version on the previous compiler):
   an assignment of several pieces is one helper call (integers formatted straight into the field), and a loop that assigns no field
   reads the lengths of the text it indexes once, windows passed to inlined functions included.
-- Next: `ascii` rules (bytes 0..127; writing by index), Base64's message.
+- Done: `ascii<N>` holds bytes 0..127: storing, appending or copying a window with any other byte fails (400, "ascii text cannot
+  hold byte 195 (at 3)"), a literal with one is a compile error; `s[i] = b` writes a byte (0..127, below the length) of ascii text,
+  and is a compile error on `utf8<N>` / `string<N>` (`ascii.case`). Not yet: ascii inputs (`name: ascii<1..32>` checks lengths only).
 
 ## Phase 5: later
 

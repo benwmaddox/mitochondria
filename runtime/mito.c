@@ -665,6 +665,11 @@ static int store_scalar(Mito *m, u64 a, u32 s, const Val *v) {
     }
     wr(&m->mem, a, scalar_size(s), bits); return 0;
 }
+/* `ascii<N>` text holds bytes 0..127 only */
+static int not_ascii(Mito *m, const u8 *p, u64 n) {
+    for (u64 i = 0; i < n; i++) if (p[i] > 127) { err(m, E_BAD, 400); a_str(&m->emsg, "ascii text cannot hold byte "); a_u64(&m->emsg, p[i]); a_str(&m->emsg, " (at "); a_u64(&m->emsg, i); a_str(&m->emsg, ")"); return 1; }
+    return 0;
+}
 static int store_bytes_at(Mito *m, u64 len_at, u64 bytes_at, u64 cap, const u8 *b, u64 n) {
     if (n > cap) { err(m, E_TOOLONG, 413); a_str(&m->emsg, "string of "); a_u64(&m->emsg, n); a_str(&m->emsg, " bytes does not fit string<"); a_u64(&m->emsg, cap); a_str(&m->emsg, ">"); return -1; }
     put(&m->mem, bytes_at, b, n); wr(&m->mem, len_at, 4, n); return 0;
@@ -681,6 +686,7 @@ static int store_col(Mito *m, u32 c, u64 idx, u32 ci, i64 j, const Val *v) {
     u64 a = caddr(m, c, idx, ci);
     if (v->tag == 4) {
         if (col->kind != 2 || j >= 0) return bad_type(m);
+        if (col->scalar == 1 && not_ascii(m, t_ptr(m, (T){ v->a, v->b }), v->b)) return -1; /* an ascii<N> column */
         const MitoCol *bc = &coll(&m->mem, c)->cols[ci + 1];
         return store_bytes_at(m, a, caddr(m, c, idx, ci + 1), bc->n, t_ptr(m, (T){ v->a, v->b }), v->b);
     }
@@ -1176,9 +1182,9 @@ static int h_store_elem(Ctx *c, u32 cid, u32 idx, u32 ci, i64 k, const Val *v) {
 /* A plain value at `off`: code 1..11 a scalar, 20 a string<cap>, 30 a reference to top-level pool `cap`. */
 static int h_store_plain(Ctx *c, u32 off, u32 code, u32 cap, const Val *v) {
     Mito *m = M_(c);
-    if (v->tag == 4) { if (code != 20) return bad_type(m); return store_bytes_at(m, off, off + 4, cap, t_ptr(m, (T){ v->a, v->b }), v->b); }
+    if (v->tag == 4) { if (code != 20 && code != 21) return bad_type(m); if (code == 21 && not_ascii(m, t_ptr(m, (T){ v->a, v->b }), v->b)) return -1; return store_bytes_at(m, off, off + 4, cap, t_ptr(m, (T){ v->a, v->b }), v->b); }
     if (v->tag != 1 && v->tag != 2 && v->tag != 3) return fail(m, 500, "cannot store this value in state");
-    if (code == 20) { err(m, E_BAD, 400); a_str(&m->emsg, "expected a string"); return -1; }
+    if (code == 20 || code == 21) { err(m, E_BAD, 400); a_str(&m->emsg, "expected a string"); return -1; }
     return store_scalar(m, off, code, v);
 }
 static int h_alloc(Ctx *c, u32 cid, u32 inst, int try_, u32 *out) {
@@ -1456,6 +1462,7 @@ static int h_str_app(Ctx *c, int kind, u64 a, u64 b, u32 cc, const Val *v) {
     else if (v->tag == 0) { p = 0; n = 0; }
     else { if (show(m, v)) return -1; p = m->text.p + mark; n = m->text.len - mark; }
     if (cur + n > cap) { m->text.len = mark; err(m, E_TOOLONG, 413); a_str(&m->emsg, "string of "); a_u64(&m->emsg, cur + n); a_str(&m->emsg, " bytes does not fit string<"); a_u64(&m->emsg, cap); a_str(&m->emsg, ">"); return -1; }
+    if ((kind & 4) && not_ascii(m, p, n)) { m->text.len = mark; return -1; }
     if (n) put(&m->mem, bytes_at + cur, p, n);
     if (n || (kind & 2)) wr(&m->mem, len_at, 4, cur + n);
     m->text.len = mark;
@@ -1471,6 +1478,7 @@ static int h_str_app_at(Ctx *c, int kind, u64 a, u64 b, u32 cc, u64 src, u32 n) 
     else { len_at = a; bytes_at = a + 4; cap = b; }
     u64 cur = (kind & 2) ? 0 : rd(&m->mem, len_at, 4);
     if (cur + n > cap) { err(m, E_TOOLONG, 413); a_str(&m->emsg, "string of "); a_u64(&m->emsg, cur + n); a_str(&m->emsg, " bytes does not fit string<"); a_u64(&m->emsg, cap); a_str(&m->emsg, ">"); return -1; }
+    if ((kind & 4) && not_ascii(m, m->mem.base + src, n)) return -1;
     u64 to = bytes_at + cur;
     if (n && src < to + n && to < src + n) {
         u32 mark = m->text.len; T t;
@@ -1505,6 +1513,7 @@ static int h_str_set(Ctx *c, int kind, u64 a, u64 b, u32 cc, int clear, const Va
         else if (v[i].tag == 0) continue;
         else { m->text.len = mark; if (show(m, &v[i])) return -1; p = m->text.p + mark; n = m->text.len - mark; }
         if (cur + n > cap) { m->text.len = mark; err(m, E_TOOLONG, 413); a_str(&m->emsg, "string of "); a_u64(&m->emsg, cur + n); a_str(&m->emsg, " bytes does not fit string<"); a_u64(&m->emsg, cap); a_str(&m->emsg, ">"); return -1; }
+        if ((kind & 4) && v[i].tag == 4 && not_ascii(m, p, n)) { m->text.len = mark; return -1; }
         put(&m->mem, bytes_at + cur, p, n);
         cur += n;
     }

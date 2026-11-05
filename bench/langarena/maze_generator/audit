@@ -1,0 +1,2 @@
+rewritten-to-match
+The maze has the reference's shape (a pool of cell objects with their own neighbour arrays, built and shuffled with the reference's random sequence). dig keeps the reference's explicit stack as an array of 262,144 (it reaches 205,017 for the run parameters, measured by simulating it); ensure_open_finish is the reference's recursion (it never goes deeper than 1 for these parameters). Stores are checked and undo-logged.

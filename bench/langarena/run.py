@@ -116,6 +116,9 @@ META = {
     "graph_bfs": (["vertices", "jumps", "jump_len"], False),
     "graph_dfs": (["vertices", "jumps", "jump_len"], False),
     "graph_astar": (["vertices", "jumps", "jump_len"], False),
+    "maze_generator": (["w", "h"], False),
+    "maze_bfs": (["w", "h"], False),
+    "maze_astar": (["w", "h"], False),
 }
 rows = []
 for test in tests:

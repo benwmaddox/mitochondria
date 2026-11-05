@@ -1,0 +1,233 @@
+// LangArena Maze::AStar (kostya/LangArena, MIT): A* search for the shortest path through a generated maze, 70 times.
+// The reference's maze: a w x h grid (1400 x 1400 for the run parameters) of cell objects, each with its kind (wall, space, start, finish, border), its coordinates
+// and its own array of four neighbours in an order shuffled by the reference's random generator when the maze is built. A pool of cells, cell (x, y) is slot
+// y * w + x, built and linked in prepare with the reference's random sequence (the reference builds the maze in its constructor, with the generator at its
+// starting value, which is what a fresh program has). Kinds: 0 wall, 1 space, 2 start, 3 finish, 4 border; walkable is space, start or finish.
+// The checksum is the sum of the path lengths plus the x * y of the middle cell of the last path.
+struct Cell { kind: u8; x: i32; y: i32; ny: i32[4]; nx: i32[4]; }
+struct M { cells: pool<Cell, 1960000>; w: i64; h: i64; last: i64; result: i64; sy: i32[262144]; sx: i32[262144]; came: i32[1960000]; gs: i32[1960000]; bf: i32[1960000]; hf: i32[4096]; hv: i32[4096]; hn: i64; cur_v: i64; mid: i64; }
+state m: M;
+
+fn next_int(max) {
+    m.last = (m.last * 3877 + 29573) % 139968;
+    return int(m.last / 139968.0 * max);
+}
+
+// the reference's Maze::new and link_neighbors
+fn build(width, height) {
+    m.cells.clear();
+    m.w = max(width, 5);
+    m.h = max(height, 5);
+    m.last = 42;
+    let w = m.w;
+    let h = m.h;
+    each y in 0..h { each x in 0..w { let c = m.cells.add(); c.kind = 0; c.x = x; c.y = y; } }
+    each y in 0..h {
+        each x in 0..w {
+            let c = m.cells[y * w + x];
+            if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
+                c.kind = 4;
+            } else {
+                c.ny[0] = y - 1; c.nx[0] = x;
+                c.ny[1] = y + 1; c.nx[1] = x;
+                c.ny[2] = y;     c.nx[2] = x + 1;
+                c.ny[3] = y;     c.nx[3] = x - 1;
+                each t in 0..4 {
+                    let i = next_int(4);
+                    let j = next_int(4);
+                    if i != j {
+                        let ty = c.ny[i]; c.ny[i] = c.ny[j]; c.ny[j] = ty;
+                        let tx = c.nx[i]; c.nx[i] = c.nx[j]; c.nx[j] = tx;
+                    }
+                }
+            }
+        }
+    }
+    m.cells[1 * w + 1].kind = 2;
+    m.cells[(h - 2) * w + (w - 2)].kind = 3;
+}
+// the reference's dig: an explicit stack of cells to look at
+fn dig(y0, x0) {
+    let w = m.w;
+    var sp = 1;
+    m.sy[0] = y0;
+    m.sx[0] = x0;
+    each step in 0..1000000000 while sp > 0 {
+        sp = sp - 1;
+        let y = m.sy[sp];
+        let x = m.sx[sp];
+        let c = m.cells[y * w + x];
+        var walkable = 0;
+        each k in 0..4 {
+            let kind = m.cells[c.ny[k] * w + c.nx[k]].kind;
+            if kind == 1 || kind == 2 || kind == 3 { walkable = walkable + 1; }
+        }
+        if walkable == 1 {
+            c.kind = 1;
+            each k in 0..4 {
+                let ny = c.ny[k];
+                let nx = c.nx[k];
+                if m.cells[ny * w + nx].kind == 0 {
+                    m.sy[sp] = ny;
+                    m.sx[sp] = nx;
+                    sp = sp + 1;
+                }
+            }
+        }
+    }
+}
+// the reference's ensure_open_finish, recursive: which neighbours are walls is decided before any recursion, as the reference collects them first
+fn ensure_open_finish(y, x) {
+    let w = m.w;
+    let c = m.cells[y * w + x];
+    c.kind = 1;
+    let y0 = c.ny[0]; let x0 = c.nx[0]; let k0 = m.cells[y0 * w + x0].kind;
+    let y1 = c.ny[1]; let x1 = c.nx[1]; let k1 = m.cells[y1 * w + x1].kind;
+    let y2 = c.ny[2]; let x2 = c.nx[2]; let k2 = m.cells[y2 * w + x2].kind;
+    let y3 = c.ny[3]; let x3 = c.nx[3]; let k3 = m.cells[y3 * w + x3].kind;
+    var walkable = 0;
+    if k0 == 1 || k0 == 2 || k0 == 3 { walkable = walkable + 1; }
+    if k1 == 1 || k1 == 2 || k1 == 3 { walkable = walkable + 1; }
+    if k2 == 1 || k2 == 2 || k2 == 3 { walkable = walkable + 1; }
+    if k3 == 1 || k3 == 2 || k3 == 3 { walkable = walkable + 1; }
+    if walkable <= 1 {
+        if k0 == 0 { ensure_open_finish(y0, x0); }
+        if k1 == 0 { ensure_open_finish(y1, x1); }
+        if k2 == 0 { ensure_open_finish(y2, x2); }
+        if k3 == 0 { ensure_open_finish(y3, x3); }
+    }
+}
+fn generate() {
+    let w = m.w;
+    let h = m.h;
+    let start = m.cells[1 * w + 1];
+    each k in 0..4 {
+        let ny = start.ny[k];
+        let nx = start.nx[k];
+        if m.cells[ny * w + nx].kind == 0 { dig(ny, nx); }
+    }
+    let finish = m.cells[(h - 2) * w + (w - 2)];
+    each k in 0..4 {
+        let ny = finish.ny[k];
+        let nx = finish.nx[k];
+        if m.cells[ny * w + nx].kind == 0 { ensure_open_finish(ny, nx); }
+    }
+}
+
+@post("/prepare/{w}/{h}")
+fn prepare(w: i64 in 5..1400, h: i64 in 5..1400) -> Response<{}> { m.result = 0; build(w, h); generate(); return ok({}); }
+
+// the reference's astar: A* over walkable cells with the Manhattan heuristic, a binary min-heap ordered by (f, cell index) (the reference's
+// BinaryHeap<Reverse<(i32, usize)>>; every pair is pushed at most once, so any correct heap pops the same sequence), arrays for came-from, g
+// and best f. The path is walked back from the finish to take its length and its middle cell, which is what the checksum uses.
+fn heap_push(f, v) {
+    var i = m.hn;
+    m.hn = m.hn + 1;
+    var going = 1;
+    each t in 0..64 while going == 1 && i > 0 {
+        let p = (i - 1) / 2;
+        if f < m.hf[p] || (f == m.hf[p] && v < m.hv[p]) {
+            m.hf[i] = m.hf[p];
+            m.hv[i] = m.hv[p];
+            i = p;
+        } else {
+            going = 0;
+        }
+    }
+    m.hf[i] = f;
+    m.hv[i] = v;
+}
+fn heap_pop() {
+    m.cur_v = m.hv[0];
+    m.hn = m.hn - 1;
+    let n = m.hn;
+    if n > 0 {
+        let f = m.hf[n];
+        let v = m.hv[n];
+        var i = 0;
+        var going = 1;
+        each t in 0..64 while going == 1 {
+            var c = 2 * i + 1;
+            if c >= n {
+                going = 0;
+            } else {
+                if c + 1 < n && (m.hf[c + 1] < m.hf[c] || (m.hf[c + 1] == m.hf[c] && m.hv[c + 1] < m.hv[c])) { c = c + 1; }
+                if m.hf[c] < f || (m.hf[c] == f && m.hv[c] < v) {
+                    m.hf[i] = m.hf[c];
+                    m.hv[i] = m.hv[c];
+                    i = c;
+                } else {
+                    going = 0;
+                }
+            }
+        }
+        m.hf[i] = f;
+        m.hv[i] = v;
+    }
+}
+fn one_run() {
+    let w = m.w;
+    let h = m.h;
+    let size = w * h;
+    let ty = h - 2;
+    let tx = w - 2;
+    let target = ty * w + tx;
+    m.came.fill(0, size, -1);
+    m.gs.fill(0, size, 2147483647);
+    m.bf.fill(0, size, 2147483647);
+    let start = 1 * w + 1;
+    m.gs[start] = 0;
+    let f_start = abs(1 - ty) + abs(1 - tx);
+    m.hn = 0;
+    heap_push(f_start, start);
+    m.bf[start] = f_start;
+    var found = 0;
+    var length = 0;
+    var mid_value = 0;
+    each step in 0..1000000000 while m.hn > 0 && found == 0 {
+        heap_pop();
+        let current = m.cur_v;
+        if current == target {
+            found = 1;
+            var count = 0;
+            var cur = current;
+            each t in 0..1000000000 while cur != -1 { count = count + 1; cur = m.came[cur]; }
+            length = count;
+            // forward index count / 2 is count - 1 - count / 2 steps back from the finish
+            var node = current;
+            each t in 0..count - 1 - count / 2 { node = m.came[node]; }
+            mid_value = (node / w) * (node % w);
+        } else {
+            let cy = current / w;
+            let cx = current % w;
+            let current_g = m.gs[current];
+            let c = m.cells[current];
+            each k in 0..4 {
+                let ny = c.ny[k];
+                let nx = c.nx[k];
+                let kind = m.cells[ny * w + nx].kind;
+                if kind == 1 || kind == 2 || kind == 3 {
+                    let ni = ny * w + nx;
+                    let tentative = current_g + 1;
+                    if tentative < m.gs[ni] {
+                        m.came[ni] = current;
+                        m.gs[ni] = tentative;
+                        let f_new = tentative + abs(ny - ty) + abs(nx - tx);
+                        if f_new < m.bf[ni] {
+                            m.bf[ni] = f_new;
+                            heap_push(f_new, ni);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    m.result = (m.result + length) % 4294967296;
+    m.mid = mid_value;
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": (m.result + m.mid) % 4294967296 }); }

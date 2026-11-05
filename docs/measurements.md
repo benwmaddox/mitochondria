@@ -881,3 +881,22 @@ Reading it: the range and commit tests together cost about 10% overall (1.06x to
 (Binarytrees::Obj 1.29x to 0.54x, Binarytrees::Arena 2.08x to 1.09x, Base64 4x) and in loops the versioning does not cover (GameOfLife, Huffman decode, Fannkuch). The sieve and Brainfuck
 do not move: their loops are versioned already, and what is left against Rust is overflow checking (Rust with overflow checks takes 1.79 s on the sieve, Mitochondria 1.74 s).
 Run-to-run noise is a few percent (Binarytrees::Obj as built measured 3.2 s in round 24 and 3.7 s here).
+
+## Round 26: HTTP keep-alive (2026-11-05)
+
+The HTTP front end now keeps connections open (HTTP/1.1 unless `Connection: close`; HTTP/1.0 only with `Connection: keep-alive`), answers back-to-back requests in order,
+and frames bodies by Content-Length exactly (bytes after it are the next request; a malformed or cut-short request closes the connection). `--conns` connection threads (16)
+take connections that have a request waiting; one poller thread (WSAPoll) accepts and watches idle connections, closing them after 10 s; a thread waits 1 ms for a client's next
+request before handing the connection back. One program's handler runs under a lock, one request at a time, as before.
+
+A trivial endpoint (`GET /n`, handler about 200 ns), Windows loopback, unpinned:
+
+| client | before (new connection each request) | after |
+|---|---|---|
+| Python http.client, one client, new connection each request | 600-1,100 req/s | 600-900 req/s |
+| Python http.client, one client, kept connection | (not possible) | 6,500-6,700 req/s |
+| raw socket, kept, one request at a time | (not possible) | 9,500-9,800 req/s |
+| raw socket, kept, 32 requests pipelined | (not possible) | 51,000-57,000 req/s |
+| 8 Python client threads, kept connections | | 48,000-57,000 req/s (the client is the limit) |
+
+With 40 connections that never sent anything and 40 idle kept ones open (more than the 16 threads), a new client was answered in 0.7 ms.

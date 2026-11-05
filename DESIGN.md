@@ -158,13 +158,15 @@ Limits:
 - Pressure marks are absolute megabytes; no idle trim yet.
 - `string<N>` reserves N bytes per slot: 2000-byte chat bodies averaging 120 bytes left 39.5 MB committed for 3.1 MB
   live. Packed text is planned (Next, 3).
-- HTTP serves one request per connection, on a thread per connection.
+- HTTP keeps connections open with a fixed pool of connection threads and one poller (WSAPoll, up to 4,096 idle connections);
+  an event loop on IOCP would serve more connections with fewer threads. One program handles one request at a time.
 
 ## Next
 1. Linux: an OS layer (memory, threads, locks, clock, randomness, sockets) with the cases and the HTTP record passing
    on both systems (Linux in WSL2).
-2. HTTP: keep-alive with an event loop over a fixed table of connections (IOCP on Windows, epoll then io_uring on
-   Linux). A connection costs Windows 200-500 µs against about 2 µs of handling.
+2. HTTP: an event loop over a fixed table of connections (IOCP on Windows, epoll then io_uring on Linux) in place of
+   the poller and connection threads. Keep-alive is done (2026-11-05): a kept connection costs about 100 µs a request
+   on Windows loopback against 1-1.5 ms for a new connection each time.
 3. Long uneven text: `text<N>` fields packed into a per-collection text area.
 4. Shards placed by load rather than `id % count`.
 5. Worker messages beyond `forward`: one-way `send`, fan-out with gathered replies, links and monitors.

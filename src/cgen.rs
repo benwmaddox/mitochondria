@@ -1032,7 +1032,8 @@ impl<'p> G<'p> {
                     return Ok(si);
                 }
                 Err(SpecErr::Conflict(u)) => {
-                    let next = unify(cand, u);
+                    // the first guess (no value) is a guess, not a `null` the function returns: replace it with what the body gives
+                    let next = if cand == K::Null { match u { K::Ref(c) => K::Item(c), o => o } } else { unify(cand, u) }; // (a real `null` widens it again on the next try)
                     if !tries.contains(&next) { if next == K::Any { tries.push(K::Any); } else { tries.insert(t, next); } }
                     else if !tries.contains(&K::Any) { tries.push(K::Any); }
                 }
@@ -1393,7 +1394,21 @@ impl<'p> G<'p> {
     fn close(&mut self, tail: &str) { self.checked.clear(); self.depth -= 1; self.line(tail); }
 
     fn block(&mut self, stmts: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<()> {
-        for s in stmts { self.checked.clear(); self.stmt(s, env)?; }
+        let mut restore: Vec<(u32, CV)> = Vec::new();
+        for (i, s) in stmts.iter().enumerate() {
+            self.checked.clear();
+            self.stmt(s, env)?;
+            // `if !exists(x) { ... }` (or `if x == null`) whose branch always leaves: x is a plain item for the rest of this block
+            if let Stmt::If(c, t, e) = s {
+                if let Some((slot, false)) = narrow_test(c) {
+                    let leaves = matches!(t.last(), Some(Stmt::Fail(..) | Stmt::Return(..) | Stmt::Respond(..)));
+                    if leaves && e.is_empty() && !assigned_slots(&stmts[i + 1..]).contains(&slot) {
+                        if let Some(CV::Ref(cl, _, k)) = env[slot as usize].clone() { restore.push((slot, env[slot as usize].replace(CV::Item(cl, k)).unwrap())); }
+                    }
+                }
+            }
+        }
+        for (slot, v) in restore.into_iter().rev() { env[slot as usize] = Some(v); }
         Ok(())
     }
 
@@ -1422,7 +1437,7 @@ impl<'p> G<'p> {
                 let (c, idx, path) = match bv {
                     CV::Item(c, idx) => (c, idx, f.clone()),
                     CV::Part(c, idx, p) => (c, idx, format!("{}.{}", p, f)),
-                    CV::Ref(t, s, k) => { self.line(&format!("if ({} == 0) TAIL(c->h->dead(c));", s)); (t, k, f.clone()) }
+                    CV::Ref(..) => return no(format!("assigning `.{}` of a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`", f)),
                     CV::Plain(sid, off) => {
                         let sd = &self.prog.structs[sid];
                         let Some(k) = sd.fields.iter().position(|x| x.0 == *f) else { return no(format!("no field `{}`", f)) };
@@ -1439,19 +1454,8 @@ impl<'p> G<'p> {
                         self.call(&format!("c->h->store_plain(c, {}, {}, {}, &{})", at, code, cap, vv));
                         return Ok(());
                     }
-                    CV::Null => { self.line("TAIL(c->h->dead(c));"); return Ok(()); }
-                    CV::Any(x) => {
-                        if self.prog.structs.iter().any(|sd| sd.fields.iter().zip(&sd.ranges).any(|(fd, r)| fd.0 == *f && r.is_some())) {
-                            return no(format!("`{}` has a declared range, and this value's collection is only known when the program runs; assign it through a value of a known collection", f));
-                        }
-                        self.may_write_dynamic(Some(f))?;
-                        self.line(&format!("if ({}.tag == 0) TAIL(c->h->dead(c));", x));
-                        self.line(&format!("if ({}.tag != 5) FAIL(500, \"assignment target is not an item or a state struct\", 50);", x));
-                        let v = self.expr(rhs, env, None)?;
-                        let vv = self.val(v)?;
-                        self.call(&format!("c->h->store_field(c, &{}, {}, {}, &{})", x, c_lit(f.as_bytes()), f.len(), vv));
-                        return Ok(());
-                    }
+                    CV::Null => return no(format!("assigning `.{}` of `null`", f)),
+                    CV::Any(_) => return no(format!("assigning `.{}` of a value whose kind is only known when the program runs, which may be null: give it a known kind (a plain item)", f)),
                     _ => { self.fail(500, "assignment target is not an item or a state struct"); return Ok(()); }
                 };
                 let Some(ci) = self.prog.colls[c].cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_) | CKind::Arr(..))) else {
@@ -1517,12 +1521,27 @@ impl<'p> G<'p> {
             }
             Stmt::Assign(..) => return no("assignment target not compiled yet"),
             Stmt::If(c, t, e) => {
+                // `if exists(x)` / `if x != null`: inside, x is a plain item; `if !exists(x)` / `if x == null`: in the else branch
+                let narrowed = narrow_test(c).and_then(|(slot, yes)| match env[slot as usize].clone() { Some(CV::Ref(cl, _, k)) => Some((slot, yes, cl, k)), _ => None });
                 let cv = self.expr(c, env, None)?;
                 let cond = self.cond(cv)?;
                 self.open(&format!("if ({}) {{", cond));
+                let narrow = |g: &mut Self, env: &mut Vec<Option<CV>>, branch: &'p [Stmt], want: bool| -> Option<CV> {
+                    let (slot, yes, cl, k) = narrowed.clone()?;
+                    if yes != want || assigned_slots(branch).contains(&slot) { return None; }
+                    let _ = g; env[slot as usize].replace(CV::Item(cl, k))
+                };
+                let kept = narrow(self, env, t, true);
                 self.block(t, env)?;
+                if let (Some(v), Some((slot, ..))) = (kept, narrowed.clone()) { env[slot as usize] = Some(v); }
                 self.close("}");
-                if !e.is_empty() { self.open("else {"); self.block(e, env)?; self.close("}"); }
+                if !e.is_empty() {
+                    self.open("else {");
+                    let kept = narrow(self, env, e, false);
+                    self.block(e, env)?;
+                    if let (Some(v), Some((slot, ..))) = (kept, narrowed.clone()) { env[slot as usize] = Some(v); }
+                    self.close("}");
+                }
             }
             Stmt::Each(it, body) => {
                 if let (Some(_), Some(n)) = (&it.via, crate::lang::path_of(&it.coll)) {
@@ -1618,7 +1637,7 @@ impl<'p> G<'p> {
                 let other = |c: usize| no(format!("an item of {} cannot be removed from {}", self.prog.colls[c].name, wname));
                 match self.expr(e, env, None)? {
                     CV::Item(c, i) => { if c != want { return other(c); } self.may_add_or_free(c, "remove")?; self.call(&format!("c->h->free_(c, {}, {})", c, i)) }
-                    CV::Ref(t, s, k) => { if t != want { return other(t); } self.may_add_or_free(t, "remove")?; self.line(&format!("if ({} != 0) {{ CALL(c->h->free_(c, {}, {})); }}", s, t, k)) }
+                    CV::Ref(..) => return no("removing a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`"),
                     CV::Null => {}
                     CV::Any(x) => {
                         // a value whose kind is known only at run time: it must be an item of this collection
@@ -1919,9 +1938,9 @@ impl<'p> G<'p> {
             CV::Item(c, idx) => (c, idx, f.to_string()),
             CV::Part(c, idx, p) => (c, idx, format!("{}.{}", p, f)),
             CV::Ref(t, s, k) => {
-                // reading through a null reference is a dead reference, as in the interpreter
-                let on_dead = match dead { Some(l) => format!("goto {};", l), None => "TAIL(c->h->dead(c));".into() };
-                self.line(&format!("if ({} == 0) {}", s, on_dead));
+                // a value that may be null is read only inside `or(...)` / `exists(...)`, or after `if exists(x)` made it a plain item
+                let Some(l) = dead else { return no(format!("`.{}` of a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`", f)) };
+                self.line(&format!("if ({} == 0) goto {};", s, l));
                 (t, k, f.to_string())
             }
             CV::Plain(sid, off) => {
@@ -1933,10 +1952,11 @@ impl<'p> G<'p> {
                 let v = self.plain(off + sd.offs[k], &ty, dead)?;
                 return Ok(self.with_field_range(v, range));
             }
-            CV::Null => { match dead { Some(l) => self.line(&format!("goto {};", l)), None => self.line("TAIL(c->h->dead(c));") } return Ok(CV::Null); }
+            CV::Null => { let Some(l) = dead else { return no(format!("`.{}` of `null`", f)) }; self.line(&format!("goto {};", l)); return Ok(CV::Null); }
             CV::Any(x) => {
                 // an item whose collection is known only at run time: the interpreter's own field lookup
                 if let Some(l) = dead { self.line(&format!("if ({}.tag == 0) goto {};", x, l)); }
+                if dead.is_none() { return no(format!("`.{}` of a value whose kind is only known when the program runs, which may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`", f)); }
                 let r = self.tmp("v");
                 self.line(&format!("Val {};", r));
                 self.call(&format!("c->h->field_val(c, &{}, {}, {}, &{})", x, c_lit(f.as_bytes()), f.len(), r));
@@ -2143,17 +2163,25 @@ impl<'p> G<'p> {
                         let saved = self.or_dead.replace(l.clone());
                         let a = self.expr(&args[0], env, Some(&l));
                         self.or_dead = saved;
-                        let av = self.val(a?)?;
+                        let a = a?;
+                        let ka = kind(&a);
+                        let av = self.val(a)?;
                         self.line(&format!("if ({}.tag == 0) goto {};", av, l)); // null also takes the fallback
                         self.line(&format!("{} = {}; goto {};", res, av, end));
                         self.line("}");
                         self.line(&format!("{}: {{", l));
                         let fb = self.expr(&args[1], env, dead)?;
+                        let kb = kind(&fb);
                         let fv = self.val(fb)?;
                         self.line(&format!("{} = {};", res, fv));
                         self.line("}");
                         self.line(&format!("{}: ;", end));
-                        Ok(CV::Any(res))
+                        Ok(match (ka, kb) {
+                            (Some(K::Item(c) | K::Ref(c)), Some(K::Item(d))) if c == d => CV::Item(c, format!("{}.b", res)),
+                            (Some(K::Item(c) | K::Ref(c)), Some(K::Ref(d))) if c == d => { let (sv, kv) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}.tag != 0, {} = {}.b;", sv, res, kv, res)); CV::Ref(c, sv, kv) }
+                            (Some(K::Item(c) | K::Ref(c)), Some(K::Null)) => { let (sv, kv) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}.tag != 0, {} = {}.b;", sv, res, kv, res)); CV::Ref(c, sv, kv) }
+                            _ => CV::Any(res),
+                        })
                     }
                     B::Exists => {
                         let (l, end, res) = (self.tmp("dead"), self.tmp("done"), self.tmp("v"));
@@ -2262,7 +2290,7 @@ impl<'p> G<'p> {
             B::Capacity => { let Some(CV::Coll(c, _)) = a.first() else { return no("`capacity()` is a function of a collection") }; CV::Int(format!("{}LL", self.prog.colls[*c].cap)) }
             B::Slot => match a.first() {
                 Some(CV::Item(c, i)) => CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)),
-                Some(CV::Ref(c, s, i)) => { self.line(&format!("if ({} == 0) FAIL(500, \"slot(item)\", 10);", s)); CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)) }
+                Some(CV::Ref(..)) => return no("`slot(x)` of a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`"),
                 _ => unreachable!("generic above"),
             },
             B::Sqrt | B::Exp | B::Floor => {
@@ -2333,6 +2361,18 @@ impl<'p> G<'p> {
 
     /// Call user function `k` with argument values already computed: inlined, or a generated C function if recursive.
     fn call_values(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>) -> R<CV> {
+        let r = self.call_values_inner(k, vals, dead)?;
+        let (opt, name) = (self.api.fns[k as usize].ret_opt, self.api.fns[k as usize].name.clone());
+        let gives = returns_value(&self.api.fns[k as usize].body); // a function without `return value` gives nothing, which is not null
+        Ok(match r {
+            // (a recursive function's result reads as null until its kind is known: only a definite item-or-null counts there)
+            CV::Ref(..) if !opt && gives => return no(format!("`{}` can return null (it returns `null`, or a value that may be null, on some path): declare it `fn {}(...) -> T?` so that callers check it", name, name)),
+            CV::Null if !opt && gives && !self.recursive[k as usize] => return no(format!("`{}` can return null (it returns `null`, or a value that may be null, on some path): declare it `fn {}(...) -> T?` so that callers check it", name, name)),
+            CV::Item(c, e) if opt => { let s = self.tmp("r"); self.line(&format!("u32 {} = 1;", s)); CV::Ref(c, s, e) }
+            r => r,
+        })
+    }
+    fn call_values_inner(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>) -> R<CV> {
         let f = &self.api.fns[k as usize];
         self.depth_check();
         if self.recursive[k as usize] {
@@ -2821,6 +2861,46 @@ mod profile_tests {
         assert_eq!(load("@post(\"/a\") fn post_a() -> Response<{ n: i64, c: i64 }> { let p = app.items.add { n: 2 }; p.n += 1; app.items.remove(p); return ok({ n: p.n, c: app.items.count() }); }"), "");
     }
 
+    /// `T?`: a value that may be null is used as an item only after `if exists(x)` (or a guard that leaves when it is null), or inside
+    /// `or(...)` / `exists(...)`; a function that can return null says `-> T?`. A plain item is always live, so nothing here can fail at run time.
+    #[test]
+    fn values_that_may_be_null_are_checked_before_use() {
+        let st = "struct I { n: i64; name: string<8>; } struct App { items: pool<I, 4>; } state app: App;";
+        let load = |api: &str| -> String { super::check(&Program::parse(st).unwrap(), api).err().unwrap_or_default() };
+        let find = "fn find(n) -> I? { each it in app.items { if it.n == n { return it; } } return null; }\n";
+        for (api, want) in [
+            // reading, writing, removing and slot() of a value that may be null
+            (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = find(k); return ok({{ n: it.n }}); }}", find), "`.n` of a value that may be null"),
+            (format!("{}@post(\"/a\") fn a(k: i64) -> Response<{{}}> {{ let it = find(k); it.n = 1; return ok({{}}); }}", find), "assigning `.n` of a value that may be null"),
+            (format!("{}@post(\"/a\") fn a(k: i64) -> Response<{{}}> {{ let it = find(k); app.items.remove(it); return ok({{}}); }}", find), "removing a value that may be null"),
+            (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ s: i64 }}> {{ let it = find(k); return ok({{ s: slot(it) }}); }}", find), "`slot(x)` of a value that may be null"),
+            // try_add gives a value that may be null
+            ("@post(\"/a\") fn a() -> Response<{}> { let it = app.items.try_add(); it.n = 1; return ok({}); }".to_string(), "may be null"),
+            // a function that can return null must say so
+            ("fn find(n) { each it in app.items { if it.n == n { return it; } } return null; }\n@get(\"/a\") fn a(k: i64) -> Response<{ n: i64 }> { return ok({ n: or(find(k).n, 0) }); }".to_string(), "declare it `fn find(...) -> T?`"),
+            // the narrowing ends with its branch, and does not hold when the branch assigns the variable
+            (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = find(k); if exists(it) {{ }} return ok({{ n: it.n }}); }}", find), "may be null"),
+            (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ var it = find(k); if exists(it) {{ it = find(k + 1); return ok({{ n: it.n }}); }} return ok({{ n: 0 }}); }}", find), "may be null"),
+            // writing through null
+            ("@post(\"/a\") fn a() -> Response<{}> { let it = null; it.n = 1; return ok({}); }".to_string(), "of `null`"),
+        ] {
+            let e = load(&api);
+            assert!(e.contains(want), "{} -> {}", api, e);
+        }
+        // what is accepted: `if exists(x)`, `if x != null`, a guard that leaves, the else branch of `if x == null`, `or(...)`, `exists(...)`
+        for api in [
+            format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = find(k); if exists(it) {{ return ok({{ n: it.n }}); }} return ok({{ n: 0 }}); }}", find),
+            format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = find(k); if it != null {{ it.n = 2; return ok({{ n: it.n }}); }} return ok({{ n: 0 }}); }}", find),
+            format!("{}@post(\"/a\") fn a(k: i64) -> Response<{{ s: i64 }}> {{ let it = find(k); if !exists(it) {{ fail 404 \"no such item\"; }} it.n = 3; app.items.remove(it); return ok({{ s: slot(it) }}); }}", find),
+            format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = find(k); if it == null {{ return ok({{ n: 0 }}); }} else {{ return ok({{ n: it.n }}); }} }}", find),
+            format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64, there: bool }}> {{ return ok({{ n: or(find(k).n, -1), there: exists(find(k)) }}); }}", find),
+            // `or` with a plain item as the fallback gives a plain item
+            format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = or(find(k), app.items[0]); return ok({{ n: it.n }}); }}", find),
+        ] {
+            assert_eq!(load(&api), "", "{}", api);
+        }
+    }
+
     /// Every answer is checked against the endpoint's `Response<T>` when the program is compiled.
     #[test]
     fn answers_are_checked_against_their_response_type() {
@@ -2991,3 +3071,27 @@ fn stmt_sites<'p>(st: &'p Stmt, v: u32, assigned: &std::collections::HashSet<u32
 
 /// An i64 as a C constant (the smallest one cannot be written as a literal).
 fn c_i64(v: i64) -> String { if v == i64::MIN { "(-9223372036854775807LL - 1)".into() } else { format!("{}LL", v) } }
+
+/// `exists(x)`, `x != null` (true: x is an item when the test holds), `!exists(x)`, `x == null` (false: when it fails), for a local x.
+fn narrow_test(c: &Expr) -> Option<(u32, bool)> {
+    let local = |e: &Expr| match e { Expr::Var(_, VarRes::Local(s)) => Some(*s), _ => None };
+    match c {
+        Expr::Call(n, a, _) if n == "exists" && a.len() == 1 => local(&a[0]).map(|s| (s, true)),
+        Expr::Un('!', x) => narrow_test(x).map(|(s, y)| (s, !y)),
+        Expr::Bin(op, a, b) if op == "!=" || op == "==" => {
+            let s = match (&**a, &**b) { (x, Expr::Null) | (Expr::Null, x) => local(x)?, _ => return None };
+            Some((s, op == "!="))
+        }
+        _ => None,
+    }
+}
+
+/// Does any `return` in these statements give a value?
+fn returns_value(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Return(Some(_)) => true,
+        Stmt::If(_, t, e) => returns_value(t) || returns_value(e),
+        Stmt::Each(_, b) => returns_value(b),
+        _ => false,
+    })
+}

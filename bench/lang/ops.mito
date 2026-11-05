@@ -1,6 +1,6 @@
 // One common operation per endpoint, repeated n times inside the request: the cost of each, read from the server's own
 // timer (bench/lang/ops.py). Each endpoint answers a sum so the work is not optimised away.
-struct Item { id: i64; x: i64; f: f64; b: bool; name: string<16>; next: ref<ops.items>; }
+struct Item { id: i64; x: i64; f: f64; b: bool; name: string<16>; next: i64; } // next: an item's slot
 struct Ev { at: i64; v: i64; }
 struct Ops {
     items: pool<Item, 100000> checked;
@@ -40,9 +40,9 @@ fn read_float(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.item
 @get("/cmp_string/{n}")
 fn cmp_string(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; var s = 0; each i in 0..n { if e.name == "item" { s = s + 1; } } return ok({ "s": s }); }
 @post("/store_ref/{n}")
-fn store_ref(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; let o = ops.items[6]; each i in 0..n { e.next = o; } return ok({ "s": 0 }); }
+fn store_ref(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; let o = ops.items[6]; each i in 0..n { e.next = slot(o); } return ok({ "s": 0 }); }
 @get("/read_ref/{n}")
-fn read_ref(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; e.next = ops.items[6]; var s = 0; each i in 0..n { s = s + e.next.x; } return ok({ "s": s }); }
+fn read_ref(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; e.next = 6; var s = 0; each i in 0..n { s = s + ops.items[e.next].x; } return ok({ "s": s }); }
 @post("/list_add/{n}")
 fn list_add(n: i64 in 1..100000000) -> Response<{ s: i64 }> { each i in 0..n { ops.log.add { at: i, v: i }; } return ok({ "s": ops.log.count() }); }
 @get("/iter_list/{n}")

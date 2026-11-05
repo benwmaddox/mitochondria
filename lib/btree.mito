@@ -53,12 +53,12 @@ pub fn inner_count() { return self.inners.count(); }
 pub fn height() { return self.head.height; }
 pub fn room() { return N - self.items.count(); }
 pub fn get(item_slot) { return self.items[item_slot]; }
-pub fn first() {
+pub fn first() -> T? {
     let leaf = self.head.first;
     if leaf == 0 { return null; }
     return self.items[self.leaves[leaf - 1].slots[0]];
 }
-pub fn last() {
+pub fn last() -> T? {
     let leaf = self.head.last;
     if leaf == 0 { return null; }
     return self.items[self.leaves[leaf - 1].slots[self.leaves[leaf - 1].count - 1]];
@@ -66,7 +66,7 @@ pub fn last() {
 
 // ---- finding by key
 // The first item (in order) whose key is target, or null.
-pub fn find(target) {
+pub fn find(target) -> T? {
     if self.head.root == 0 { return null; }
     var leaf = self.descend(target, false);
     var pos = self.leaf_pos(leaf, target, false);

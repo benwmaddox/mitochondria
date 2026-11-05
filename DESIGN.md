@@ -48,6 +48,13 @@ back with `pool[slot]`, which checks the slot is live (`or(pool[slot].name, "[go
 in state carries no generation, so a reused slot is not detected there; a generation-checked id held in state is
 planned (`ref<path>` did this and was removed; a different design is wanted).
 
+**`T` and `T?`.** A plain item value (`T`) is always a live item: removals take effect only when the request succeeds, so
+nothing a request holds turns into `null` under it. A value that may be `null` has type `T?`: what `try_add()` gives, and
+what a function declared `fn find(name) -> Node?` returns (a function that can return `null` must say so). The compiler
+rejects reading, writing, removing or taking `slot()` of a `T?` until it is checked: inside `if exists(x) { ... }` (or
+`if x != null`), in the `else` of `if x == null`, and after a guard that leaves (`if !exists(x) { fail 404 "..."; }`), `x`
+is a plain `T`; `or(x.name, "-")` and `exists(x)` take a `T?` as it is. So no item access can fail at run time for being `null`.
+
 **Nesting.** A collection can be a field of an item, with a maximum per parent: `Room.messages: list<Msg, 1000>`
 reserves 1000 per room. Each parent's items sit together, so a room's newest 50 messages are the last 50 of its list,
 with no index. A parent that does not exist costs nothing; removing it empties what it holds.

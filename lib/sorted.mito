@@ -38,8 +38,8 @@ pub fn set_key(it, kv) {
 pub fn size() { return self.items.count(); }
 pub fn room() { return N - self.items.count(); }
 pub fn get(k) { return self.items[k]; }
-pub fn first() { let n = self.head.next[0]; if n == 0 { return null; } return self.items[n - 1]; }
-pub fn last() { let n = self.head.last; if n == 0 { return null; } return self.items[n - 1]; }
+pub fn first() -> T? { let n = self.head.next[0]; if n == 0 { return null; } return self.items[n - 1]; }
+pub fn last() -> T? { let n = self.head.last; if n == 0 { return null; } return self.items[n - 1]; }
 
 // the position after x at level l (x: 0 the head, else slot + 1)
 fn nxt(x, l) { if x == 0 { return self.head.next[l]; } return self.links[x - 1].next[l]; }

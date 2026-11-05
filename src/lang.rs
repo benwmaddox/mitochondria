@@ -110,7 +110,8 @@ pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64), Item(String, Option<Str
 #[derive(Debug, Clone)]
 /// A function. A module instance's functions are named `instance.name` (written by `modules::expand`); `public` ones
 /// (`pub fn`) can be called from outside the module.
-pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool }
+/// `ret_opt`: declared `-> T?`: the result may be null, and a caller must check it (`if exists(x)`) or give a fallback (`or`).
+pub struct Func { pub name: String, pub params: Vec<String>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool }
 #[derive(Debug, Clone, Default)]
 pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 
@@ -186,10 +187,11 @@ pub fn parse(src: &str) -> R<Api> {
             while p.sym(".") { name = format!("{}.{}", name, p.id()?); } // instance.function, from module expansion
             p.eat("(")?;
             let mut params = Vec::new();
-            while !p.sym(")") { params.push(p.id()?); if p.sym(":") { p.skip_type()?; } p.sym(","); }
-            if p.sym("->") { p.skip_type()?; }
+            while !p.sym(")") { params.push(p.id()?); if p.sym(":") { p.skip_type()?; p.sym("?"); } p.sym(","); }
+            let mut ret_opt = false;
+            if p.sym("->") { p.skip_type()?; ret_opt = p.sym("?"); }
             let body = p.block()?;
-            api.fns.push(Func { name, params, body, slots: 0, public });
+            api.fns.push(Func { name, params, body, slots: 0, public, ret_opt });
             continue;
         }
         if p.is_kw("endpoint") { return Err("endpoints are functions with an attribute: `@post(\"/path\") fn name() -> Response<T> { ... }`".into()); }

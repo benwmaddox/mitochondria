@@ -929,3 +929,7 @@ Geometric mean over the 31 measured: -10.9%. Maze::Generator was measured too an
 port faster; not explained yet, so Maze::Generator keeps its arrays logged.
 
 Full run after all of it (3 rounds, 41 ports, 2026-11-05 evening): 0.97x of Rust over the 27 like-for-like and rewritten-to-match ports (0.74x of Crystal), 0.94x over all 41 (morning: 1.06x and 1.04x).
+
+## Round 28: no ref<>, and T? (2026-11-05)
+
+With `ref<>` removed, Binarytrees::Obj names a node's children by slot + 1 and follows them by a checked index instead of a generation-checked reference: 2.78 s to 2.04 s (0.68x of Rust; audit now rewritten-to-match).

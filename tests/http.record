@@ -58,7 +58,7 @@
 > GET /rooms HTTP/1.1\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...(65237 more bytes)
 < HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n
 > POST /sessions HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n{"name":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz...(1048328 more bytes)
-< HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: 55\r\nConnection: close\r\n\r\n{"error":"request too large for the request text area"}
+< HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: 45\r\nConnection: close\r\n\r\n{"error":"`name`: 1048565 bytes, at most 32"}
 === chat-sharded
 > POST /sessions HTTP/1.1\r\nHost: x\r\nContent-Length: 14\r\n\r\n{"name":"ann"}
 < HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 34\r\nConnection: close\r\n\r\n{"token":"0.0.0.229b7acb620956e0"}

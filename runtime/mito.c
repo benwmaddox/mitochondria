@@ -357,6 +357,12 @@ static void reset_instance(Mem *m, u32 c, u64 inst) {
     if (k->checked) { u64 it = 0, idx; while (item_at(m, c, inst, &it, &idx)) { u64 ga = gaddr(m, c, idx); wr(m, ga, 4, rd(m, ga, 4) + 1); } }
     zero(m, waddr(m, c, inst, 0), (hw + 63) / 64 * 8);
     hset(m, c, HW, inst, 0); hset(m, c, COUNT, inst, 0); hset(m, c, HINT, inst, 0);
+    if (!k->checked && !k->nkids) {
+        /* zero what the items held now, in one pass per column, and forget that the slots were ever used: the adds that refill the pool then find zeroed memory, as in a fresh pool */
+        u64 ever = hget(m, c, EVER, inst);
+        for (u32 i = 0; i < k->ncols; i++) if (k->cols[i].kind != 3) zero(m, k->cols[i].off + inst * k->cap * k->cols[i].size, ever * k->cols[i].size);
+        hset(m, c, EVER, inst, 0);
+    }
 }
 static int is_full(Mem *m, u32 c, u64 inst) {
     const MitoColl *k = coll(m, c);
@@ -364,6 +370,11 @@ static int is_full(Mem *m, u32 c, u64 inst) {
     return hget(m, c, COUNT, inst) >= k->cap;
 }
 /* Append to a list (dropping the oldest if declared) or take the lowest free slot of a pool. ~0 when full. */
+/* commit and undo-log a small range (within one page and one line is the usual case) for a write that follows: the two checks inline, the general routines only when one fails */
+static inline void touch(Mem *m, u64 a, u32 n) {
+    if (UNLIKELY(!m->committed[a / PAGE] || (a + n - 1) / PAGE != a / PAGE)) ensure(m, a, a + n);
+    if (m->jon) { u64 l = a / LINE; if (UNLIKELY((a + n - 1) / LINE != l || !(m->dirty[l >> 3] & (1u << (l & 7))))) save(m, a, n); }
+}
 static u64 push_item(Mem *m, u32 c, u64 inst) {
     const MitoColl *k = coll(m, c); u64 cap = k->cap;
     if (k->list) {
@@ -371,6 +382,26 @@ static u64 push_item(Mem *m, u32 c, u64 inst) {
         if (len < cap) { u64 idx = inst * cap + (head + len) % cap; zero_item(m, c, idx); hset(m, c, LEN, inst, len + 1); return idx; }
         if (k->drop_oldest) { u64 idx = inst * cap + head; zero_item(m, c, idx); hset(m, c, HEAD, inst, (head + 1) % cap); return idx; }
         return ~0ULL;
+    }
+    if (k->mult == 1 && !k->checked && k->nkids == 0) {
+        /* the common pool: one instance, no generations, no nested collections. Adding at the high-water mark (nothing freed below it) needs no search */
+        u32 h[4]; memcpy(h, m->base + k->hdr, 16); /* HW, COUNT, HINT, EVER: committed at start */
+        if (h[2] == h[0] && h[0] < cap) {
+            u64 slot = h[0];
+            u64 wa = k->live + 8 * (slot / 64);
+            u64 word = slot % 64 ? rd(m, wa, 8) : 0; /* a word wholly above the high-water mark may be uncommitted; its bits are zero */
+            touch(m, wa, 8); word |= 1ULL << (slot % 64); memcpy(m->base + wa, &word, 8);
+            for (u32 i = 0; i < k->ncols; i++) {
+                const MitoCol *col = &k->cols[i];
+                if (col->kind == 3) continue;
+                u64 a = col->off + slot * col->size;
+                touch(m, a, col->size);
+                if (slot < h[3]) memset(m->base + a, 0, col->size); /* a reused slot is cleared; a never-used one is zero already */
+            }
+            u32 v[4] = { h[0] + 1, h[1] + 1, h[0] + 1, h[3] > h[0] + 1 ? h[3] : h[0] + 1 };
+            touch(m, k->hdr, 16); memcpy(m->base + k->hdr, v, 16);
+            return slot;
+        }
     }
     u64 hw = hget(m, c, HW, inst), cnt = hget(m, c, COUNT, inst), hint = hget(m, c, HINT, inst);
     u64 slot = ~0ULL, w = hint / 64;

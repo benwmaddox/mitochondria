@@ -41,13 +41,13 @@ pub enum Expr {
     Bin(String, Box<Expr>, Box<Expr>),
 }
 
-/// `each m in room.messages reverse where ... limit n`
+/// `foreach m in room.messages reverse where ... limit n`
 #[derive(Debug, Clone)]
-/// `each var in coll ...`, or with `hi`, a range of integers `each var in coll..hi ...` (from `coll`, the low bound,
-/// up to but not including `hi`).
+/// `foreach var in coll ...`, or with `hi`, a range of integers `foreach var in coll..hi ...` (from `coll`, the low bound,
+/// up to `hi` included; `hi` here is one past it, as the parser excludes the end internally).
 /// `from`: where a loop over a module instance starts. `via`: that instance's iteration functions (set by the binder).
 /// `whil`: `while cond` ends the loop as soon as `cond` is false (tested before `where` and the body).
-pub struct Iter { pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub whil: Option<Expr>, pub wher: Option<Expr>, pub limit: Option<Expr>, pub via: Option<Via> }
+pub struct Iter { pub index: Option<(String, u32)>, pub budget: bool, pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub whil: Option<Expr>, pub wher: Option<Expr>, pub limit: Option<Expr>, pub via: Option<Via> }
 
 /// A module instance's iteration functions: a cursor from `first(from)` (or `last(from)` for reverse), the next from
 /// `next(cur)` (or `prev`), the item at it from `item(cur)`; a null cursor ends the loop.
@@ -86,6 +86,11 @@ pub enum Stmt {
     /// Hand the request on to another worker: `forward rooms[key] { "user": expr };`
     Forward { kind: String, key: Expr, fields: Vec<(String, Expr)> },
     Do(Expr),
+    /// `break;` / `continue;`: leave the innermost loop / go on with its next round.
+    Break,
+    Continue,
+    /// Where `continue` lands in a `for` loop: before its step (the end of the body elsewhere).
+    ContinueHere,
     /// Where the next statement starts in the source (line, column): kept for error messages; generates nothing.
     At(u32, u32),
 }
@@ -368,30 +373,41 @@ impl P {
     fn no_init<T>(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> { let was = self.init_ok; self.init_ok = false; let r = f(self); self.init_ok = was; r }
 
     fn iter(&mut self) -> R<Iter> { self.no_init(|p| p.iter_inner()) }
+    /// `item[, i] in coll [from k] [reverse] [while c] [where c] [limit n]`, or `i in lo..hi` (both ends included).
     fn iter_inner(&mut self) -> R<Iter> {
-        let var = self.id()?; self.kw("in")?; let coll = self.expr()?;
-        let hi = if self.sym("..") { Some(self.expr()?) } else { None };
+        let var = self.id()?;
+        let index = if self.sym(",") { Some((self.id()?, 0)) } else { None };
+        self.kw("in")?; let coll = self.expr()?;
+        // internally the end is excluded: `lo..e - 1` is lo..e, a number n is n + 1, anything else e + 1
+        let hi = if self.sym("..") { Some(match self.expr()? {
+            Expr::Bin(op, a, b) if op == "-" && matches!(*b, Expr::Int(1)) => *a,
+            Expr::Int(n) => Expr::Int(n + 1),
+            e => Expr::Bin("+".into(), Box::new(e), Box::new(Expr::Int(1))),
+        }) } else { None };
         let from = if self.is_kw("from") { self.i += 1; Some(self.expr()?) } else { None };
         let reverse = if self.is_kw("reverse") { self.i += 1; true } else { false };
         let whil = if self.is_kw("while") { self.i += 1; Some(self.expr()?) } else { None };
         let wher = if self.is_kw("where") { self.i += 1; Some(self.expr()?) } else { None };
         if self.is_kw("order") { return Err("`order by` was removed: keep the data in order with a sorted collection (lib/sorted.mito)".into()); }
         let limit = if self.is_kw("limit") { self.i += 1; Some(self.expr()?) } else { None };
-        Ok(Iter { var, slot: 0, coll, hi, from, reverse, whil, wher, limit, via: None })
+        Ok(Iter { index, budget: false, var, slot: 0, coll, hi, from, reverse, whil, wher, limit, via: None })
     }
 
     fn stmt(&mut self) -> R<Stmt> {
-        if self.is_kw("for") || self.is_kw("while") || self.is_kw("foreach") {
-            return Err(format!("`{}` loops are not in the language yet (they are planned): loop with `each i in 0..n {{ ... }}` (the end excluded), \
-                over a collection with `each item in coll {{ ... }}`, and while a condition holds with `each i in 0..limit while cond {{ ... }}`", self.here_word()));
+        if self.is_kw("each") { return Err("`each` is now `foreach`, and a range includes its end: `foreach i in 0..n - 1 { ... }`, `foreach item, i in coll { ... }`".into()); }
+        if self.is_kw("foreach") {
+            self.i += 1;
+            // the head may be in parentheses: `foreach (item in coll) { ... }`
+            let paren = self.sym("(");
+            let it = self.iter()?;
+            if paren { self.eat(")")?; }
+            let b = self.block()?;
+            return Ok(Stmt::Each(it, b));
         }
-        if self.is_kw("break") || self.is_kw("continue") {
-            return Err(format!("`{}` is not in the language yet (it is planned): end a loop early with `each ... while cond`, and skip an item with `if`", self.here_word()));
-        }
-        if matches!(self.t.get(self.i), Some(Tok::Id(_))) && matches!((self.t.get(self.i + 1), self.t.get(self.i + 2)), (Some(Tok::Sym(a)), Some(Tok::Sym(b))) if a == b && (a == "+" || a == "-")) {
-            let (n, op) = (self.here_word(), match self.t.get(self.i + 1) { Some(Tok::Sym(a)) => a.clone(), _ => String::new() });
-            return Err(format!("`{}{}{}` does not exist: write `{} {}= 1;`", n, op, op, n, op));
-        }
+        if self.is_kw("while") { self.i += 1; let c = self.no_init(|p| p.expr())?; let b = self.block()?; return Ok(Stmt::Each(unbounded(Some(c)), b)); }
+        if self.is_kw("for") { return self.for_stmt(); }
+        if self.is_kw("break") { self.i += 1; self.eat(";")?; return Ok(Stmt::Break); }
+        if self.is_kw("continue") { self.i += 1; self.eat(";")?; return Ok(Stmt::Continue); }
         if self.is_kw("let") || self.is_kw("var") {
             let is_var = self.is_kw("var");
             self.i += 1; let n = self.id()?; self.eat("=")?;
@@ -441,16 +457,62 @@ impl P {
             self.eat(";")?; return Ok(Stmt::Fail(code, msg));
         }
         if self.is_kw("respond") { return Err("`respond` was replaced by returning the answer: `return ok(...);` (or `created`, `no_content`, `status`)".into()); }
+        let st = self.simple()?;
+        self.eat(";")?;
+        Ok(st)
+    }
+
+    /// An expression, `x = e` or `x op= e`, without its `;` (a statement, or a `for` loop's step).
+    fn simple(&mut self) -> R<Stmt> {
+        if matches!(self.t.get(self.i), Some(Tok::Id(_))) && matches!((self.t.get(self.i + 1), self.t.get(self.i + 2)), (Some(Tok::Sym(a)), Some(Tok::Sym(b))) if a == b && (a == "+" || a == "-")) {
+            let (n, op) = (self.here_word(), match self.t.get(self.i + 1) { Some(Tok::Sym(a)) => a.clone(), _ => String::new() });
+            return Err(format!("`{}{}{}` does not exist: write `{} {}= 1`", n, op, op, n, op));
+        }
         let lhs = self.expr()?;
-        if self.sym(";") { return Ok(Stmt::Do(lhs)); }
         // `x += e` is `x = x + e`
         for op in ["+=", "-=", "*=", "/="] {
-            if self.sym(op) { let rhs = self.expr()?; self.eat(";")?; return Ok(Stmt::Assign(lhs.clone(), Expr::Bin(op[..1].to_string(), Box::new(lhs), Box::new(rhs)))); }
+            if self.sym(op) { let rhs = self.expr()?; return Ok(Stmt::Assign(lhs.clone(), Expr::Bin(op[..1].to_string(), Box::new(lhs), Box::new(rhs)))); }
         }
-        self.eat("=")?;
-        let rhs = self.expr()?; self.eat(";")?;
+        if !self.sym("=") { return Ok(Stmt::Do(lhs)); }
+        let rhs = self.expr()?;
         Ok(Stmt::Assign(lhs, rhs))
     }
+
+    /// `for [var] i = e; cond; step { ... }` (the head may be in parentheses). `i` is a new variable of the loop. A counted loop
+    /// (`i < n` or `i <= n`, step `i += 1`, neither `i` nor `n` assigned in the body, `n` a number or a local) is a range loop;
+    /// any other runs as `while cond { body; step }` with `continue` landing before the step.
+    fn for_stmt(&mut self) -> R<Stmt> {
+        self.kw("for")?;
+        let paren = self.sym("(");
+        self.sym_kw("var");
+        let v = self.id()?;
+        self.eat("=")?;
+        let init = self.no_init(|p| p.expr())?;
+        self.eat(";")?;
+        let cond = self.no_init(|p| p.expr())?;
+        self.eat(";")?;
+        let step = self.no_init(|p| p.simple())?;
+        if paren { self.eat(")")?; }
+        let body = self.block()?;
+        let is_v = |e: &Expr| matches!(e, Expr::Var(n, _) if *n == v);
+        let counted = match (&cond, &step) {
+            (Expr::Bin(op, a, n), Stmt::Assign(t, Expr::Bin(plus, x, one)))
+                if (op == "<" || op == "<=") && is_v(a) && is_v(t) && plus == "+" && is_v(x) && matches!(**one, Expr::Int(1))
+                && !assigns_name(&body, &v) && match &**n { Expr::Int(_) => true, Expr::Var(m, _) => *m != v && !assigns_name(&body, m), _ => false } =>
+                Some(if op == "<" { (**n).clone() } else if let Expr::Int(k) = **n { Expr::Int(k + 1) } else { Expr::Bin("+".into(), n.clone(), Box::new(Expr::Int(1))) }),
+            _ => None,
+        };
+        if let Some(hi) = counted {
+            let it = Iter { index: None, budget: false, var: v, slot: 0, coll: init, hi: Some(hi), from: None, reverse: false, whil: None, wher: None, limit: None, via: None };
+            return Ok(Stmt::Each(it, body));
+        }
+        let mut b = body;
+        b.push(Stmt::ContinueHere);
+        b.push(step);
+        // a block of its own (an `if` that always holds) keeps `i` inside the loop
+        Ok(Stmt::If(Expr::Bool(true), vec![Stmt::Var(v, 0, init), Stmt::Each(unbounded(Some(cond)), b)], Vec::new()))
+    }
+    fn sym_kw(&mut self, k: &str) -> bool { if self.is_kw(k) { self.i += 1; true } else { false } }
 
     fn if_stmt(&mut self) -> R<Stmt> {
         self.kw("if")?; let c = self.no_init(|p| p.expr())?; let t = self.block()?;
@@ -473,7 +535,10 @@ impl P {
             }
             return Ok(Json::Obj(f));
         }
-        if self.sym("[") { self.kw("each")?; let it = self.iter()?; let v = self.no_init(|p| p.json())?; self.eat("]")?; return Ok(Json::Arr(it, Box::new(v))); }
+        if self.sym("[") {
+            if self.is_kw("each") { return Err("`[each ...]` is now `[foreach ...]`, and a range includes its end".into()); }
+            self.kw("foreach")?; let it = self.iter()?; let v = self.no_init(|p| p.json())?; self.eat("]")?; return Ok(Json::Arr(it, Box::new(v)));
+        }
         Ok(Json::E(self.expr()?))
     }
 
@@ -558,7 +623,7 @@ pub fn path_of(e: &Expr) -> Option<String> {
 }
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32) }
+struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32 }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
 pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
@@ -566,13 +631,13 @@ pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
     let mut errs = Vec::new();
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0) };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0), loops: 0 };
         for p in &f.params { b.declare(p, false); }
         if let Err(e) = b.block(&mut f.body) { errs.push(e); }
         f.slots = b.max;
     }
     for e in &mut api.eps {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0) };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0 };
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         if let Err(e) = b.block(&mut e.body) { errs.push(e); continue; }
         e.slots = b.max;
@@ -615,10 +680,11 @@ impl Binder<'_> {
                 it.via = Some(Via { first, next, item, last: f("iter_last"), prev: f("iter_prev") });
             }
         }
-        if let Some(fr) = &mut it.from { if it.via.is_none() { return self.err(format!("`each {} in ... from`: only a module instance can start a loop from a key", it.var)); } self.expr(fr)?; }
+        if let Some(fr) = &mut it.from { if it.via.is_none() { return self.err(format!("`foreach {} in ... from`: only a module instance can start a loop from a key", it.var)); } self.expr(fr)?; }
         if let Some(l) = &mut it.limit { self.expr(l)?; }
         it.slot = self.declare(&it.var, false);
-        if let Some(w) = &mut it.whil { if it.hi.is_none() && it.via.is_none() { return self.err(format!("`each {} in ... while`: only ranges and module instances stop early; a list or pool is walked whole", it.var)); } self.expr(w)?; }
+        if let Some((n, slot)) = &mut it.index { *slot = self.declare(n, false); }
+        if let Some(w) = &mut it.whil { if it.hi.is_none() && it.via.is_none() { return self.err(format!("`foreach {} in ... while`: only ranges and module instances stop early; a list or pool is walked whole", it.var)); } self.expr(w)?; }
         if let Some(w) = &mut it.wher { self.expr(w)?; }
         Ok(())
     }
@@ -673,7 +739,9 @@ impl Binder<'_> {
                 } else { self.expr(lhs)?; }
             }
             Stmt::If(c, t, e) => { self.expr(c)?; self.block(t)?; self.block(e)?; }
-            Stmt::Each(it, body) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.block(body)?; self.names.truncate(mark); self.next = next; }
+            Stmt::Each(it, body) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.loops += 1; let r = self.block(body); self.loops -= 1; r?; self.names.truncate(mark); self.next = next; }
+            Stmt::Break | Stmt::Continue => if self.loops == 0 { return self.err(format!("`{}` outside a loop", if matches!(s, Stmt::Break) { "break" } else { "continue" })); },
+            Stmt::ContinueHere => {}
             Stmt::Remove(c, e) => { self.expr(c)?; self.expr(e)?; }
             Stmt::Clear(c) => { self.expr(c)?; }
             Stmt::Move(a, f, t2, n) => { self.expr(a)?; self.expr(f)?; self.expr(t2)?; self.expr(n)?; }
@@ -787,3 +855,18 @@ pub fn suggest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Str
 }
 /// The builtin functions, for suggestions.
 pub const BUILTIN_NAMES: &[&str] = &["int", "str", "len", "now", "random", "min", "max", "slot", "stat", "token", "or", "exists", "maxlen", "sqrt", "exp", "floor", "abs", "substr", "text_from", "wrapping_add", "wrapping_sub", "wrapping_mul", "ok", "created", "no_content", "status"];
+
+/// A loop without a fixed extent (`while`, a `for` that is not counted): a range as long as it needs, stopped by `cond`, and
+/// counted against the request's step budget.
+fn unbounded(cond: Option<Expr>) -> Iter {
+    Iter { index: None, budget: true, var: "__mito__round".into(), slot: 0, coll: Expr::Int(0), hi: Some(Expr::Int(i64::MAX)), from: None, reverse: false, whil: cond, wher: None, limit: None, via: None }
+}
+/// Is the variable `name` assigned anywhere in these statements?
+fn assigns_name(stmts: &[Stmt], name: &str) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Assign(Expr::Var(n, _), _) => n == name,
+        Stmt::If(_, t, e) => assigns_name(t, name) || assigns_name(e, name),
+        Stmt::Each(_, b) => assigns_name(b, name),
+        _ => false,
+    })
+}

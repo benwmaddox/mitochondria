@@ -240,9 +240,9 @@ mod tests {
             ("@post(\"/a\") fn post_a() -> Response<{}> { let s = app.b.items.add(); return ok({}); }", "add items of app.b with its functions, not `app.b.items.add()`"),
             ("@post(\"/a\") fn post_a() -> Response<{}> { app.b.items.remove(app.b.get(0)); return ok({}); }", "remove items of app.b with its functions, not `app.b.items.remove()`"),
             ("@post(\"/a\") fn post_a() -> Response<{}> { let x = app.b.get(0); app.b.items.remove(x); return ok({}); }", "remove items of app.b with its functions"),
-            ("@post(\"/a\") fn post_a() -> Response<{}> { each s in app.b { app.b.remove(s); } return ok({}); }", "a loop over app.b calls a function that changes app.b"),
-            ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": [each s in app.b app.b.add()] }); }", "a loop over app.b calls a function that changes app.b"),
-            ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": [each s in app.b from 1 order by s.n s.n] }); }", "`order by` was removed"),
+            ("@post(\"/a\") fn post_a() -> Response<{}> { foreach s in app.b { app.b.remove(s); } return ok({}); }", "a loop over app.b calls a function that changes app.b"),
+            ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": [foreach s in app.b app.b.add()] }); }", "a loop over app.b calls a function that changes app.b"),
+            ("@get(\"/a\") fn get_a() -> Response<{}> { return ok({ \"x\": [foreach s in app.b from 1 order by s.n s.n] }); }", "`order by` was removed"),
         ] {
             let e = load(api).err().unwrap_or_default();
             assert!(e.contains(want), "{} -> {}", api, e);

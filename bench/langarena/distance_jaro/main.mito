@@ -16,12 +16,12 @@ fn jaro(off1, len1, off2, len2) {
     p.flags1.fill(0, len1, 0);
     p.flags2.fill(0, len2, 0);
     var matches = 0;
-    each i in 0..len1 {
+    foreach i in 0..len1 - 1 {
         var start = 0;
         if i > window { start = i - window; }
         let end = min(len2 - 1, i + window);
         var found = 0;
-        each j in start..end + 1 while found == 0 {
+        foreach j in start..end while found == 0 {
             if p.flags2[j] == 0 && p.text[off1 + i] == p.text[off2 + j] {
                 p.flags1[i] = 1;
                 p.flags2[j] = 1;
@@ -33,9 +33,9 @@ fn jaro(off1, len1, off2, len2) {
     if matches == 0 { return 0.0; }
     var transpositions = 0;
     var k = 0;
-    each i in 0..len1 {
+    foreach i in 0..len1 - 1 {
         if p.flags1[i] == 1 {
-            each w in 0..len2 + 1 while k < len2 && p.flags2[k] == 0 { k = k + 1; }
+            foreach w in 0..len2 while k < len2 && p.flags2[k] == 0 { k = k + 1; }
             if k < len2 {
                 if p.text[off1 + i] != p.text[off2 + k] { transpositions = transpositions + 1; }
                 k = k + 1;
@@ -48,7 +48,7 @@ fn jaro(off1, len1, off2, len2) {
 }
 fn one_run() {
     var total = p.result;
-    each pair in 0..p.count {
+    foreach pair in 0..p.count - 1 {
         total = total + int(jaro(p.off1[pair], p.len1[pair], p.off2[pair], p.len2[pair]) * 1000.0);
     }
     p.result = total % 4294967296;
@@ -59,24 +59,24 @@ fn prepare(count: i64 in 1..1024, size: i64 in 1..56) -> Response<{}> {
     p.count = count;
     p.last = 42;
     var at = 0;
-    each pair in 0..count {
+    foreach pair in 0..count - 1 {
         let first_len = next_int(size) + 4;
         let second_len = next_int(size) + 4;
         p.off1[pair] = at;
         p.len1[pair] = first_len;
-        each i in 0..first_len { p.text[at + i] = 97 + next_int(10); }
+        foreach i in 0..first_len - 1 { p.text[at + i] = 97 + next_int(10); }
         at = at + first_len;
         p.off2[pair] = at;
         p.len2[pair] = second_len;
-        each i in 0..second_len { p.text[at + i] = 97 + next_int(10); }
+        foreach i in 0..second_len - 1 { p.text[at + i] = 97 + next_int(10); }
         at = at + second_len;
     }
     p.result = 0;
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": p.result }); }

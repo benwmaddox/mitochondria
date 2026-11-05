@@ -14,9 +14,9 @@ fn post_f(f0: i64, f1: i64, f2: i64, f3: i64, f4: i64, f5: i64, f6: i64, f7: i64
 @get("/n/{x}")
 fn get_n_x(x: string<4096>) -> Response<{ n: i64 }> { return ok({ "n": int(x) }); }
 @post("/fill")
-fn post_fill() -> Response<{ n: i64 }> { each i in app.ts.count()..70000 { let t = app.ts.add(); } return ok({ "n": app.ts.count() }); }
+fn post_fill() -> Response<{ n: i64 }> { foreach i in app.ts.count()..69999 { let t = app.ts.add(); } return ok({ "n": app.ts.count() }); }
 @post("/free/{n}")
-fn post_free_n(n: i64) -> Response<{}> { each t in app.ts limit n { app.ts.remove(t); } return ok({}); }
+fn post_free_n(n: i64) -> Response<{}> { foreach t in app.ts limit n { app.ts.remove(t); } return ok({}); }
 @get("/count")
 fn get_count() -> Response<{ n: i64 }> { return ok({ "n": app.ts.count() }); }
 --- requests

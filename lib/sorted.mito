@@ -1,6 +1,6 @@
 // Up to N items of struct T, kept in order of their field `key`; items with equal keys stay in the order they were
 // added. Change an item's key with set_key (the key is read-only outside this module); other fields are the
-// program's. Walk it with `each s in instance [from k] [reverse] ...`.
+// program's. Walk it with `foreach s in instance [from k] [reverse] ...`.
 //
 // A skip list: every item is linked to its neighbours in order (level 0), and some items also at higher levels,
 // each about a quarter as many as the one below, so finding a key takes O(log n) steps from the top level down.
@@ -49,9 +49,9 @@ fn before(n, kv, strict) { let k = self.items[n - 1].key; return k < kv || (!str
 // position at every level, where link() puts a new item. Levels above head.top hold nothing, so the search starts there.
 fn below(kv, strict, record) {
     var x = 0;
-    each l in 0..self.head.top reverse {
+    foreach l in 0..self.head.top - 1 reverse {
         var n = self.nxt(x, l);
-        each step in 0..N while n != 0 && self.before(n, kv, strict) { x = n; n = self.nxt(x, l); }
+        foreach step in 0..N - 1 while n != 0 && self.before(n, kv, strict) { x = n; n = self.nxt(x, l); }
         if record { self.head.update[l] = x; }
     }
     return x;
@@ -65,17 +65,17 @@ fn levels() {
     self.head.rng = r;
     var v = r / 7;
     var h = 1;
-    each t in 0..11 while v % 4 == 0 { h = h + 1; v = v / 4; }
+    foreach t in 0..10 while v % 4 == 0 { h = h + 1; v = v / 4; }
     return h;
 }
 // put item slot s (its key set) after every item with a key up to its own
 fn link(s) {
     self.below(self.items[s].key, false, true);
     let h = self.levels();
-    each l in self.head.top..h { self.head.update[l] = 0; }
+    foreach l in self.head.top..h - 1 { self.head.update[l] = 0; }
     if h > self.head.top { self.head.top = h; }
     self.links[s].level = h;
-    each l in 0..h {
+    foreach l in 0..h - 1 {
         let p = self.head.update[l];
         let n = self.nxt(p, l);
         self.links[s].next[l] = n;
@@ -86,7 +86,7 @@ fn link(s) {
 }
 // take item slot s out of the order (a second unlink of the same item does nothing)
 fn unlink(s) {
-    each l in 0..self.links[s].level {
+    foreach l in 0..self.links[s].level - 1 {
         let p = self.links[s].prev[l];
         let n = self.links[s].next[l];
         if p == 0 { self.head.next[l] = n; } else { self.links[p - 1].next[l] = n; }

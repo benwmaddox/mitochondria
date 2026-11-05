@@ -8,9 +8,9 @@ state app: App;
 fn get_ints() -> Response<{ b: i64, c: i64, d: i64, e: i64 }> {
     var at = 1;
     let b = at;
-    each i in 0..3 while at < 10 {
+    foreach i in 0..2 while at < 10 {
         let start = at;
-        each j in 0..3 while at < 10 && j < 2 { at = at + 1; }
+        foreach j in 0..2 while at < 10 && j < 2 { at = at + 1; }
         at = at + start;
     }
     var x = 5;

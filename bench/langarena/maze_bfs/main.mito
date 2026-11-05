@@ -21,9 +21,9 @@ fn build(width, height) {
     m.last = 42;
     let w = m.w;
     let h = m.h;
-    each y in 0..h { each x in 0..w { let c = m.cells.add(); c.kind = 0; c.x = x; c.y = y; } }
-    each y in 0..h {
-        each x in 0..w {
+    foreach y in 0..h - 1 { foreach x in 0..w - 1 { let c = m.cells.add(); c.kind = 0; c.x = x; c.y = y; } }
+    foreach y in 0..h - 1 {
+        foreach x in 0..w - 1 {
             let c = m.cells[y * w + x];
             if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
                 c.kind = 4;
@@ -32,7 +32,7 @@ fn build(width, height) {
                 c.ny[1] = y + 1; c.nx[1] = x;
                 c.ny[2] = y;     c.nx[2] = x + 1;
                 c.ny[3] = y;     c.nx[3] = x - 1;
-                each t in 0..4 {
+                foreach t in 0..3 {
                     let i = next_int(4);
                     let j = next_int(4);
                     if i != j {
@@ -52,19 +52,19 @@ fn dig(y0, x0) {
     var sp = 1;
     m.sy[0] = y0;
     m.sx[0] = x0;
-    each step in 0..1000000000 while sp > 0 {
+    foreach step in 0..999999999 while sp > 0 {
         sp = sp - 1;
         let y = m.sy[sp];
         let x = m.sx[sp];
         let c = m.cells[y * w + x];
         var walkable = 0;
-        each k in 0..4 {
+        foreach k in 0..3 {
             let kind = m.cells[c.ny[k] * w + c.nx[k]].kind;
             if kind == 1 || kind == 2 || kind == 3 { walkable = walkable + 1; }
         }
         if walkable == 1 {
             c.kind = 1;
-            each k in 0..4 {
+            foreach k in 0..3 {
                 let ny = c.ny[k];
                 let nx = c.nx[k];
                 if m.cells[ny * w + nx].kind == 0 {
@@ -101,13 +101,13 @@ fn generate() {
     let w = m.w;
     let h = m.h;
     let start = m.cells[1 * w + 1];
-    each k in 0..4 {
+    foreach k in 0..3 {
         let ny = start.ny[k];
         let nx = start.nx[k];
         if m.cells[ny * w + nx].kind == 0 { dig(ny, nx); }
     }
     let finish = m.cells[(h - 2) * w + (w - 2)];
-    each k in 0..4 {
+    foreach k in 0..3 {
         let ny = finish.ny[k];
         let nx = finish.nx[k];
         if m.cells[ny * w + nx].kind == 0 { ensure_open_finish(ny, nx); }
@@ -137,11 +137,11 @@ fn one_run() {
     var found = 0;
     var length = 0;
     var mid_value = 0;
-    each step in 0..1000000000 while qh < qt && found == 0 {
+    foreach step in 0..999999999 while qh < qt && found == 0 {
         let pid = m.q[qh];
         qh = qh + 1;
         let c = m.cells[m.py[pid] * w + m.px[pid]];
-        each k in 0..4 {
+        foreach k in 0..3 {
             if found == 0 {
                 let ny = c.ny[k];
                 let nx = c.nx[k];
@@ -150,14 +150,14 @@ fn one_run() {
                     // the path is the finish, then pid and its parents back to the start
                     var count = 2;
                     var cur = m.pp[pid];
-                    each t in 0..1000000000 while cur >= 0 { count = count + 1; cur = m.pp[cur]; }
+                    foreach t in 0..999999999 while cur >= 0 { count = count + 1; cur = m.pp[cur]; }
                     length = count;
                     let from_end = count - 1 - count / 2;
                     if from_end == 0 {
                         mid_value = tx * ty;
                     } else {
                         var node = pid;
-                        each t in 1..from_end { node = m.pp[node]; }
+                        foreach t in 1..from_end - 1 { node = m.pp[node]; }
                         mid_value = m.py[node] * m.px[node];
                     }
                 } else {
@@ -179,8 +179,8 @@ fn one_run() {
     m.mid = mid_value;
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": (m.result + m.mid) % 4294967296 }); }

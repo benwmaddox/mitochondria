@@ -12,7 +12,7 @@ fn parse() {
     var head = -1;
     var tail = -1;
     var done = 0;
-    each step in 0..g.srclen + 1 while done == 0 && g.pos < g.srclen {
+    foreach step in 0..g.srclen while done == 0 && g.pos < g.srclen {
         let byte = g.src[g.pos];
         g.pos = g.pos + 1;
         var kind = -1;
@@ -37,7 +37,7 @@ fn parse() {
 // the reference's execute: run a list; a loop runs its body while the current cell is not zero
 fn execute(head) {
     var node = head;
-    each step in 0..g.nops + 1 while node >= 0 {
+    foreach step in 0..g.nops while node >= 0 {
         let kind = g.op[node];
         if kind == 0 {
             g.tape[g.tpos] = (g.tape[g.tpos] + 255) & 255;
@@ -51,7 +51,7 @@ fn execute(head) {
         } else if kind == 4 {
             g.result = (g.result << 2) + g.tape[g.tpos];
         } else {
-            each w in 0..9000000000000 while g.tape[g.tpos] != 0 { execute(g.body[node]); }
+            foreach w in 0..8999999999999 while g.tape[g.tpos] != 0 { execute(g.body[node]); }
         }
         node = g.nxt[node];
     }
@@ -70,24 +70,24 @@ fn run_program() {
 @post("/prepare")
 fn prepare(program: string<4096>, warmup: string<4096>) -> Response<{}> {
     g.proglen = len(program);
-    each i in 0..g.proglen { g.prog[i] = program[i]; }
+    foreach i in 0..g.proglen - 1 { g.prog[i] = program[i]; }
     g.warmlen = len(warmup);
-    each i in 0..g.warmlen { g.warm[i] = warmup[i]; }
+    foreach i in 0..g.warmlen - 1 { g.warm[i] = warmup[i]; }
     g.total = 0;
     return ok({});
 }
 @post("/warmup/{n}")
 fn warmup(n: i64 in 0..100000) -> Response<{}> {
     g.srclen = g.warmlen;
-    each i in 0..g.warmlen { g.src[i] = g.warm[i]; }
-    each i in 0..n { run_program(); }
+    foreach i in 0..g.warmlen - 1 { g.src[i] = g.warm[i]; }
+    foreach i in 0..n - 1 { run_program(); }
     return ok({});
 }
 @post("/run/{n}")
 fn run(n: i64 in 1..100000) -> Response<{}> {
     g.srclen = g.proglen;
-    each i in 0..g.proglen { g.src[i] = g.prog[i]; }
-    each i in 0..n {
+    foreach i in 0..g.proglen - 1 { g.src[i] = g.prog[i]; }
+    foreach i in 0..n - 1 {
         run_program();
         g.total = (g.total + (g.result % 4294967296 + 4294967296) % 4294967296) % 4294967296;
     }

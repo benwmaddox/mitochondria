@@ -25,8 +25,8 @@ fn get_cols(i: i64) -> Response<{ eq: bool, ne: bool, lt: bool, le: bool, gt: bo
 @get("/count/{n}")
 fn get_count(n: i64) -> Response<{ hits: i64, names: i64 }> {
     var hits = 0; var names = 0;
-    each r in 0..n {
-        each w in app.words where w.a == "bob" { hits = hits + 1; }
+    foreach r in 0..n - 1 {
+        foreach w in app.words where w.a == "bob" { hits = hits + 1; }
         if app.words[0].a != "zed" { names = names + 1; }
     }
     return ok({ "hits": hits, "names": names });

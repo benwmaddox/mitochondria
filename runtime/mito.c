@@ -583,6 +583,7 @@ typedef struct Mito {
     Area out, text;
     u8 *areas;
     i64 clock; int fixed_clock; u64 rng;
+    i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
     Pressure pr;
     /* the request being handled */
     u32 ei; const MitoPair *hdrs; u32 nhdrs; const MitoPair *fwd; u32 nfwd; i64 now;
@@ -1389,6 +1390,7 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
     m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf;
     m->rng = seed;
+    m->loop_budget = 100000000;
     /* State of at most COMMIT_ALL_MAX is committed whole at start: committing reserves the system's commit charge, not physical memory (a page takes
        memory when first written), and then no store, add or helper needs to test or commit pages. Trims happen only under memory pressure; turning
        pressure on (set_marks) gives back what is not live and returns to committing on demand, so its accounting is exact. */
@@ -1411,6 +1413,7 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     return m;
 }
 MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.dirty); os_release(m->mem.jb.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }
+MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n; }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
 MITO_API void MITO(set_marks)(void *mp_, u64 soft, u64 hard) { Mito *m = (Mito *)mp_;
     m->pr.on = 1; m->pr.soft = soft; m->pr.hard = hard; m->pr.refusing = 0; m->pr.trims = m->pr.full_trims = m->pr.freed = 0;
@@ -1475,7 +1478,7 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     m->now = m->fixed_clock ? m->clock : os_now_ms();
     begin(&m->mem);
     m->frees.len = 0; m->sel.len = 0;
-    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p, 0 };
+    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p, 0, m->loop_budget };
     int res = mito_eps[ei](&ctx);
     if (res < 0 && m->ekind == E_FORWARD) { m->out.len = 0; m->pending = 1; return 0; } /* committed or rolled back by MITO(finish_forward) */
     int code, ok;

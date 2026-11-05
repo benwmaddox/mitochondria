@@ -9,8 +9,8 @@ fn one_run() {
     let fw = sc.w * 1.0;
     let fh = sc.h * 1.0;
     var total = sc.result;
-    each row in 0..sc.h {
-        each column in 0..sc.w {
+    foreach row in 0..sc.h - 1 {
+        foreach column in 0..sc.w - 1 {
             // the primary ray, normalised
             let raw_x = (column * 1.0 - fw / 2.0) / fw;
             let raw_y = (row * 1.0 - fh / 2.0) / fh;
@@ -20,7 +20,7 @@ fn one_run() {
             let dir_z = 1.0 * inverse;
             var hit = -1;
             var hit_t = 0.0;
-            each sphere in 0..3 while hit < 0 {
+            foreach sphere in 0..2 while hit < 0 {
                 let to_x = sc.cx[sphere];
                 let to_y = sc.cy[sphere];
                 let to_z = sc.cz[sphere];
@@ -83,8 +83,8 @@ fn prepare(w: i64 in 1..4096, h: i64 in 1..4096) -> Response<{}> {
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": sc.result }); }

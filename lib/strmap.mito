@@ -21,21 +21,21 @@ pub fn room() { return N - self.head.size; }
 
 fn hash_of(key) {
     var hash = 5381;
-    each at in 0..len(key) { hash = (hash * 33 + key[at]) % 4294967296; }
+    foreach at in 0..len(key) - 1 { hash = (hash * 33 + key[at]) % 4294967296; }
     return hash;
 }
 // does entry `entry` (slot + 1) hold key?
 fn same(entry, key) {
     let base = (entry - 1) * 64;
     var equal = self.key_len[entry - 1] == len(key);
-    each at in 0..len(key) while equal { if self.key_bytes[base + at] != key[at] { equal = false; } }
+    foreach at in 0..len(key) - 1 while equal { if self.key_bytes[base + at] != key[at] { equal = false; } }
     return equal;
 }
 // the entry for key (its hash given), 0 if there is none
 fn find(key, hash) {
     var cur = self.heads[hash % N];
     var found = 0;
-    each step in 0..N + 1 while cur != 0 && found == 0 {
+    foreach step in 0..N while cur != 0 && found == 0 {
         if self.hashes[cur - 1] == hash && self.same(cur, key) { found = cur; } else { cur = self.links[cur - 1]; }
     }
     return found;
@@ -60,7 +60,7 @@ fn insert(key, hash, value) {
         entry = self.head.used;
     }
     let base = (entry - 1) * 64;
-    each at in 0..len(key) { self.key_bytes[base + at] = key[at]; }
+    foreach at in 0..len(key) - 1 { self.key_bytes[base + at] = key[at]; }
     self.key_len[entry - 1] = len(key);
     self.values[entry - 1] = value;
     self.hashes[entry - 1] = hash;
@@ -106,7 +106,7 @@ pub fn remove_entry(entry) {
     let bucket = self.hashes[entry - 1] % N;
     var cur = self.heads[bucket];
     var prev = 0;
-    each step in 0..N + 1 while cur != entry && cur != 0 { prev = cur; cur = self.links[cur - 1]; }
+    foreach step in 0..N while cur != entry && cur != 0 { prev = cur; cur = self.links[cur - 1]; }
     if cur == entry {
         if prev == 0 { self.heads[bucket] = self.links[entry - 1]; } else { self.links[prev - 1] = self.links[entry - 1]; }
         self.links[entry - 1] = self.head.free;

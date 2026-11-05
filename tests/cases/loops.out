@@ -1,0 +1,13 @@
+GET /ranges -> 200 {"count":10,"sum":55,"down":321,"one":1,"none":0}
+POST /fill -> 200 {"live":6}
+GET /index -> 200 {"seen":[0,1,2,3],"sum":6110}
+GET /while -> 200 {"n":6,"steps":111}
+GET /for -> 200 {"counted":45,"evens":20,"paren":1234,"upto":4}
+GET /jumps -> 200 {"first":8,"odd":25,"stepped":15,"inner":6,"filtered":70}
+POST /made -> 200 {"made":2}
+GET /forever -> 500 {"error":"loop ran too long","line":70}
+GET /parens -> 200 {"n":110}
+state <plain values> 0
+state app.items 72
+state app.made 40
+memory reserved=8192 committed=8192 live=112

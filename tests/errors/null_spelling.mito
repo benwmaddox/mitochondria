@@ -1,5 +1,5 @@
 // expect: 4:24: fn best: unknown name `nil` (the value that is not there is written `null`)
 struct P { score: i64; } struct App { ps: pool<P, 8>; } state app: App;
-fn best() -> P? { each p in app.ps { return p; }
+fn best() -> P? { foreach p in app.ps { return p; }
                        return nil; }
 @get("/a") fn a() -> Response<{ n: i64 }> { return ok({ n: 1 }); }

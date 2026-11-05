@@ -25,7 +25,7 @@ fn post_players_p_hit_k(p: i64, k: i64) -> Response<{ hits: i64 }> {
 }
 @get("/players")
 fn get_players() -> Response<{ x: [{ name: string, h0: i64, h1: i64, h2: i64 }] }> {
-    return ok({ "x": [each p in app.players { "name": p.name, "h0": p.hits[0], "h1": p.hits[1], "h2": p.hits[2] }] });
+    return ok({ "x": [foreach p in app.players { "name": p.name, "h0": p.hits[0], "h1": p.hits[1], "h2": p.hits[2] }] });
 }
 @post("/overflow")
 fn post_overflow() -> Response<{}> { let p = app.players[0]; p.hits[1] = 40000; return ok({}); }

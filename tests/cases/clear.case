@@ -21,14 +21,14 @@ fn post_clear_add(v: i64) -> Response<{ slot: i64, count: i64 }> { app.items.cle
 fn post_clear_fail() -> Response<{}> { app.items.clear(); fail 422 "no"; }
 @get("/all")
 fn get_all() -> Response<{ items: [{ v: i64, tags: [i64] }], count: i64 }> {
-    return ok({ "items": [each i in app.items { "v": i.v, "tags": [each t in i.tags t.t] }], "count": app.items.count() });
+    return ok({ "items": [foreach i in app.items { "v": i.v, "tags": [foreach t in i.tags t.t] }], "count": app.items.count() });
 }
 @post("/log/{v}")
 fn post_log(v: i64) -> Response<{}> { app.log.add { t: v }; return ok({}); }
 @post("/log-clear")
 fn post_log_clear() -> Response<{ count: i64 }> { app.log.clear(); return ok({ "count": app.log.count() }); }
 @get("/log")
-fn get_log() -> Response<{ x: [i64] }> { return ok({ "x": [each t in app.log t.t] }); }
+fn get_log() -> Response<{ x: [i64] }> { return ok({ "x": [foreach t in app.log t.t] }); }
 --- requests
 POST /clear
 POST /add/1

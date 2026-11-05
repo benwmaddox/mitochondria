@@ -101,7 +101,7 @@ fn record(p: Player, points: i64) -> Response<{ best: i64 }> {
 
 @get("/board")
 fn board(top: i64 in 1..100 = 10) -> Response<{ top: [Row] }> {
-    return ok({ top: [each e in game.board reverse limit top { name: game.players[e.who].name, points: e.points }] });
+    return ok({ top: [foreach e in game.board reverse limit top { name: game.players[e.who].name, points: e.points }] });
 }
 ```
 

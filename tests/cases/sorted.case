@@ -18,28 +18,28 @@ fn post_set_k(k: i64, points: i64) -> Response<{}> { app.board.set_key(app.board
 @delete("/x/{k}")
 fn delete_x_k(k: i64) -> Response<{ size: i64 }> { app.board.remove(app.board.get(k)); return ok({ "size": app.board.size() }); }
 @get("/asc")
-fn get_asc() -> Response<{ x: [string] }> { return ok({ "x": [each s in app.board s.name + ":" + s.points] }); }
+fn get_asc() -> Response<{ x: [string] }> { return ok({ "x": [foreach s in app.board s.name + ":" + s.points] }); }
 @get("/top")
-fn get_top(n: i64 = 3) -> Response<{ x: [string] }> { return ok({ "x": [each s in app.board reverse limit n s.name] }); }
+fn get_top(n: i64 = 3) -> Response<{ x: [string] }> { return ok({ "x": [foreach s in app.board reverse limit n s.name] }); }
 @get("/from/{k}")
-fn get_from_k(k: i64) -> Response<{ up: [string], down: [string] }> { return ok({ "up": [each s in app.board from k s.name], "down": [each s in app.board from k reverse s.name] }); }
+fn get_from_k(k: i64) -> Response<{ up: [string], down: [string] }> { return ok({ "up": [foreach s in app.board from k s.name], "down": [foreach s in app.board from k reverse s.name] }); }
 @get("/ends")
 fn get_ends() -> Response<{ first: string, last: string, room: i64 }> { return ok({ "first": or(app.board.first().name, "-"), "last": or(app.board.last().name, "-"), "room": app.board.room() }); }
 @get("/sum")
-fn get_sum() -> Response<{ t: i64 }> { var t = 0; each s in app.board where s.points > 0 { t = t + s.points; } return ok({ "t": t }); }
+fn get_sum() -> Response<{ t: i64 }> { var t = 0; foreach s in app.board where s.points > 0 { t = t + s.points; } return ok({ "t": t }); }
 @post("/fav/{k}")
 fn post_fav_k(k: i64) -> Response<{}> { app.fav.s = slot(app.board.get(k)) + 1; return ok({}); }
 @get("/fav")
 fn get_fav() -> Response<{ fav: string }> { return ok({ "fav": or(app.board.get(app.fav.s - 1).name, "-") }); }
 @post("/churn/{n}")
 fn post_churn_n(n: i64) -> Response<{ size: i64 }> {
-    each i in 0..n { let s = app.board.add(i % 4 - 1); s.name = "c"; app.board.remove(s); }
+    foreach i in 0..n - 1 { let s = app.board.add(i % 4 - 1); s.name = "c"; app.board.remove(s); }
     return ok({ "size": app.board.size() });
 }
 @post("/words")
 fn post_words(w: string<4096>?) -> Response<{}> { let x = app.words.add(w); x.n = len(w); return created({}); }
 @get("/words/{from}")
-fn get_words_from(from: string<4096>) -> Response<{ all: [string], from: [string], back: [string] }> { return ok({ "all": [each x in app.words x.w], "from": [each x in app.words from from x.w], "back": [each x in app.words from from reverse x.w] }); }
+fn get_words_from(from: string<4096>) -> Response<{ all: [string], from: [string], back: [string] }> { return ok({ "all": [foreach x in app.words x.w], "from": [foreach x in app.words from from x.w], "back": [foreach x in app.words from from reverse x.w] }); }
 --- requests
 GET /asc
 GET /ends

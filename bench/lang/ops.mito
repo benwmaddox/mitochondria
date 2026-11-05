@@ -12,44 +12,44 @@ state ops: Ops;
 
 @post("/fill/{n}")
 fn fill(n: i64 in 1..100000) -> Response<{ n: i64 }> {
-    each i in 0..n { let e = ops.items.add(); e.id = i; e.x = i * 3; e.f = 1.5; e.b = i % 2 == 0; e.name = "item"; }
+    foreach i in 0..n - 1 { let e = ops.items.add(); e.id = i; e.x = i * 3; e.f = 1.5; e.b = i % 2 == 0; e.name = "item"; }
     return ok({ "n": ops.items.count() });
 }
 @get("/empty/{n}")
-fn empty(n: i64 in 1..100000000) -> Response<{ s: i64 }> { var s = 0; each i in 0..n { s = s + i; } return ok({ "s": s }); }
+fn empty(n: i64 in 1..100000000) -> Response<{ s: i64 }> { var s = 0; foreach i in 0..n - 1 { s = s + i; } return ok({ "s": s }); }
 @get("/iter_pool/{n}")
-fn iter_pool(n: i64 in 1..100000) -> Response<{ s: i64 }> { var s = 0; each r in 0..n { each e in ops.items { s = s + e.x; } } return ok({ "s": s }); }
+fn iter_pool(n: i64 in 1..100000) -> Response<{ s: i64 }> { var s = 0; foreach r in 0..n - 1 { foreach e in ops.items { s = s + e.x; } } return ok({ "s": s }); }
 @get("/iter_where/{n}")
-fn iter_where(n: i64 in 1..100000) -> Response<{ s: i64 }> { var s = 0; each r in 0..n { each e in ops.items where e.x % 2 == 0 { s = s + e.x; } } return ok({ "s": s }); }
+fn iter_where(n: i64 in 1..100000) -> Response<{ s: i64 }> { var s = 0; foreach r in 0..n - 1 { foreach e in ops.items where e.x % 2 == 0 { s = s + e.x; } } return ok({ "s": s }); }
 @get("/index_pool/{n}")
-fn index_pool(n: i64 in 1..100000000) -> Response<{ s: i64 }> { var s = 0; each i in 0..n { s = s + ops.items[i % 1000].x; } return ok({ "s": s }); }
+fn index_pool(n: i64 in 1..100000000) -> Response<{ s: i64 }> { var s = 0; foreach i in 0..n - 1 { s = s + ops.items[i % 1000].x; } return ok({ "s": s }); }
 @post("/store_int/{n}")
-fn store_int(n: i64 in 1..100000000) -> Response<{ s: i64 }> { each i in 0..n { ops.total = i; } return ok({ "s": ops.total }); }
+fn store_int(n: i64 in 1..100000000) -> Response<{ s: i64 }> { foreach i in 0..n - 1 { ops.total = i; } return ok({ "s": ops.total }); }
 @post("/store_field_int/{n}")
-fn store_field_int(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; each i in 0..n { e.x = i; } return ok({ "s": e.x }); }
+fn store_field_int(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; foreach i in 0..n - 1 { e.x = i; } return ok({ "s": e.x }); }
 @post("/store_float/{n}")
-fn store_float(n: i64 in 1..100000000) -> Response<{ s: i64 }> { each i in 0..n { ops.ratio = 1.5; } return ok({ "s": 0 }); }
+fn store_float(n: i64 in 1..100000000) -> Response<{ s: i64 }> { foreach i in 0..n - 1 { ops.ratio = 1.5; } return ok({ "s": 0 }); }
 @post("/store_field_float/{n}")
-fn store_field_float(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; each i in 0..n { e.f = 2.5; } return ok({ "s": 0 }); }
+fn store_field_float(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; foreach i in 0..n - 1 { e.f = 2.5; } return ok({ "s": 0 }); }
 @post("/store_bool/{n}")
-fn store_bool(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; each i in 0..n { e.b = i % 2 == 0; } return ok({ "s": 0 }); }
+fn store_bool(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; foreach i in 0..n - 1 { e.b = i % 2 == 0; } return ok({ "s": 0 }); }
 @post("/store_string/{n}")
-fn store_string(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; each i in 0..n { e.name = "abc"; } return ok({ "s": 0 }); }
+fn store_string(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; foreach i in 0..n - 1 { e.name = "abc"; } return ok({ "s": 0 }); }
 @get("/read_float/{n}")
-fn read_float(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; var s = 0.0; each i in 0..n { s = s + e.f; } return ok({ "s": int(s) }); }
+fn read_float(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; var s = 0.0; foreach i in 0..n - 1 { s = s + e.f; } return ok({ "s": int(s) }); }
 @get("/cmp_string/{n}")
-fn cmp_string(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; var s = 0; each i in 0..n { if e.name == "item" { s = s + 1; } } return ok({ "s": s }); }
+fn cmp_string(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; var s = 0; foreach i in 0..n - 1 { if e.name == "item" { s = s + 1; } } return ok({ "s": s }); }
 @post("/store_ref/{n}")
-fn store_ref(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; let o = ops.items[6]; each i in 0..n { e.next = slot(o); } return ok({ "s": 0 }); }
+fn store_ref(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; let o = ops.items[6]; foreach i in 0..n - 1 { e.next = slot(o); } return ok({ "s": 0 }); }
 @get("/read_ref/{n}")
-fn read_ref(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; e.next = 6; var s = 0; each i in 0..n { s = s + ops.items[e.next].x; } return ok({ "s": s }); }
+fn read_ref(n: i64 in 1..100000000) -> Response<{ s: i64 }> { let e = ops.items[5]; e.next = 6; var s = 0; foreach i in 0..n - 1 { s = s + ops.items[e.next].x; } return ok({ "s": s }); }
 @post("/list_add/{n}")
-fn list_add(n: i64 in 1..100000000) -> Response<{ s: i64 }> { each i in 0..n { ops.log.add { at: i, v: i }; } return ok({ "s": ops.log.count() }); }
+fn list_add(n: i64 in 1..100000000) -> Response<{ s: i64 }> { foreach i in 0..n - 1 { ops.log.add { at: i, v: i }; } return ok({ "s": ops.log.count() }); }
 @get("/iter_list/{n}")
-fn iter_list(n: i64 in 1..100000) -> Response<{ s: i64 }> { var s = 0; each r in 0..n { each e in ops.log { s = s + e.v; } } return ok({ "s": s }); }
+fn iter_list(n: i64 in 1..100000) -> Response<{ s: i64 }> { var s = 0; foreach r in 0..n - 1 { foreach e in ops.log { s = s + e.v; } } return ok({ "s": s }); }
 @post("/store_arr/{n}")
-fn store_arr(n: i64 in 1..100000000) -> Response<{ s: i64 }> { each i in 0..n { ops.arr[i % 64] = i; } return ok({ "s": ops.arr[3] }); }
+fn store_arr(n: i64 in 1..100000000) -> Response<{ s: i64 }> { foreach i in 0..n - 1 { ops.arr[i % 64] = i; } return ok({ "s": ops.arr[3] }); }
 @post("/add_remove/{n}")
-fn add_remove(n: i64 in 1..10000) -> Response<{ s: i64 }> { each i in 0..n { let e = ops.items.add(); e.x = i; ops.items.remove(e); } return ok({ "s": ops.items.count() }); }
+fn add_remove(n: i64 in 1..10000) -> Response<{ s: i64 }> { foreach i in 0..n - 1 { let e = ops.items.add(); e.x = i; ops.items.remove(e); } return ok({ "s": ops.items.count() }); }
 @get("/respond_array/{n}")
-fn respond_array(n: i64 in 1..1000) -> Response<{ x: [{ id: i64, name: string, x: i64 }] }> { return ok({ "x": [each e in ops.items limit n { "id": e.id, "name": e.name, "x": e.x }] }); }
+fn respond_array(n: i64 in 1..1000) -> Response<{ x: [{ id: i64, name: string, x: i64 }] }> { return ok({ "x": [foreach e in ops.items limit n { "id": e.id, "name": e.name, "x": e.x }] }); }

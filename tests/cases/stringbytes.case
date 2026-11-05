@@ -21,7 +21,7 @@ fn get_motd(i: i64) -> Response<{ b: i64 }> { return ok({ "b": app.motd[i] }); }
 fn get_sum(s: string<16>) -> Response<{ sum: i64, hash: i64 }> {
     var sum = 0;
     var hash = 5381;
-    each i in 0..len(s) { sum = sum + s[i]; hash = (hash * 33 + s[i]) % 4294967296; }
+    foreach i in 0..len(s) - 1 { sum = sum + s[i]; hash = (hash * 33 + s[i]) % 4294967296; }
     return ok({ "sum": sum, "hash": hash });
 }
 --- requests

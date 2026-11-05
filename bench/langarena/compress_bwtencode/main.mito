@@ -11,15 +11,15 @@ fn before(left, right) {
     return bw.pr0[left] < bw.pr0[right] || (bw.pr0[left] == bw.pr0[right] && bw.pr1[left] <= bw.pr1[right]);
 }
 fn merge(low, mid, high) {
-    each x in low..high + 1 { bw.tmp[x] = bw.sa[x]; }
+    foreach x in low..high { bw.tmp[x] = bw.sa[x]; }
     var i = low;
     var j = mid + 1;
     var k = low;
-    each w in 0..1000000000 while i <= mid && j <= high {
+    foreach w in 0..999999999 while i <= mid && j <= high {
         if before(bw.tmp[i], bw.tmp[j]) { bw.sa[k] = bw.tmp[i]; i = i + 1; } else { bw.sa[k] = bw.tmp[j]; j = j + 1; }
         k = k + 1;
     }
-    each w in 0..1000000000 while i <= mid { bw.sa[k] = bw.tmp[i]; i = i + 1; k = k + 1; }
+    foreach w in 0..999999999 while i <= mid { bw.sa[k] = bw.tmp[i]; i = i + 1; k = k + 1; }
 }
 fn msort(low, high) {
     if low < high {
@@ -32,31 +32,31 @@ fn msort(low, high) {
 fn bwt_transform() {
     let n = bw.size;
     bw.counts.fill(0, 256, 0);
-    each i in 0..n { bw.counts[bw.data[i]] = bw.counts[bw.data[i]] + 1; }
+    foreach i in 0..n - 1 { bw.counts[bw.data[i]] = bw.counts[bw.data[i]] + 1; }
     var total = 0;
-    each i in 0..256 { bw.positions[i] = total; total = total + bw.counts[i]; }
+    foreach i in 0..255 { bw.positions[i] = total; total = total + bw.counts[i]; }
     bw.fill.fill(0, 256, 0);
-    each i in 0..n {
+    foreach i in 0..n - 1 {
         let byte = bw.data[i];
         bw.sa[bw.positions[byte] + bw.fill[byte]] = i;
         bw.fill[byte] = bw.fill[byte] + 1;
     }
     var current_rank = 0;
     var prev_char = bw.data[bw.sa[0]];
-    each i in 0..n {
+    foreach i in 0..n - 1 {
         let index = bw.sa[i];
         if bw.data[index] != prev_char { current_rank = current_rank + 1; prev_char = bw.data[index]; }
         bw.rank[index] = current_rank;
     }
     var k = 1;
-    each round in 0..64 while k < n {
-        each i in 0..n {
+    foreach round in 0..63 while k < n {
+        foreach i in 0..n - 1 {
             bw.pr0[i] = bw.rank[i];
             bw.pr1[i] = bw.rank[(i + k) % n];
         }
         msort(0, n - 1);
         bw.rank[bw.sa[0]] = 0;
-        each i in 1..n {
+        foreach i in 1..n - 1 {
             let prev = bw.sa[i - 1];
             let curr = bw.sa[i];
             var step = 1;
@@ -65,7 +65,7 @@ fn bwt_transform() {
         }
         k = k * 2;
     }
-    each i in 0..n {
+    foreach i in 0..n - 1 {
         let suffix = bw.sa[i];
         if suffix == 0 {
             bw.trans[i] = bw.data[n - 1];
@@ -76,7 +76,7 @@ fn bwt_transform() {
     }
 }
 fn make_data(size) {
-    each i in 0..size {
+    foreach i in 0..size - 1 {
         let slot = i % 11;
         var byte = 65;
         if slot == 1 { byte = 66; } else if slot == 2 { byte = 82; } else if slot == 3 { byte = 65; } else if slot == 4 { byte = 67; }
@@ -98,8 +98,8 @@ fn prepare(size: i64 in 2..131072) -> Response<{}> {
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": bw.result }); }

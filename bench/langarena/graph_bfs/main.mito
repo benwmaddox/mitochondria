@@ -31,12 +31,12 @@ fn one_run() {
     var tail = 1;
     g.visited[0] = 1;
     var found = -1;
-    each step in 0..g.vertices + 1 while head < tail && found < 0 {
+    foreach step in 0..g.vertices while head < tail && found < 0 {
         let v = g.qv[head];
         let dist = g.qd[head];
         head = head + 1;
         let vertex = g.vs[v];
-        each nb in vertex.adj {
+        foreach nb in vertex.adj {
             if found < 0 {
                 if nb.to == target {
                     found = dist + 1;
@@ -58,12 +58,12 @@ fn prepare(vertices: i64 in 2..500000, jumps: i64 in 1..1000, jump_len: i64 in 1
     g.vertices = vertices;
     g.last = 42;
     g.result = 0;
-    each i in 0..vertices { g.vs.add(); }
+    foreach i in 0..vertices - 1 { g.vs.add(); }
     // generate_random: a path, then random jumps, in the reference's order and with its random generator
-    each i in 1..vertices { add_edge(i, i - 1); }
-    each v in 0..vertices {
+    foreach i in 1..vertices - 1 { add_edge(i, i - 1); }
+    foreach v in 0..vertices - 1 {
         let num_jumps = next_int(jumps);
-        each j in 0..num_jumps {
+        foreach j in 0..num_jumps - 1 {
             let offset = next_int(jump_len) - jump_len / 2;
             let u = v + offset;
             if u >= 0 && u < vertices && u != v { add_edge(v, u); }
@@ -72,8 +72,8 @@ fn prepare(vertices: i64 in 2..500000, jumps: i64 in 1..1000, jump_len: i64 in 1
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": g.result }); }

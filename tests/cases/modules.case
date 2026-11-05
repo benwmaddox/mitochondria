@@ -28,16 +28,16 @@ fn get_fav() -> Response<{ fav: string }> { return ok({ "fav": or(app.scores.get
 fn get_stats() -> Response<{ added: i64, removed: i64, count: i64, others: i64, names: [string] }> {
     return ok({
         "added": app.scores.added(), "removed": app.scores.removed(), "count": app.scores.items.count(),
-        "others": app.others.size(), "names": [each s in app.scores.items s.name]
+        "others": app.others.size(), "names": [foreach s in app.scores.items s.name]
     });
 }
 @get("/walk")
 fn get_walk() -> Response<{ all: [string], back: [string], from1: [string], back_from1: [string], first: [string], total: i64 }> {
     var total = 0;
-    each s in app.scores where s.points > 15 { total = total + s.points; }
+    foreach s in app.scores where s.points > 15 { total = total + s.points; }
     return ok({
-        "all": [each s in app.scores s.name], "back": [each s in app.scores reverse s.name], "from1": [each s in app.scores from 1 s.name],
-        "back_from1": [each s in app.scores from 1 reverse s.name], "first": [each s in app.scores limit 1 s.name], "total": total
+        "all": [foreach s in app.scores s.name], "back": [foreach s in app.scores reverse s.name], "from1": [foreach s in app.scores from 1 s.name],
+        "back_from1": [foreach s in app.scores from 1 reverse s.name], "first": [foreach s in app.scores limit 1 s.name], "total": total
     });
 }
 @post("/others")

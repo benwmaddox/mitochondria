@@ -8,7 +8,7 @@ struct AR {
 state ar: AR;
 
 fn make_data(size) {
-    each i in 0..size {
+    foreach i in 0..size - 1 {
         let slot = i % 11;
         var byte = 65;
         if slot == 1 { byte = 66; } else if slot == 2 { byte = 82; } else if slot == 3 { byte = 65; } else if slot == 4 { byte = 67; }
@@ -21,7 +21,7 @@ fn make_data(size) {
 fn make_tables() {
     var total = 0;
     var cum = 0;
-    each i in 0..256 {
+    foreach i in 0..255 {
         ar.low_table[i] = cum;
         cum = cum + ar.freq[i];
         ar.high_table[i] = cum;
@@ -42,7 +42,7 @@ fn write_bit(bit) {
 }
 fn encode() {
     ar.freq.fill(0, 256, 0);
-    each i in 0..ar.size { ar.freq[ar.data[i]] = ar.freq[ar.data[i]] + 1; }
+    foreach i in 0..ar.size - 1 { ar.freq[ar.data[i]] = ar.freq[ar.data[i]] + 1; }
     make_tables();
     var low = 0;
     var high = 4294967295;
@@ -50,20 +50,20 @@ fn encode() {
     ar.buffer = 0;
     ar.bit_pos = 0;
     ar.out_len = 0;
-    each i in 0..ar.size {
+    foreach i in 0..ar.size - 1 {
         let byte = ar.data[i];
         let range = high - low + 1;
         high = low + (range * ar.high_table[byte] / ar.total) - 1;
         low = low + (range * ar.low_table[byte] / ar.total);
         var going = 1;
-        each step in 0..1000 while going == 1 {
+        foreach step in 0..999 while going == 1 {
             if high < 2147483648 {
                 write_bit(0);
-                each p in 0..pending { write_bit(1); }
+                foreach p in 0..pending - 1 { write_bit(1); }
                 pending = 0;
             } else if low >= 2147483648 {
                 write_bit(1);
-                each p in 0..pending { write_bit(0); }
+                foreach p in 0..pending - 1 { write_bit(0); }
                 pending = 0;
                 low = low - 2147483648;
                 high = high - 2147483648;
@@ -83,10 +83,10 @@ fn encode() {
     pending = pending + 1;
     if low < 1073741824 {
         write_bit(0);
-        each p in 0..pending { write_bit(1); }
+        foreach p in 0..pending - 1 { write_bit(1); }
     } else {
         write_bit(1);
-        each p in 0..pending { write_bit(0); }
+        foreach p in 0..pending - 1 { write_bit(0); }
     }
     // flush
     if ar.bit_pos > 0 {
@@ -114,16 +114,16 @@ fn decode() {
     ar.in_bit = 0;
     if ar.out_len > 0 { ar.in_cur = ar.out[0]; } else { ar.in_cur = 0; }
     var value = 0;
-    each i in 0..32 { value = (value << 1) | read_bit(); }
+    foreach i in 0..31 { value = (value << 1) | read_bit(); }
     var low = 0;
     var high = 4294967295;
-    each j in 0..data_size {
+    foreach j in 0..data_size - 1 {
         let range = high - low + 1;
         let scaled = ((value - low + 1) * ar.total - 1) / range;
         // partition_point: the first symbol whose cumulative high is above `scaled`
         var first = 0;
         var past = 256;
-        each w in 0..9 while first < past {
+        foreach w in 0..8 while first < past {
             let mid = (first + past) / 2;
             if ar.high_table[mid] <= scaled { first = mid + 1; } else { past = mid; }
         }
@@ -132,7 +132,7 @@ fn decode() {
         high = low + (range * ar.high_table[symbol] / ar.total) - 1;
         low = low + (range * ar.low_table[symbol] / ar.total);
         var going = 1;
-        each step in 0..1000 while going == 1 {
+        foreach step in 0..999 while going == 1 {
             if high >= 2147483648 && low < 2147483648 && (low < 1073741824 || high >= 3221225472) {
                 going = 0;
             } else {
@@ -168,13 +168,13 @@ fn prepare(size: i64 in 2..131072) -> Response<{}> {
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> {
     var same = 0;
     if ar.decoded_len == ar.size { same = 1; }
-    each i in 0..ar.size { if ar.decoded[i] != ar.data[i] { same = 0; } }
+    foreach i in 0..ar.size - 1 { if ar.decoded[i] != ar.data[i] { same = 0; } }
     return ok({ "checksum": (ar.result + same * 100000) % 4294967296 });
 }

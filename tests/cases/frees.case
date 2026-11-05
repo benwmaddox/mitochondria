@@ -13,7 +13,7 @@ fn post_t() -> Response<{ slot: i64 }> { let t = app.ts.add(); t.n = 7; return c
 @delete("/t/{k}")
 fn delete_t_k(k: i64) -> Response<{ n: i64 }> { let t = app.ts[k]; app.ts.remove(t); if k == 0 { fail 409 "changed my mind"; } return ok({ "n": t.n }); }
 @post("/swap")
-fn post_swap() -> Response<{ got: bool }> { each t in app.ts { app.ts.remove(t); } let u = app.ts.try_add(); return ok({ "got": exists(u) }); }
+fn post_swap() -> Response<{ got: bool }> { foreach t in app.ts { app.ts.remove(t); } let u = app.ts.try_add(); return ok({ "got": exists(u) }); }
 @get("/count")
 fn get_count() -> Response<{ n: i64, c: i64 }> { return ok({ "n": app.ts.count(), "c": app.c.n }); }
 @post("/f")

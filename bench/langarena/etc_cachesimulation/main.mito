@@ -20,16 +20,16 @@ fn set_value(node, updated) {
     let base = (node - 1) * 24;
     var at = 0;
     if updated == 1 {
-        each index in 0..len("updated_") { c.vbytes[base + at] = "updated_"[index]; at = at + 1; }
+        foreach index in 0..len("updated_") - 1 { c.vbytes[base + at] = "updated_"[index]; at = at + 1; }
     } else {
-        each index in 0..len("new_") { c.vbytes[base + at] = "new_"[index]; at = at + 1; }
+        foreach index in 0..len("new_") - 1 { c.vbytes[base + at] = "new_"[index]; at = at + 1; }
     }
     var digits = 1;
     var rest = c.run_id;
-    each step in 0..12 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
+    foreach step in 0..11 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
     var slot = base + at + digits - 1;
     var remaining = c.run_id;
-    each step in 0..digits {
+    foreach step in 0..digits - 1 {
         c.vbytes[slot] = 48 + remaining % 10;
         remaining = remaining / 10;
         slot = slot - 1;
@@ -89,7 +89,7 @@ fn cache_put(key, updated) {
     }
 }
 fn one_run() {
-    each step in 0..1000 {
+    foreach step in 0..999 {
         let key = "item_" + next_int(c.values);
         if cache_get(key) != 0 {
             c.hits = c.hits + 1;
@@ -117,9 +117,9 @@ fn prepare(values: i64 in 1..1000000, size: i64 in 1..8192) -> Response<{}> {
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { c.last = 42; c.run_id = 0; each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { c.last = 42; c.run_id = 0; foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> {
     var result = 5432;

@@ -11,9 +11,9 @@ fn next_int(max) {
 }
 fn crc32() {
     var crc = 0xFFFFFFFF;
-    each i in 0..h.size {
+    foreach i in 0..h.size - 1 {
         crc = crc ^ h.data[i];
-        each bit in 0..8 {
+        foreach bit in 0..7 {
             if (crc & 1) != 0 { crc = (crc >> 1) ^ 0xEDB88320; } else { crc = crc >> 1; }
         }
     }
@@ -30,12 +30,12 @@ fn prepare(size: i64 in 1..1200000) -> Response<{}> {
     h.size = size;
     h.last = 42;
     h.result = 0;
-    each i in 0..size { h.data[i] = next_int(256); }
+    foreach i in 0..size - 1 { h.data[i] = next_int(256); }
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { h.last = 42; each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { h.last = 42; foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": h.result }); }

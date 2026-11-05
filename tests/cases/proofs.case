@@ -6,7 +6,7 @@ state a: A;
 
 fn bumped(n) { var m = n; m = m + 5; return m; }
 @post("/fill")
-fn post_fill() -> Response<{}> { each i in 0..4 { a.arr[i] = 10 + i; } return ok({}); }
+fn post_fill() -> Response<{}> { foreach i in 0..3 { a.arr[i] = 10 + i; } return ok({}); }
 @get("/safe/{n}")
 fn get_safe(n: i64 in 0..3) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n] }); }
 @get("/edge/{n}")
@@ -14,9 +14,9 @@ fn get_edge(n: i64 in 0..4) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n] 
 @get("/negative/{n}")
 fn get_negative(n: i64 in -1..3) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n] }); }
 @get("/sum/{n}")
-fn get_sum(n: i64 in 0..3) -> Response<{ v: i64 }> { var s = 0; each i in 0..n + 1 { s = s + a.arr[i]; } return ok({ "v": s }); }
+fn get_sum(n: i64 in 0..3) -> Response<{ v: i64 }> { var s = 0; foreach i in 0..n { s = s + a.arr[i]; } return ok({ "v": s }); }
 @get("/sum5/{n}")
-fn get_sum5(n: i64 in 0..4) -> Response<{ v: i64 }> { var s = 0; each i in 0..n + 1 { s = s + a.arr[i]; } return ok({ "v": s }); }
+fn get_sum5(n: i64 in 0..4) -> Response<{ v: i64 }> { var s = 0; foreach i in 0..n { s = s + a.arr[i]; } return ok({ "v": s }); }
 @get("/arith/{n}")
 fn get_arith(n: i64 in 0..1) -> Response<{ v: i64 }> { return ok({ "v": a.arr[n * 2 + 1] }); }
 @get("/arith2/{n}")

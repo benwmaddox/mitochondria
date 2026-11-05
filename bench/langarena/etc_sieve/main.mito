@@ -11,17 +11,17 @@ fn one_run() {
     s.primes[0] = 0;
     s.primes[1] = 0;
     var root = 0;
-    each step in 0..limit while (root + 1) * (root + 1) <= limit { root = root + 1; }
-    each p in 2..root + 1 {
+    foreach step in 0..limit - 1 while (root + 1) * (root + 1) <= limit { root = root + 1; }
+    foreach p in 2..root {
         if s.primes[p] == 1 {
             var multiple = p * p;
-            each step in 0..limit while multiple <= limit { s.primes[multiple] = 0; multiple = multiple + p; }
+            foreach step in 0..limit - 1 while multiple <= limit { s.primes[multiple] = 0; multiple = multiple + p; }
         }
     }
     var last_prime = 2;
     var count = 1;
     var n = 3;
-    each step in 0..limit while n <= limit {
+    foreach step in 0..limit - 1 while n <= limit {
         if s.primes[n] == 1 { last_prime = n; count = count + 1; }
         n = n + 2;
     }
@@ -31,8 +31,8 @@ fn one_run() {
 @post("/prepare/{limit}")
 fn prepare(limit: i64 in 2..3000000) -> Response<{}> { s.limit = limit; s.checksum = 0; return ok({}); }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": s.checksum }); }

@@ -5,54 +5,54 @@
 struct App { cells: i64[64]; bytes: u8[64]; total: i64; }
 state app: App;
 
-fn sum_cells() { var total = 0; each i in 0..64 { total = total + app.cells[i] * (i + 1); } return total; }
-fn sum_bytes() { var total = 0; each i in 0..64 { total = total + app.bytes[i] * (i + 1); } return total; }
+fn sum_cells() { var total = 0; foreach i in 0..63 { total = total + app.cells[i] * (i + 1); } return total; }
+fn sum_bytes() { var total = 0; foreach i in 0..63 { total = total + app.bytes[i] * (i + 1); } return total; }
 @post("/fill/{from}/{to}")
 fn post_fill(from: i64, to: i64) -> Response<{ sum: i64, last: i64 }> {
-    each i in from..to { app.cells[i] = i * 10; }
+    foreach i in from..to - 1 { app.cells[i] = i * 10; }
     return ok({ "sum": sum_cells(), "last": app.cells[63] });
 }
 @post("/shift/{offset}")
 fn post_shift(offset: i64) -> Response<{ sum: i64 }> {
-    each i in 0..40 { app.cells[i + offset] = app.cells[i] + 1; }
+    foreach i in 0..39 { app.cells[i + offset] = app.cells[i] + 1; }
     return ok({ "sum": sum_cells() });
 }
 @post("/mirror")
 fn post_mirror() -> Response<{ first: i64, last: i64, sum: i64 }> {
-    each i in 0..64 { app.cells[63 - i] = i; }
+    foreach i in 0..63 { app.cells[63 - i] = i; }
     return ok({ "first": app.cells[0], "last": app.cells[63], "sum": sum_cells() });
 }
 @post("/step/{start}/{step}/{limit}")
 fn post_step(start: i64, step: i64, limit: i64) -> Response<{ sum: i64 }> {
-    each i in 0..64 { app.bytes[i] = 1; }
+    foreach i in 0..63 { app.bytes[i] = 1; }
     var at = start;
-    each guard in 0..1000 while at <= limit { app.bytes[at] = 0; at = at + step; }
+    foreach guard in 0..999 while at <= limit { app.bytes[at] = 0; at = at + step; }
     return ok({ "sum": sum_bytes() });
 }
 @post("/fill-then-fail")
 fn post_fill_then_fail() -> Response<{}> {
-    each i in 0..64 { app.cells[i] = 999; }
+    foreach i in 0..63 { app.cells[i] = 999; }
     fail 409 "undone";
 }
 @post("/branch/{to}")
 fn post_branch(to: i64) -> Response<{ sum: i64 }> {
-    each i in 0..to { if i < 64 { app.cells[i] = -i; } }
+    foreach i in 0..to - 1 { if i < 64 { app.cells[i] = -i; } }
     return ok({ "sum": sum_cells() });
 }
 @get("/sum/{from}/{to}")
 fn get_sum(from: i64, to: i64) -> Response<{ total: i64 }> {
     var total = 0;
-    each i in from..to { total = total + app.cells[i]; }
+    foreach i in from..to - 1 { total = total + app.cells[i]; }
     return ok({ "total": total });
 }
 @post("/counted/{start}/{step}/{n}")
 fn post_counted(start: i64, step: i64, n: i64) -> Response<{ sum: i64 }> {
-    each i in 0..64 { app.cells[i] = 0; }
+    foreach i in 0..63 { app.cells[i] = 0; }
     var k = start;
     var after = start;
-    each i in 0..n { app.cells[k] = app.cells[k] + i; k = k + step; app.bytes[after % 64] = 0; }
+    foreach i in 0..n - 1 { app.cells[k] = app.cells[k] + i; k = k + step; app.bytes[after % 64] = 0; }
     var at = start;
-    each i in 0..n { at = at + step; app.cells[at - step] = app.cells[at - step] + 1; }
+    foreach i in 0..n - 1 { at = at + step; app.cells[at - step] = app.cells[at - step] + 1; }
     return ok({ "sum": sum_cells() });
 }
 --- requests

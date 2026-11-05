@@ -28,7 +28,7 @@ fn heap_push(f, v) {
     var i = g.hn;
     g.hn = g.hn + 1;
     var going = 1;
-    each w in 0..64 while going == 1 && i > 0 {
+    foreach w in 0..63 while going == 1 && i > 0 {
         let p = (i - 1) / 2;
         if f < g.hf[p] || (f == g.hf[p] && v < g.hv[p]) {
             g.hf[i] = g.hf[p];
@@ -51,7 +51,7 @@ fn heap_pop() {
         let v = g.hv[n];
         var i = 0;
         var going = 1;
-        each w in 0..64 while going == 1 {
+        foreach w in 0..63 while going == 1 {
             var c = 2 * i + 1;
             if c >= n {
                 going = 0;
@@ -79,14 +79,14 @@ fn one_run() {
     g.hn = 0;
     heap_push(target, 0);
     var found = -1;
-    each step in 0..100000000 while g.hn > 0 && found < 0 {
+    foreach step in 0..99999999 while g.hn > 0 && found < 0 {
         heap_pop();
         let current = g.cur_v;
         if current == target {
             found = g.gs[current];
         } else {
             let vertex = g.vs[current];
-            each nb in vertex.adj {
+            foreach nb in vertex.adj {
                 let tentative = g.gs[current] + 1;
                 if tentative < g.gs[nb.to] {
                     g.gs[nb.to] = tentative;
@@ -108,12 +108,12 @@ fn prepare(vertices: i64 in 2..500000, jumps: i64 in 1..1000, jump_len: i64 in 1
     g.vertices = vertices;
     g.last = 42;
     g.result = 0;
-    each i in 0..vertices { g.vs.add(); }
+    foreach i in 0..vertices - 1 { g.vs.add(); }
     // generate_random: a path, then random jumps, in the reference's order and with its random generator
-    each i in 1..vertices { add_edge(i, i - 1); }
-    each v in 0..vertices {
+    foreach i in 1..vertices - 1 { add_edge(i, i - 1); }
+    foreach v in 0..vertices - 1 {
         let num_jumps = next_int(jumps);
-        each j in 0..num_jumps {
+        foreach j in 0..num_jumps - 1 {
             let offset = next_int(jump_len) - jump_len / 2;
             let u = v + offset;
             if u >= 0 && u < vertices && u != v { add_edge(v, u); }
@@ -122,8 +122,8 @@ fn prepare(vertices: i64 in 2..500000, jumps: i64 in 1..1000, jump_len: i64 in 1
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": g.result }); }

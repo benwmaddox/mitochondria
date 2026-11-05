@@ -9,13 +9,13 @@ state b: Bench;
 @post("/insert/{n}")
 fn insert(n: i64 in 1..1048576) -> Response<{ size: i64 }> {
     var x = 20261104;
-    each i in 0..n { x = x * 48271 % 2147483647; let e = b.m.add(x * 2); e.v = x; }
+    foreach i in 0..n - 1 { x = x * 48271 % 2147483647; let e = b.m.add(x * 2); e.v = x; }
     return ok({ "size": b.m.size() });
 }
 @get("/hit/{n}/{ops}")
 fn hit(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104; var s = 0;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
         let e = b.m.find(x * 2);
@@ -26,7 +26,7 @@ fn hit(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }>
 @get("/miss/{n}/{ops}")
 fn miss(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104; var s = 0;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
         let e = b.m.find(x * 2 + 1);
@@ -37,7 +37,7 @@ fn miss(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }
 @get("/mixed/{n}/{ops}")
 fn mixed(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104; var s = 0;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
         let e = b.m.find(x * 2 + j % 2);
@@ -48,7 +48,7 @@ fn mixed(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 
 @post("/increment/{n}/{ops}")
 fn increment(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
         let e = b.m.find(x * 2);
@@ -59,10 +59,10 @@ fn increment(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: 
 @get("/range/{n}/{ops}")
 fn range(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104; var s = 0;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
-        each e in b.m from x * 2 limit 100 { s = s + e.v; }
+        foreach e in b.m from x * 2 limit 100 { s = s + e.v; }
     }
     return ok({ "sum": s });
 }
@@ -71,7 +71,7 @@ fn range(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 
 @delete("/delete/{x}/{count}")
 fn delete(x: i64, count: i64 in 1..16384) -> Response<{ x: i64, size: i64 }> {
     var y = x;
-    each i in 0..count {
+    foreach i in 0..count - 1 {
         y = y * 48271 % 2147483647;
         b.m.remove_key(y * 2);
     }
@@ -87,10 +87,10 @@ fn stats() -> Response<{ committed_kb: i64, live_kb: i64, reserved_kb: i64 }> {
 @post("/churn/{x}/{y}/{count}")
 fn churn(x: i64, y: i64, count: i64 in 1..8192) -> Response<{ x: i64, y: i64, size: i64 }> {
     var nx = x; var ny = y;
-    each i in 0..count {
+    foreach i in 0..count - 1 {
         ny = ny * 48271 % 2147483647;
         var hit = -1;
-        each e in b.m from ny * 2 limit 1 { if e.k == ny * 2 { hit = slot(e); } }
+        foreach e in b.m from ny * 2 limit 1 { if e.k == ny * 2 { hit = slot(e); } }
         if hit >= 0 { b.m.remove(b.m.get(hit)); }
         nx = nx * 48271 % 2147483647;
         let it = b.m.add(nx * 2); it.v = nx;
@@ -101,9 +101,9 @@ fn churn(x: i64, y: i64, count: i64 in 1..8192) -> Response<{ x: i64, y: i64, si
 @get("/probe/{y}/{ops}")
 fn probe(y: i64, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var ny = y; var s = 0;
-    each i in 0..ops {
+    foreach i in 0..ops - 1 {
         ny = ny * 48271 % 2147483647;
-        each e in b.m from ny * 2 limit 1 { if e.k == ny * 2 { s = s + e.v; } }
+        foreach e in b.m from ny * 2 limit 1 { if e.k == ny * 2 { s = s + e.v; } }
     }
     return ok({ "sum": s });
 }
@@ -114,7 +114,7 @@ fn shape() -> Response<{ leaves: i64, inners: i64, height: i64, size: i64 }> { r
 @post("/insert_from/{x}/{n}")
 fn insert_from(x: i64, n: i64 in 1..1048576) -> Response<{ x: i64, size: i64 }> {
     var nx = x;
-    each i in 0..n { nx = nx * 48271 % 2147483647; let e = b.m.add(nx * 2); e.v = nx; }
+    foreach i in 0..n - 1 { nx = nx * 48271 % 2147483647; let e = b.m.add(nx * 2); e.v = nx; }
     return ok({ "x": nx, "size": b.m.size() });
 }
 
@@ -122,6 +122,6 @@ fn insert_from(x: i64, n: i64 in 1..1048576) -> Response<{ x: i64, size: i64 }> 
 @get("/scan/{limit}")
 fn scan(limit: i64 in 1..2000000) -> Response<{ sum: i64 }> {
     var s = 0;
-    each e in b.m limit limit { s = s + e.v; }
+    foreach e in b.m limit limit { s = s + e.v; }
     return ok({ "sum": s });
 }

@@ -40,7 +40,7 @@ fn add_room(who: Session from header("X-Session"), name: string<1..48>) -> Respo
 
 @get("/rooms")
 fn rooms(who: Session from header("X-Session")) -> Response<{ rooms: [{ id: Room, name: string }] }> {
-    return ok({ rooms: [each r in chat.rooms { id: r, name: r.name }] });
+    return ok({ rooms: [foreach r in chat.rooms { id: r, name: r.name }] });
 }
 
 @post("/rooms/{room}/messages")
@@ -58,7 +58,7 @@ fn post_message(who: Session from header("X-Session"), room: Room, body: string<
 fn messages(who: Session from header("X-Session"), room: Room, limit: i64 = 50) -> Response<{ room: string, messages: [{ seq: i64, author: string, at: i64, body: string }] }> {
     return ok({
         room: room.name,
-        messages: [each m in room.messages reverse limit min(limit, 100) {
+        messages: [foreach m in room.messages reverse limit min(limit, 100) {
             seq: m.seq, author: or(chat.sessions[m.author].name, "[deleted]"), at: m.at, body: m.body
         }]
     });
@@ -68,7 +68,7 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 = 50) 
 fn typing(who: Session from header("X-Session"), room: Room) -> Response<{ ok: bool }> {
     let t = now();
     var found = false;
-    each ty in room.typing {
+    foreach ty in room.typing {
         if ty.who == slot(who) { ty.until = typing_until(t); found = true; }
         else if ty.until < t { room.typing.remove(ty); }
     }
@@ -79,13 +79,13 @@ fn typing(who: Session from header("X-Session"), room: Room) -> Response<{ ok: b
 @get("/rooms/{room}/typing")
 fn who_is_typing(who: Session from header("X-Session"), room: Room) -> Response<{ typing: [{ name: string }] }> {
     let t = now();
-    return ok({ typing: [each ty in room.typing where ty.until >= t { name: or(chat.sessions[ty.who].name, "[gone]") }] });
+    return ok({ typing: [foreach ty in room.typing where ty.until >= t { name: or(chat.sessions[ty.who].name, "[gone]") }] });
 }
 
 @get("/stats")
 fn stats() -> Response<{ sessions: i64, rooms: i64, messages: i64, next_seq: i64, committed_kb: i64, live_kb: i64, reserved_kb: i64 }> {
     var messages = 0;
-    each r in chat.rooms { messages += r.messages.count(); }
+    foreach r in chat.rooms { messages += r.messages.count(); }
     return ok({
         sessions: chat.sessions.count(), rooms: chat.rooms.size(), messages: messages, next_seq: chat.meta.next_seq,
         committed_kb: stat("committed_kb"), live_kb: stat("live_kb"), reserved_kb: stat("reserved_kb")

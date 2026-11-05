@@ -9,11 +9,11 @@ fn set(i: i64, k: i64) -> Response<{}> { bt.t.set_key(bt.t.get(i), k); return ok
 @post("/del/{i}")
 fn del(i: i64) -> Response<{}> { bt.t.remove(bt.t.get(i)); return ok({}); }
 @get("/all")
-fn all() -> Response<{ x: [i64] }> { return ok({ "x": [each e in bt.t e.k * 100000 + slot(e)] }); }
+fn all() -> Response<{ x: [i64] }> { return ok({ "x": [foreach e in bt.t e.k * 100000 + slot(e)] }); }
 @get("/rev")
-fn rev() -> Response<{ x: [i64] }> { return ok({ "x": [each e in bt.t reverse e.k * 100000 + slot(e)] }); }
+fn rev() -> Response<{ x: [i64] }> { return ok({ "x": [foreach e in bt.t reverse e.k * 100000 + slot(e)] }); }
 @get("/from/{k}")
-fn from(k: i64) -> Response<{ up: [i64], down: [i64] }> { return ok({ "up": [each e in bt.t from k limit 40 e.k * 100000 + slot(e)], "down": [each e in bt.t from k reverse limit 40 e.k * 100000 + slot(e)] }); }
+fn from(k: i64) -> Response<{ up: [i64], down: [i64] }> { return ok({ "up": [foreach e in bt.t from k limit 40 e.k * 100000 + slot(e)], "down": [foreach e in bt.t from k reverse limit 40 e.k * 100000 + slot(e)] }); }
 @get("/ends")
 fn ends() -> Response<{ first: i64, last: i64, size: i64 }> { return ok({ "first": or(bt.t.first().k, -1), "last": or(bt.t.last().k, -1), "size": bt.t.size() }); }
 @get("/find/{k}")

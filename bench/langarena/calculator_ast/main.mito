@@ -17,15 +17,15 @@ fn next_int(max) {
 }
 // the program text
 fn put(text) {
-    each index in 0..len(text) { g.text[g.text_len] = text[index]; g.text_len = g.text_len + 1; }
+    foreach index in 0..len(text) - 1 { g.text[g.text_len] = text[index]; g.text_len = g.text_len + 1; }
 }
 fn put_int(value) {
     var digits = 1;
     var rest = value;
-    each step in 0..20 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
+    foreach step in 0..19 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
     var slot = g.text_len + digits - 1;
     var remaining = value;
-    each step in 0..digits {
+    foreach step in 0..digits - 1 {
         g.text[slot] = 48 + remaining % 10;
         remaining = remaining / 10;
         slot = slot - 1;
@@ -40,11 +40,11 @@ fn prepare(operations: i64 in 1..12000) -> Response<{}> {
     g.result = 0;
     g.text_len = 0;
     put("v0 = 1\n");
-    each index in 0..10 {
+    foreach index in 0..9 {
         let var_id = index + 1;
         put_var(var_id); put(" = "); put_var(var_id - 1); put(" + "); put_int(var_id); put("\n");
     }
-    each index in 0..operations {
+    foreach index in 0..operations - 1 {
         let var_id = index + 10;
         put_var(var_id); put(" = "); put_var(var_id - 1); put(" + ");
         let choice = next_int(10);
@@ -93,7 +93,7 @@ fn advance() {
     if g.pos >= g.text_len { g.cur = 0; } else { g.cur = g.text[g.pos]; }
 }
 fn skip_whitespace() {
-    each step in 0..g.text_len + 1 while g.cur == 32 || g.cur == 9 || g.cur == 10 || g.cur == 13 { advance(); }
+    foreach step in 0..g.text_len while g.cur == 32 || g.cur == 9 || g.cur == 10 || g.cur == 13 { advance(); }
 }
 fn is_digit(byte) { return byte >= 48 && byte <= 57; }
 fn is_letter(byte) { return (byte >= 97 && byte <= 122) || (byte >= 65 && byte <= 90); }
@@ -102,7 +102,7 @@ fn parse_expression_rest(left_node) {
     if g.pos < 0 { return 0; }
     var current = left_node;
     var going = 1;
-    each step in 0..g.text_len + 1 while going == 1 {
+    foreach step in 0..g.text_len while going == 1 {
         skip_whitespace();
         if g.cur == 43 || g.cur == 45 {
             let op = g.cur;
@@ -119,7 +119,7 @@ fn parse_term_rest(left_node) {
     if g.pos < 0 { return 0; }
     var current = left_node;
     var going = 1;
-    each step in 0..g.text_len + 1 while going == 1 {
+    foreach step in 0..g.text_len while going == 1 {
         skip_whitespace();
         if g.cur == 42 || g.cur == 47 || g.cur == 37 {
             let op = g.cur;
@@ -134,7 +134,7 @@ fn parse_term_rest(left_node) {
 }
 fn parse_number() {
     var value = 0;
-    each step in 0..g.text_len + 1 while is_digit(g.cur) {
+    foreach step in 0..g.text_len while is_digit(g.cur) {
         value = value * 10 + (g.cur - 48);
         advance();
     }
@@ -143,7 +143,7 @@ fn parse_number() {
 fn parse_variable() {
     if g.pos < 0 { return 0; }
     let start = g.pos;
-    each step in 0..g.text_len + 1 while is_letter(g.cur) || is_digit(g.cur) { advance(); }
+    foreach step in 0..g.text_len while is_letter(g.cur) || is_digit(g.cur) { advance(); }
     let length = g.pos - start;
     skip_whitespace();
     if g.cur == 61 {
@@ -187,14 +187,14 @@ fn one_run() {
     g.count = 0;
     g.pos = 0;
     g.cur = g.text[0];
-    each step in 0..g.text_len + 1 while g.cur != 0 {
+    foreach step in 0..g.text_len while g.cur != 0 {
         skip_whitespace();
         if g.cur != 0 {
             let expression = parse_expression();
             g.expressions[g.count] = expression;
             g.count = g.count + 1;
             skip_whitespace();
-            each newline in 0..g.text_len + 1 while g.cur == 10 {
+            foreach newline in 0..g.text_len while g.cur == 10 {
                 advance();
                 skip_whitespace();
             }
@@ -204,14 +204,14 @@ fn one_run() {
     let last = g.expressions[g.count - 1];
     if g.kind[last] == 3 {
         var hash = 5381;
-        each index in 0..g.name_len[last] { hash = (hash * 33 + g.text[g.name_start[last] + index]) % 4294967296; }
+        foreach index in 0..g.name_len[last] - 1 { hash = (hash * 33 + g.text[g.name_start[last] + index]) % 4294967296; }
         total = total + hash;
     }
     g.result = total % 4294967296;
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": g.result }); }

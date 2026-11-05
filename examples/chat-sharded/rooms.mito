@@ -18,7 +18,7 @@ struct Shard {
 state shard: Shard;
 
 fn find_room(id: i64) -> Room {
-    each r in shard.rooms where r.id == id limit 1 { return r; }
+    foreach r in shard.rooms where r.id == id limit 1 { return r; }
     fail 404 "no such room";
 }
 fn typing_until(t: i64) -> i64 { return t + max(shard.meta.typing_ttl, 5000); }
@@ -38,7 +38,7 @@ fn add_room(name: string<1..48>, forwarded user: string<16>, forwarded author: s
 
 @get("/rooms")
 fn rooms(forwarded user: string<16>, forwarded author: string<32>) -> Response<{ rooms: [{ id: i64, name: string }] }> {
-    return ok({ rooms: [each d in shard.directory { id: d.id, name: d.name }] });
+    return ok({ rooms: [foreach d in shard.directory { id: d.id, name: d.name }] });
 }
 
 @post("/rooms/{room}/messages")
@@ -54,7 +54,7 @@ fn messages(room: i64, limit: i64 = 50, forwarded user: string<16>, forwarded au
     let r = find_room(room);
     return ok({
         room: r.name,
-        messages: [each m in r.messages reverse limit min(limit, 100) { seq: m.seq, author: m.author, at: m.at, body: m.body }]
+        messages: [foreach m in r.messages reverse limit min(limit, 100) { seq: m.seq, author: m.author, at: m.at, body: m.body }]
     });
 }
 
@@ -63,7 +63,7 @@ fn typing(room: i64, forwarded user: string<16>, forwarded author: string<32>) -
     let r = find_room(room);
     let t = now();
     var found = false;
-    each ty in r.typing {
+    foreach ty in r.typing {
         if ty.user == user { ty.until = typing_until(t); found = true; }
         else if ty.until < t { r.typing.remove(ty); }
     }
@@ -75,5 +75,5 @@ fn typing(room: i64, forwarded user: string<16>, forwarded author: string<32>) -
 fn who_is_typing(room: i64, forwarded user: string<16>, forwarded author: string<32>) -> Response<{ typing: [{ name: string }] }> {
     let r = find_room(room);
     let t = now();
-    return ok({ typing: [each ty in r.typing where ty.until >= t { name: ty.name }] });
+    return ok({ typing: [foreach ty in r.typing where ty.until >= t { name: ty.name }] });
 }

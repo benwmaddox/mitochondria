@@ -10,7 +10,7 @@ fn get_plain(x: i64, y: i64) -> Response<{ sum: i64 }> { return ok({ "sum": x + 
 @post("/grow/{n}")
 fn post_grow(n: i64) -> Response<{ total: i64 }> {
     app.total = 1;
-    each i in 0..n { app.total = wrapping_mul(app.total, 3) + 1; if app.total > 100 { app.total = app.total - 100; } }
+    foreach i in 0..n - 1 { app.total = wrapping_mul(app.total, 3) + 1; if app.total > 100 { app.total = app.total - 100; } }
     var x = 4611686018427387904;
     x = wrapping_add(x, x);
     return ok({ "total": x });

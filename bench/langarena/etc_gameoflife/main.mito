@@ -16,15 +16,15 @@ fn next_float() {
 fn one_generation() {
     let w = life.w;
     let h = life.h;
-    each y in 0..h {
-        each x in 0..w {
+    foreach y in 0..h - 1 {
+        foreach x in 0..w - 1 {
             let cell = life.cells[y * w + x];
             var alive_neighbors = 0;
-            each nb in cell.neighbors { if life.cells[nb.y * w + nb.x].alive { alive_neighbors = alive_neighbors + 1; } }
+            foreach nb in cell.neighbors { if life.cells[nb.y * w + nb.x].alive { alive_neighbors = alive_neighbors + 1; } }
             if cell.alive { cell.next_state = alive_neighbors == 2 || alive_neighbors == 3; } else { cell.next_state = alive_neighbors == 3; }
         }
     }
-    each i in 0..w * h {
+    foreach i in 0..w * h - 1 {
         let cell = life.cells[i];
         cell.alive = cell.next_state;
     }
@@ -36,13 +36,13 @@ fn prepare(w: i64 in 1..500, h: i64 in 1..500) -> Response<{}> {
     life.w = w;
     life.h = h;
     life.last = 42;
-    each y in 0..h { each x in 0..w { let c = life.cells.add(); c.alive = false; c.next_state = false; } }
+    foreach y in 0..h - 1 { foreach x in 0..w - 1 { let c = life.cells.add(); c.alive = false; c.next_state = false; } }
     // link_neighbors: the eight neighbours in the reference's order (dy then dx, from -1), wrapping around
-    each y in 0..h {
-        each x in 0..w {
+    foreach y in 0..h - 1 {
+        foreach x in 0..w - 1 {
             let cell = life.cells[y * w + x];
-            each dy in 0..3 {
-                each dx in 0..3 {
+            foreach dy in 0..2 {
+                foreach dx in 0..2 {
                     if dx != 1 || dy != 1 {
                         let ny = (y + dy - 1 + h) % h;
                         let nx = (x + dx - 1 + w) % w;
@@ -54,18 +54,18 @@ fn prepare(w: i64 in 1..500, h: i64 in 1..500) -> Response<{}> {
     }
     // the reference's prepare(): a cell is alive when the next random number in [0, 1) is below 0.1
     life.last = 42;
-    each y in 0..h { each x in 0..w { if next_float() < 0.1 { life.cells[y * w + x].alive = true; } } }
+    foreach y in 0..h - 1 { foreach x in 0..w - 1 { if next_float() < 0.1 { life.cells[y * w + x].alive = true; } } }
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_generation(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_generation(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_generation(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_generation(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> {
     var alive = 0;
     var hash = 2166136261;
-    each i in 0..life.w * life.h {
+    foreach i in 0..life.w * life.h - 1 {
         var a = 0;
         if life.cells[i].alive { a = 1; alive = alive + 1; }
         hash = ((hash ^ a) * 16777619) % 4294967296;

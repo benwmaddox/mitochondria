@@ -14,20 +14,20 @@ fn one_run() {
     var best_count = 0;
     var best_start = 0;
     var best_len = 0;
-    each step in 0..size + 1 while at < size {
+    foreach step in 0..size while at < size {
         // skip whitespace, then take the run of non-whitespace
         var code = text[at];
         if code == 32 || code == 10 || code == 9 || code == 13 {
             at = at + 1;
         } else {
             let start = at;
-            each scan in 0..size + 1 while at < size && text[at] != 32 && text[at] != 10 && text[at] != 9 && text[at] != 13 { at = at + 1; }
+            foreach scan in 0..size while at < size && text[at] != 32 && text[at] != 10 && text[at] != 9 && text[at] != 13 { at = at + 1; }
             let seen = w.map.add_to(substr(text, start, at - start), 1);
             if seen > best_count { best_count = seen; best_start = start; best_len = at - start; }
         }
     }
     var hash = 5381;
-    each index in 0..best_len { hash = (hash * 33 + text[best_start + index]) % 4294967296; }
+    foreach index in 0..best_len - 1 { hash = (hash * 33 + text[best_start + index]) % 4294967296; }
     w.result = (w.result + best_count + hash + w.map.size()) % 4294967296;
 }
 
@@ -38,8 +38,8 @@ fn prepare(text: string<400000>) -> Response<{}> {
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": w.result }); }

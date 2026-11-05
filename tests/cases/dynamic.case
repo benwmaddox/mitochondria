@@ -13,7 +13,7 @@ fn post_t() -> Response<{}> { let t = app.ts.add(); t.n = slot(t) * 10; return c
 @get("/index")
 fn get_index(k: i64 from body) -> Response<{ n: i64 }> { return ok({ "n": app.ts[k].n }); }
 @get("/limit")
-fn get_limit(n: i64 from body) -> Response<{ x: [i64] }> { return ok({ "x": [each t in app.ts limit n t.n] }); }
+fn get_limit(n: i64 from body) -> Response<{ x: [i64] }> { return ok({ "x": [foreach t in app.ts limit n t.n] }); }
 @get("/minmax")
 fn get_minmax(a: i64 from body) -> Response<{ min: i64, max: i64 }> { return ok({ "min": min(a, 5), "max": max(3, a) }); }
 @get("/neg")
@@ -27,7 +27,7 @@ fn get_ornotlive(k: i64 from body) -> Response<{ a: i64, b: bool, c: i64 }> { re
 fn pool_of() { return app.ts; }
 fn find(k) -> T? { if k < 0 { return app.ts[99]; } if k == 0 { return app.ts[0]; } return find(k - 1); }
 @get("/coll")
-fn get_coll() -> Response<{ n: i64, x: [i64] }> { return ok({ "n": pool_of().count(), "x": [each t in pool_of() t.n] }); }
+fn get_coll() -> Response<{ n: i64, x: [i64] }> { return ok({ "n": pool_of().count(), "x": [foreach t in pool_of() t.n] }); }
 @get("/recor")
 fn get_recor(k: i64 from body) -> Response<{ a: i64 }> { return ok({ "a": or(find(k).n, -1) }); }
 @get("/divmin")

@@ -8,16 +8,16 @@ struct Csv { text: u8[12582912]; text_len: i64; rows: i64; last: i64; x_avg: f64
 state c: Csv;
 
 fn put(literal) {
-    each index in 0..len(literal) { c.text[c.text_len] = literal[index]; c.text_len = c.text_len + 1; }
+    foreach index in 0..len(literal) - 1 { c.text[c.text_len] = literal[index]; c.text_len = c.text_len + 1; }
 }
 fn put_byte(byte) { c.text[c.text_len] = byte; c.text_len = c.text_len + 1; }
 fn put_int(value) {
     var digits = 1;
     var rest = value;
-    each step in 0..20 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
+    foreach step in 0..19 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
     var slot = c.text_len + digits - 1;
     var remaining = value;
-    each step in 0..digits {
+    foreach step in 0..digits - 1 {
         c.text[slot] = 48 + remaining % 10;
         remaining = remaining / 10;
         slot = slot - 1;
@@ -30,7 +30,7 @@ fn put_digits(state) {
     put("0.");
     var place = 1000000000;
     var rest = digits;
-    each step in 0..10 {
+    foreach step in 0..9 {
         put_byte(48 + rest / place);
         rest = rest % place;
         place = place / 10;
@@ -46,7 +46,7 @@ fn prepare(rows: i64 in 1..120000) -> Response<{}> {
     c.rows = rows;
     c.last = 42;
     c.text_len = 0;
-    each i in 0..rows {
+    foreach i in 0..rows - 1 {
         // "point <letter>\n, ""<i % 100>""",x,,z,"[<flag>\n, <i % 100>]",y
         put_byte(34); put("point "); put_byte(65 + i % 26); put_byte(92); put_byte(110); put(", "); put_byte(34); put_byte(34); put_int(i % 100); put_byte(34); put_byte(34); put_byte(34); put(",");
         let x_state = next_state();
@@ -68,7 +68,7 @@ fn parse_decimal(from, to) {
     var mantissa = 0;
     var fraction = 0;
     var seen_point = 0;
-    each at in from..to {
+    foreach at in from..to - 1 {
         let byte = c.text[at];
         if byte == 46 {
             seen_point = 1;
@@ -78,7 +78,7 @@ fn parse_decimal(from, to) {
         }
     }
     var scale = 1.0;
-    each step in 0..fraction { scale = scale * 10.0; }
+    foreach step in 0..fraction - 1 { scale = scale * 10.0; }
     return mantissa / scale;
 }
 fn one_run() {
@@ -88,16 +88,16 @@ fn one_run() {
     var y_sum = 0.0;
     var z_sum = 0.0;
     var records = 0;
-    each step in 0..size + 1 while at < size {
+    foreach step in 0..size while at < size {
         var field = 0;
         var record_done = 0;
-        each unused in 0..8 while record_done == 0 {
+        foreach unused in 0..7 while record_done == 0 {
             // one field: quoted (ends at a quote not followed by a quote) or plain (ends at a comma or newline)
             let start = at;
             if at < size && c.text[at] == 34 {
                 at = at + 1;
                 var closed = 0;
-                each scan in 0..size + 1 while closed == 0 && at < size {
+                foreach scan in 0..size while closed == 0 && at < size {
                     if c.text[at] == 34 {
                         if at + 1 < size && c.text[at + 1] == 34 { at = at + 2; } else { closed = 1; at = at + 1; }
                     } else {
@@ -105,7 +105,7 @@ fn one_run() {
                     }
                 }
             } else {
-                each scan in 0..size + 1 while at < size && c.text[at] != 44 && c.text[at] != 10 { at = at + 1; }
+                foreach scan in 0..size while at < size && c.text[at] != 44 && c.text[at] != 10 { at = at + 1; }
             }
             if field == 1 { x_sum = x_sum + parse_decimal(start, at); }
             if field == 3 { z_sum = z_sum + parse_decimal(start, at); }
@@ -121,12 +121,12 @@ fn one_run() {
     c.z_avg = z_sum / count;
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/result")
 fn result() -> Response<{ x: f64, y: f64, z: f64, hash: i64 }> {
     var hash = 5381;
-    each index in 0..c.text_len { hash = (hash * 33 + c.text[index]) % 4294967296; }
+    foreach index in 0..c.text_len - 1 { hash = (hash * 33 + c.text[index]) % 4294967296; }
     return ok({ "x": c.x_avg, "y": c.y_avg, "z": c.z_avg, "hash": hash });
 }

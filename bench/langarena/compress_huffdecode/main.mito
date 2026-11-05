@@ -11,7 +11,7 @@ struct HF {
 state hf: HF;
 
 fn make_data(size) {
-    each i in 0..size {
+    foreach i in 0..size - 1 {
         let slot = i % 11;
         var byte = 65;
         if slot == 1 { byte = 66; } else if slot == 2 { byte = 82; } else if slot == 3 { byte = 65; } else if slot == 4 { byte = 67; }
@@ -35,17 +35,17 @@ fn new_node(freq, byte, leaf) {
 fn build_tree() {
     hf.nodes = 0;
     hf.list_len = 0;
-    each byte in 0..256 {
+    foreach byte in 0..255 {
         if hf.freq[byte] > 0 {
             hf.list[hf.list_len] = new_node(hf.freq[byte], byte, 1);
             hf.list_len = hf.list_len + 1;
         }
     }
     // stable insertion sort by frequency (what the library does for a list this short)
-    each i in 1..hf.list_len {
+    foreach i in 1..hf.list_len - 1 {
         let moving = hf.list[i];
         var j = i;
-        each w in 0..1000 while j > 0 && hf.node_freq[hf.list[j - 1]] > hf.node_freq[moving] {
+        foreach w in 0..999 while j > 0 && hf.node_freq[hf.list[j - 1]] > hf.node_freq[moving] {
             hf.list[j] = hf.list[j - 1];
             j = j - 1;
         }
@@ -58,7 +58,7 @@ fn build_tree() {
         hf.node_right[root] = new_node(0, 0, 1);
         hf.root = root;
     } else {
-        each round in 0..1000 while hf.list_len > 1 {
+        foreach round in 0..999 while hf.list_len > 1 {
             let left = hf.list[0];
             let right = hf.list[1];
             hf.list.move(2, 0, hf.list_len - 2);
@@ -71,7 +71,7 @@ fn build_tree() {
             if hf.list_len > 0 {
                 var size = hf.list_len;
                 var base = 0;
-                each w in 0..64 while size > 1 {
+                foreach w in 0..63 while size > 1 {
                     let half = size / 2;
                     let mid = base + half;
                     if hf.node_freq[hf.list[mid]] <= hf.node_freq[parent] { base = mid; }
@@ -102,7 +102,7 @@ fn build_codes(node, code, length) {
 }
 fn encode() {
     hf.freq.fill(0, 256, 0);
-    each i in 0..hf.size { hf.freq[hf.data[i]] = hf.freq[hf.data[i]] + 1; }
+    foreach i in 0..hf.size - 1 { hf.freq[hf.data[i]] = hf.freq[hf.data[i]] + 1; }
     build_tree();
     hf.code_len.fill(0, 256, 0);
     hf.codes.fill(0, 256, 0);
@@ -111,11 +111,11 @@ fn encode() {
     var bit_pos = 0;
     var total_bits = 0;
     var out_len = 0;
-    each i in 0..hf.size {
+    foreach i in 0..hf.size - 1 {
         let byte = hf.data[i];
         let code = hf.codes[byte];
         let length = hf.code_len[byte];
-        each step in 0..length {
+        foreach step in 0..length - 1 {
             let shift = length - 1 - step;
             if ((code >> shift) & 1) != 0 { current = current | (1 << (7 - bit_pos)); }
             bit_pos = bit_pos + 1;
@@ -139,9 +139,9 @@ fn decode() {
     var node = hf.root;
     var processed = 0;
     var size = 0;
-    each index in 0..hf.out_len while processed < hf.bit_count {
+    foreach index in 0..hf.out_len - 1 while processed < hf.bit_count {
         let byte = hf.out[index];
-        each step in 0..8 {
+        foreach step in 0..7 {
             if processed < hf.bit_count {
                 let bit = (byte >> (7 - step)) & 1;
                 processed = processed + 1;
@@ -172,13 +172,13 @@ fn prepare(size: i64 in 2..1048576) -> Response<{}> {
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> {
     var same = 0;
     if hf.decoded_len == hf.size { same = 1; }
-    each i in 0..hf.size { if hf.decoded[i] != hf.data[i] { same = 0; } }
+    foreach i in 0..hf.size - 1 { if hf.decoded[i] != hf.data[i] { same = 0; } }
     return ok({ "checksum": (hf.result + same * 100000) % 4294967296 });
 }

@@ -16,9 +16,9 @@ fn qs(lo, hi) {
         let pivot = so.t[lo + len / 2];
         var i = lo;
         var j = hi;
-        each outer in 0..1000000 while i <= j {
-            each w in 0..1000000 while so.t[i] < pivot { i = i + 1; }
-            each w in 0..1000000 while so.t[j] > pivot { j = j - 1; }
+        foreach outer in 0..999999 while i <= j {
+            foreach w in 0..999999 while so.t[i] < pivot { i = i + 1; }
+            foreach w in 0..999999 while so.t[j] > pivot { j = j - 1; }
             if i <= j {
                 let tmp = so.t[i];
                 so.t[i] = so.t[j];
@@ -33,7 +33,7 @@ fn qs(lo, hi) {
 }
 fn one_run() {
     so.result = (so.result + so.data[next_int(so.size)]) % 4294967296;
-    each i in 0..so.size { so.t[i] = so.data[i]; }
+    foreach i in 0..so.size - 1 { so.t[i] = so.data[i]; }
     qs(0, so.size - 1);
     so.result = (so.result + so.t[next_int(so.size)]) % 4294967296;
 }
@@ -43,12 +43,12 @@ fn prepare(size: i64 in 2..400000) -> Response<{}> {
     so.size = size;
     so.last = 42;
     so.result = 0;
-    each i in 0..size { so.data[i] = next_int(1000000); }
+    foreach i in 0..size - 1 { so.data[i] = next_int(1000000); }
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { so.last = 42; each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { so.last = 42; foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": so.result }); }

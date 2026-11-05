@@ -10,8 +10,8 @@ state m: Mat;
 fn matgen_into_a_and_b() {
     let n = m.n;
     let tmp = 1.0 / (n * n);
-    each i in 0..n {
-        each j in 0..n {
+    foreach i in 0..n - 1 {
+        foreach j in 0..n - 1 {
             let v = tmp * (i - j) * (i + j);
             m.a[i * n + j] = v;
             m.b[i * n + j] = v;
@@ -20,13 +20,13 @@ fn matgen_into_a_and_b() {
 }
 fn one_run() {
     let n = m.n;
-    each i in 0..n { each j in 0..n { m.bt[j * n + i] = m.b[i * n + j]; } }
-    each i in 0..n {
+    foreach i in 0..n - 1 { foreach j in 0..n - 1 { m.bt[j * n + i] = m.b[i * n + j]; } }
+    foreach i in 0..n - 1 {
         let row = i * n;
-        each j in 0..n {
+        foreach j in 0..n - 1 {
             let col = j * n;
             var s = 0.0;
-            each k in 0..n { s = s + m.a[row + k] * m.bt[col + k]; }
+            foreach k in 0..n - 1 { s = s + m.a[row + k] * m.bt[col + k]; }
             m.c[row + j] = s;
         }
     }
@@ -36,8 +36,8 @@ fn one_run() {
 @post("/prepare/{n}")
 fn prepare(n: i64 in 2..900) -> Response<{}> { m.n = n; matgen_into_a_and_b(); return ok({}); }
 @post("/warmup/{k}")
-fn warmup(k: i64 in 0..100000) -> Response<{}> { each i in 0..k { one_run(); } return ok({}); }
+fn warmup(k: i64 in 0..100000) -> Response<{}> { foreach i in 0..k - 1 { one_run(); } return ok({}); }
 @post("/run/{k}")
-fn run(k: i64 in 1..100000) -> Response<{}> { each i in 0..k { one_run(); } return ok({}); }
+fn run(k: i64 in 1..100000) -> Response<{}> { foreach i in 0..k - 1 { one_run(); } return ok({}); }
 @get("/result")
 fn result() -> Response<{ result: f64 }> { return ok({ "result": m.center }); }

@@ -20,14 +20,14 @@ fn post_x(from: i64, n: i64, v: f64) -> Response<{}> { app.x.fill(from, n, v); r
 fn post_flag(from: i64, n: i64, v: i64) -> Response<{}> { app.flag.fill(from, n, v > 0); return ok({}); }
 @get("/plain")
 fn get_plain() -> Response<{ b: [i64], h: [i64], q: [i64], x: [f64], flag: [bool] }> {
-    return ok({ "b": [each i in 0..6 app.b[i]], "h": [each i in 0..5 app.h[i]], "q": [each i in 0..3 app.q[i]], "x": [each i in 0..3 app.x[i]], "flag": [each i in 0..4 app.flag[i]] });
+    return ok({ "b": [foreach i in 0..5 app.b[i]], "h": [foreach i in 0..4 app.h[i]], "q": [foreach i in 0..2 app.q[i]], "x": [foreach i in 0..2 app.x[i]], "flag": [foreach i in 0..3 app.flag[i]] });
 }
 @post("/rows")
 fn post_rows() -> Response<{ slot: i64 }> { let r = app.rows.add(); return created({ "slot": slot(r) }); }
 @post("/rows/{s}/{from}/{n}/{v}")
 fn post_row(s: i64, from: i64, n: i64, v: i64) -> Response<{}> { let r = app.rows[s]; r.w.fill(from, n, v); r.ok.fill(from, n, v > 0); r.f.fill(from, n, v * 1.5); return ok({}); }
 @get("/rows/{s}")
-fn get_row(s: i64) -> Response<{ w: [i64], ok: [bool], f: [f64] }> { let r = app.rows[s]; return ok({ "w": [each i in 0..4 r.w[i]], "ok": [each i in 0..3 r.ok[i]], "f": [each i in 0..3 r.f[i]] }); }
+fn get_row(s: i64) -> Response<{ w: [i64], ok: [bool], f: [f64] }> { let r = app.rows[s]; return ok({ "w": [foreach i in 0..3 r.w[i]], "ok": [foreach i in 0..2 r.ok[i]], "f": [foreach i in 0..2 r.f[i]] }); }
 @post("/fill-then-fail")
 fn post_fail() -> Response<{}> { app.b.fill(0, 6, 9); app.q.fill(0, 3, 7); fail 422 "no"; }
 --- requests

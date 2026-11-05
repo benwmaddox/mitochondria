@@ -5,13 +5,13 @@ state b: Bench;
 @post("/insert/{n}")
 fn insert(n: i64 in 1..1048576) -> Response<{ size: i64 }> {
     var x = 20261104;
-    each i in 0..n { x = x * 48271 % 2147483647; b.m.put(x * 2, x); }
+    foreach i in 0..n - 1 { x = x * 48271 % 2147483647; b.m.put(x * 2, x); }
     return ok({ "size": b.m.size() });
 }
 @get("/hit/{n}/{ops}")
 fn hit(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104; var s = 0;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
         s = s + b.m.get_or(x * 2, 0);
@@ -21,7 +21,7 @@ fn hit(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }>
 @get("/miss/{n}/{ops}")
 fn miss(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104; var s = 0;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
         s = s + b.m.get_or(x * 2 + 1, 0);
@@ -31,7 +31,7 @@ fn miss(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }
 @get("/mixed/{n}/{ops}")
 fn mixed(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104; var s = 0;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
         s = s + b.m.get_or(x * 2 + j % 2, 0);
@@ -41,7 +41,7 @@ fn mixed(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 
 @post("/increment/{n}/{ops}")
 fn increment(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
         b.m.add_to(x * 2, 1);
@@ -51,7 +51,7 @@ fn increment(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: 
 @get("/range/{n}/{ops}")
 fn range(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
     var x = 20261104; var s = 0;
-    each j in 0..ops {
+    foreach j in 0..ops - 1 {
         if j % n == 0 { x = 20261104; }
         x = x * 48271 % 2147483647;
         s = s + b.m.range_sum(x * 2, 100);
@@ -61,7 +61,7 @@ fn range(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 
 @delete("/delete/{x}/{count}")
 fn delete(x: i64, count: i64 in 1..16384) -> Response<{ x: i64, size: i64 }> {
     var y = x;
-    each i in 0..count {
+    foreach i in 0..count - 1 {
         y = y * 48271 % 2147483647;
         b.m.del(y * 2);
     }

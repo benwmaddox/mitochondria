@@ -32,7 +32,7 @@ fn post_units_k_move(k: i64, dx: i64, dy: i64) -> Response<{ x: i64, y: i64 }> {
 fn post_world(x: i64, y: i64) -> Response<{ x: i64 }> { app.world.origin.x = x; app.world.origin.y = y; app.world.size = 3; return ok({ "x": app.world.origin.x }); }
 @get("/units")
 fn get_units() -> Response<{ o: i64, x: [{ name: string, x: i64, y: i64, w: i64 }] }> {
-    return ok({ "o": app.world.origin.x + app.world.origin.y, "x": [each u in app.units where u.at.x >= app.world.origin.x { "name": u.name, "x": u.at.x, "y": u.at.y, "w": width(u) }] });
+    return ok({ "o": app.world.origin.x + app.world.origin.y, "x": [foreach u in app.units where u.at.x >= app.world.origin.x { "name": u.name, "x": u.at.x, "y": u.at.y, "w": width(u) }] });
 }
 --- requests
 GET /units

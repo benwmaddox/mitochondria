@@ -8,7 +8,7 @@ struct LZ {
 state lz: LZ;
 
 fn make_data(size) {
-    each i in 0..size {
+    foreach i in 0..size - 1 {
         let slot = i % 11;
         var byte = 65;
         if slot == 1 { byte = 66; } else if slot == 2 { byte = 82; } else if slot == 3 { byte = 65; } else if slot == 4 { byte = 67; }
@@ -23,7 +23,7 @@ fn lookup(prefix, byte) {
     let key = prefix * 256 + byte;
     var slot = slot_of(key);
     var found = -1;
-    each probe in 0..16384 while lz.keys[slot] >= 0 && found < 0 {
+    foreach probe in 0..16383 while lz.keys[slot] >= 0 && found < 0 {
         if lz.keys[slot] == key { found = lz.values[slot]; } else { slot = (slot + 1) & 16383; }
     }
     return found;
@@ -31,7 +31,7 @@ fn lookup(prefix, byte) {
 fn insert(prefix, byte, code) {
     let key = prefix * 256 + byte;
     var slot = slot_of(key);
-    each probe in 0..16384 while lz.keys[slot] >= 0 { slot = (slot + 1) & 16383; }
+    foreach probe in 0..16383 while lz.keys[slot] >= 0 { slot = (slot + 1) & 16383; }
     lz.keys[slot] = key;
     lz.values[slot] = code;
 }
@@ -46,7 +46,7 @@ fn encode() {
     lz.next_code = 256;
     lz.codes_len = 0;
     var current = lz.data[0];
-    each i in 1..lz.size {
+    foreach i in 1..lz.size - 1 {
         let byte = lz.data[i];
         let found = lookup(current, byte);
         if found >= 0 {
@@ -63,7 +63,7 @@ fn encode() {
 
 // the reference's lzw_decode: a dictionary of byte strings (each entry is the previous code's string plus one byte, copied), the text is the strings in order
 fn decode() {
-    each i in 0..256 { lz.buf[i] = i; lz.off[i] = i; lz.elen[i] = 1; }
+    foreach i in 0..255 { lz.buf[i] = i; lz.off[i] = i; lz.elen[i] = 1; }
     var dict_len = 256;
     var buf_end = 256;
     var out_len = 0;
@@ -71,7 +71,7 @@ fn decode() {
     lz.buf.move(lz.off[old_code], 4194304 + out_len, lz.elen[old_code]);
     out_len = out_len + lz.elen[old_code];
     let pairs = lz.codes_len / 2;
-    each pair in 1..pairs {
+    foreach pair in 1..pairs - 1 {
         let new_code = lz.codes[pair * 2] * 256 + lz.codes[pair * 2 + 1];
         // entry = dict[old_code].clone()
         let entry = buf_end;
@@ -108,13 +108,13 @@ fn prepare(size: i64 in 2..1048576) -> Response<{}> {
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> {
     var same = 0;
     if lz.decoded_len == lz.size { same = 1; }
-    each i in 0..lz.size { if lz.buf[4194304 + i] != lz.data[i] { same = 0; } }
+    foreach i in 0..lz.size - 1 { if lz.buf[4194304 + i] != lz.data[i] { same = 0; } }
     return ok({ "checksum": (lz.result + same * 100000) % 4294967296 });
 }

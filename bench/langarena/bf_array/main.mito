@@ -7,14 +7,14 @@ state g: BF;
 
 fn compile() {
     g.ncmds = 0;
-    each i in 0..g.srclen {
+    foreach i in 0..g.srclen - 1 {
         let c = g.src[i];
         if c == 43 || c == 45 || c == 62 || c == 60 || c == 91 || c == 93 || c == 46 || c == 44 { g.cmds[g.ncmds] = c; g.ncmds = g.ncmds + 1; }
     }
     var ok = 1;
     if g.ncmds == 0 { ok = 0; }
     var sp = 0;
-    each i in 0..g.ncmds {
+    foreach i in 0..g.ncmds - 1 {
         let cmd = g.cmds[i];
         if cmd == 91 {
             g.stack[sp] = i;
@@ -40,7 +40,7 @@ fn execute() {
     var pc = 0;
     var result = 0;
     var bad = 0;
-    each step in 0..9000000000000 while pc < g.ncmds && bad == 0 {
+    foreach step in 0..8999999999999 while pc < g.ncmds && bad == 0 {
         let cmd = g.cmds[pc];
         if cmd == 43 {
             g.tape[pos] = (g.tape[pos] + 1) & 255;
@@ -75,24 +75,24 @@ fn run_program() {
 @post("/prepare")
 fn prepare(program: string<4096>, warmup: string<4096>) -> Response<{}> {
     g.proglen = len(program);
-    each i in 0..g.proglen { g.prog[i] = program[i]; }
+    foreach i in 0..g.proglen - 1 { g.prog[i] = program[i]; }
     g.warmlen = len(warmup);
-    each i in 0..g.warmlen { g.warm[i] = warmup[i]; }
+    foreach i in 0..g.warmlen - 1 { g.warm[i] = warmup[i]; }
     g.result = 0;
     return ok({});
 }
 @post("/warmup/{n}")
 fn warmup(n: i64 in 0..100000) -> Response<{}> {
     g.srclen = g.warmlen;
-    each i in 0..g.warmlen { g.src[i] = g.warm[i]; }
-    each i in 0..n { run_program(); }
+    foreach i in 0..g.warmlen - 1 { g.src[i] = g.warm[i]; }
+    foreach i in 0..n - 1 { run_program(); }
     return ok({});
 }
 @post("/run/{n}")
 fn run(n: i64 in 1..100000) -> Response<{}> {
     g.srclen = g.proglen;
-    each i in 0..g.proglen { g.src[i] = g.prog[i]; }
-    each i in 0..n {
+    foreach i in 0..g.proglen - 1 { g.src[i] = g.prog[i]; }
+    foreach i in 0..n - 1 {
         run_program();
         if g.bad == 0 { g.result = (g.result + g.out) % 4294967296; }
     }

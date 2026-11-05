@@ -45,9 +45,9 @@ fn delete_items_k(k: i64) -> Response<{ left: i64 }> {
 @get("/all")
 fn get_all() -> Response<{ items: [{ name: string, n: i64 }], board: [{ name: string, n: i64 }], log: [{ what: string }], "quoted key": i64 }> {
     return ok({
-        items: [each it in app.items { name: it.name, n: it.n }],
-        board: [each e in app.board reverse { name: or(app.items[e.who].name, "[gone]"), n: e.n }],
-        log: [each l in app.log { what: l.what }],
+        items: [foreach it in app.items { name: it.name, n: it.n }],
+        board: [foreach e in app.board reverse { name: or(app.items[e.who].name, "[gone]"), n: e.n }],
+        log: [foreach l in app.log { what: l.what }],
         "quoted key": app.total
     });
 }

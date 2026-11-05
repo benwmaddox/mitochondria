@@ -6,7 +6,7 @@ state app: App;
 
 @post("/count/{n}")
 fn post_count(n: i64) -> Response<{ total: i64 }> {
-    each i in 0..n {
+    foreach i in 0..n - 1 {
         let key = "item_" + i;
         app.total = app.total + len(key);
     }
@@ -15,9 +15,9 @@ fn post_count(n: i64) -> Response<{ total: i64 }> {
 @post("/nested/{n}")
 fn post_nested(n: i64) -> Response<{ total: i64 }> {
     var sum = 0;
-    each i in 0..n {
+    foreach i in 0..n - 1 {
         let outer = "outer_" + i;
-        each j in 0..10 {
+        foreach j in 0..9 {
             let inner = outer + "_" + j;
             sum = sum + len(inner);
         }
@@ -28,14 +28,14 @@ fn post_nested(n: i64) -> Response<{ total: i64 }> {
 @post("/keep/{n}")
 fn post_keep(n: i64) -> Response<{ last: string, len: i64 }> {
     var kept = "";
-    each i in 0..n { kept = "keep_" + i + "_" + "padding_padding_padding_padding"; }
+    foreach i in 0..n - 1 { kept = "keep_" + i + "_" + "padding_padding_padding_padding"; }
     app.last = "x";
     return ok({ "last": kept, "len": len(kept) });
 }
 @post("/accumulate/{n}")
 fn post_accumulate(n: i64) -> Response<{ len: i64 }> {
     var all = "";
-    each i in 0..n { all = all + "ab"; }
+    foreach i in 0..n - 1 { all = all + "ab"; }
     return ok({ "len": len(all) });
 }
 --- requests

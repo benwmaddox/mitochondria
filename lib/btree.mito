@@ -1,6 +1,6 @@
 // Up to N items of struct T, kept in order of their field `key` (an i64): the same interface as `sorted`, built as a
 // B+tree for speed. Items with equal keys stay in the order they were added. Change an item's key with set_key (the key
-// is read-only outside this module); other fields are the program's. Walk it with `each item in instance [from key] [reverse] ...`.
+// is read-only outside this module); other fields are the program's. Walk it with `foreach item in instance [from key] [reverse] ...`.
 //
 // Items stay in their pool slots; the tree holds copies of their keys, so a search reads a few nodes of 16 keys (each
 // searched by halving) and touches no item until it has found the one it wants. Leaves hold up to 16 keys and the
@@ -95,7 +95,7 @@ pub fn remove_key(target) {
 fn leaf_pos(leaf, target, above) {
     let node = self.leaves[leaf - 1];
     var pos = 0;
-    each at in 0..17 while at < node.count && (node.keys[at] < target || (above && node.keys[at] == target)) { pos = at + 1; }
+    foreach at in 0..16 while at < node.count && (node.keys[at] < target || (above && node.keys[at] == target)) { pos = at + 1; }
     return pos;
 }
 // In inner node `node_id` (its id): which child holds keys from target on: the number of separators below target (at or
@@ -103,13 +103,13 @@ fn leaf_pos(leaf, target, above) {
 fn kid_pos(node_id, target, above) {
     let node = self.inners[node_id - 1];
     var pos = 0;
-    each at in 0..16 while at < node.count - 1 && (node.keys[at] < target || (above && node.keys[at] == target)) { pos = at + 1; }
+    foreach at in 0..15 while at < node.count - 1 && (node.keys[at] < target || (above && node.keys[at] == target)) { pos = at + 1; }
     return pos;
 }
 // The leaf (its id) where a search for target ends, 0 if the tree is empty.
 fn descend(target, above) {
     var node = self.head.root;
-    each level in 0..self.head.height { node = self.inners[node - 1].kids[self.kid_pos(node, target, above)]; }
+    foreach level in 0..self.head.height - 1 { node = self.inners[node - 1].kids[self.kid_pos(node, target, above)]; }
     return node;
 }
 
@@ -140,7 +140,7 @@ fn place(item_slot) {
 // leaf `leaf` holds 17: the first 9 stay, the last 8 move to a new leaf after it
 fn split_leaf(leaf) {
     let right = self.new_leaf();
-    each offset in 0..8 {
+    foreach offset in 0..7 {
         let moved = self.leaves[leaf - 1].slots[9 + offset];
         self.leaves[right - 1].keys[offset] = self.leaves[leaf - 1].keys[9 + offset];
         self.leaves[right - 1].slots[offset] = moved;
@@ -163,7 +163,7 @@ fn insert_up(left_node, right_node, separator, first_level) {
     var up_key = separator;
     var level = first_level;
     var going = 1;
-    each step in 0..20 while going == 1 {
+    foreach step in 0..19 while going == 1 {
         let parent = self.parent_of(left, level);
         if parent == 0 {
             // left was the root: a new root above both
@@ -194,12 +194,12 @@ fn insert_up(left_node, right_node, separator, first_level) {
                 // the parent holds 17 children: the first 9 stay, the key after them goes up, the last 8 move to a new node
                 let made = self.inners.add();
                 let sibling = slot(made) + 1;
-                each offset in 0..8 {
+                foreach offset in 0..7 {
                     let kid = self.inners[parent - 1].kids[9 + offset];
                     self.inners[sibling - 1].kids[offset] = kid;
                     self.set_parent(kid, level, sibling);
                 }
-                each offset in 0..7 { self.inners[sibling - 1].keys[offset] = self.inners[parent - 1].keys[9 + offset]; }
+                foreach offset in 0..6 { self.inners[sibling - 1].keys[offset] = self.inners[parent - 1].keys[9 + offset]; }
                 self.inners[sibling - 1].count = 8;
                 let promoted = self.inners[parent - 1].keys[8];
                 self.inners[parent - 1].count = 9;
@@ -217,7 +217,7 @@ fn set_parent(node, level, parent) { if level == 0 { self.leaves[node - 1].paren
 // the position of child `child` in inner node `node`
 fn kid_index(node, child) {
     var index = 0;
-    each step in 0..17 while self.inners[node - 1].kids[index] != child { index = index + 1; }
+    foreach step in 0..16 while self.inners[node - 1].kids[index] != child { index = index + 1; }
     return index;
 }
 
@@ -226,7 +226,7 @@ fn kid_index(node, child) {
 fn unplace(item_slot) {
     let leaf = self.locs[item_slot].leaf;
     var index = 0;
-    each step in 0..17 while self.leaves[leaf - 1].slots[index] != item_slot { index = index + 1; }
+    foreach step in 0..16 while self.leaves[leaf - 1].slots[index] != item_slot { index = index + 1; }
     let node = self.leaves[leaf - 1];
     let count = node.count;
     node.keys.move(index + 1, index, count - index - 1);
@@ -251,7 +251,7 @@ fn drop_kid(first_node, gone) {
     var node = first_node;
     var child = gone;
     var going = 1;
-    each step in 0..20 while going == 1 {
+    foreach step in 0..19 while going == 1 {
         let index = self.kid_index(node, child);
         let inner = self.inners[node - 1];
         let count = inner.count;
@@ -275,7 +275,7 @@ fn drop_kid(first_node, gone) {
 }
 // a root with one child is replaced by it, as often as that holds
 fn collapse_root() {
-    each step in 0..20 while self.head.height > 0 && self.inners[self.head.root - 1].count == 1 {
+    foreach step in 0..19 while self.head.height > 0 && self.inners[self.head.root - 1].count == 1 {
         let old_root = self.head.root;
         let only = self.inners[old_root - 1].kids[0];
         if self.head.height == 1 { self.leaves[only - 1].parent = 0; } else { self.inners[only - 1].parent = 0; }
@@ -301,7 +301,7 @@ fn merge_leaf(leaf) {
 fn absorb(earlier, later) {
     let earlier_count = self.leaves[earlier - 1].count;
     let later_count = self.leaves[later - 1].count;
-    each offset in 0..later_count {
+    foreach offset in 0..later_count - 1 {
         let moved = self.leaves[later - 1].slots[offset];
         self.leaves[earlier - 1].keys[earlier_count + offset] = self.leaves[later - 1].keys[offset];
         self.leaves[earlier - 1].slots[earlier_count + offset] = moved;

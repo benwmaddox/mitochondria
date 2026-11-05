@@ -8,7 +8,7 @@ struct App {
 state app: App;
 struct Top { head: i64; }
 
-fn find(name) -> Node? { each n in app.nodes { if n.name == name { return n; } } return null; }
+fn find(name) -> Node? { foreach n in app.nodes { if n.name == name { return n; } } return null; }
 @post("/nodes")
 fn post_nodes(name: string<4096>?) -> Response<{ slot: i64 }> {
     let n = app.nodes.add();
@@ -24,7 +24,7 @@ fn get_walk() -> Response<{ names: string, steps: i64 }> {
     var cur = app.top.head;
     var names = "";
     var steps = 0;
-    each n in app.nodes {
+    foreach n in app.nodes {
         if cur != 0 && exists(app.nodes[cur - 1]) { let node = app.nodes[cur - 1]; names = names + node.name + ","; cur = node.next; steps = steps + 1; }
     }
     return ok({ "names": names, "steps": steps });

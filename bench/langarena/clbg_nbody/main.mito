@@ -9,9 +9,9 @@ state nb: NB;
 
 fn energy() {
     var e = 0.0;
-    each i in 0..5 {
+    foreach i in 0..4 {
         e = e + 0.5 * nb.mass[i] * (nb.vx[i] * nb.vx[i] + nb.vy[i] * nb.vy[i] + nb.vz[i] * nb.vz[i]);
-        each j in i + 1..5 {
+        foreach j in i + 1..4 {
             let dx = nb.x[i] - nb.x[j];
             let dy = nb.y[i] - nb.y[j];
             let dz = nb.z[i] - nb.z[j];
@@ -25,7 +25,7 @@ fn offset_momentum() {
     var px = 0.0;
     var py = 0.0;
     var pz = 0.0;
-    each i in 0..5 {
+    foreach i in 0..4 {
         let m = nb.mass[i];
         px = px + nb.vx[i] * m;
         py = py + nb.vy[i] * m;
@@ -38,9 +38,9 @@ fn offset_momentum() {
 }
 fn one_run() {
     let dt = 0.01;
-    each step in 0..1000 {
-        each i in 0..5 {
-            each j in i + 1..5 {
+    foreach step in 0..999 {
+        foreach i in 0..4 {
+            foreach j in i + 1..4 {
                 let dx = nb.x[i] - nb.x[j];
                 let dy = nb.y[i] - nb.y[j];
                 let dz = nb.z[i] - nb.z[j];
@@ -101,7 +101,7 @@ fn prepare() -> Response<{}> {
     nb.vy[4] = 0.001628241700382422954551664418;
     nb.vz[4] = -0.000095159225451971586953736626;
     nb.mass[4] = 0.000051513890204661145133177569;
-    each i in 1..5 {
+    foreach i in 1..4 {
         nb.vx[i] = nb.vx[i] * days_per_year;
         nb.vy[i] = nb.vy[i] * days_per_year;
         nb.vz[i] = nb.vz[i] * days_per_year;
@@ -113,8 +113,8 @@ fn prepare() -> Response<{}> {
     return ok({});
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..1000000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..1000000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..1000000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..1000000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/result")
 fn result() -> Response<{ v1: f64, v2: f64 }> { return ok({ "v1": nb.v1, "v2": energy() }); }

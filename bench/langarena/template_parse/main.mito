@@ -13,15 +13,15 @@ struct T {
 state t: T;
 
 fn put(literal) {
-    each index in 0..len(literal) { t.text[t.text_len] = literal[index]; t.text_len = t.text_len + 1; }
+    foreach index in 0..len(literal) - 1 { t.text[t.text_len] = literal[index]; t.text_len = t.text_len + 1; }
 }
 fn put_int(value) {
     var digits = 1;
     var rest = value;
-    each step in 0..20 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
+    foreach step in 0..19 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
     var slot = t.text_len + digits - 1;
     var remaining = value;
-    each step in 0..digits {
+    foreach step in 0..digits - 1 {
         t.text[slot] = 48 + remaining % 10;
         remaining = remaining / 10;
         slot = slot - 1;
@@ -32,7 +32,7 @@ fn put_int(value) {
 fn define(code, literal) {
     t.name_off[code] = t.names_len;
     t.name_len[code] = len(literal);
-    each index in 0..len(literal) { t.names[t.names_len + index] = literal[index]; }
+    foreach index in 0..len(literal) - 1 { t.names[t.names_len + index] = literal[index]; }
     t.names_len = t.names_len + len(literal);
 }
 
@@ -53,7 +53,7 @@ fn prepare(count: i64 in 1..60000) -> Response<{}> {
     put("Lorem {ipsum} dolor {sit} amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore {et} dolore magna aliqua. ");
     put("</p>");
     put("<table>");
-    each i in 0..count {
+    foreach i in 0..count - 1 {
         if i % 3 == 0 { put("<!-- {comment} -->"); }
         put("<tr>");
         put("<td>{{ FIRST_NAME"); put_int(i); put(" }}</td>");
@@ -76,20 +76,20 @@ fn one_run() {
     let size = t.text_len;
     var at = 0;
     var out = 0;
-    each step in 0..size + 1 while at < size {
+    foreach step in 0..size while at < size {
         var copied = 1;
         if at + 1 < size && t.text[at] == 123 && t.text[at + 1] == 123 {
             var close = at + 2;
-            each scan in 0..size + 1 while close + 1 < size && !(t.text[close] == 125 && t.text[close + 1] == 125) { close = close + 1; }
+            foreach scan in 0..size while close + 1 < size && !(t.text[close] == 125 && t.text[close + 1] == 125) { close = close + 1; }
             if close + 1 < size {
                 // the name between the braces, trimmed
                 var low = at + 2;
                 var high = close;
-                each skip in 0..size + 1 while low < high && (t.text[low] == 32 || t.text[low] == 9 || t.text[low] == 10 || t.text[low] == 13) { low = low + 1; }
-                each skip in 0..size + 1 while high > low && (t.text[high - 1] == 32 || t.text[high - 1] == 9 || t.text[high - 1] == 10 || t.text[high - 1] == 13) { high = high - 1; }
+                foreach skip in 0..size while low < high && (t.text[low] == 32 || t.text[low] == 9 || t.text[low] == 10 || t.text[low] == 13) { low = low + 1; }
+                foreach skip in 0..size while high > low && (t.text[high - 1] == 32 || t.text[high - 1] == 9 || t.text[high - 1] == 10 || t.text[high - 1] == 13) { high = high - 1; }
                 let code = t.vars.get_or(text_from(t.text, low, high - low), -1);
                 if code >= 0 {
-                    each index in 0..t.name_len[code] { t.rendered[out + index] = t.names[t.name_off[code] + index]; }
+                    foreach index in 0..t.name_len[code] - 1 { t.rendered[out + index] = t.names[t.name_off[code] + index]; }
                     out = out + t.name_len[code];
                 }
                 at = close + 2;
@@ -106,12 +106,12 @@ fn one_run() {
     t.result = (t.result + out) % 4294967296;
 }
 @post("/warmup/{n}")
-fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
-fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> {
     var hash = 5381;
-    each index in 0..t.rendered_len { hash = (hash * 33 + t.rendered[index]) % 4294967296; }
+    foreach index in 0..t.rendered_len - 1 { hash = (hash * 33 + t.rendered[index]) % 4294967296; }
     return ok({ "checksum": (t.result + hash) % 4294967296 });
 }

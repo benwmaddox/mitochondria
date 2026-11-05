@@ -89,7 +89,7 @@ kind of its first value and a function returns one kind; a program needing a kin
 @get("/rooms/{room}/messages")
 fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..100 = 50)
     -> Response<{ messages: [{ seq: i64, author: string, body: string }] }> {
-    return ok({ messages: [each m in room.messages reverse limit limit {
+    return ok({ messages: [foreach m in room.messages reverse limit limit {
         seq: m.seq, author: or(m.author.name, "[deleted]"), body: m.body }] });
 }
 ```
@@ -107,9 +107,13 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
 **Every request is atomic.** The runtime records the old bytes of each write; a failed request writes them back.
 `remove` takes effect when the request succeeds, so a removed slot cannot be reused in the same request.
 
-**Loops.** `each x in c where cond limit n`, `reverse` for newest first, `each i in lo..hi` (with `while` to stop
-early); the same clauses build JSON arrays. Order is kept in the data, never computed when read. Every loop is bounded
-by a capacity or a range.
+**Loops.** `foreach x in c where cond limit n` visits the live items of a collection (`foreach x, i in c`: `i` counts the items
+visited), `reverse` for newest first, `foreach i in lo..hi` both ends included (with `while` to stop early); the same clauses build
+JSON arrays (`[foreach x in c expr]`). Order is kept in the data, never computed when read. `for i = 0; i < n; i += 1 { }` and
+`while cond { }` loop as long as needed, `break` and `continue` work in every loop, and parentheses around a head are allowed but
+never required. A `foreach` is bounded by a capacity or a range; a `while` or `for` counts its rounds against the request's step
+budget (100 million, `--loop-budget N`), past which the request fails with "loop ran too long". A counted `for` (`i < n` or
+`i <= n`, step `i += 1`, neither changed in the body) compiles as a range loop.
 
 ## Modules
 A module is a `.mito` file in `lib/`: parameters, structs, a `state { ... }` block (what an instance holds) and

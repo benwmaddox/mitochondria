@@ -13,12 +13,12 @@ fn post_plain_k(k: i64, v: i64) -> Response<{}> { app.plain[k] = v; return ok({}
 @post("/plain/move/{from}/{to}/{n}")
 fn post_plain_move(from: i64, to: i64, n: i64) -> Response<{}> { app.plain.move(from, to, n); return ok({}); }
 @get("/plain")
-fn get_plain() -> Response<{ x: [i64] }> { return ok({ "x": [each i in 0..6 app.plain[i]] }); }
+fn get_plain() -> Response<{ x: [i64] }> { return ok({ "x": [foreach i in 0..5 app.plain[i]] }); }
 @post("/rows")
 fn post_rows() -> Response<{ slot: i64 }> {
     let r = app.rows.add();
-    each i in 0..6 { r.cells[i] = i * 10; }
-    each i in 0..4 { r.small[i] = i + 1; }
+    foreach i in 0..5 { r.cells[i] = i * 10; }
+    foreach i in 0..3 { r.small[i] = i + 1; }
     return created({ "slot": slot(r) });
 }
 @post("/rows/{s}/move/{from}/{to}/{n}")
@@ -26,7 +26,7 @@ fn post_rows_move(s: i64, from: i64, to: i64, n: i64) -> Response<{}> { let r = 
 @post("/rows/{s}/small/{from}/{to}/{n}")
 fn post_rows_small(s: i64, from: i64, to: i64, n: i64) -> Response<{}> { let r = app.rows[s]; r.small.move(from, to, n); return ok({}); }
 @get("/rows/{s}")
-fn get_rows_s(s: i64) -> Response<{ cells: [i64], small: [i64] }> { let r = app.rows[s]; return ok({ "cells": [each i in 0..6 r.cells[i]], "small": [each i in 0..4 r.small[i]] }); }
+fn get_rows_s(s: i64) -> Response<{ cells: [i64], small: [i64] }> { let r = app.rows[s]; return ok({ "cells": [foreach i in 0..5 r.cells[i]], "small": [foreach i in 0..3 r.small[i]] }); }
 @post("/rows/{s}/move-then-fail")
 fn post_rows_move_fail(s: i64) -> Response<{}> { let r = app.rows[s]; r.cells.move(0, 2, 4); fail 422 "changed my mind"; }
 --- requests

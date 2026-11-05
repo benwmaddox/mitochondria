@@ -5,23 +5,23 @@ struct P { items: pool<KV, 1048576> checked; locs: pool<Loc, 1048576>; }
 state p: P;
 @post("/fill/{n}")
 fn fill(n: i64 in 1..1048576) -> Response<{ size: i64 }> {
-    each i in 0..n { let e = p.items.add(); e.k = i; }
+    foreach i in 0..n - 1 { let e = p.items.add(); e.k = i; }
     return ok({ "size": p.items.count() });
 }
 @post("/fill2/{n}")
 fn fill2(n: i64 in 1..1048576) -> Response<{ size: i64 }> {
-    each i in 0..n { let e = p.items.add(); e.k = i; let l = p.locs.add(); l.leaf = 7; }
+    foreach i in 0..n - 1 { let e = p.items.add(); e.k = i; let l = p.locs.add(); l.leaf = 7; }
     return ok({ "size": p.items.count() });
 }
 @delete("/clear/{from}/{n}")
 fn clear(from: i64, n: i64 in 1..16384) -> Response<{ size: i64 }> {
-    each i in from..from + n { p.items.remove(p.items[i]); }
+    foreach i in from..from + n - 1 { p.items.remove(p.items[i]); }
     return ok({ "size": p.items.count() });
 }
 // pieces of a remove, to find where its time goes: only reading the items; the full remove is /clear
 @get("/touch/{from}/{n}")
 fn touch(from: i64, n: i64 in 1..16384) -> Response<{ sum: i64 }> {
     var s = 0;
-    each i in from..from + n { s = s + p.items[i].k; }
+    foreach i in from..from + n - 1 { s = s + p.items[i].k; }
     return ok({ "sum": s });
 }

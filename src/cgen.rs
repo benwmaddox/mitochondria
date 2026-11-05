@@ -18,7 +18,7 @@ typedef struct { u32 off, len; int present; } Txt;
 /* tag: 0 null, 1 int (i), 2 float (f), 3 bool (i), 4 string (a = offset, b = length), 5 item (a = collection, b = index) */
 typedef struct { int tag; u32 a, b; i64 i; double f; } Val;
 typedef struct H H;
-typedef struct { u8 *base; void *run; const H *h; u8 *dirty; u8 *committed; int jon; u8 *text; u32 at; } Ctx; /* dirty, committed, jon: the undo log's line map, the page commit flags, whether the request journals: fixed for the request */
+typedef struct { u8 *base; void *run; const H *h; u8 *dirty; u8 *committed; int jon; u8 *text; u32 at; i64 steps; } Ctx; /* dirty, committed, jon: the undo log's line map, the page commit flags, whether the request journals: fixed for the request */
 /* The runtime's helpers. Every one returns 0, or a non-zero status after recording the error (the generated code then
    returns that status at once and the runtime rolls the request back). Collections, columns and items are numbered as
    in the layout table at the top of an emitted file; `idx` is an item's index across all instances of its collection. */
@@ -103,6 +103,8 @@ struct H {
 #define CALL_OR_DEAD(x, l) do { if ((st = (x)) != 0) { if (st < 0 && c->h->was_dead(c)) goto l; c->at = AT_; return st; } } while (0)
 #define TAIL(x) do { c->at = AT_; return (x); } while (0)
 #define FAIL(code, msg, n) do { c->at = AT_; return c->h->fail(c, (code), (msg), (n)); } while (0)
+/* a round of a loop without a fixed extent (`while`, a `for` that is not counted): counted against the request's step budget */
+#define ROUND_() do { if (--c->steps < 0) FAIL(500, "loop ran too long", 17); } while (0)
 #define OVERFLOW_ FAIL(500, "integer overflow", 16)
 #ifdef __clang__
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -409,6 +411,8 @@ struct G<'p> {
     versioned: u32, // how many versioned loops enclose the code being generated (each doubles its body; at most 3 deep)
     loop_hint: Option<(i64, i64)>, // the next range loop's counter interval, proven by a versioning guard (its fast copy)
     at: (u32, u32), // the source line and column of the statement being generated (for error messages)
+    loop_n: u32, // labels of loops, numbered on their own
+    loops: Vec<(String, String, bool, bool)>, // the loops being generated, innermost last: break label, continue label, whether each is used
     checked: Vec<(String, u64)>, // range tests done since the last statement start, block boundary, label or goto: (index, size) need not be tested again
     skip_save: bool, // the next inline store needs no undo-log test (its range was saved by a loop guard)
     txt_escapes: Vec<u32>, // slots of variables that were assigned a string (or a value of unknown kind), in the order it happened
@@ -850,7 +854,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), at: (0, 0), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), at: (0, 0), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1171,7 +1175,7 @@ impl<'p> G<'p> {
         })
     }
 
-    /// Loop versioning. For a range loop (`each v in lo..hi`), and for a loop that steps a variable (`while j <= limit` with one
+    /// Loop versioning. For a range loop (`foreach v in lo..hi`, internally lo up to hi excluded), and for a loop that steps a variable (`while j <= limit` with one
     /// `j = j + step` at the top level of the body), find the accesses to plain-state arrays whose index is the counter (or the
     /// stepped variable) plus or minus a value the loop does not change. Emit, before the loop, a test that every such index
     /// stays inside its array for the whole loop, and save the ranges the loop stores into to the undo log in one pass when it
@@ -1429,6 +1433,9 @@ impl<'p> G<'p> {
     fn stmt(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<()> {
         match s {
             Stmt::At(l, c) => { self.at = (*l, *c); self.line("#undef AT_"); self.line(&format!("#define AT_ {}", l)); }
+            Stmt::Break => { let l = self.loops.last_mut().ok_or("`break` outside a loop")?; l.2 = true; let g = format!("goto {};", l.0); self.line(&g); }
+            Stmt::Continue => { let l = self.loops.last_mut().ok_or("`continue` outside a loop")?; l.3 = true; let g = format!("goto {};", l.1); self.line(&g); }
+            Stmt::ContinueHere => { let l = self.loops.last_mut().ok_or("misplaced loop step")?; l.3 = false; let g = format!("{}: ;", l.1); self.line(&g); }
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
                 let v = self.expr(e, env, None)?;
@@ -2467,9 +2474,22 @@ impl<'p> G<'p> {
     /// Emit a loop over a list or pool instance (with `reverse`, `where` and `limit`), running `body` with the item bound.
     /// With `collect`, the items passing `where` are collected before any body runs, then limited, as the interpreter's
     /// `select` does; otherwise filtering and the body run in one pass.
+    /// A loop's labels for `break` and `continue` (placed only when used).
+    fn loop_enter(&mut self) { self.loop_n += 1; let (b, c) = (format!("brk_{}", self.loop_n), format!("cnt_{}", self.loop_n)); self.loops.push((b, c, false, false)); }
+    /// The end of a round's body: where `continue` lands, unless a `for` loop's step placed it already.
+    fn loop_round_end(&mut self) { if let Some(l) = self.loops.last_mut() { if l.3 { l.3 = false; let t = format!("{}: ;", l.1); self.line(&t); } } }
+    /// After the loop: where `break` lands.
+    fn loop_exit(&mut self) { if let Some(l) = self.loops.pop() { if l.2 { self.line(&format!("{}: ;", l.0)); } } }
+    /// Each round: the index (`foreach item, i in ...`: the rounds before this one), and for a loop without a fixed extent its
+    /// count against the request's step budget.
+    fn round_start(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, hits: &str) {
+        if let Some((_, slot)) = &it.index { let ix = self.tmp("ix"); self.line(&format!("i64 {} = (i64){} - 1;", ix, hits)); env[*slot as usize] = Some(CV::Int(ix)); }
+    }
+
     fn each(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
         if let Some(v) = it.via { return self.walk(it, v, env, body); }
         if let Some(hi) = &it.hi { return self.range_loop(it, hi, env, body); }
+        self.loop_enter();
         let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
         let coll = self.prog.colls[c].clone();
         let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
@@ -2501,9 +2521,12 @@ impl<'p> G<'p> {
         }
         self.line(&format!("{}++;", hits));
         if !collect {
+            self.round_start(it, env, &hits);
             body(self, env, &hits)?;
+            self.loop_round_end();
             self.close("}");
             self.close("}");
+            self.loop_exit();
             return Ok(());
         }
         self.call(&format!("c->h->sel_add(c, {})", m));
@@ -2518,14 +2541,17 @@ impl<'p> G<'p> {
         self.line(&format!("{} = {} + 1;", hits, q));
         let v = self.item_value(c, m2, None)?;
         env[it.slot as usize] = Some(v);
+        self.round_start(it, env, &hits);
         body(self, env, &hits)?;
+        self.loop_round_end();
         self.close("}");
+        self.loop_exit(); // `break` ends the selection too
         self.call(&format!("c->h->sel_end(c, {})", h));
         self.close("}");
         Ok(())
     }
 
-    /// `each s in instance [from k] [reverse] ...`: walk a module instance with its iteration functions, at most its
+    /// `foreach s in instance [from k] [reverse] ...`: walk a module instance with its iteration functions, at most its
     /// capacity of steps, stopping at a null cursor or the limit. Order of evaluation as in the interpreter: `from`,
     /// `limit`, then the first cursor.
     fn walk(&mut self, it: &'p Iter, v: crate::lang::Via, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
@@ -2539,6 +2565,7 @@ impl<'p> G<'p> {
         let c0 = self.call_values(if it.reverse { v.last.ok_or("no reverse walk")? } else { v.first }, vec![from], None)?;
         let c0 = self.int_or(c0, 500, "a walk's cursor is an integer (-1 for none)");
         let (cur, k, hits) = (self.tmp("cur"), self.tmp("k"), self.tmp("hits"));
+        self.loop_enter();
         self.open("{");
         self.line(&format!("i64 {} = {};", cur, c0));
         self.line(&format!("i64 {} = 0;", hits));
@@ -2551,17 +2578,20 @@ impl<'p> G<'p> {
         if let Some(w) = &it.whil { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) break;", wc)); }
         let filtered = if let Some(w) = &it.wher { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.open(&format!("if ({}) {{", wc)); true } else { false };
         self.line(&format!("{}++;", hits));
+        self.round_start(it, env, &hits);
         body(self, env, &hits)?;
         if filtered { self.close("}"); }
+        self.loop_round_end(); // before the step to the next cursor
         let nx = self.call_values(if it.reverse { v.prev.ok_or("no reverse walk")? } else { v.next }, vec![CV::Int(cur.clone())], None)?;
         let nx = self.int_or(nx, 500, "a walk's cursor is an integer (-1 for none)");
         self.line(&format!("{} = {};", cur, nx));
         self.close("}");
         self.close("}");
+        self.loop_exit();
         Ok(())
     }
 
-    /// `each i in lo..hi`: the bounds are read once, values are computed as the loop goes (where is tested just before
+    /// `foreach i in lo..hi`: the bounds are read once, values are computed as the loop goes (where is tested just before
     /// each body), and `limit` counts the bodies run.
     fn range_loop(&mut self, it: &'p Iter, hi: &'p Expr, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
         let v = self.expr(&it.coll, env, None)?;
@@ -2574,6 +2604,7 @@ impl<'p> G<'p> {
         let lim = lim.map(|l| self.hold_int(l));
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
         let (k, hits) = (self.tmp("k"), self.tmp("hits"));
+        self.loop_enter();
         self.open("{");
         self.line(&format!("i64 {} = 0;", hits));
         if it.reverse {
@@ -2584,6 +2615,8 @@ impl<'p> G<'p> {
             self.open(&format!("for (i64 {} = {}; {} < {}; {}++) {{", k, lo, k, hi, k));
         }
         if let Some(l) = &lim { self.line(&format!("if ({} >= {}) break;", hits, l)); }
+        // a loop without a fixed extent counts its rounds against the request's budget, so a mistake cannot hold the program
+        if it.budget { self.line("ROUND_();"); }
         env[it.slot as usize] = Some(CV::Int(k.clone()));
         // the counter is never assigned in the body: between the smallest lower bound and one below the largest upper bound
         if let (Some((lo_min, _)), Some((_, hi_max))) = (self.interval(&lo), self.interval(&hi)) { if hi_max > lo_min { self.ranges.insert(k.clone(), (lo_min, hi_max - 1)); } }
@@ -2595,9 +2628,12 @@ impl<'p> G<'p> {
             self.line(&format!("if (!({})) continue;", wc));
         }
         self.line(&format!("{}++;", hits));
+        self.round_start(it, env, &hits);
         body(self, env, &hits)?;
+        self.loop_round_end();
         self.close("}");
         self.close("}");
+        self.loop_exit();
         Ok(())
     }
 
@@ -2701,7 +2737,7 @@ pub fn check_profile(body: &str) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
@@ -2893,7 +2929,7 @@ mod profile_tests {
     fn values_that_may_be_null_are_checked_before_use() {
         let st = "struct I { n: i64; name: string<8>; } struct App { items: pool<I, 4>; } state app: App;";
         let load = |api: &str| -> String { super::check(&Program::parse(st).unwrap(), api).err().unwrap_or_default() };
-        let find = "fn find(n) -> I? { each it in app.items { if it.n == n { return it; } } return null; }\n";
+        let find = "fn find(n) -> I? { foreach it in app.items { if it.n == n { return it; } } return null; }\n";
         for (api, want) in [
             // reading, writing, removing and slot() of a value that may be null
             (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = find(k); return ok({{ n: it.n }}); }}", find), "`.n` of a value that may be null"),
@@ -2903,7 +2939,7 @@ mod profile_tests {
             // try_add gives a value that may be null
             ("@post(\"/a\") fn a() -> Response<{}> { let it = app.items.try_add(); it.n = 1; return ok({}); }".to_string(), "may be null"),
             // a function that can return null must say so
-            ("fn find(n) { each it in app.items { if it.n == n { return it; } } return null; }\n@get(\"/a\") fn a(k: i64) -> Response<{ n: i64 }> { return ok({ n: or(find(k).n, 0) }); }".to_string(), "declare it `fn find(...) -> T?`"),
+            ("fn find(n) { foreach it in app.items { if it.n == n { return it; } } return null; }\n@get(\"/a\") fn a(k: i64) -> Response<{ n: i64 }> { return ok({ n: or(find(k).n, 0) }); }".to_string(), "declare it `fn find(...) -> T?`"),
             // the narrowing ends with its branch, and does not hold when the branch assigns the variable
             (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ let it = find(k); if exists(it) {{ }} return ok({{ n: it.n }}); }}", find), "may be null"),
             (format!("{}@get(\"/a\") fn a(k: i64) -> Response<{{ n: i64 }}> {{ var it = find(k); if exists(it) {{ it = find(k + 1); return ok({{ n: it.n }}); }} return ok({{ n: 0 }}); }}", find), "may be null"),
@@ -2936,8 +2972,8 @@ mod profile_tests {
             ("@get(\"/a\") fn a() -> Response<{ n: i64 }> { return ok({ n: 1, m: 2 }); }", "has `m`, which { n: i64 } does not declare"),
             ("@get(\"/a\") fn a() -> Response<{ n: i64, m: i64 }> { return ok({ n: 1 }); }", "has no `m`"),
             ("@get(\"/a\") fn a() -> Response<{ n: string }> { return ok({ n: 1 }); }", "`n` is i64, declared string"),
-            ("@get(\"/a\") fn a() -> Response<{ x: [i64] }> { return ok({ x: [each it in app.items it.name] }); }", "`x[]` is string, declared i64"),
-            ("@get(\"/a\") fn a() -> Response<[Row]> { return ok([each it in app.items { name: it.name }]); }", "has no `n`"),
+            ("@get(\"/a\") fn a() -> Response<{ x: [i64] }> { return ok({ x: [foreach it in app.items it.name] }); }", "`x[]` is string, declared i64"),
+            ("@get(\"/a\") fn a() -> Response<[Row]> { return ok([foreach it in app.items { name: it.name }]); }", "has no `n`"),
             ("@get(\"/a\") fn a() -> Response<null> { return ok({}); }", "declared null"),
             ("@get(\"/a\") fn a() -> Response<{}> { return status(404, {}); }", "an answer is a success (2xx)"),
             ("@get(\"/a\") fn a() -> Response<{}> { return {}; }", "an endpoint returns its answer"),
@@ -2957,7 +2993,7 @@ mod profile_tests {
         }
         // what fits: a declared struct, optional values, run-time kinds, no body, a status of choice
         for api in [
-            "@get(\"/a\") fn a() -> Response<[Row]> { return ok([each it in app.items { name: it.name, n: it.n }]); }",
+            "@get(\"/a\") fn a() -> Response<[Row]> { return ok([foreach it in app.items { name: it.name, n: it.n }]); }",
             "@get(\"/a\") fn a(x: string<8>?) -> Response<{ n: string? }> { return ok({ n: or(x, null) }); }",
             "@delete(\"/a\") fn a() -> Response<null> { return no_content(); }",
             "@post(\"/a\") fn a() -> Response<{ total: i64 }> { app.total += 1; if app.total > 2 { return status(202, { total: app.total }); } return created({ total: app.total }); }",
@@ -3013,7 +3049,7 @@ fn assigned_slots(stmts: &[Stmt]) -> std::collections::HashSet<u32> {
                 Stmt::Let(_, s, _) | Stmt::Var(_, s, _) => { out.insert(*s); }
                 Stmt::Alloc { slot, .. } => { out.insert(*slot); }
                 Stmt::If(_, t, e) => { walk(t, out); walk(e, out); }
-                Stmt::Each(it, b) => { out.insert(it.slot); walk(b, out); }
+                Stmt::Each(it, b) => { out.insert(it.slot); if let Some((_, s)) = &it.index { out.insert(*s); } walk(b, out); }
                 _ => {}
             }
         }

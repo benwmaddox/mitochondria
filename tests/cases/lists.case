@@ -14,7 +14,7 @@ fn post_evs(n: i64, who: string<4096>?) -> Response<{ count: i64 }> { let e = ap
 @get("/evs/{k}")
 fn get_evs_k(k: i64) -> Response<{ n: i64, who: string }> { let e = app.evs[k]; return ok({ "n": e.n, "who": e.who }); }
 @get("/evs")
-fn get_evs() -> Response<{ x: [i64], r: [i64], first: i64 }> { return ok({ "x": [each e in app.evs e.n], "r": [each e in app.evs reverse e.n], "first": app.evs[0].n }); }
+fn get_evs() -> Response<{ x: [i64], r: [i64], first: i64 }> { return ok({ "x": [foreach e in app.evs e.n], "r": [foreach e in app.evs reverse e.n], "first": app.evs[0].n }); }
 @post("/strict")
 fn post_strict() -> Response<{ n: i64 }> { let e = app.strict.add(); e.n = app.strict.count(); return created({ "n": e.n }); }
 @post("/strict/try")
@@ -22,8 +22,8 @@ fn post_strict_try() -> Response<{ got: bool }> { let e = app.strict.try_add(); 
 @post("/copy")
 fn post_copy() -> Response<{ x: [i64] }> {
     // the loop sees the items there were when it started, not the ones it adds
-    each e in app.evs { let f = app.evs.add(); f.n = e.n + 100; f.who = e.who; }
-    return ok({ "x": [each e in app.evs e.n] });
+    foreach e in app.evs { let f = app.evs.add(); f.n = e.n + 100; f.who = e.who; }
+    return ok({ "x": [foreach e in app.evs e.n] });
 }
 @post("/bags")
 fn post_bags() -> Response<{ n: i64, f: i64 }> { let b = app.bags.add(); let x = b.nums.add(); let y = b.nums.add(); let f = b.flags.add(); return created({ "n": b.nums.count(), "f": b.flags.count() }); }
@@ -31,19 +31,19 @@ fn post_bags() -> Response<{ n: i64, f: i64 }> { let b = app.bags.add(); let x =
 fn get_bags_k(k: i64) -> Response<{ sum: i64, all: [i64], rev: [i64], at1: i64, flags: [bool] }> {
     let b = app.bags[k];
     var sum = 0;
-    each v in b.nums { sum = sum + v; }
-    return ok({ "sum": sum, "all": [each v in b.nums v], "rev": [each v in b.nums reverse v], "at1": b.nums[1], "flags": [each f in b.flags f] });
+    foreach v in b.nums { sum = sum + v; }
+    return ok({ "sum": sum, "all": [foreach v in b.nums v], "rev": [foreach v in b.nums reverse v], "at1": b.nums[1], "flags": [foreach f in b.flags f] });
 }
 @post("/bags/{k}/set")
 fn post_bags_k_set(k: i64, i: i64, v: i64) -> Response<{ at: i64 }> { let b = app.bags[k]; b.nums[i] = v; return ok({ "at": b.nums[i] }); }
 @post("/bags/{k}/flag")
-fn post_bags_k_flag(k: i64, on: bool) -> Response<{ flags: [bool] }> { let b = app.bags[k]; b.flags[0] = on; return ok({ "flags": [each f in b.flags f] }); }
+fn post_bags_k_flag(k: i64, on: bool) -> Response<{ flags: [bool] }> { let b = app.bags[k]; b.flags[0] = on; return ok({ "flags": [foreach f in b.flags f] }); }
 @post("/evs/{k}")
 fn post_evs_k(k: i64) -> Response<{}> { app.evs[k] = 5; return ok({}); }
 @post("/bags/{k}/grow")
 fn post_bags_k_grow(k: i64) -> Response<{ n: i64 }> {
     let b = app.bags[k];
-    each v in b.nums { let w = b.nums.add(); }
+    foreach v in b.nums { let w = b.nums.add(); }
     return ok({ "n": b.nums.count() });
 }
 --- requests

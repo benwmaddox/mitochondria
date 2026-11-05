@@ -28,20 +28,20 @@ pub fn inner_count() { return self.inners.count(); }
 fn leaf_pos(leaf, target) {
     let node = self.leaves[leaf - 1];
     var pos = 0;
-    each at in 0..17 while at < node.count && node.keys[at] < target { pos = at + 1; }
+    foreach at in 0..16 while at < node.count && node.keys[at] < target { pos = at + 1; }
     return pos;
 }
 // In inner node `node_id`: which child holds target: the number of separators at or below it.
 fn kid_pos(node_id, target) {
     let node = self.inners[node_id - 1];
     var pos = 0;
-    each at in 0..16 while at < node.count - 1 && node.keys[at] <= target { pos = at + 1; }
+    foreach at in 0..15 while at < node.count - 1 && node.keys[at] <= target { pos = at + 1; }
     return pos;
 }
 // The leaf where a search for target ends, 0 if the map is empty.
 fn descend(target) {
     var node = self.head.root;
-    each level in 0..self.head.height { node = self.inners[node - 1].kids[self.kid_pos(node, target)]; }
+    foreach level in 0..self.head.height - 1 { node = self.inners[node - 1].kids[self.kid_pos(node, target)]; }
     return node;
 }
 
@@ -74,12 +74,12 @@ pub fn range_sum(start, limit) {
     if self.head.root != 0 {
         var leaf = self.descend(start);
         var pos = self.leaf_pos(leaf, start);
-        each step in 0..limit + 2 while leaf != 0 && taken < limit {
+        foreach step in 0..limit + 2 - 1 while leaf != 0 && taken < limit {
             // the rest of this leaf, as far as the limit allows
             let node = self.leaves[leaf - 1];
             var stop = node.count;
             if stop - pos > limit - taken { stop = pos + limit - taken; }
-            each at in 0..17 where at >= pos && at < stop { total = total + node.vals[at]; }
+            foreach at in 0..16 where at >= pos && at < stop { total = total + node.vals[at]; }
             if stop > pos { taken = taken + stop - pos; }
             leaf = node.next;
             pos = 0;
@@ -120,7 +120,7 @@ fn split_leaf(leaf) {
     let right = self.new_leaf();
     let from = self.leaves[leaf - 1];
     let to = self.leaves[right - 1];
-    each offset in 0..8 {
+    foreach offset in 0..7 {
         to.keys[offset] = from.keys[9 + offset];
         to.vals[offset] = from.vals[9 + offset];
     }
@@ -141,7 +141,7 @@ fn insert_up(left_node, right_node, separator, first_level) {
     var up_key = separator;
     var level = first_level;
     var going = 1;
-    each step in 0..20 while going == 1 {
+    foreach step in 0..19 while going == 1 {
         let parent = self.parent_of(left, level);
         if parent == 0 {
             // left was the root: a new root above both
@@ -172,12 +172,12 @@ fn insert_up(left_node, right_node, separator, first_level) {
                 // the parent holds 17 children: the first 9 stay, the key after them goes up, the last 8 move to a new node
                 let made = self.inners.add();
                 let sibling = slot(made) + 1;
-                each offset in 0..8 {
+                foreach offset in 0..7 {
                     let kid = self.inners[parent - 1].kids[9 + offset];
                     self.inners[sibling - 1].kids[offset] = kid;
                     self.set_parent(kid, level, sibling);
                 }
-                each offset in 0..7 { self.inners[sibling - 1].keys[offset] = self.inners[parent - 1].keys[9 + offset]; }
+                foreach offset in 0..6 { self.inners[sibling - 1].keys[offset] = self.inners[parent - 1].keys[9 + offset]; }
                 self.inners[sibling - 1].count = 8;
                 let promoted = self.inners[parent - 1].keys[8];
                 self.inners[parent - 1].count = 9;
@@ -195,7 +195,7 @@ fn set_parent(node, level, parent) { if level == 0 { self.leaves[node - 1].paren
 // the position of child `child` in inner node `node`
 fn kid_index(node, child) {
     var index = 0;
-    each step in 0..17 while self.inners[node - 1].kids[index] != child { index = index + 1; }
+    foreach step in 0..16 while self.inners[node - 1].kids[index] != child { index = index + 1; }
     return index;
 }
 
@@ -235,7 +235,7 @@ fn drop_kid(first_node, gone) {
     var node = first_node;
     var child = gone;
     var going = 1;
-    each step in 0..20 while going == 1 {
+    foreach step in 0..19 while going == 1 {
         let index = self.kid_index(node, child);
         let inner = self.inners[node - 1];
         let count = inner.count;
@@ -258,7 +258,7 @@ fn drop_kid(first_node, gone) {
 }
 // a root with one child is replaced by it, as often as that holds
 fn collapse_root() {
-    each step in 0..20 while self.head.height > 0 && self.inners[self.head.root - 1].count == 1 {
+    foreach step in 0..19 while self.head.height > 0 && self.inners[self.head.root - 1].count == 1 {
         let old_root = self.head.root;
         let only = self.inners[old_root - 1].kids[0];
         if self.head.height == 1 { self.leaves[only - 1].parent = 0; } else { self.inners[only - 1].parent = 0; }
@@ -285,7 +285,7 @@ fn absorb(earlier, later) {
     let from = self.leaves[later - 1];
     let into_count = into.count;
     let from_count = from.count;
-    each offset in 0..from_count {
+    foreach offset in 0..from_count - 1 {
         into.keys[into_count + offset] = from.keys[offset];
         into.vals[into_count + offset] = from.vals[offset];
     }

@@ -21,7 +21,7 @@ fn post_notes(t: string<4096>?) -> Response<{ text: string }> {
 @get("/notes")
 fn get_notes(q: string<4096>?, x_name: string<4096>? from header("X-Name")) -> Response<{ all: string, first: string, eq: bool, lt: bool, hdr: string, q: string }> {
     var all = "";
-    each n in app.notes { all = all + n.text; }
+    foreach n in app.notes { all = all + n.text; }
     return ok({ "all": all, "first": app.notes[0].text, "eq": app.notes[0].text == "[a]", "lt": "abc" < "abd", "hdr": or(x_name, "none"), "q": q });
 }
 @get("/concat")

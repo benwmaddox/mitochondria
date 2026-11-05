@@ -19,7 +19,7 @@ fn get_absf(x: f64) -> Response<{ r: f64 }> { return ok({ "r": abs(x) }); }
 @get("/combo/{x}")
 fn get_combo(x: f64) -> Response<{ r: f64 }> { m.v = sqrt(x * x + 1.0); return ok({ "r": floor(exp(m.v)) + abs(m.v - 100.0) }); }
 @get("/loop/{n}")
-fn get_loop(n: i64 in 1..1000) -> Response<{ r: f64 }> { var s = 0.0; each i in 1..n + 1 { s = s + sqrt(i); } return ok({ "r": s }); }
+fn get_loop(n: i64 in 1..1000) -> Response<{ r: f64 }> { var s = 0.0; foreach i in 1..n { s = s + sqrt(i); } return ok({ "r": s }); }
 --- requests
 GET /sqrt/2.0
 GET /sqrt/16.0

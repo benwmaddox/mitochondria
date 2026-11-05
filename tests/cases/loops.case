@@ -1,0 +1,91 @@
+// loops: `foreach` (ranges include their end; an index counts the live items visited), `for`, `while`, `break`, `continue`,
+// parentheses around a head, and the step budget of loops without a fixed extent
+--- program
+struct Item { n: i64; }
+struct App { items: pool<Item, 8>; made: pool<Item, 8>; }
+state app: App;
+
+@get("/ranges")
+fn ranges() -> Response<{ count: i64, sum: i64, down: i64, one: i64, none: i64 }> {
+    var count = 0; var sum = 0; var down = 0; var one = 0; var none = 0;
+    foreach i in 1..10 { count += 1; sum += i; }
+    foreach i in 1..3 reverse { down = down * 10 + i; }
+    foreach i in 5..5 { one += 1; }
+    foreach i in 5..4 { none += 1; }
+    return ok({ count: count, sum: sum, down: down, one: one, none: none });
+}
+@post("/fill")
+fn fill() -> Response<{ live: i64 }> {
+    foreach i in 0..5 { let it = app.items.add(); it.n = i * 10; }
+    // holes: the items 10 and 30 leave; a loop sees only what is live
+    foreach it in app.items { if it.n == 10 || it.n == 30 { app.items.remove(it); } }
+    return ok({ live: app.items.count() });
+}
+@get("/index")
+fn index() -> Response<{ seen: [i64], sum: i64 }> {
+    var sum = 0;
+    foreach it, i in app.items { sum += i * 1000 + it.n; }
+    return ok({ seen: [foreach it, i in app.items i], sum: sum });
+}
+@get("/while")
+fn while_loop() -> Response<{ n: i64, steps: i64 }> {
+    var n = 27; var steps = 0;
+    while n != 1 { if n % 2 == 0 { n = n / 2; } else { n = 3 * n + 1; } steps += 1; }
+    var m = 0;
+    while (m < 5) { m += 1; }
+    return ok({ n: n + m, steps: steps });
+}
+@get("/for")
+fn for_loop() -> Response<{ counted: i64, evens: i64, paren: i64, upto: i64 }> {
+    var counted = 0; var evens = 0; var paren = 0; var upto = 0;
+    for i = 0; i < 10; i += 1 { counted += i; }
+    for var i = 0; i < 10; i += 2 { evens += i; }
+    for (var i = 1; i <= 4; i += 1) { paren = paren * 10 + i; }
+    let top = 3;
+    for i = 0; i <= top; i += 1 { upto += 1; }
+    return ok({ counted: counted, evens: evens, paren: paren, upto: upto });
+}
+@get("/jumps")
+fn jumps() -> Response<{ first: i64, odd: i64, stepped: i64, inner: i64, filtered: i64 }> {
+    var first = -1;
+    foreach i in 0..100 { if i * i > 50 { first = i; break; } }
+    var odd = 0;
+    foreach i in 1..10 { if i % 2 == 0 { continue; } odd += i; }
+    // `continue` in a `for` loop still runs its step
+    var stepped = 0;
+    for var i = 0; i < 10; i += 3 { if i == 3 { continue; } stepped += i; }
+    // `break` leaves only the innermost loop
+    var inner = 0;
+    foreach a in 1..3 { foreach b in 1..100 { if b > a { break; } inner += 1; } }
+    var filtered = 0;
+    foreach it in app.items where it.n > 0 { if it.n == 40 { continue; } filtered += it.n; }
+    return ok({ first: first, odd: odd, stepped: stepped, inner: inner, filtered: filtered });
+}
+@post("/made")
+fn made() -> Response<{ made: i64 }> {
+    // a loop that adds items walks a selection made first; `break` ends it too
+    foreach it in app.items { if it.n > 20 { break; } let m = app.made.add(); m.n = it.n; }
+    return ok({ made: app.made.count() });
+}
+@get("/forever")
+fn forever() -> Response<{ n: i64 }> {
+    var n = 0;
+    while true { n += 1; }
+    return ok({ n: n });
+}
+@get("/parens")
+fn parens() -> Response<{ n: i64 }> {
+    var n = 0;
+    foreach (it, i in app.items) { if (i > 0) { n += it.n; } }
+    return ok({ n: n });
+}
+--- requests
+GET /ranges
+POST /fill
+GET /index
+GET /while
+GET /for
+GET /jumps
+POST /made
+GET /forever
+GET /parens

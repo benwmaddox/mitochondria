@@ -18,7 +18,7 @@ fn post_clear() -> Response<{ size: i64, room: i64 }> { app.m.clear(); return ok
 fn post_fail(key: string<64>) -> Response<{}> { app.m.put(key, 99); fail 400 "no"; }
 @post("/churn/{n}")
 fn post_churn(n: i64) -> Response<{ size: i64 }> {
-    each i in 0..n { app.m.put("k" + i, i); app.m.remove("k" + i); }
+    foreach i in 0..n - 1 { app.m.put("k" + i, i); app.m.remove("k" + i); }
     return ok({ "size": app.m.size() });
 }
 @post("/entry/{key}")

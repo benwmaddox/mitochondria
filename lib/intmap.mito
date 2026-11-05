@@ -24,7 +24,7 @@ fn bucket_of(key) {
 fn find(key) {
     var cur = self.heads[self.bucket_of(key)];
     var found = 0;
-    each step in 0..N + 1 while cur != 0 && found == 0 {
+    foreach step in 0..N while cur != 0 && found == 0 {
         if self.keys[cur - 1] == key { found = cur; } else { cur = self.links[cur - 1]; }
     }
     return found;
@@ -84,7 +84,7 @@ pub fn remove(key) {
     var cur = self.heads[bucket];
     var prev = 0;
     var done = false;
-    each step in 0..N + 1 while cur != 0 && !done {
+    foreach step in 0..N while cur != 0 && !done {
         if self.keys[cur - 1] == key {
             if prev == 0 { self.heads[bucket] = self.links[cur - 1]; } else { self.links[prev - 1] = self.links[cur - 1]; }
             self.links[cur - 1] = self.head.free;

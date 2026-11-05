@@ -531,8 +531,8 @@ MITO_API int t_reply(void *sp) {
             "@post(\"/add/{v}/{id}\") fn post_add_v_id(v: i64, id: i64) -> Response<{ slot: i64 }> { let e = app.s.add(v); e.id = id; return created({ slot: slot(e) }); }\n\
              @post(\"/set/{k}/{v}\") fn post_set_k_v(k: i64, v: i64) -> Response<{}> { app.s.set_key(app.s.get(k), v); return ok({}); }\n\
              @delete(\"/x/{k}\") fn delete_x_k(k: i64) -> Response<{}> { app.s.remove(app.s.get(k)); return ok({}); }\n\
-             @get(\"/all\") fn get_all() -> Response<{ x: [i64] }> { return ok({ \"x\": [each e in app.s e.id] }); }\n\
-             @get(\"/from/{k}\") fn get_from_k(k: i64) -> Response<{ up: [i64], down: [i64] }> { return ok({ \"up\": [each e in app.s from k e.id], \"down\": [each e in app.s from k reverse e.id] }); }\n").unwrap();
+             @get(\"/all\") fn get_all() -> Response<{ x: [i64] }> { return ok({ \"x\": [foreach e in app.s e.id] }); }\n\
+             @get(\"/from/{k}\") fn get_from_k(k: i64) -> Response<{ up: [i64], down: [i64] }> { return ok({ \"up\": [foreach e in app.s from k e.id], \"down\": [foreach e in app.s from k reverse e.id] }); }\n").unwrap();
         let case = Case { name: "sorted-model".into(), state, api, requests: String::new(), system: None, files: Vec::new() };
         let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
         if clang().is_some() {

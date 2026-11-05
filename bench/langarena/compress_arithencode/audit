@@ -1,0 +1,2 @@
+like-for-like
+Same coder statement by statement: the reference's u64 range arithmetic (64-bit here), its frequency table, pending-bit handling and bit writer. The reference's Vec push is a store into an output array. Stores are checked and undo-logged.

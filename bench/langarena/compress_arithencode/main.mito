@@ -1,0 +1,115 @@
+// LangArena Compress::ArithEncode (kostya/LangArena, MIT): arithmetic-code a repeating text, `iterations` times.
+// The input is `size` bytes of the repeating pattern "ABRACADABRA"; the coder is the reference's 32-bit integer arithmetic coder (low/high range, cumulative frequency tables,
+// pending bits for the straddle case, bits packed most significant first). The checksum adds the length of every run's output, warmup included.
+struct AR {
+    data: u8[131072]; out: u8[131072]; freq: i32[256]; low_table: i64[256]; high_table: i64[256];
+    size: i64; total: i64; buffer: i64; bit_pos: i64; out_len: i64; result: i64; 
+}
+state ar: AR;
+
+fn make_data(size) {
+    each i in 0..size {
+        let slot = i % 11;
+        var byte = 65;
+        if slot == 1 { byte = 66; } else if slot == 2 { byte = 82; } else if slot == 3 { byte = 65; } else if slot == 4 { byte = 67; }
+        else if slot == 5 { byte = 65; } else if slot == 6 { byte = 68; } else if slot == 7 { byte = 65; } else if slot == 8 { byte = 66; }
+        else if slot == 9 { byte = 82; } else if slot == 10 { byte = 65; }
+        ar.data[i] = byte;
+    }
+}
+// the reference's cumulative tables: low[i] .. high[i] is symbol i's slice of 0..total
+fn make_tables() {
+    var total = 0;
+    var cum = 0;
+    each i in 0..256 {
+        ar.low_table[i] = cum;
+        cum = cum + ar.freq[i];
+        ar.high_table[i] = cum;
+        total = total + ar.freq[i];
+    }
+    ar.total = total;
+}
+// the reference's BitOutputStream
+fn write_bit(bit) {
+    ar.buffer = (ar.buffer << 1) | (bit & 1);
+    ar.bit_pos = ar.bit_pos + 1;
+    if ar.bit_pos == 8 {
+        ar.out[ar.out_len] = ar.buffer;
+        ar.out_len = ar.out_len + 1;
+        ar.buffer = 0;
+        ar.bit_pos = 0;
+    }
+}
+fn encode() {
+    ar.freq.fill(0, 256, 0);
+    each i in 0..ar.size { ar.freq[ar.data[i]] = ar.freq[ar.data[i]] + 1; }
+    make_tables();
+    var low = 0;
+    var high = 4294967295;
+    var pending = 0;
+    ar.buffer = 0;
+    ar.bit_pos = 0;
+    ar.out_len = 0;
+    each i in 0..ar.size {
+        let byte = ar.data[i];
+        let range = high - low + 1;
+        high = low + (range * ar.high_table[byte] / ar.total) - 1;
+        low = low + (range * ar.low_table[byte] / ar.total);
+        var going = 1;
+        each step in 0..1000 while going == 1 {
+            if high < 2147483648 {
+                write_bit(0);
+                each p in 0..pending { write_bit(1); }
+                pending = 0;
+            } else if low >= 2147483648 {
+                write_bit(1);
+                each p in 0..pending { write_bit(0); }
+                pending = 0;
+                low = low - 2147483648;
+                high = high - 2147483648;
+            } else if low >= 1073741824 && high < 3221225472 {
+                pending = pending + 1;
+                low = low - 1073741824;
+                high = high - 1073741824;
+            } else {
+                going = 0;
+            }
+            if going == 1 {
+                low = low << 1;
+                high = ((high << 1) | 1) & 4294967295;
+            }
+        }
+    }
+    pending = pending + 1;
+    if low < 1073741824 {
+        write_bit(0);
+        each p in 0..pending { write_bit(1); }
+    } else {
+        write_bit(1);
+        each p in 0..pending { write_bit(0); }
+    }
+    // flush
+    if ar.bit_pos > 0 {
+        ar.buffer = ar.buffer << (8 - ar.bit_pos);
+        ar.out[ar.out_len] = ar.buffer;
+        ar.out_len = ar.out_len + 1;
+    }
+}
+
+fn one_run() {
+    encode();
+    ar.result = (ar.result + ar.out_len) % 4294967296;
+}
+@post("/prepare/{size}")
+fn prepare(size: i64 in 2..131072) -> Response<{}> {
+    ar.size = size;
+    ar.result = 0;
+    make_data(size);
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": ar.result }); }

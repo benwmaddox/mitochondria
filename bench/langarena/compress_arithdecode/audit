@@ -1,0 +1,2 @@
+rewritten-to-match
+Same decoder statement by statement (the reference's read_bit, the scaled value, partition_point as a binary search over the cumulative table). The reference allocates the output vector each run; here it is a state array. The encoder that prepares the input is untimed, as in the reference; the equality test with the input runs in the checksum request. Stores are checked and undo-logged.

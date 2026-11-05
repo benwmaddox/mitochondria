@@ -18,7 +18,7 @@ typedef struct { u32 off, len; int present; } Txt;
 /* tag: 0 null, 1 int (i), 2 float (f), 3 bool (i), 4 string (a = offset, b = length), 5 item (a = collection, b = index) */
 typedef struct { int tag; u32 a, b; i64 i; double f; } Val;
 typedef struct H H;
-typedef struct { u8 *base; void *run; const H *h; u8 *dirty; u8 *committed; int jon; } Ctx; /* dirty, committed, jon: the undo log's line map, the page commit flags, whether the request journals: fixed for the request */
+typedef struct { u8 *base; void *run; const H *h; u8 *dirty; u8 *committed; int jon; u8 *text; } Ctx; /* dirty, committed, jon: the undo log's line map, the page commit flags, whether the request journals: fixed for the request */
 /* The runtime's helpers. Every one returns 0, or a non-zero status after recording the error (the generated code then
    returns that status at once and the runtime rolls the request back). Collections, columns and items are numbered as
    in the layout table at the top of an emitted file; `idx` is an item's index across all instances of its collection. */
@@ -135,6 +135,7 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 #define NMUL(r, x, y) i64 r = (x) * (y)
 #define NDIV(r, x, y) i64 r = (x) / (y)
 #define NMOD(r, x, y) i64 r = (x) % (y)
+#define TX_(i) (tx_[(i)]) /* a byte of the request's text area, where strings that are not in state live */
 #define SAVE_(a, size) do { if (UNLIKELY(jn_ && !((dr_[(a) >> 9] >> (((a) >> 6) & 7)) & 1))) { CALL(c->h->save_line(c, (a), (size))); } } while (0)
 #define COMMIT_(a, size) do { if (UNLIKELY(!cm_[(a) >> 12])) { CALL(c->h->commit_range(c, (a), (size))); } } while (0)
 #ifdef __clang__
@@ -720,10 +721,10 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 if !new.is_empty() {
                     src += &format!("\n// functions for recursive calls, first used by {}, one per combination of argument kinds\n", ep.text);
                     for sp in new { src += &format!("{}int {}{};\n", linkage, sp.name, sp.proto); }
-                    for sp in new { src += &format!("{}int {}{} {{\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; (void)dr_; (void)cm_; (void)jn_;\n{}    return 0;\n}}\n", linkage, sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
+                    for sp in new { src += &format!("{}int {}{} {{\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", linkage, sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
                 }
                 done = specs;
-                src += &format!("{}{}int {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; (void)dr_; (void)cm_; (void)jn_;\n{}    return 0;\n}}\n", head, linkage, name, body);
+                src += &format!("{}{}int {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", head, linkage, name, body);
             }
             Err(why) => {
                 if let Some(sf) = source { src += &source_comment(ep, sf); src += &format!("// not compiled: {}\n", why); }
@@ -1578,6 +1579,22 @@ impl<'p> G<'p> {
                         self.elem_check(&k, n as u64);
                         self.load(&off.to_string(), &k, sc)
                     }
+                    // a string's bytes are read by index (0..len); strings are never written by index
+                    v @ (CV::Txt(_) | CV::Lit(_)) => {
+                        let t = self.txt_of(v)?;
+                        let k = self.hold_int(k);
+                        self.line(&format!("if (UNLIKELY({k} < 0 || (u64){k} >= (u64){t}.len)) FAIL(400, \"string index out of range\", 25);"));
+                        Ok(CV::Int(format!("(i64)TX_({}.off + {})", t, k)))
+                    }
+                    CV::StateStr(c, idx, ci) => {
+                        let k = self.hold_int(k);
+                        let lenoff = self.prog.colls[c].cols[ci].off;
+                        let bytes = &self.prog.colls[c].cols[ci + 1];
+                        let CKind::StrBytes(m) = bytes.kind else { return no("string column layout") };
+                        let boff = bytes.off;
+                        self.line(&format!("if (UNLIKELY({k} < 0 || (u64){k} >= (u64)LD_U32({lenoff}, {idx}))) FAIL(400, \"string index out of range\", 25);"));
+                        Ok(CV::Int(format!("(i64)LD_U8({}, (i64)({}) * {} + {})", boff, idx, m, k)))
+                    }
                     _ => { self.fail(500, "cannot index this value"); Ok(CV::Null) }
                 }
             }
@@ -2312,7 +2329,7 @@ impl<'p> G<'p> {
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
     let t = ctoks(body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];

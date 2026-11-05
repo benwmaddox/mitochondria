@@ -1,0 +1,44 @@
+// the bytes of a string, read by index (strings are never written by index): a request text, a literal, a string field of an item, a
+// string in plain state; the index is range checked
+--- program
+struct Word { text: string<8>; }
+struct App { words: pool<Word, 2>; motd: string<16>; }
+state app: App;
+
+@post("/words")
+fn post_words(text: string<8>) -> Response<{ slot: i64 }> { let w = app.words.add(); w.text = text; return created({ "slot": slot(w) }); }
+@post("/motd")
+fn post_motd(text: string<16>) -> Response<{}> { app.motd = text; return ok({}); }
+@get("/input/{i}")
+fn get_input(s: string<16>, i: i64) -> Response<{ b: i64, len: i64 }> { return ok({ "b": s[i], "len": len(s) }); }
+@get("/literal/{i}")
+fn get_literal(i: i64) -> Response<{ b: i64 }> { return ok({ "b": "hello"[i] }); }
+@get("/item/{w}/{i}")
+fn get_item(w: i64, i: i64) -> Response<{ b: i64 }> { return ok({ "b": app.words[w].text[i] }); }
+@get("/motd/{i}")
+fn get_motd(i: i64) -> Response<{ b: i64 }> { return ok({ "b": app.motd[i] }); }
+@get("/sum")
+fn get_sum(s: string<16>) -> Response<{ sum: i64, hash: i64 }> {
+    var sum = 0;
+    var hash = 5381;
+    each i in 0..len(s) { sum = sum + s[i]; hash = (hash * 33 + s[i]) % 4294967296; }
+    return ok({ "sum": sum, "hash": hash });
+}
+--- requests
+POST /words {"text": "abc"}
+POST /words {"text": "z"}
+POST /motd {"text": "hi there"}
+GET /input/0?s=ABC
+GET /input/2?s=ABC
+GET /input/3?s=ABC
+GET /input/-1?s=ABC
+GET /literal/0
+GET /literal/4
+GET /literal/5
+GET /item/0/1
+GET /item/0/3
+GET /item/1/0
+GET /motd/3
+GET /motd/8
+GET /sum?s=123456789
+GET /sum?s=

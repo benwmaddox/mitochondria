@@ -1,0 +1,123 @@
+// A hash map from string keys (up to 64 bytes) to i64 values, up to N entries, one value per key. Separate chaining over plain arrays: a table of N bucket
+// heads and, per entry, its key bytes, key length, value, hash and chain link. The hash of a key (djb2, 32 bits) is computed once per call and kept in the entry, so a chain
+// walk compares numbers before it compares bytes. Removing an entry is an unlink onto a free list that the next put reuses at once (a pool would hold the slot back until
+// the end of the request), so a map can take many inserts and removes in one request. Entries are numbered by slot + 1; 0 is none. Putting a new key into a full map
+// is an ordinary error (507). (Local names are never a single letter: see lib/btree.mito.)
+module strmap<N: count>
+struct Head { size: i64; used: i64; free: u32; }
+// what an instance holds
+state {
+    key_bytes: u8[N * 64];
+    key_len: u8[N];
+    values: i64[N];
+    hashes: u32[N];
+    links: u32[N];
+    heads: u32[N];
+    head: Head;
+}
+
+pub fn size() { return self.head.size; }
+pub fn room() { return N - self.head.size; }
+
+fn hash_of(key) {
+    var hash = 5381;
+    each at in 0..len(key) { hash = (hash * 33 + key[at]) % 4294967296; }
+    return hash;
+}
+// does entry `entry` (slot + 1) hold key?
+fn same(entry, key) {
+    let base = (entry - 1) * 64;
+    var equal = self.key_len[entry - 1] == len(key);
+    each at in 0..len(key) while equal { if self.key_bytes[base + at] != key[at] { equal = false; } }
+    return equal;
+}
+// the entry for key (its hash given), 0 if there is none
+fn find(key, hash) {
+    var cur = self.heads[hash % N];
+    var found = 0;
+    each step in 0..N + 1 while cur != 0 && found == 0 {
+        if self.hashes[cur - 1] == hash && self.same(cur, key) { found = cur; } else { cur = self.links[cur - 1]; }
+    }
+    return found;
+}
+pub fn has(key) { return self.find(key, self.hash_of(key)) != 0; }
+// The value of key, or dflt when there is none.
+pub fn get_or(key, dflt) {
+    let found = self.find(key, self.hash_of(key));
+    var value = dflt;
+    if found != 0 { value = self.values[found - 1]; }
+    return value;
+}
+// A new entry for key at the front of its chain, value as given; the caller knows the key is not there.
+fn insert(key, hash, value) {
+    if len(key) > 64 { fail 413 "strmap: key longer than 64 bytes"; }
+    var entry = self.head.free;
+    if entry != 0 {
+        self.head.free = self.links[entry - 1];
+    } else {
+        if self.head.used >= N { fail 507 "strmap: full"; }
+        self.head.used = self.head.used + 1;
+        entry = self.head.used;
+    }
+    let base = (entry - 1) * 64;
+    each at in 0..len(key) { self.key_bytes[base + at] = key[at]; }
+    self.key_len[entry - 1] = len(key);
+    self.values[entry - 1] = value;
+    self.hashes[entry - 1] = hash;
+    self.links[entry - 1] = self.heads[hash % N];
+    self.heads[hash % N] = entry;
+    self.head.size = self.head.size + 1;
+}
+// Set the value of key (adding the key if it is new); true if it was new.
+pub fn put(key, value) {
+    let hash = self.hash_of(key);
+    let found = self.find(key, hash);
+    var added = false;
+    if found != 0 {
+        self.values[found - 1] = value;
+    } else {
+        self.insert(key, hash, value);
+        added = true;
+    }
+    return added;
+}
+// Add delta to the value of key, starting from 0 when the key is new; the new value.
+pub fn add_to(key, delta) {
+    let hash = self.hash_of(key);
+    let found = self.find(key, hash);
+    var value = delta;
+    if found != 0 {
+        value = self.values[found - 1] + delta;
+        self.values[found - 1] = value;
+    } else {
+        self.insert(key, hash, delta);
+    }
+    return value;
+}
+// Remove key; true if it was there.
+pub fn remove(key) {
+    let hash = self.hash_of(key);
+    var cur = self.heads[hash % N];
+    var prev = 0;
+    var done = false;
+    each step in 0..N + 1 while cur != 0 && !done {
+        if self.hashes[cur - 1] == hash && self.same(cur, key) {
+            if prev == 0 { self.heads[hash % N] = self.links[cur - 1]; } else { self.links[prev - 1] = self.links[cur - 1]; }
+            self.links[cur - 1] = self.head.free;
+            self.head.free = cur;
+            self.head.size = self.head.size - 1;
+            done = true;
+        } else {
+            prev = cur;
+            cur = self.links[cur - 1];
+        }
+    }
+    return done;
+}
+// Remove every entry.
+pub fn clear() {
+    self.heads.fill(0, N, 0);
+    self.head.size = 0;
+    self.head.used = 0;
+    self.head.free = 0;
+}

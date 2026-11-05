@@ -1,4 +1,4 @@
-// the text area of a request is 256 KB: a loop that builds strings and keeps none past its iteration gives their space back at the end of each iteration, so it can run
+// the text area of a request is 4 MB: a loop that builds strings and keeps none past its iteration gives their space back at the end of each iteration, so it can run
 // any number of times; a loop that hands a string to a variable declared before it keeps them (and can run the area full)
 --- program
 struct App { total: i64; last: string<16>; }
@@ -40,8 +40,8 @@ fn post_accumulate(n: i64) -> Response<{ len: i64 }> {
 }
 --- requests
 POST /count/10
-POST /count/100000
-POST /nested/50000
+POST /count/1000000
+POST /nested/200000
 POST /keep/10
 POST /keep/100000
 POST /accumulate/1000

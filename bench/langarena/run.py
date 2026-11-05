@@ -79,7 +79,18 @@ def run_mito(test, name, exe, cfg, params, float_result):
         for _ in range(300):
             try: socket.create_connection(("127.0.0.1", port), 0.2).close(); break
             except OSError: time.sleep(0.05)
-        if params == "program": call("POST", "/prepare", {"program": cfg["program"], "warmup": cfg["warmup_program"]})
+        if params == "words":
+            last = 42
+            def next_int(mx):
+                nonlocal last
+                last = (last * 3877 + 29573) % 139968
+                return int(last / 139968.0 * mx)
+            parts = []
+            for _ in range(cfg["words"]):
+                wl = next_int(cfg["word_len"]) + next_int(3) + 3
+                parts.append("".join(chr(97 + next_int(26)) for _ in range(wl)))
+            call("POST", "/prepare", {"text": " ".join(parts)})
+        elif params == "program": call("POST", "/prepare", {"program": cfg["program"], "warmup": cfg["warmup_program"]})
         else: call("POST", prepare_path(cfg, params))
         call("POST", f"/warmup/{warm}")
         secs, _ = call("POST", f"/run/{iters}")
@@ -142,6 +153,7 @@ META = {
     "compress_arithdecode": (["size"], False),
     "compress_lzwencode": (["size"], False),
     "compress_lzwdecode": (["size"], False),
+    "etc_words": ("words", False),
     "etc_cachesimulation": (["values", "size"], False),
     "calculator_ast": (["operations"], False),
     "base64_encode": (["size"], "b64enc"),

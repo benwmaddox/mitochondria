@@ -515,7 +515,7 @@ static void relieve(Mem *m, Pressure *p) {
 }
 
 /* ---------------------------------------------------------------- a running program */
-#define TEXT_CAP (256 * 1024)
+#define TEXT_CAP (4 * 1024 * 1024)
 #define RESPONSE_CAP (256 * 1024)
 /* The declared limits of a request, the same in every runtime (serve.rs MAX_QUERY ...). A route has at most 32 parts
    (checked when the program loads), names at most 128 bytes and fail messages 1024, so messages fit `ebuf`. */

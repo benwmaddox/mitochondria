@@ -1,8 +1,8 @@
 POST /count/10 -> 200 {"total":60}
-POST /count/100000 -> 200 {"total":988950}
-POST /nested/50000 -> 200 {"total":6927790}
+POST /count/1000000 -> 200 {"total":10888950}
+POST /nested/200000 -> 200 {"total":29177790}
 POST /keep/10 -> 200 {"last":"keep_9_padding_padding_padding_padding","len":38}
 POST /keep/100000 -> 507 {"error":"request text area is full"}
-POST /accumulate/1000 -> 507 {"error":"request text area is full"}
+POST /accumulate/1000 -> 200 {"len":2000}
 state <plain values> 32
 memory reserved=4096 committed=4096 live=32

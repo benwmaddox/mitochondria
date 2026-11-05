@@ -385,6 +385,7 @@ struct G<'p> {
     slot_kinds: &'p [((Option<u32>, u32), K)],           // widened kinds of `var` and `let` slots
     ret_kinds: &'p [(u32, K)],                           // widened result kinds of functions
     widen: Option<Widen>,
+    var_names: std::collections::HashSet<String>, // the C names of `var`s: a `let` of one must copy it
     txt_escapes: Vec<u32>, // slots of variables that were assigned a string (or a value of unknown kind), in the order it happened
     recursive: &'p [bool],                               // per function: is it part of a cycle of calls
     specs: &'p std::cell::RefCell<Vec<Spec>>,            // C functions generated for recursive functions
@@ -813,7 +814,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1474,10 +1475,21 @@ impl<'p> G<'p> {
 
     /// Convert a value to kind `k` (which it fits), in its own variable if `mutable`.
     fn coerce(&mut self, v: CV, k: K, mutable: bool) -> R<CV> {
+        let held = self.coerce_value(v, k, mutable)?;
+        if mutable {
+            match &held {
+                CV::Int(n) | CV::Flt(n) | CV::Bool(n) | CV::Txt(n) | CV::Any(n) | CV::Item(_, n) => { self.var_names.insert(n.clone()); }
+                CV::Ref(_, s, i) => { self.var_names.insert(s.clone()); self.var_names.insert(i.clone()); }
+                _ => {}
+            }
+        }
+        Ok(held)
+    }
+    fn coerce_value(&mut self, v: CV, k: K, mutable: bool) -> R<CV> {
         Ok(match (k, v) {
-            (K::Any, v) => { let x = self.val(v)?; if mutable { let t = self.tmp("v"); self.line(&format!("Val {} = {};", t, x)); CV::Any(t) } else { CV::Any(x) } }
+            (K::Any, v) => { let x = self.val(v)?; if mutable || self.var_names.contains(&x) { let t = self.tmp("v"); self.line(&format!("Val {} = {};", t, x)); CV::Any(t) } else { CV::Any(x) } }
             (K::Txt, CV::Null) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ 0, 0, 0 }};", t)); CV::Txt(t) }
-            (K::Txt, v @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..))) => { let x = self.txt_of(v)?; if mutable { let t = self.tmp("t"); self.line(&format!("Txt {} = {};", t, x)); CV::Txt(t) } else { CV::Txt(x) } }
+            (K::Txt, v @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..))) => { let x = self.txt_of(v)?; if mutable || self.var_names.contains(&x) { let t = self.tmp("t"); self.line(&format!("Txt {} = {};", t, x)); CV::Txt(t) } else { CV::Txt(x) } }
             (K::Ref(c), CV::Null) => { let (s, i) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = 0, {} = 0;", s, i)); CV::Ref(c, s, i) }
             (K::Ref(c), CV::Item(_, e)) => { let (s, i) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = 1, {} = {};", s, i, e)); CV::Ref(c, s, i) }
             (K::Ref(_), v @ CV::Ref(..)) => self.hold(v, mutable)?,
@@ -1487,17 +1499,19 @@ impl<'p> G<'p> {
 
     /// Give a value its own C variable (so it is computed once, and a `var` can be assigned later).
     fn hold(&mut self, v: CV, mutable: bool) -> R<CV> {
+        // a `let` may share a C name with the value it is given, unless that name is a `var`'s (which a later assignment changes)
+        let shared = |g: &Self, e: &str| !mutable && is_name(e) && !g.var_names.contains(e);
         Ok(match v {
-            CV::Int(e) if mutable || !is_name(&e) => { let t = self.tmp("v"); self.line(&format!("i64 {} = {};", t, e)); CV::Int(t) }
-            CV::Flt(e) if mutable || !is_name(&e) => { let t = self.tmp("v"); self.line(&format!("double {} = {};", t, e)); CV::Flt(t) }
-            CV::Bool(e) if mutable || !is_name(&e) => { let t = self.tmp("v"); self.line(&format!("int {} = {};", t, e)); CV::Bool(t) }
-            CV::Item(c, e) if mutable || !is_name(&e) => { let t = self.tmp("i"); self.line(&format!("u32 {} = {};", t, e)); CV::Item(c, t) }
-            CV::Txt(e) if mutable => { let t = self.tmp("t"); self.line(&format!("Txt {} = {};", t, e)); CV::Txt(t) }
-            CV::Any(e) if mutable => { let t = self.tmp("v"); self.line(&format!("Val {} = {};", t, e)); CV::Any(t) }
-            CV::Lit(s) if mutable => CV::Txt(self.txt_of(CV::Lit(s))?),
-            CV::StateStr(..) => CV::Txt(self.txt_of(v)?), // a value is copied when read, as in the interpreter
-            CV::Null if mutable => { let t = self.tmp("v"); self.line(&format!("Val {} = {{ 0, 0, 0, 0, 0 }};", t)); CV::Any(t) }
-            CV::Ref(c, s, k) if mutable => { let (s2, k2) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}, {} = {};", s2, s, k2, k)); CV::Ref(c, s2, k2) }
+            CV::Int(e) if !shared(self, &e) => { let t = self.tmp("v"); self.line(&format!("i64 {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Int(t) }
+            CV::Flt(e) if !shared(self, &e) => { let t = self.tmp("v"); self.line(&format!("double {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Flt(t) }
+            CV::Bool(e) if !shared(self, &e) => { let t = self.tmp("v"); self.line(&format!("int {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Bool(t) }
+            CV::Item(c, e) if !shared(self, &e) => { let t = self.tmp("i"); self.line(&format!("u32 {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Item(c, t) }
+            CV::Txt(e) if mutable || self.var_names.contains(&e) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Txt(t) }
+            CV::Any(e) if mutable || self.var_names.contains(&e) => { let t = self.tmp("v"); self.line(&format!("Val {} = {};", t, e)); if mutable { self.var_names.insert(t.clone()); } CV::Any(t) }
+            CV::Lit(s) if mutable => { let t = self.txt_of(CV::Lit(s))?; self.var_names.insert(t.clone()); CV::Txt(t) }
+            CV::StateStr(..) => { let t = self.txt_of(v)?; if mutable { self.var_names.insert(t.clone()); } CV::Txt(t) } // a value is copied when read, as in the interpreter
+            CV::Null if mutable => { let t = self.tmp("v"); self.line(&format!("Val {} = {{ 0, 0, 0, 0, 0 }};", t)); self.var_names.insert(t.clone()); CV::Any(t) }
+            CV::Ref(c, s, k) if mutable || self.var_names.contains(&s) || self.var_names.contains(&k) => { let (s2, k2) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}, {} = {};", s2, s, k2, k)); if mutable { self.var_names.insert(s2.clone()); self.var_names.insert(k2.clone()); } CV::Ref(c, s2, k2) }
             o => o,
         })
     }
@@ -2030,6 +2044,17 @@ impl<'p> G<'p> {
                 let name = match bi { B::Sqrt => "sqrt", B::Exp => "exp", _ => "floor" };
                 let x = match a.as_slice() { [CV::Flt(e)] => e.clone(), [CV::Int(e)] => format!("(double)({})", e), _ => return no(format!("`{}` takes one number", name)) };
                 CV::Flt(format!("{}_({})", name.to_uppercase(), x))
+            }
+            B::Substr => {
+                // a piece of a string, `substr(text, from, count)`: it shares the text's bytes (no copy), the range is checked
+                let [text, from, count] = <[CV; 3]>::try_from(a).map_err(|_| "`substr` takes a string, a start and a count".to_string())?;
+                let t = self.txt_of(text)?;
+                let (from, count) = (self.int_or(from, 400, "a start and a count must be integers"), self.int_or(count, 400, "a start and a count must be integers"));
+                let (from, count) = (self.hold_int(from), self.hold_int(count));
+                self.line(&format!("if (UNLIKELY({from} < 0 || {count} < 0 || {from} + {count} > (i64){t}.len)) FAIL(400, \"substring out of range\", 22);"));
+                let r = self.tmp("t");
+                self.line(&format!("Txt {r} = {{ (u32)({t}.off + {from}), (u32){count}, 1 }};"));
+                CV::Txt(r)
             }
             B::Abs => match a.as_slice() {
                 [CV::Flt(e)] => CV::Flt(format!("FABS_({})", e)),

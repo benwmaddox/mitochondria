@@ -1,0 +1,58 @@
+// a `let` copies the value it is given: a later assignment to the `var` it came from does not change it (numbers, floats, strings, references)
+--- program
+struct Item { n: i64; }
+struct App { items: pool<Item, 4>; total: i64; }
+state app: App;
+
+@get("/ints")
+fn get_ints() -> Response<{ b: i64, c: i64, d: i64, e: i64 }> {
+    var at = 1;
+    let b = at;
+    each i in 0..3 while at < 10 {
+        let start = at;
+        each j in 0..3 while at < 10 && j < 2 { at = at + 1; }
+        at = at + start;
+    }
+    var x = 5;
+    let c = x;
+    x = 7;
+    let d = x;
+    x = x + 1;
+    return ok({ "b": b, "c": c, "d": d, "e": x });
+}
+@get("/floats")
+fn get_floats() -> Response<{ b: f64, c: f64 }> {
+    var f = 1.5;
+    let b = f;
+    f = f * 2.0;
+    let c = f;
+    f = 0.0;
+    return ok({ "b": b, "c": c });
+}
+@get("/strings")
+fn get_strings() -> Response<{ b: string, c: string, d: string }> {
+    var s = "one";
+    let b = s;
+    s = s + "!";
+    let c = s;
+    s = "other";
+    let d = s;
+    s = "last";
+    return ok({ "b": b, "c": c, "d": d });
+}
+@post("/items")
+fn post_items() -> Response<{ first: i64, second: i64 }> {
+    let a = app.items.add();
+    a.n = 1;
+    let b = app.items.add();
+    b.n = 2;
+    var cur = a;
+    let kept = cur;
+    cur = b;
+    return ok({ "first": kept.n, "second": cur.n });
+}
+--- requests
+GET /ints
+GET /floats
+GET /strings
+POST /items

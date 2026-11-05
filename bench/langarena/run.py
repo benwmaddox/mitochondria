@@ -34,8 +34,14 @@ args = sys.argv[1:]
 mode, rounds = "run", 3
 if "--mode" in args: i = args.index("--mode"); mode = args[i + 1]; del args[i:i + 2]
 if "--rounds" in args: i = args.index("--rounds"); rounds = int(args[i + 1]); del args[i:i + 2]
+# --cflags "-O3 -DX ...": build the Mitochondria side with these clang flags instead of the default (measuring builds); --mito-only: skip the other implementations
+cflags = []
+if "--cflags" in args: i = args.index("--cflags"); cflags = args[i + 1].split(); del args[i:i + 2]
+mito_only = "--mito-only" in args
+if mito_only: args.remove("--mito-only")
 config = {c["name"]: c for c in json.load(open(os.path.join(here, f"{mode}.js")))}
 tests = args or sorted(d for d in os.listdir(here) if os.path.isfile(os.path.join(here, d, "main.mito")))
+if cflags: build_dir = os.path.join(here, "build", "flags-" + "_".join(f.strip("-").replace("=", "-") for f in cflags))
 os.makedirs(build_dir, exist_ok=True)
 
 
@@ -62,7 +68,7 @@ def build(test):
     out = os.path.join(build_dir, test + ".exe")
     src = os.path.join(here, test, "main.mito")
     if not os.path.exists(out) or os.path.getmtime(out) < max(os.path.getmtime(src), os.path.getmtime(mito)):
-        r = subprocess.run([mito, "build", src, "-o", out], capture_output=True, text=True)
+        r = subprocess.run([mito, "build", src, "-o", out] + [x for f in cflags for x in ("--cflag", f)], capture_output=True, text=True)
         if r.returncode: raise RuntimeError(f"{test}: build failed\n{r.stdout}{r.stderr}")
     return out
 
@@ -181,7 +187,7 @@ for test in tests:
     exe = build(test)
     M, R, RC, Y, ok_m, ok_r, ok_rc, ok_y = [], [], [], [], True, True, True, True
     for r in range(rounds):
-        order = ["m", "r", "c", "y"] if r % 2 == 0 else ["y", "c", "r", "m"]
+        order = ["m"] if mito_only else ["m", "r", "c", "y"] if r % 2 == 0 else ["y", "c", "r", "m"]
         for who in order:
             if who == "m":
                 s, ok, got = run_mito(test, name, exe, cfg, params, floaty); M.append(s); ok_m &= ok
@@ -199,7 +205,7 @@ for label, agg in (("best of rounds", min), ("median of rounds", statistics.medi
     print(f"\n{label} ({mode} parameters, {rounds} rounds, seconds for the timed iterations, ratio = Mitochondria / Rust):")
     print(f"{'Workload':<26}{'Mitochondria s':>16}{'Rust (reference) s':>20}{'Mito/Rust':>11}{'Rust, overflow checks s':>25}{'Mito/Rust checked':>19}{'Crystal (original) s':>22}{'Mito/Crystal':>14}  checksums")
     for name, M, R, RC, Y, ok in rows:
-        m, r = agg(M), agg(R)
+        m, r = agg(M), (agg(R) if R else 0)
         ratio = lambda a, b: f"{a / b:.2f}x" if b > 0 else "n/a"
         rc = f"{agg(RC):.3f}" if RC and None not in RC else "n/a"
         rcr = ratio(m, agg(RC)) if RC and None not in RC else "n/a"

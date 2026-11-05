@@ -141,8 +141,23 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 #define NDIV(r, x, y) i64 r = (x) / (y)
 #define NMOD(r, x, y) i64 r = (x) % (y)
 #define TX_(i) (tx_[(i)]) /* a byte of the request's text area, where strings that are not in state live */
+/* MITO_MEASURE_NO_JOURNAL, MITO_MEASURE_NO_COMMIT and MITO_MEASURE_NO_RANGE are for measuring what the tests cost only: without the undo log a failed
+   request is not rolled back; without commit tests all state is committed at start; without range tests an index out of range is undefined behaviour */
+#ifdef MITO_MEASURE_NO_JOURNAL
+#define SAVE_(a, size) do { } while (0)
+#else
 #define SAVE_(a, size) do { if (UNLIKELY(jn_ && !((dr_[(a) >> 9] >> (((a) >> 6) & 7)) & 1))) { CALL(c->h->save_line(c, (a), (size))); } } while (0)
+#endif
+#ifdef MITO_MEASURE_NO_COMMIT
+#define COMMIT_(a, size) do { } while (0)
+#else
 #define COMMIT_(a, size) do { if (UNLIKELY(!cm_[(a) >> 12])) { CALL(c->h->commit_range(c, (a), (size))); } } while (0)
+#endif
+#ifdef MITO_MEASURE_NO_RANGE
+#define RANGE_(x) 0
+#else
+#define RANGE_(x) UNLIKELY(x)
+#endif
 #ifdef __clang__
 #define ST1_(a, v) do { u8 v_ = (u8)(v); __builtin_memcpy(b + (a), &v_, 1); } while (0)
 #define ST2_(a, v) do { u16 v_ = (u16)(v); __builtin_memcpy(b + (a), &v_, 2); } while (0)
@@ -1085,7 +1100,7 @@ impl<'p> G<'p> {
     fn elem_check(&mut self, k: &str, n: u64) {
         if let Some(v) = k.strip_suffix("LL").and_then(|d| d.parse::<u64>().ok()) { if v < n { return; } }
         if let Some((lo, hi)) = self.interval(k) { if lo >= 0 && (hi as u64) < n { return; } }
-        self.line(&format!("if (UNLIKELY({k} < 0 || {k} >= {n}LL)) {{"));
+        self.line(&format!("if (RANGE_({k} < 0 || {k} >= {n}LL)) {{"));
         self.depth += 1;
         self.call(&format!("c->h->elem(c, {}, {})", k, n));
         self.depth -= 1;
@@ -1287,7 +1302,7 @@ impl<'p> G<'p> {
             let q = self.tmp("q");
             self.open("{");
             self.line(&format!("i64 {} = {};", q, k));
-            self.line(&format!("if (UNLIKELY({q} < 0 || {q} >= {cap}LL || {q} >= (i64)LD_U32({hdr}, {inst}) || !((LD_U64({live}, (i64)({inst}) * {words} + ({q} >> 6)) >> ({q} & 63)) & 1))) {{"));
+            self.line(&format!("if (RANGE_({q} < 0 || {q} >= {cap}LL || {q} >= (i64)LD_U32({hdr}, {inst}) || !((LD_U64({live}, (i64)({inst}) * {words} + ({q} >> 6)) >> ({q} & 63)) & 1))) {{"));
             self.depth += 1;
             self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, q, t));
             self.depth -= 1;
@@ -1748,7 +1763,7 @@ impl<'p> G<'p> {
                     v @ (CV::Txt(_) | CV::Lit(_)) => {
                         let t = self.txt_of(v)?;
                         let k = self.hold_int(k);
-                        self.line(&format!("if (UNLIKELY({k} < 0 || (u64){k} >= (u64){t}.len)) FAIL(400, \"string index out of range\", 25);"));
+                        self.line(&format!("if (RANGE_({k} < 0 || (u64){k} >= (u64){t}.len)) FAIL(400, \"string index out of range\", 25);"));
                         Ok(CV::Int(format!("(i64)TX_({}.off + {})", t, k)))
                     }
                     CV::StateStr(c, idx, ci) => {
@@ -1757,7 +1772,7 @@ impl<'p> G<'p> {
                         let bytes = &self.prog.colls[c].cols[ci + 1];
                         let CKind::StrBytes(m) = bytes.kind else { return no("string column layout") };
                         let boff = bytes.off;
-                        self.line(&format!("if (UNLIKELY({k} < 0 || (u64){k} >= (u64)LD_U32({lenoff}, {idx}))) FAIL(400, \"string index out of range\", 25);"));
+                        self.line(&format!("if (RANGE_({k} < 0 || (u64){k} >= (u64)LD_U32({lenoff}, {idx}))) FAIL(400, \"string index out of range\", 25);"));
                         Ok(CV::Int(format!("(i64)LD_U8({}, (i64)({}) * {} + {})", boff, idx, m, k)))
                     }
                     _ => { self.fail(500, "cannot index this value"); Ok(CV::Null) }
@@ -2537,7 +2552,7 @@ impl<'p> G<'p> {
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
     let t = ctoks(body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];

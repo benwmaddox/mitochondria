@@ -822,3 +822,62 @@ A mistake found on the way: a first version of the per-iteration text-area relea
 ## Round 24: fewer per-store tests (2026-11-05)
 
 Pool add fast path and bulk zeroing in clear (Binarytrees::Arena 3.76x to about 2x of Rust), array.move saving only its destination, no commit test on stores to live items, and loop versioning (a guard before a loop proves its indexes in range and saves the stored ranges at once). Sieve 2.33 to 1.77 s, SHA256 1.02 to 0.86 s, Sort::Merge 1.93 to 1.74 s (A/B on one core). Full LangArena run after all of it: 1.06x of Rust over the 27 like-for-like and rewritten-to-match ports (0.81x of Crystal), 1.04x over all 41. A measuring mistake on the way: a crashed script left a server on its port and later comparisons were silently served by that stale build; bench/langarena/run.py now refuses to measure when its port is already taken.
+
+## Round 25: best case without the safety tests (2026-11-05)
+
+What the tests cost, measured: the same 41 LangArena ports built three ways, Mitochondria only, 3 rounds each, best of rounds, pinned core (`run.py --mito-only --cflags ...`):
+as built; with `-DMITO_MEASURE_NO_RANGE -DMITO_MEASURE_NO_COMMIT` (no index range tests, all state committed at start so no commit tests); and with `-DMITO_MEASURE_NO_JOURNAL` as well
+(no undo log: a failed request is then not rolled back). Integer overflow checks stay on in all three. These are measuring builds only: they break the language's guarantees. The Rust column is the
+reference from round 24's full run (same day, same core).
+
+| Workload | as built s | no range/commit tests s | also no undo log s | Rust s | as built / Rust | no tests / Rust | no tests, no undo / Rust | audit |
+|---|---|---|---|---|---|---|---|---|
+| Compress::LZWDecode | 0.203 | 0.172 | 0.081 | 1.120 | 0.18x | 0.15x | 0.07x | closest-possible |
+| Compress::LZWEncode | 0.094 | 0.094 | 0.093 | 0.520 | 0.18x | 0.18x | 0.18x | closest-possible |
+| Calculator::Ast | 0.224 | 0.213 | 0.160 | 0.680 | 0.33x | 0.31x | 0.24x | closest-possible |
+| Graph::AStar | 0.893 | 0.709 | 0.514 | 1.288 | 0.69x | 0.55x | 0.40x | rewritten-to-match |
+| Etc::GameOfLife | 1.560 | 1.054 | 0.868 | 1.901 | 0.82x | 0.55x | 0.46x | like-for-like |
+| Etc::CacheSimulation | 0.459 | 0.454 | 0.401 | 0.837 | 0.55x | 0.54x | 0.48x | rewritten-to-match |
+| Maze::BFS | 0.459 | 0.399 | 0.369 | 0.760 | 0.60x | 0.53x | 0.49x | rewritten-to-match |
+| Binarytrees::Obj | 3.737 | 2.726 | 1.575 | 2.892 | 1.29x | 0.94x | 0.54x | like-for-like |
+| Calculator::Interpreter | 0.536 | 0.522 | 0.493 | 0.864 | 0.62x | 0.60x | 0.57x | closest-possible |
+| Maze::Generator | 0.535 | 0.366 | 0.422 | 0.726 | 0.74x | 0.50x | 0.58x | rewritten-to-match |
+| Etc::Words | 0.583 | 0.566 | 0.482 | 0.783 | 0.74x | 0.72x | 0.62x | closest-possible |
+| Template::Parse | 0.682 | 0.627 | 0.567 | 0.833 | 0.82x | 0.75x | 0.68x | closest-possible |
+| Etc::NeuralNet | 0.873 | 0.886 | 0.589 | 0.859 | 1.02x | 1.03x | 0.69x | closest-possible |
+| CLBG::Spectralnorm | 0.752 | 0.751 | 0.769 | 1.099 | 0.68x | 0.68x | 0.70x | rewritten-to-match |
+| Maze::AStar | 0.952 | 0.853 | 0.777 | 1.102 | 0.86x | 0.77x | 0.71x | rewritten-to-match |
+| Compress::ArithDecode | 0.983 | 0.934 | 0.903 | 1.251 | 0.79x | 0.75x | 0.72x | rewritten-to-match |
+| CSV::Parse | 0.582 | 0.493 | 0.470 | 0.626 | 0.93x | 0.79x | 0.75x | closest-possible |
+| Compress::BWTDecode | 0.873 | 0.857 | 0.845 | 1.082 | 0.81x | 0.79x | 0.78x | rewritten-to-match |
+| Distance::Jaro | 0.953 | 0.899 | 0.878 | 1.076 | 0.89x | 0.84x | 0.82x | rewritten-to-match |
+| Hash::CRC32 | 0.805 | 0.805 | 0.682 | 0.825 | 0.98x | 0.98x | 0.83x | like-for-like |
+| Hash::SHA256 | 0.877 | 0.933 | 0.637 | 0.663 | 1.32x | 1.41x | 0.96x | like-for-like |
+| CLBG::Mandelbrot | 0.701 | 0.689 | 0.685 | 0.709 | 0.99x | 0.97x | 0.97x | rewritten-to-match |
+| Sort::Quick | 1.408 | 1.244 | 1.130 | 1.119 | 1.26x | 1.11x | 1.01x | rewritten-to-match |
+| Matmul::Single | 3.277 | 3.295 | 3.331 | 3.291 | 1.00x | 1.00x | 1.01x | closest-possible |
+| Sort::Merge | 1.726 | 1.596 | 1.336 | 1.300 | 1.33x | 1.23x | 1.03x | rewritten-to-match |
+| Distance::NGram | 0.425 | 0.405 | 0.354 | 0.344 | 1.24x | 1.18x | 1.03x | rewritten-to-match |
+| Compress::HuffEncode | 0.746 | 0.623 | 0.625 | 0.594 | 1.26x | 1.05x | 1.05x | rewritten-to-match |
+| Compress::ArithEncode | 1.046 | 1.036 | 0.943 | 0.896 | 1.17x | 1.16x | 1.05x | like-for-like |
+| Graph::BFS | 0.990 | 0.926 | 0.880 | 0.825 | 1.20x | 1.12x | 1.07x | rewritten-to-match |
+| CLBG::Fannkuchredux | 1.361 | 1.148 | 0.978 | 0.912 | 1.49x | 1.26x | 1.07x | like-for-like |
+| Compress::BWTEncode | 0.584 | 0.521 | 0.480 | 0.443 | 1.32x | 1.18x | 1.08x | closest-possible |
+| Binarytrees::Arena | 1.128 | 0.969 | 0.594 | 0.543 | 2.08x | 1.78x | 1.09x | like-for-like |
+| Compress::HuffDecode | 1.041 | 0.758 | 0.685 | 0.614 | 1.70x | 1.23x | 1.12x | rewritten-to-match |
+| CLBG::Nbody | 0.926 | 0.934 | 0.822 | 0.712 | 1.30x | 1.31x | 1.15x | closest-possible |
+| Graph::DFS | 0.952 | 0.930 | 0.846 | 0.713 | 1.34x | 1.30x | 1.19x | rewritten-to-match |
+| Etc::TextRaytracer | 0.735 | 0.750 | 0.743 | 0.618 | 1.19x | 1.21x | 1.20x | rewritten-to-match |
+| Brainfuck::Recursion | 1.981 | 1.881 | 1.734 | 1.330 | 1.49x | 1.41x | 1.30x | closest-possible |
+| Etc::Sieve | 1.735 | 1.777 | 1.741 | 1.312 | 1.32x | 1.35x | 1.33x | rewritten-to-match |
+| Brainfuck::Array | 1.393 | 1.459 | 1.437 | 0.918 | 1.52x | 1.59x | 1.57x | rewritten-to-match |
+| Base64::Decode | 1.642 | 1.279 | 0.761 | 0.184 | 8.92x | 6.95x | 4.14x | closest-possible |
+| Base64::Encode | 2.509 | 2.242 | 0.782 | 0.165 | 15.21x | 13.59x | 4.74x | closest-possible |
+
+geomean vs Rust, like-for-like + rewritten (27): as built 1.06x, no range/commit tests 0.96x, also no undo log 0.85x
+geomean vs Rust, all 41: 1.05x, 0.95x, 0.81x
+
+Reading it: the range and commit tests together cost about 10% overall (1.06x to 0.96x of Rust), the undo log another 12% (to 0.85x). They matter most where items are written a lot
+(Binarytrees::Obj 1.29x to 0.54x, Binarytrees::Arena 2.08x to 1.09x, Base64 4x) and in loops the versioning does not cover (GameOfLife, Huffman decode, Fannkuch). The sieve and Brainfuck
+do not move: their loops are versioned already, and what is left against Rust is overflow checking (Rust with overflow checks takes 1.79 s on the sieve, Mitochondria 1.74 s).
+Run-to-run noise is a few percent (Binarytrees::Obj as built measured 3.2 s in round 24 and 3.7 s here).

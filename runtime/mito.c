@@ -255,6 +255,9 @@ typedef struct {
 static const MitoColl *coll(Mem *m, u32 c) { return &m->prog->colls[c]; }
 static void ensure(Mem *m, u64 a, u64 b) {
     if (b <= a) return;
+#ifdef MITO_MEASURE_NO_COMMIT /* measuring only: everything was committed at start */
+    return;
+#endif
     u64 p = a / PAGE, last = (b - 1) / PAGE;
     while (p <= last) {
         if (!m->committed[p]) {
@@ -1392,6 +1395,11 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
     m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf;
     m->rng = seed;
+#ifdef MITO_MEASURE_NO_COMMIT /* measuring only: commit all state at start, so that no commit test is needed */
+    if (!os_commit(mem->base, mem->reserved) || !os_commit(mem->dirty, up(mem->npages * (PAGE / 64 / 8), PAGE))) return 0;
+    for (u64 q = 0; q < mem->npages; q++) mem->committed[q] = 1;
+    mem->cpages = mem->npages;
+#endif
     ensure(mem, 0, pg->plain_end);
     for (u32 c = 0; c < pg->ncolls; c++) { const MitoColl *k = &pg->colls[c]; if (k->parent < 0) ensure(mem, k->hdr, k->hdr + hdr_fields(k) * 4); }
     return m;

@@ -85,6 +85,7 @@ struct H {
     int (*str_cmp_at)(Ctx *, int, int, u64, u32, int, u64, u32, int *); /* two texts compared where they are (each in state or a literal) */
     int (*id_get)(Ctx *, u32, i64, u32 *, u32 *);                /* a stored id read back: still that item (1, its index) or not (0) */
     int (*id_of)(Ctx *, u32, u32, i64 *);                       /* the stored id of an item (slot + 1, generation) */
+    int (*log)(Ctx *, u32, const Val *, u32);                    /* `log(...)`: values on a line of standard error, with the source line */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -2663,6 +2664,19 @@ impl<'p> G<'p> {
     fn builtin(&mut self, bi: B, n: &str, _args: &'p [Expr], a: Vec<CV>, lit: impl Fn(Option<&Expr>) -> Option<String>,
         int_out: impl Fn(&mut Self, String) -> CV, txt_out: impl Fn(&mut Self, String) -> CV, val_out: impl Fn(&mut Self, String) -> CV) -> R<CV> {
         let _ = (&lit, &txt_out, &val_out);
+        if bi == B::Log {
+            // `log(...)`: for debugging, to standard error; not part of the answer
+            let mut names = Vec::new();
+            for v in a {
+                let v = match v { w @ (CV::PlainStr(_) | CV::StateStr(..) | CV::Sub(..)) => CV::Txt(self.txt_of(w)?), o => o };
+                if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("`log` takes text, numbers, bools and items"); }
+                names.push(self.val(v)?);
+            }
+            let argv = self.tmp("argv");
+            if names.is_empty() { self.line(&format!("Val {}[1];", argv)); } else { self.line(&format!("Val {}[{}] = {{ {} }};", argv, names.len(), names.join(", "))); }
+            self.call(&format!("c->h->log(c, AT_, {}, {})", argv, names.len()));
+            return Ok(CV::Null);
+        }
         if bi == B::Truncate {
             // `s.truncate(n)`: keep the first n bytes (0 <= n <= length); in utf8 text, n must not split a character
             let [s, n] = <[CV; 2]>::try_from(a).map_err(|_| "`truncate` takes the number of bytes to keep: `s.truncate(n)`".to_string())?;

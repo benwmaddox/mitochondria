@@ -14,14 +14,14 @@ pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate }
+pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
         Some(match n {
             "body" => Body, "param" => Param, "query" => Query, "header" => Header, "fwd" => Fwd, "int" => Int, "str" => Str, "len" => Len, "now" => Now,
             "random" => Random, "min" => Min, "max" => Max, "count" => Count, "capacity" => Capacity, "slot" => Slot, "stat" => Stat, "token" => Token,
-            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul,
+            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log,
             _ => return None,
         })
     }
@@ -1023,7 +1023,7 @@ pub fn suggest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Str
     best.map_or(String::new(), |(_, c)| format!(" (did you mean `{}`?)", c))
 }
 /// The builtin functions, for suggestions.
-pub const BUILTIN_NAMES: &[&str] = &["int", "str", "len", "now", "random", "min", "max", "slot", "stat", "token", "or", "exists", "maxlen", "sqrt", "exp", "floor", "abs", "substr", "text_from", "wrapping_add", "wrapping_sub", "wrapping_mul", "ok", "created", "no_content", "status"];
+pub const BUILTIN_NAMES: &[&str] = &["int", "str", "len", "now", "random", "min", "max", "slot", "stat", "token", "or", "exists", "maxlen", "sqrt", "exp", "floor", "abs", "substr", "text_from", "wrapping_add", "wrapping_sub", "wrapping_mul", "log", "ok", "created", "no_content", "status"];
 
 /// A loop without a fixed extent (`while`, a `for` that is not counted): a range as long as it needs, stopped by `cond`, and
 /// counted against the request's step budget.

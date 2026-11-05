@@ -135,6 +135,9 @@ declared with an enum type is written as the value's name. `Op.Plus` is its inte
 Op.Out => { } 0..9 => { } else => { } }` tests constants, lists and ranges in order, without fall-through; on an enum every value
 must be handled or an `else` given, and no value may be covered twice. It runs as an `if` chain (clang turns it into a jump table).
 
+**Debugging.** `log(a, b, ...)` writes its values (formatted as `+` would, separated by spaces) on one line of the server's
+standard error, with the line it was called from (`log: line 12: n is 5`); it is not part of the answer.
+
 **Tests.** `test "name" { ... }` in the program file is a function the test runner calls: inside, `get`, `post`, `put`, `patch`
 and `delete` make requests (`post("/players", { name: "ann" }, { "X-Session": token })`) answering `.status` and `.body`,
 `field(text, "name")` reads a field of a JSON answer, and the state is read directly (changed only through requests). It returns

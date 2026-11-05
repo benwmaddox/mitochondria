@@ -2057,6 +2057,14 @@ impl<'p> G<'p> {
                 self.line(&format!("Txt {r} = {{ (u32)({t}.off + {from}), (u32){count}, 1 }};"));
                 CV::Txt(r)
             }
+            B::WrapAdd | B::WrapSub | B::WrapMul => {
+                // two's-complement wrapping arithmetic (the ordinary operators fail the request on overflow)
+                let name = match bi { B::WrapAdd => "wrapping_add", B::WrapSub => "wrapping_sub", _ => "wrapping_mul" };
+                let op = match bi { B::WrapAdd => '+', B::WrapSub => '-', _ => '*' };
+                let [x, y] = <[CV; 2]>::try_from(a).map_err(|_| format!("`{}` takes two integers", name))?;
+                let (x, y) = (self.int_or(x, 400, "wrapping arithmetic takes integers"), self.int_or(y, 400, "wrapping arithmetic takes integers"));
+                CV::Int(format!("(i64)((u64)({}) {} (u64)({}))", x, op, y))
+            }
             B::TextFrom => {
                 // `text_from(bytes, from, count)`: the bytes of a state array of u8 as a string (copied into the request's text area), range checked
                 let [arr, from, count] = <[CV; 3]>::try_from(a).map_err(|_| "`text_from` takes a byte array, a start and a count".to_string())?;

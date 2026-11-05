@@ -1,0 +1,250 @@
+// LangArena Calculator::Interpreter (kostya/LangArena, MIT): evaluate the expression trees of Calculator::Ast's program (generated and parsed in prepare by the same generator and parser as the
+// Calculator::Ast port, `operations` + 11 assignment lines) by walking each tree recursively, with a map of variables (name to i64) built anew every run: numbers, variables (unset reads 0), the five operators
+// (+, -, * wrapping; / and % by the reference's simple_div and simple_mod, 0 for a zero divisor), assignments storing and giving their value. A run's result is the last expression's value, and the checksum adds
+// it as u32 for every run, warmup included. The reference's Node enum with Box children is the Ast port's node arrays; its HashMap<String, i64> is lib/strmap.mito (a name is cut out of the text with text_from).
+struct Calc {
+    text: u8[4194304]; text_len: i64; pos: i64; cur: i64;
+    kind: u8[1200000]; op: u8[1200000]; left: i32[1200000]; right: i32[1200000]; number: i64[1200000]; name_start: i32[1200000]; name_len: i32[1200000]; nodes: i64;
+    expressions: i32[40000]; count: i64;
+    vars: strmap<65536>;
+    last: i64; result: i64;
+}
+state g: Calc;
+
+fn next_int(max) {
+    g.last = (g.last * 3877 + 29573) % 139968;
+    return int(g.last / 139968.0 * max);
+}
+// the program text
+fn put(text) {
+    each index in 0..len(text) { g.text[g.text_len] = text[index]; g.text_len = g.text_len + 1; }
+}
+fn put_int(value) {
+    var digits = 1;
+    var rest = value;
+    each step in 0..20 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
+    var slot = g.text_len + digits - 1;
+    var remaining = value;
+    each step in 0..digits {
+        g.text[slot] = 48 + remaining % 10;
+        remaining = remaining / 10;
+        slot = slot - 1;
+    }
+    g.text_len = g.text_len + digits;
+}
+fn put_var(value) { put("v"); put_int(value); }
+
+// the parser
+fn new_node(kind, op, left, right, number, name_start, name_len) {
+    let node = g.nodes;
+    g.nodes = g.nodes + 1;
+    g.kind[node] = kind;
+    g.op[node] = op;
+    g.left[node] = left;
+    g.right[node] = right;
+    g.number[node] = number;
+    g.name_start[node] = name_start;
+    g.name_len[node] = name_len;
+    return node;
+}
+fn advance() {
+    g.pos = g.pos + 1;
+    if g.pos >= g.text_len { g.cur = 0; } else { g.cur = g.text[g.pos]; }
+}
+fn skip_whitespace() {
+    each step in 0..g.text_len + 1 while g.cur == 32 || g.cur == 9 || g.cur == 10 || g.cur == 13 { advance(); }
+}
+fn is_digit(byte) { return byte >= 48 && byte <= 57; }
+fn is_letter(byte) { return (byte >= 97 && byte <= 122) || (byte >= 65 && byte <= 90); }
+
+fn parse_expression_rest(left_node) {
+    if g.pos < 0 { return 0; }
+    var current = left_node;
+    var going = 1;
+    each step in 0..g.text_len + 1 while going == 1 {
+        skip_whitespace();
+        if g.cur == 43 || g.cur == 45 {
+            let op = g.cur;
+            advance();
+            let right = parse_term();
+            current = new_node(2, op, current, right, 0, 0, 0);
+        } else {
+            going = 0;
+        }
+    }
+    return current;
+}
+fn parse_term_rest(left_node) {
+    if g.pos < 0 { return 0; }
+    var current = left_node;
+    var going = 1;
+    each step in 0..g.text_len + 1 while going == 1 {
+        skip_whitespace();
+        if g.cur == 42 || g.cur == 47 || g.cur == 37 {
+            let op = g.cur;
+            advance();
+            let right = parse_factor();
+            current = new_node(2, op, current, right, 0, 0, 0);
+        } else {
+            going = 0;
+        }
+    }
+    return current;
+}
+fn parse_number() {
+    var value = 0;
+    each step in 0..g.text_len + 1 while is_digit(g.cur) {
+        value = value * 10 + (g.cur - 48);
+        advance();
+    }
+    return new_node(0, 0, -1, -1, value, 0, 0);
+}
+fn parse_variable() {
+    if g.pos < 0 { return 0; }
+    let start = g.pos;
+    each step in 0..g.text_len + 1 while is_letter(g.cur) || is_digit(g.cur) { advance(); }
+    let length = g.pos - start;
+    skip_whitespace();
+    if g.cur == 61 {
+        advance();
+        let expression = parse_expression();
+        return new_node(3, 0, expression, -1, 0, start, length);
+    }
+    return new_node(1, 0, -1, -1, 0, start, length);
+}
+fn parse_factor() {
+    if g.pos < 0 { return 0; }
+    skip_whitespace();
+    var node = 0;
+    if is_digit(g.cur) {
+        node = parse_number();
+    } else if is_letter(g.cur) {
+        node = parse_variable();
+    } else if g.cur == 40 {
+        advance();
+        node = parse_expression();
+        skip_whitespace();
+        if g.cur == 41 { advance(); }
+    } else {
+        advance();
+        node = new_node(0, 0, -1, -1, 0, 0, 0);
+    }
+    return node;
+}
+fn parse_term() {
+    if g.pos < 0 { return 0; }
+    let node = parse_factor();
+    return parse_term_rest(node);
+}
+fn parse_expression() {
+    if g.pos < 0 { return 0; }
+    let node = parse_term();
+    return parse_expression_rest(node);
+}
+
+// the reference's Parser::parse: every line of the text into an expression tree
+fn parse_all() {
+    g.nodes = 0;
+    g.count = 0;
+    g.pos = 0;
+    g.cur = g.text[0];
+    each step in 0..g.text_len + 1 while g.cur != 0 {
+        skip_whitespace();
+        if g.cur != 0 {
+            let expression = parse_expression();
+            g.expressions[g.count] = expression;
+            g.count = g.count + 1;
+            skip_whitespace();
+            each newline in 0..g.text_len + 1 while g.cur == 10 {
+                advance();
+                skip_whitespace();
+            }
+        }
+    }
+}
+@post("/prepare/{operations}")
+fn prepare(operations: i64 in 1..40000) -> Response<{}> {
+    g.last = 42;
+    g.result = 0;
+    g.text_len = 0;
+    put("v0 = 1\n");
+    each index in 0..10 {
+        let var_id = index + 1;
+        put_var(var_id); put(" = "); put_var(var_id - 1); put(" + "); put_int(var_id); put("\n");
+    }
+    each index in 0..operations {
+        let var_id = index + 10;
+        put_var(var_id); put(" = "); put_var(var_id - 1); put(" + ");
+        let choice = next_int(10);
+        if choice == 0 {
+            put("("); put_var(var_id - 1); put(" / 3) * 4 - "); put_int(index); put(" / (3 + (18 - "); put_var(var_id - 2); put(")) % "); put_var(var_id - 3);
+            put(" + 2 * ((9 - "); put_var(var_id - 6); put(") * ("); put_var(var_id - 5); put(" + 7))");
+        } else if choice == 1 {
+            put_var(var_id - 1); put(" + ("); put_var(var_id - 2); put(" + "); put_var(var_id - 3); put(") * "); put_var(var_id - 4); put(" - ("); put_var(var_id - 5); put(" / "); put_var(var_id - 6); put(")");
+        } else if choice == 2 {
+            put("(3789 - ((("); put_var(var_id - 7); put(")))) + 1");
+        } else if choice == 3 {
+            put("4/2 * (1-3) + "); put_var(var_id - 9); put("/"); put_var(var_id - 5);
+        } else if choice == 4 {
+            put("1+2+3+4+5+6+"); put_var(var_id - 1);
+        } else if choice == 5 {
+            put("(99999 / "); put_var(var_id - 3); put(")");
+        } else if choice == 6 {
+            put("0 + 0 - "); put_var(var_id - 8);
+        } else if choice == 7 {
+            put("(((((((((("); put_var(var_id - 6); put(")))))))))) * 2");
+        } else if choice == 8 {
+            put_int(index); put(" * ("); put_var(var_id - 1); put("%6)%7");
+        } else {
+            put("(1)/(0-"); put_var(var_id - 5); put(") + ("); put_var(var_id - 7); put(")");
+        }
+        put("\n");
+    }
+    parse_all();
+    g.result = 0;
+    return ok({});
+}
+
+
+fn simple_div(left_value, right_value) {
+    if right_value == 0 { return 0; }
+    if (left_value >= 0 && right_value > 0) || (left_value < 0 && right_value < 0) { return left_value / right_value; }
+    return -(abs(left_value) / abs(right_value));
+}
+fn simple_mod(left_value, right_value) {
+    if right_value == 0 { return 0; }
+    return left_value - simple_div(left_value, right_value) * right_value;
+}
+fn evaluate(node) {
+    if node < 0 { return 0; }
+    let kind = g.kind[node];
+    if kind == 0 { return g.number[node]; }
+    if kind == 1 { return g.vars.get_or(text_from(g.text, g.name_start[node], g.name_len[node]), 0); }
+    if kind == 3 {
+        let value = evaluate(g.left[node]);
+        g.vars.put(text_from(g.text, g.name_start[node], g.name_len[node]), value);
+        return value;
+    }
+    let left_value = evaluate(g.left[node]);
+    let right_value = evaluate(g.right[node]);
+    let op = g.op[node];
+    var value = 0;
+    if op == 43 { value = wrapping_add(left_value, right_value); }
+    else if op == 45 { value = wrapping_sub(left_value, right_value); }
+    else if op == 42 { value = wrapping_mul(left_value, right_value); }
+    else if op == 47 { value = simple_div(left_value, right_value); }
+    else if op == 37 { value = simple_mod(left_value, right_value); }
+    return value;
+}
+fn one_run() {
+    g.vars.clear();
+    var result = 0;
+    each index in 0..g.count { result = evaluate(g.expressions[index]); }
+    g.result = (g.result + (result % 4294967296 + 4294967296) % 4294967296) % 4294967296;
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": g.result }); }

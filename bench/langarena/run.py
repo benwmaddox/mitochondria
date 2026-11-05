@@ -156,6 +156,7 @@ META = {
     "distance_jaro": (["count", "size"], False),
     "distance_ngram": (["count", "size"], False),
     "template_parse": (["count"], False),
+    "calculator_interpreter": (["operations"], False),
     "etc_words": ("words", False),
     "etc_cachesimulation": (["values", "size"], False),
     "calculator_ast": (["operations"], False),

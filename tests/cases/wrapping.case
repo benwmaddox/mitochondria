@@ -1,0 +1,25 @@
+// wrapping_add / wrapping_sub / wrapping_mul: two's-complement arithmetic where the ordinary operators fail the request on overflow
+--- program
+struct App { total: i64; }
+state app: App;
+
+@get("/add/{x}/{y}")
+fn get_add(x: i64, y: i64) -> Response<{ sum: i64, diff: i64, product: i64 }> { return ok({ "sum": wrapping_add(x, y), "diff": wrapping_sub(x, y), "product": wrapping_mul(x, y) }); }
+@get("/plain/{x}/{y}")
+fn get_plain(x: i64, y: i64) -> Response<{ sum: i64 }> { return ok({ "sum": x + y }); }
+@post("/grow/{n}")
+fn post_grow(n: i64) -> Response<{ total: i64 }> {
+    app.total = 1;
+    each i in 0..n { app.total = wrapping_mul(app.total, 3) + 1; if app.total > 100 { app.total = app.total - 100; } }
+    var x = 4611686018427387904;
+    x = wrapping_add(x, x);
+    return ok({ "total": x });
+}
+--- requests
+GET /add/2/3
+GET /add/9223372036854775807/1
+GET /add/-9223372036854775808/1
+GET /add/4611686018427387904/4
+GET /add/3037000500/3037000500
+GET /plain/9223372036854775807/1
+POST /grow/5

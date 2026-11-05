@@ -57,6 +57,7 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 | Distance::Jaro | 0.994 | 1.063 | 0.94x | 0.986 | 1.01x | 1.145 | 0.87x | rewritten-to-match |
 | Distance::NGram | 0.437 | 0.347 | 1.26x | 0.361 | 1.21x | 0.642 | 0.68x | rewritten-to-match |
 | Template::Parse | 0.772 | 0.826 | 0.93x | 0.825 | 0.94x | 1.841 | 0.42x | closest-possible |
+| Calculator::Interpreter | 0.551 | 0.874 | 0.63x | 0.874 | 0.63x | 0.476 | 1.16x | closest-possible |
 
 Geometric mean of the 17 like-for-like and rewritten-to-match ports: 1.11x of Rust and 0.87x of Crystal (Matmul::Single and Nbody are closest-possible and left out). Medians agree with best-of within a few percent. Rows for the later ports (from Hash::CRC32 down) were measured in the same way, 3 rounds, after the store speed-ups. Crystal is
 LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
@@ -102,7 +103,7 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 30 | Hash::SHA256 | ported |
 | 31 | Hash::CRC32 | ported |
 | 32 | Calculator::Ast | ported (node arrays with a bump allocator against one heap allocation per node: closest-possible) |
-| 33 | Calculator::Interpreter | blocked: bytes of a string, hash map |
+| 33 | Calculator::Interpreter | ported (`wrapping_add/sub/mul` builtins, lib/strmap) |
 | 34-36 | Maze::Generator / BFS / AStar | ported |
 | 37 | CLBG::Fannkuchredux | ported |
 | 38 | CLBG::Mandelbrot | ported (bit packing as arithmetic) |
@@ -114,8 +115,8 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 47-48 | Compress::LZWEncode / LZWDecode | ported (encode keys its dictionary by (prefix code, byte) instead of the whole string, which favours Mitochondria: excluded from the geometric mean) |
 | 49-50 | Distance::Jaro / NGram | ported (NGram uses the new lib/intmap hash map) |
 
-Counts now: 39 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
-matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 2 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
+Counts now: 40 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
+matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 1 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
 (`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only), `coll.clear()`, `array.fill`, `array.move` and `array.count_below`.
 Still blocked by something else: building text (Base64 output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.
 Where the time goes in what is slower than the reference: Binarytrees::Arena (3.98x of Rust) is pool `add` at about 28 ns against a `Vec` push at a few (75 million adds); the sieve, Fannkuchredux and
@@ -130,3 +131,5 @@ Also added: `substr(text, from, count)` (a piece of a string sharing its bytes, 
 `lib/intmap.mito` (hash map from i64 keys to i64 values, same design as strmap) was added for NGram.
 
 `text_from(bytes, from, count)` (a state array of u8 as a string, copied into the text area, range checked) was added for Template::Parse.
+
+`wrapping_add`, `wrapping_sub` and `wrapping_mul` (two's-complement arithmetic; the ordinary operators fail the request on overflow) were added for Calculator::Interpreter.

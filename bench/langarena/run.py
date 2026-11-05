@@ -134,6 +134,7 @@ META = {
     "binarytrees_arena": (["depth"], False),
     "etc_neuralnet": ([], "sum"),
     "etc_textraytracer": (["w", "h"], False),
+    "calculator_ast": (["operations"], False),
     "base64_encode": (["size"], "b64enc"),
     "base64_decode": (["size"], "b64dec"),
     "brainfuck_array": ("program", False),

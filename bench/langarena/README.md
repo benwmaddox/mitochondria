@@ -43,6 +43,7 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 | Etc::TextRaytracer | 0.742 | 0.618 | 1.20x | 0.626 | 1.18x | 0.785 | 0.94x | rewritten-to-match |
 | Base64::Encode | 2.539 | 0.167 | 15.20x | 0.166 | 15.30x | 1.115 | 2.28x | closest-possible |
 | Base64::Decode | 1.623 | 0.184 | 8.82x | 0.184 | 8.82x | 1.132 | 1.43x | closest-possible |
+| Calculator::Ast | 0.229 | 0.665 | 0.34x | 0.670 | 0.34x | 0.402 | 0.57x | closest-possible |
 
 Geometric mean of the 17 like-for-like and rewritten-to-match ports: 1.11x of Rust and 0.87x of Crystal (Matmul::Single and Nbody are closest-possible and left out). Medians agree with best-of within a few percent. Rows for the later ports (from Hash::CRC32 down) were measured in the same way, 3 rounds, after the store speed-ups. Crystal is
 LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
@@ -87,7 +88,7 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 27-29 | Graph::BFS / DFS / AStar | ported |
 | 30 | Hash::SHA256 | ported |
 | 31 | Hash::CRC32 | ported |
-| 32 | Calculator::Ast | blocked: bytes of a string; node trees |
+| 32 | Calculator::Ast | ported (node arrays with a bump allocator against one heap allocation per node: closest-possible) |
 | 33 | Calculator::Interpreter | blocked: bytes of a string, hash map |
 | 34-36 | Maze::Generator / BFS / AStar | ported |
 | 37 | CLBG::Fannkuchredux | ported |
@@ -97,8 +98,8 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 41-48 | Compress::BWT / Huff / Arith / LZW (encode and decode) | blocked: bit operators, hash maps, byte buffers |
 | 49-50 | Distance::Jaro / NGram | blocked: strings, hash map |
 
-Counts now: 25 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
-matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 16 still to do or blocked. Language features added along the way (each tested, all merged): bit operators and hex literals
+Counts now: 26 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
+matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 15 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
 (`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only), `coll.clear()`, `array.fill`, `array.move` and `array.count_below`.
 Still blocked by something else: building text (Base64 output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.
 Where the time goes in what is slower than the reference: Binarytrees::Arena (3.98x of Rust) is pool `add` at about 28 ns against a `Vec` push at a few (75 million adds); the sieve, Fannkuchredux and

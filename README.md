@@ -33,6 +33,10 @@ an out-of-memory kill, and peak memory is known before the program runs. In retu
 
 Start with the [tutorial](docs/tutorial.md). The design is in [DESIGN.md](DESIGN.md).
 
+**Benchmarks.** 41 [LangArena](https://github.com/kostya/LangArena) tests ported and measured against LangArena's Rust and Crystal
+implementations, time and peak memory per test: [bench/langarena/RESULTS.md](bench/langarena/RESULTS.md) (written by the benchmark script;
+how the comparison is made, and each port's audit, in [bench/langarena/README.md](bench/langarena/README.md)).
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

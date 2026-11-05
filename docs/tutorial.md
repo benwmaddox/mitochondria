@@ -11,7 +11,7 @@ once, at start, which costs no memory; a page takes memory only where data is wr
 
 ## Setup
 
-Windows, with Rust:
+Windows or Linux, with Rust:
 
 ```
 git clone https://github.com/benwmaddox/mitochondria
@@ -19,8 +19,8 @@ cd mitochondria
 cargo build --release
 ```
 
-The compiler is `target\release\mito.exe` (`mitochondria.exe` beside it is the same program under its long name). It builds with the bundled TinyCC, or with
-clang if you install LLVM.
+The compiler is `target/release/mito` (`mito.exe` on Windows; `mitochondria` beside it is the same program under its long name).
+On Windows it builds with the bundled TinyCC, or with clang if you install LLVM; on Linux with the system's clang.
 
 ## 1. The state
 

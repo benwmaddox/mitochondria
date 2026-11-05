@@ -255,3 +255,5 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 - **Seeing inferred kinds (done 2026-11-05):** `mito check app.mito --kinds` prints every local's kind by function, endpoint and test,
   with its line (`let e: Entry`, `let w: text (a window onto a field)`); functions' kinds are their signatures.
 - **Persistence across restarts** (so `serve --watch` keeps state): a design question for the language as a whole, not only tooling.
+  Options drafted in [persistence.md](persistence.md) (snapshots, request log, change log, mapped file, migration by name), with a
+  recommendation: layout-described snapshots with migration first, then a change log for durability.

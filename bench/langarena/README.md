@@ -4,6 +4,8 @@ Mitochondria ports of [LangArena](https://github.com/kostya/LangArena) tests (MI
 
 Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rust cargo build --profile max-perf --manifest-path <LangArena>/rust/Cargo.toml`, and the same with `--config 'profile.max-perf.overflow-checks=true'` into `target-rust-checked`), then `python -I bench/langarena/run.py [--mode run|test] [--rounds N] [test_dir ...]`. `LANGARENA` names the clone (default `D:/tmp/langarena`).
 
+The latest numbers, time and peak memory for every port against Rust and Crystal, are in [RESULTS.md](RESULTS.md), which `run.py` writes (from `results.json`) at the end of every run of the run parameters.
+
 ## How the comparison is made
 
 - LangArena times only `run_all()`, after `prepare()` and the warmup iterations (max(0.2 * iterations, 1) unless the entry says `warmup_iterations`); its checksum covers the warmup runs too, and its random generator is reset after warmup. A port is a program with `POST /prepare/...`, `POST /warmup/{n}`, `POST /run/{n}` and `GET /checksum`; prepare and warmup are untimed requests whose state persists, and only `/run` is timed.

@@ -16,7 +16,7 @@ Methodology (LangArena's, kostya/LangArena, MIT):
   - both processes are pinned to the same core (pin.py), rounds alternate, best of N and the median are reported.
 Rust with overflow checks on (RUST_CHECKED) is an extra column: Mitochondria always checks integer overflow, the reference's max-perf
 profile does not."""
-import http.client, json, math, os, re, socket, statistics, subprocess, sys, time
+import ctypes, datetime, http.client, json, math, os, platform, re, socket, statistics, subprocess, sys, time
 
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(here, "..", "ordered"))
@@ -53,12 +53,78 @@ if cflags: build_dir = os.path.join(here, "build", "flags-" + "_".join(f.strip("
 if os.environ.get("MITO_BUILD_TAG"): build_dir = os.path.join(build_dir, os.environ["MITO_BUILD_TAG"])
 os.makedirs(build_dir, exist_ok=True)
 
+# results.json keeps every implementation's latest numbers per test; RESULTS.md is written from it after each run
+results_path = os.path.join(here, "results.json")
+markdown_path = os.path.join(here, "RESULTS.md")
+results = json.load(open(results_path, encoding="utf-8")) if os.path.exists(results_path) else {}
+def save_results():
+    with open(results_path, "w", encoding="utf-8") as f: json.dump(results, f, indent=1, sort_keys=True)
+def audit_of(test):
+    try: return open(os.path.join(here, test, "audit"), encoding="utf-8").readline().strip()
+    except OSError: return ""
+def write_markdown():
+    names = sorted(results, key=lambda n: n.lower())
+    def val(n, k, f): x = results[n].get(k); return x.get(f) if x else None
+    def num(x, d=3): return "" if x is None else f"{x:.{d}f}"
+    def ratio(a, b): return "" if a is None or not b else f"{a / b:.2f}x"
+    def gmean(xs): xs = [x for x in xs if x]; return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else None
+    fair = [n for n in names if audit_of(results[n]["test"]) in ("like-for-like", "rewritten-to-match")]
+    dates = sorted({v["date"] for n in names for k, v in results[n].items() if isinstance(v, dict) and "date" in v})
+    o = ["# LangArena results: Mitochondria, Rust and Crystal", "",
+         "Written by `run.py` (`python -I bench/langarena/run.py`) from `results.json`; do not edit by hand. Each implementation's numbers are from its "
+         "latest run (" + (dates[0] + " to " + dates[-1] if len(dates) > 1 else (dates[0] if dates else "no runs")) + "): a run of only some implementations "
+         "(`--mito-only`) keeps the others' last numbers. How the comparison is made, and each port's audit, are in [README.md](README.md).", "",
+         f"Machine: {platform.system()} {platform.release()}, {platform.processor() or platform.machine()}. Run parameters (`run.js`), best of the rounds of a run, "
+         "every checksum verified against LangArena's. Rust is LangArena's implementation (max-perf profile: opt-level 3, fat LTO, overflow checks off; the "
+         "checked column turns them on, as Mitochondria always checks); Crystal is LangArena's original implementation. Ratios are Mitochondria / the column's implementation.", "",
+         "## Time (seconds for the timed iterations)", "",
+         "| Workload | Mitochondria | Rust | Mito/Rust | Rust (checked) | Mito/Rust (checked) | Crystal | Mito/Crystal | audit |",
+         "|---|---:|---:|---:|---:|---:|---:|---:|---|"]
+    for n in names:
+        m, r, c, y = (val(n, k, "s") for k in "mrcy")
+        o.append(f"| {n} | {num(m)} | {num(r)} | {ratio(m, r)} | {num(c)} | {ratio(m, c)} | {num(y)} | {ratio(m, y)} | {audit_of(results[n]['test'])} |")
+    gr = gmean([val(n, "m", "s") / val(n, "r", "s") for n in fair if val(n, "m", "s") and val(n, "r", "s")])
+    gc = gmean([val(n, "m", "s") / val(n, "c", "s") for n in fair if val(n, "m", "s") and val(n, "c", "s")])
+    gy = gmean([val(n, "m", "s") / val(n, "y", "s") for n in fair if val(n, "m", "s") and val(n, "y", "s")])
+    ga = gmean([val(n, "m", "s") / val(n, "r", "s") for n in names if val(n, "m", "s") and val(n, "r", "s")])
+    o += ["", f"Geometric mean over the {len(fair)} like-for-like and rewritten-to-match ports: Mitochondria / Rust {num(gr, 3)}x, / Rust (checked) {num(gc, 3)}x, "
+          f"/ Crystal {num(gy, 3)}x; over all {len(names)} ports, / Rust {num(ga, 3)}x.", "",
+          "## Memory (peak working set, MB)", "",
+          "The most physical memory each process held at once, measured by the operating system (Windows' peak working set). Rust and Crystal run one test per process; "
+          "Mitochondria is its server process for that test, measured after prepare, warmup and the timed run (its connection threads and request areas included; "
+          "reserved address space that was never touched is not counted).", "",
+          "| Workload | Mitochondria MB | Rust MB | Mito/Rust | Crystal MB | Mito/Crystal |",
+          "|---|---:|---:|---:|---:|---:|"]
+    for n in names:
+        m, r, y = val(n, "m", "mb"), val(n, "r", "mb"), val(n, "y", "mb")
+        o.append(f"| {n} | {num(m, 1)} | {num(r, 1)} | {ratio(m, r)} | {num(y, 1)} | {ratio(m, y)} |")
+    mr = gmean([val(n, "m", "mb") / val(n, "r", "mb") for n in names if val(n, "m", "mb") and val(n, "r", "mb")])
+    my = gmean([val(n, "m", "mb") / val(n, "y", "mb") for n in names if val(n, "m", "mb") and val(n, "y", "mb")])
+    o += ["", f"Geometric mean over all {len(names)} ports: Mitochondria / Rust {num(mr, 2)}x, / Crystal {num(my, 2)}x.", ""]
+    with open(markdown_path, "w", encoding="utf-8") as f: f.write("\n".join(o))
+    print(f"wrote {markdown_path}", file=sys.stderr)
+
 
 def checksum_bytes(data):
     h = 5381
     for b in data:
         h = (h * 33 + b) % 4294967296
     return h
+
+
+# peak memory: a process's peak working set (the most physical memory it held at once), read from its handle, which stays
+# open after the process ends while the Popen object lives
+class _PMC(ctypes.Structure):
+    _fields_ = [("cb", ctypes.c_uint32), ("PageFaultCount", ctypes.c_uint32), ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t), ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t), ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+def peak_mb(p):
+    if os.name != "nt": return None
+    m = _PMC(); m.cb = ctypes.sizeof(_PMC)
+    k32 = ctypes.windll.kernel32
+    k32.K32GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PMC), ctypes.c_uint32]
+    if not k32.K32GetProcessMemoryInfo(ctypes.c_void_p(int(p._handle)), ctypes.byref(m), m.cb): return None
+    return m.PeakWorkingSetSize / (1 << 20)
 
 
 def checksum_f64(v):
@@ -127,7 +193,7 @@ def run_mito(test, name, exe, cfg, params, float_result):
             got = checksum_f64(math.sqrt(res["result"]))
         else:
             got = res["checksum"]
-        return secs, got == cfg["checksum"], got
+        return secs, got == cfg["checksum"], got, peak_mb(p)
     finally:
         p.kill(); p.wait()
 
@@ -136,9 +202,10 @@ def run_rust(exe, name):
     name = ref_name.get(name, name)
     p = subprocess.Popen([exe, os.path.join(arena, f"{mode}.js"), name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=os.path.dirname(exe)); pin(p)
     out = p.communicate()[0]
+    mem = peak_mb(p)
     m = re.search(rf"{re.escape(name)}: (OK|ERR\[[^\]]*\]) in ([0-9.]+)s", out)
-    if not m: return None, False
-    return float(m.group(2)), m.group(1) == "OK"
+    if not m: return None, False, mem
+    return float(m.group(2)), m.group(1) == "OK", mem
 
 
 # per test: the config keys /prepare takes, and whether the checksum comes from a float
@@ -192,20 +259,32 @@ for test in tests:
     cfg = config[name]
     exe = build(test)
     M, R, RC, Y, ok_m, ok_r, ok_rc, ok_y = [], [], [], [], True, True, True, True
+    MEM = {"m": [], "r": [], "c": [], "y": []}
     for r in range(rounds):
         order = ["m"] if mito_only else ["m", "r", "c", "y"] if r % 2 == 0 else ["y", "c", "r", "m"]
         for who in order:
             if who == "m":
-                s, ok, got = run_mito(test, name, exe, cfg, params, floaty); M.append(s); ok_m &= ok
+                s, ok, got, mem = run_mito(test, name, exe, cfg, params, floaty); M.append(s); ok_m &= ok; MEM["m"].append(mem)
                 if not ok: print(f"  {name}: Mitochondria checksum {got}, expected {cfg['checksum']}", file=sys.stderr)
             elif who == "r":
-                s, ok = run_rust(rust, name); R.append(s); ok_r &= ok
+                s, ok, mem = run_rust(rust, name); R.append(s); ok_r &= ok; MEM["r"].append(mem)
             elif who == "c" and os.path.exists(rust_checked):
-                s, ok = run_rust(rust_checked, name); RC.append(s); ok_rc &= ok
+                s, ok, mem = run_rust(rust_checked, name); RC.append(s); ok_rc &= ok; MEM["c"].append(mem)
             elif who == "y" and os.path.exists(crystal):
-                s, ok = run_rust(crystal, name); Y.append(s); ok_y &= ok
+                s, ok, mem = run_rust(crystal, name); Y.append(s); ok_y &= ok; MEM["y"].append(mem)
     rows.append((name, M, R, RC, Y, ok_m and ok_r and ok_y))
+    # the results file: each implementation's best time and peak memory, replaced only for the implementations measured now
+    if mode == "run":
+        entry = results.setdefault(name, {"test": test})
+        stamp = datetime.date.today().isoformat()
+        for key, times, oks in (("m", M, ok_m), ("r", R, ok_r), ("c", RC, ok_rc), ("y", Y, ok_y)):
+            if times and None not in times:
+                mems = [x for x in MEM[key] if x is not None]
+                entry[key] = {"s": min(times), "mb": min(mems) if mems else None, "verified": oks, "date": stamp}
+        save_results()
     print(f"  {name} done", file=sys.stderr)
+
+if mode == "run": write_markdown()
 
 for label, agg in (("best of rounds", min), ("median of rounds", statistics.median)):
     print(f"\n{label} ({mode} parameters, {rounds} rounds, seconds for the timed iterations, ratio = Mitochondria / Rust):")

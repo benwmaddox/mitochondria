@@ -1,0 +1,105 @@
+// LangArena Compress::BWTEncode (kostya/LangArena, MIT): Burrows-Wheeler transform of a repeating text, `iterations` times.
+// The input is `size` bytes of the repeating pattern "ABRACADABRA". The Burrows-Wheeler transform is the reference's prefix-doubling suffix sort: counting-sort the suffixes by
+// first byte, rank them, then for k = 1, 2, 4, ... sort the suffix array by the pair (rank[i], rank[(i + k) % n]) with a stable sort and re-rank. The reference's `sort_by`
+// (a library stable sort that detects runs already in order) is a top-down merge sort here (as in the Sort::Merge port) that skips the merge when the two halves are already in order, the per-round pair and rank vectors live in state arrays, and the new ranks are written
+// over the old ones (the pairs hold the old ranks). The checksum adds the length of the result of every run, warmup included.
+struct BW { data: u8[131072]; trans: u8[131072]; sa: i32[131072]; rank: i32[131072]; pr0: i32[131072]; pr1: i32[131072]; tmp: i32[131072]; counts: i32[256]; positions: i32[256]; fill: i32[256]; size: i64; orig: i64; result: i64; }
+state bw: BW;
+
+// a before b (or equal): the reference's comparison of the pairs, ties keep their order
+fn before(left, right) {
+    return bw.pr0[left] < bw.pr0[right] || (bw.pr0[left] == bw.pr0[right] && bw.pr1[left] <= bw.pr1[right]);
+}
+fn merge(low, mid, high) {
+    each x in low..high + 1 { bw.tmp[x] = bw.sa[x]; }
+    var i = low;
+    var j = mid + 1;
+    var k = low;
+    each w in 0..1000000000 while i <= mid && j <= high {
+        if before(bw.tmp[i], bw.tmp[j]) { bw.sa[k] = bw.tmp[i]; i = i + 1; } else { bw.sa[k] = bw.tmp[j]; j = j + 1; }
+        k = k + 1;
+    }
+    each w in 0..1000000000 while i <= mid { bw.sa[k] = bw.tmp[i]; i = i + 1; k = k + 1; }
+}
+fn msort(low, high) {
+    if low < high {
+        let mid = (low + high) / 2;
+        msort(low, mid);
+        msort(mid + 1, high);
+        if !before(bw.sa[mid], bw.sa[mid + 1]) { merge(low, mid, high); }
+    }
+}
+fn bwt_transform() {
+    let n = bw.size;
+    bw.counts.fill(0, 256, 0);
+    each i in 0..n { bw.counts[bw.data[i]] = bw.counts[bw.data[i]] + 1; }
+    var total = 0;
+    each i in 0..256 { bw.positions[i] = total; total = total + bw.counts[i]; }
+    bw.fill.fill(0, 256, 0);
+    each i in 0..n {
+        let byte = bw.data[i];
+        bw.sa[bw.positions[byte] + bw.fill[byte]] = i;
+        bw.fill[byte] = bw.fill[byte] + 1;
+    }
+    var current_rank = 0;
+    var prev_char = bw.data[bw.sa[0]];
+    each i in 0..n {
+        let index = bw.sa[i];
+        if bw.data[index] != prev_char { current_rank = current_rank + 1; prev_char = bw.data[index]; }
+        bw.rank[index] = current_rank;
+    }
+    var k = 1;
+    each round in 0..64 while k < n {
+        each i in 0..n {
+            bw.pr0[i] = bw.rank[i];
+            bw.pr1[i] = bw.rank[(i + k) % n];
+        }
+        msort(0, n - 1);
+        bw.rank[bw.sa[0]] = 0;
+        each i in 1..n {
+            let prev = bw.sa[i - 1];
+            let curr = bw.sa[i];
+            var step = 1;
+            if bw.pr0[prev] == bw.pr0[curr] && bw.pr1[prev] == bw.pr1[curr] { step = 0; }
+            bw.rank[curr] = bw.rank[prev] + step;
+        }
+        k = k * 2;
+    }
+    each i in 0..n {
+        let suffix = bw.sa[i];
+        if suffix == 0 {
+            bw.trans[i] = bw.data[n - 1];
+            bw.orig = i;
+        } else {
+            bw.trans[i] = bw.data[suffix - 1];
+        }
+    }
+}
+fn make_data(size) {
+    each i in 0..size {
+        let slot = i % 11;
+        var byte = 65;
+        if slot == 1 { byte = 66; } else if slot == 2 { byte = 82; } else if slot == 3 { byte = 65; } else if slot == 4 { byte = 67; }
+        else if slot == 5 { byte = 65; } else if slot == 6 { byte = 68; } else if slot == 7 { byte = 65; } else if slot == 8 { byte = 66; }
+        else if slot == 9 { byte = 82; } else if slot == 10 { byte = 65; }
+        bw.data[i] = byte;
+    }
+}
+
+fn one_run() {
+    bwt_transform();
+    bw.result = (bw.result + bw.size) % 4294967296;
+}
+@post("/prepare/{size}")
+fn prepare(size: i64 in 2..131072) -> Response<{}> {
+    bw.size = size;
+    bw.result = 0;
+    make_data(size);
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": bw.result }); }

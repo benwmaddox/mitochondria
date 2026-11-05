@@ -1,0 +1,2 @@
+closest-possible
+Same prefix-doubling suffix sort and the same data. The reference's `sort_by` is a library stable sort (driftsort); here it is a top-down stable merge sort written in the language (as the Sort::Merge port) that skips a merge when its halves are already in order, which is a different algorithm from the one the reference runs: closest-possible. The reference allocates a pairs vector and a new rank vector every round; here they are state arrays, the new ranks overwrite the old (the pairs hold the old ranks). Stores are checked and undo-logged.

@@ -1,0 +1,2 @@
+rewritten-to-match
+Same counting-sort inverse (counts, positions, `next` links, follow from the original index). The encoder that prepares the input is the language's version of the reference's (see Compress::BWTEncode's audit) and is untimed, as in the reference. The checksum's equality test with the input runs in the checksum request. Stores are checked and undo-logged.

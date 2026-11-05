@@ -15,11 +15,11 @@ fn merge(left, mid, right) {
     var i = left;
     var j = mid + 1;
     var k = left;
-    each w in 0..1000000000 while i <= mid && j <= right {
+    each w in left..right + 1 while i <= mid && j <= right {
         if so.tmp[i] <= so.tmp[j] { so.t[k] = so.tmp[i]; i = i + 1; } else { so.t[k] = so.tmp[j]; j = j + 1; }
         k = k + 1;
     }
-    each w in 0..1000000000 while i <= mid { so.t[k] = so.tmp[i]; i = i + 1; k = k + 1; }
+    each w in i..mid + 1 { so.t[k] = so.tmp[i]; i = i + 1; k = k + 1; }
 }
 fn msort(left, right) {
     if left < right {

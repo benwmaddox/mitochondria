@@ -1186,6 +1186,22 @@ impl<'p> G<'p> {
                 }
             }
         }
+        // a variable stepped once per iteration (`k = k + 1` at the top level of the body, nowhere else assigned), bounded by the number of
+        // iterations of the range (as the merge loop's output position): the accesses before the step and those after it
+        if pure(&it.coll) && pure(hi) {
+            let stepped: Vec<u32> = plans.iter().map(|p| p.0).collect();
+            for (si, st) in body.iter().enumerate() {
+                let Stmt::Assign(Expr::Var(_, VarRes::Local(slot)), Expr::Bin(op, a, step)) = st else { continue };
+                let slot = *slot;
+                if op != "+" || !matches!(&**a, Expr::Var(_, VarRes::Local(s3)) if *s3 == slot) || !invariant(step, &assigned) || stepped.contains(&slot) || slot == it.slot { continue; }
+                if body.iter().enumerate().any(|(i, other)| i != si && assigns_slot(other, slot)) { continue; }
+                let (mut before, mut after) = (Vec::new(), Vec::new());
+                for other in &body[..si] { stmt_sites(other, slot, &assigned, &mut before); }
+                for other in &body[si + 1..] { stmt_sites(other, slot, &assigned, &mut after); }
+                if !before.is_empty() { plans.push((slot, before, Bound::Counted(&it.coll, hi, step, false))); }
+                if !after.is_empty() { plans.push((slot, after, Bound::Counted(&it.coll, hi, step, true))); }
+            }
+        }
         if plans.is_empty() { return Ok(None); }
         let guard = self.tmp("fast");
         self.line(&format!("int {} = 1;", guard));
@@ -1204,7 +1220,21 @@ impl<'p> G<'p> {
                     let lo = { let v = self.expr(lo, env, None)?; let k = self.int_or(v, 500, "a range needs integers"); self.hold_int(k) };
                     let hi = { let v = self.expr(hi, env, None)?; let k = self.int_or(v, 500, "a range needs integers"); self.hold_int(k) };
                     counter = Some((-BOUND, BOUND));
+                    self.line(&format!("if (!({lo} >= -{BIG} && {lo} <= {BIG} && {hi} >= -{BIG} && {hi} <= {BIG})) {guard} = 0;"));
                     (lo, format!("({} - 1)", hi))
+                }
+                Bound::Counted(lo, hi, step, after) => {
+                    let Some(CV::Int(start)) = env[slot as usize].clone() else { continue };
+                    let start = self.hold_int(start);
+                    let lo = { let v = self.expr(lo, env, None)?; let k = self.int_or(v, 500, "a range needs integers"); self.hold_int(k) };
+                    let hi = { let v = self.expr(hi, env, None)?; let k = self.int_or(v, 500, "a range needs integers"); self.hold_int(k) };
+                    let stepv = { let v = self.expr(step, env, None)?; let k = self.int_or(v, 500, "a step must be an integer"); self.hold_int(k) };
+                    // steps times iterations within 2^40, so the bound below cannot overflow
+                    self.line(&format!("if (!({start} >= -{BIG} && {start} <= {BIG} && {lo} >= -{BIG} && {lo} <= {BIG} && {hi} >= -{BIG} && {hi} <= {BIG} && {stepv} > 0 && {stepv} <= {BIG} && ({hi} <= {lo} || {stepv} <= {BIG} / ({hi} - {lo})))) {guard} = 0;"));
+                    if let Some(CV::Int(name)) = env[slot as usize].clone() { hints.push((name, (-2 * BOUND, 2 * BOUND))); }
+                    if let Expr::Var(_, VarRes::Local(ss)) = step { if let Some(CV::Int(name)) = env[*ss as usize].clone() { hints.push((name, (1, BOUND))); } }
+                    let extra = if after { "" } else { " - 1" };
+                    (start.clone(), format!("({} + ({} - {}{}) * {})", start, hi, lo, extra, stepv))
                 }
                 Bound::Stepped(limit, inclusive, step) => {
                     let step_expr = step;
@@ -1212,13 +1242,13 @@ impl<'p> G<'p> {
                     let start = self.hold_int(start);
                     let limit = { let v = self.expr(limit, env, None)?; let k = self.int_or(v, 500, "a bound must be an integer"); self.hold_int(k) };
                     let step = { let v = self.expr(step, env, None)?; let k = self.int_or(v, 500, "a step must be an integer"); self.hold_int(k) };
-                    self.line(&format!("if (!({step} > 0 && {step} <= {BIG})) {guard} = 0;"));
+                    self.line(&format!("if (!({step} > 0 && {step} <= {BIG} && {start} >= -{BIG} && {start} <= {BIG} && {limit} >= -{BIG} && {limit} <= {BIG})) {guard} = 0;"));
                     if let Some(CV::Int(name)) = env[slot as usize].clone() { hints.push((name, (-2 * BOUND, 2 * BOUND))); }
                     if let Expr::Var(_, VarRes::Local(ss)) = step_expr { if let Some(CV::Int(name)) = env[*ss as usize].clone() { hints.push((name, (1, BOUND))); } }
                     (start, if inclusive { limit } else { format!("({} - 1)", limit) })
                 }
             };
-            self.line(&format!("if (!({vmin} >= -{BIG} && {vmin} <= {BIG} && {vmax} >= -{BIG} && {vmax} <= {BIG})) {guard} = 0;"));
+            self.line(&format!("if ({guard} && !({vmin} >= -{BIG} && {vmin} <= {BIG} && {vmax} >= -{BIG} && {vmax} <= {BIG})) {guard} = 0;"));
             // a short loop keeps its per-access tests: the test and the bulk save would cost more than they save
             self.line(&format!("if ({guard} && {vmax} - {vmin} < 32) {guard} = 0;"));
             for site in sites {
@@ -2862,7 +2892,9 @@ struct Site<'p> { arr: &'p Expr, idx: &'p Expr, store: bool, off: Off<'p> }
 #[derive(Clone, Copy)]
 enum Off<'p> { Zero, Plus(&'p Expr), Minus(&'p Expr), From(&'p Expr) }
 /// The values a versioned loop's variable takes: the range lo..hi, or from its value before the loop up to a limit (inclusive or not), stepping up.
-enum Bound<'p> { Range(&'p Expr, &'p Expr), Stepped(&'p Expr, bool, &'p Expr) }
+enum Bound<'p> { Range(&'p Expr, &'p Expr), Stepped(&'p Expr, bool, &'p Expr), Counted(&'p Expr, &'p Expr, &'p Expr, bool) }
+// Counted(lo, hi, step, after): a variable stepped up once per iteration of a loop over lo..hi; at most hi - lo iterations, so it stays below
+// its start plus (hi - lo) steps; `after`: the accesses come after the step in the body (one step more)
 
 /// The local slots assigned anywhere in these statements (nested ones included).
 fn assigned_slots(stmts: &[Stmt]) -> std::collections::HashSet<u32> {

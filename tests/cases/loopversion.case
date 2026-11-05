@@ -45,6 +45,16 @@ fn get_sum(from: i64, to: i64) -> Response<{ total: i64 }> {
     each i in from..to { total = total + app.cells[i]; }
     return ok({ "total": total });
 }
+@post("/counted/{start}/{step}/{n}")
+fn post_counted(start: i64, step: i64, n: i64) -> Response<{ sum: i64 }> {
+    each i in 0..64 { app.cells[i] = 0; }
+    var k = start;
+    var after = start;
+    each i in 0..n { app.cells[k] = app.cells[k] + i; k = k + step; app.bytes[after % 64] = 0; }
+    var at = start;
+    each i in 0..n { at = at + step; app.cells[at - step] = app.cells[at - step] + 1; }
+    return ok({ "sum": sum_cells() });
+}
 --- requests
 POST /fill/0/64
 POST /fill/2/4
@@ -62,3 +72,9 @@ POST /branch/100
 GET /sum/0/64
 GET /sum/-1/40
 POST /fill/40/40
+POST /counted/0/1/64
+POST /counted/10/1/40
+POST /counted/0/2/32
+POST /counted/10/1/60
+POST /counted/63/0/40
+POST /counted/-1/1/40

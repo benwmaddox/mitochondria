@@ -1,0 +1,3 @@
+// expect: `best` holds an id of game.players, given an item of game.others
+struct Player { n: i64; } struct Other { n: i64; } struct Game { players: pool<Player, 4> checked; others: pool<Other, 4> checked; best: Player?; } state game: Game;
+@post("/a") fn a() -> Response<{}> { let o = game.others.add(); game.best = o; return ok({}); }

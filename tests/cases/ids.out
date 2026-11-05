@@ -1,0 +1,16 @@
+POST /players -> 201 {"id":"0.0"}
+POST /players -> 201 {"id":"1.0"}
+POST /best/0.0 -> 200 {"best":"ann"}
+POST /rival/1.0/0.0 -> 200 {"rival":"ann"}
+GET /look/1.0 -> 200 {"best":"ann","there":true,"id":"0.0","rival":"ann"}
+DELETE /players/0.0 -> 204 
+GET /look/1.0 -> 200 {"best":"-","there":false,"id":null,"rival":"-"}
+POST /players -> 201 {"id":"0.1"}
+GET /look/1.0 -> 200 {"best":"-","there":false,"id":null,"rival":"-"}
+POST /best/0.1 -> 200 {"best":"cy"}
+GET /look/1.0 -> 200 {"best":"cy","there":true,"id":"0.1","rival":"-"}
+POST /clear -> 200 {"best":null}
+GET /look/1.0 -> 200 {"best":"-","there":false,"id":null,"rival":"-"}
+state <plain values> 8
+state game.players 60
+memory reserved=8192 committed=8192 live=68

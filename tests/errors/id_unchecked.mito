@@ -1,0 +1,3 @@
+// expect: 2:66: `Game.best` (`Player?`): a stored id needs generations to tell a reused slot from its item: declare `game.players` `checked`
+struct Player { n: i64; } struct Game { players: pool<Player, 4>; best: Player?; } state game: Game;
+@get("/a") fn a() -> Response<{}> { return ok({}); }

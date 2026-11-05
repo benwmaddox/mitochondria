@@ -1,0 +1,3 @@
+// expect: `best` holds an id: give it an item, a value that may be null, or `null`
+struct Player { n: i64; } struct Game { players: pool<Player, 4> checked; best: Player?; } state game: Game;
+@post("/a") fn a() -> Response<{}> { game.best = 3; return ok({}); }

@@ -41,7 +41,8 @@ impl Ty { pub fn is_coll(&self) -> bool { matches!(self, Ty::List(..) | Ty::Pool
 /// `ranges[k]`: field k's declared range (`limit: i64 in 0..3000000`, both ends included), when it has one: every write is checked against it,
 /// and reads give the range analysis that interval.
 /// `unlogged[k]`: field k is kept out of the undo log (`scratch: u8[4096] unlogged`): a failed request leaves what it wrote there.
-pub struct StructDef { pub name: String, pub fields: Vec<(String, Ty)>, pub ranges: Vec<Option<(i64, i64)>>, pub unlogged: Vec<bool>, pub offs: Vec<usize>, pub size: usize, pub align: usize, state: u8 }
+/// `ids[k]`: field k holds a stored id (`best: Player?`, or `Player in game.players?`): the struct and the collection named, if any.
+pub struct StructDef { pub name: String, pub fields: Vec<(String, Ty)>, pub ranges: Vec<Option<(i64, i64)>>, pub ids: Vec<Option<(String, Option<String>)>>, pub unlogged: Vec<bool>, pub offs: Vec<usize>, pub size: usize, pub align: usize, state: u8 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind { List(Full), Pool(bool) }
@@ -93,7 +94,13 @@ pub struct ModInst { pub name: String, pub module: String, pub key: Option<Strin
 #[derive(Clone, Debug)]
 pub struct EnumDef { pub name: String, pub base: Scalar, pub values: Vec<(String, i64)> }
 
+/// Where a stored id lives: an item's column (collection, column) or a plain value (its offset).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IdAt { Col(usize, usize), Plain(usize) }
+
 pub struct Program {
+    /// The stored-id fields and the pool each names (a top-level `checked` pool).
+    pub ids: Vec<(IdAt, usize)>,
     pub enums: Vec<EnumDef>,
     /// `request work: Work;`: the per-request struct (offset, bytes on whole 64-byte lines): zeroed before each request, kept out of
     /// the undo log, never kept between requests.
@@ -210,10 +217,20 @@ impl Program {
                     let mut fields = Vec::new();
                     let mut ranges = Vec::new();
                     let mut unlogged = Vec::new();
+                    let mut ids = Vec::new();
                     while p.peek() != Some("}") {
                         let f = p.ident()?; p.eat(":")?;
                         let ascii = p.peek() == Some("ascii");
                         let ty = p.ty()?;
+                        // `T?` / `T in path?`: a stored id of an item, read back as a `T?` (8 bytes: slot + 1, then its generation)
+                        let mut idref = None;
+                        if let Ty::Named(n) = &ty {
+                            if p.peek() == Some("?") { p.i += 1; idref = Some((n.clone(), None)); }
+                            else if p.peek() == Some("in") && p.t.get(p.i + 1).map_or(false, |x| x.chars().next().map_or(false, |c| c.is_alphabetic())) {
+                                p.i += 1; let path = p.path()?; p.eat("?")?; idref = Some((n.clone(), Some(path)));
+                            }
+                        }
+                        let ty = if idref.is_some() { Ty::Scalar(Scalar::I64) } else { ty };
                         // `in lo..hi`: a declared range for an integer field, both ends included
                         let range = if p.word("in") { let lo = p.signed()?; p.eat(".")?; p.eat(".")?; let hi = p.signed()?; Some((lo, hi)) } else { None };
                         if let Some((lo, hi)) = range {
@@ -227,10 +244,10 @@ impl Program {
                         let unl = p.word("unlogged");
                         p.eat(";")?;
                         // an `ascii<N>` field: its bytes are 0..127 (the range of a text field is the range of its bytes)
-                        fields.push((f, ty)); ranges.push(if ascii { Some((0, 127)) } else { range }); unlogged.push(unl);
+                        fields.push((f, ty)); ranges.push(if ascii { Some((0, 127)) } else { range }); unlogged.push(unl); ids.push(idref);
                     }
                     p.eat("}")?;
-                    structs.push(StructDef { name, fields, ranges, unlogged, offs: Vec::new(), size: 0, align: 1, state: 0 });
+                    structs.push(StructDef { name, fields, ranges, ids, unlogged, offs: Vec::new(), size: 0, align: 1, state: 0 });
                 }
                 "state" => {
                     let n = p.ident()?; p.eat(":")?; let ty = p.ty()?; p.eat(";")?;
@@ -266,7 +283,7 @@ impl Program {
                 else { sd.fields[k].1 = Ty::Scalar(en.base); if sd.ranges[k].is_none() { sd.ranges[k] = Some((lo, hi)); } }
             }
         }
-        let mut prog = Program { enums, request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
+        let mut prog = Program { ids: Vec::new(), enums, request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
             let fs = std::mem::take(&mut prog.structs[i].fields);
@@ -317,6 +334,7 @@ impl Program {
         for c in 0..prog.colls.len() { if prog.colls[c].unlogged && prog.colls[c].parent.is_none() { let (a, b) = (prog.colls[c].start, prog.colls[c].end); prog.unlogged.push((a, up(b, 64))); } }
         if let Some((a, n)) = prog.request { prog.unlogged.push((a, a + n)); }
         prog.total = cur;
+        prog.resolve_ids()?;
         Ok(prog)
     }
 
@@ -349,6 +367,56 @@ impl Program {
     }
 
     /// The byte ranges of unlogged plain fields under struct `s` at `base` (`all`: the whole struct is inside an unlogged field).
+    /// The pool a stored id names: the one top-level `checked` pool of its struct (or the collection written).
+    fn id_target(&self, owner: &str, field: &str, st: &str, path: &Option<String>) -> Result<usize, String> {
+        let Some(sid) = self.structs.iter().position(|s| s.name == st) else { return Err(format!("`{}.{}`: `{}` is not a struct", owner, field, st)) };
+        let found: Vec<usize> = (0..self.colls.len()).filter(|&c| { let k = &self.colls[c]; k.item == Some(sid) && path.as_ref().map_or(true, |p| k.name == *p) }).collect();
+        let c = match found.as_slice() {
+            [c] => *c,
+            [] => return Err(format!("`{}.{}` (`{}?`): no collection holds `{}` items{}", owner, field, st, st, path.as_ref().map_or(String::new(), |p| format!(" at `{}`", p)))),
+            _ => return Err(format!("`{}.{}` (`{}?`): several collections hold `{}` items: write `{} in path?` ({})", owner, field, st, st, st, found.iter().map(|&c| self.colls[c].name.clone()).collect::<Vec<_>>().join(", "))),
+        };
+        let k = &self.colls[c];
+        if k.parent.is_some() { return Err(format!("`{}.{}` (`{}?`): an id of an item of a nested collection ({}) cannot be stored yet", owner, field, st, k.name)); }
+        if !k.checked() { return Err(format!("`{}.{}` (`{}?`): a stored id needs generations to tell a reused slot from its item: declare `{}` `checked`", owner, field, st, k.name)); }
+        Ok(c)
+    }
+    /// Every stored-id field, in items' columns and in plain values, with the pool it names.
+    fn resolve_ids(&mut self) -> Result<(), String> {
+        let mut out = Vec::new();
+        // items' columns: a field of the item struct, or of a plain struct inside it (`a.best`)
+        fn paths(p: &Program, s: usize, prefix: &str, out: &mut Vec<(String, String, String, Option<String>)>) {
+            for (k, (f, t)) in p.structs[s].fields.iter().enumerate() {
+                let path = if prefix.is_empty() { f.clone() } else { format!("{}.{}", prefix, f) };
+                if let Some((st, c)) = &p.structs[s].ids[k] { out.push((path.clone(), p.structs[s].name.clone(), st.clone(), c.clone())); }
+                if let Ty::Struct(i) = t { paths(p, *i, &path, out); }
+            }
+        }
+        for c in 0..self.colls.len() {
+            let Some(s) = self.colls[c].item else { continue };
+            let mut ps = Vec::new();
+            paths(self, s, "", &mut ps);
+            for (path, owner, st, cp) in ps {
+                let target = self.id_target(&owner, &path, &st, &cp)?;
+                if let Some(ci) = self.colls[c].cols.iter().position(|x| x.path == path) { out.push((IdAt::Col(c, ci), target)); }
+            }
+        }
+        // plain values
+        fn plain(p: &Program, s: usize, base: usize, out: &mut Vec<(usize, String, String, String, Option<String>)>) {
+            for (k, (f, t)) in p.structs[s].fields.iter().enumerate() {
+                let o = base + p.structs[s].offs[k];
+                if let Some((st, c)) = &p.structs[s].ids[k] { out.push((o, p.structs[s].name.clone(), f.clone(), st.clone(), c.clone())); }
+                if let Ty::Struct(i) = t { plain(p, *i, o, out); }
+            }
+        }
+        let mut ps = Vec::new();
+        for g in &self.globals { if let Ty::Struct(s) = g.ty { plain(self, s, g.off, &mut ps); } }
+        for (o, owner, f, st, cp) in ps { let target = self.id_target(&owner, &f, &st, &cp)?; out.push((IdAt::Plain(o), target)); }
+        self.ids = out;
+        Ok(())
+    }
+    /// The pool a stored id at this place names, if the place holds one.
+    pub fn id_at(&self, at: IdAt) -> Option<usize> { self.ids.iter().find(|x| x.0 == at).map(|x| x.1) }
     fn plain_unlogged(&mut self, s: usize, base: usize, all: bool) {
         let fields = self.structs[s].fields.clone();
         for (k, (_, t)) in fields.iter().enumerate() {

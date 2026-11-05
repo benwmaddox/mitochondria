@@ -1,0 +1,38 @@
+// stored ids: a field `T?` holds an item's id (slot and generation) and reads back as a `T?`: null when the item was removed, also after
+// its slot is reused by another item; set from an item, a `T?` or `null`; written in an answer as the id or null
+--- program
+struct Player { name: string<8>; rival: Player?; }
+struct Game { players: pool<Player, 4> checked; best: Player?; }
+state game: Game;
+
+@post("/players")
+fn add(name: string<8>) -> Response<{ id: Player }> { let p = game.players.add { name: name }; return created({ id: p }); }
+@post("/best/{p}")
+fn set_best(p: Player) -> Response<{ best: string }> { game.best = p; return ok({ best: or(game.best.name, "-") }); }
+@post("/rival/{p}/{q}")
+fn set_rival(p: Player, q: Player) -> Response<{ rival: string }> { p.rival = q; return ok({ rival: or(p.rival.name, "-") }); }
+@delete("/players/{p}")
+fn remove(p: Player) -> Response<null> { game.players.remove(p); return no_content(); }
+@post("/clear")
+fn clear_best() -> Response<{ best: Player? }> { game.best = null; return ok({ best: game.best }); }
+@get("/look/{p}")
+fn look(p: Player) -> Response<{ best: string, there: bool, id: Player?, rival: string }> {
+    var name = 0;
+    let b = game.best;
+    if exists(b) { name = len(b.name); }
+    return ok({ best: or(game.best.name, "-"), there: exists(game.best), id: game.best, rival: or(p.rival.name, "-") });
+}
+--- requests
+POST /players {"name": "ann"}
+POST /players {"name": "bo"}
+POST /best/0.0
+POST /rival/1.0/0.0
+GET /look/1.0
+DELETE /players/0.0
+GET /look/1.0
+POST /players {"name": "cy"}
+GET /look/1.0
+POST /best/0.1
+GET /look/1.0
+POST /clear
+GET /look/1.0

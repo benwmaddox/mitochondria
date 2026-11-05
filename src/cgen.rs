@@ -83,6 +83,8 @@ struct H {
     int (*str_set)(Ctx *, int, u64, u64, u32, int, const Val *, u32); /* several pieces at once (from the start when the int is 1): one call */
     int (*json_at)(Ctx *, u64, u32);                             /* n bytes of state at an offset (a window onto text) as a JSON string, read where they are */
     int (*str_cmp_at)(Ctx *, int, int, u64, u32, int, u64, u32, int *); /* two texts compared where they are (each in state or a literal) */
+    int (*id_get)(Ctx *, u32, i64, u32 *, u32 *);                /* a stored id read back: still that item (1, its index) or not (0) */
+    int (*id_of)(Ctx *, u32, u32, i64 *);                       /* the stored id of an item (slot + 1, generation) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -1643,6 +1645,13 @@ impl<'p> G<'p> {
                         let at = off + sd.offs[k];
                         let range = sd.ranges[k];
                         self.may_write_plain(at)?;
+                        if let Some(target) = self.prog.id_at(crate::layout::IdAt::Plain(at)) {
+                            let v = self.expr(rhs, env, None)?;
+                            let v = self.id_store_value(target, v, f)?;
+                            let vv = self.val(v)?;
+                            self.call(&format!("c->h->store_plain(c, {}, {}, {}, &{})", at, code, cap, vv));
+                            return Ok(());
+                        }
                         let ascii = code == 20 && range.is_some();
                         if code == 20 { if let Some((clear, pieces)) = str_pieces(&Expr::Field(base.clone(), f.clone()), rhs) { return self.str_append(if ascii { 4 } else { 0 }, format!("{}ULL", at), format!("{}ULL", cap), 0, clear, &pieces, env); } }
                         let v = self.expr(rhs, env, None)?;
@@ -1666,6 +1675,13 @@ impl<'p> G<'p> {
                     return no(if known { format!("assigning `.{}` as a whole is not supported yet; assign its fields", path) } else { format!("no field `{}`", path) });
                 };
                 self.may_write_col(c, &path)?;
+                if let Some(target) = self.prog.id_at(crate::layout::IdAt::Col(c, ci)) {
+                    let v = self.expr(rhs, env, None)?;
+                    let v = self.id_store_value(target, v, &path)?;
+                    let vv = self.val(v)?;
+                    self.call(&format!("c->h->store(c, {}, {}, {}, &{})", c, idx, ci, vv));
+                    return Ok(());
+                }
                 let is_text = matches!(self.prog.colls[c].cols[ci].kind, CKind::StrLen);
                 let ascii = is_text && self.prog.colls[c].cols[ci].range.is_some();
                 if is_text {
@@ -2132,6 +2148,29 @@ impl<'p> G<'p> {
             _ => unreachable!("a window's base is a text field"),
         }
     }
+    /// A stored id (the C expression of its 8 bytes) read back as a `T?` of pool `target`.
+    fn id_value(&mut self, target: usize, v: String) -> CV {
+        let (s, i) = (self.tmp("r"), self.tmp("i"));
+        self.line(&format!("u32 {} = 0, {} = 0;", s, i));
+        self.call(&format!("c->h->id_get(c, {}, {}, &{}, &{})", target, v, s, i));
+        CV::Ref(target, s, i)
+    }
+    /// A value stored into an id field of pool `target`: an item, a `T?` or null, as its id (0 for null).
+    fn id_store_value(&mut self, target: usize, v: CV, what: &str) -> R<CV> {
+        let wrong = |g: &Self, c: usize| no(format!("`{}` holds an id of {}, given an item of {}", what, g.prog.colls[target].name, g.prog.colls[c].name));
+        Ok(match v {
+            CV::Null => CV::Int("0LL".into()),
+            CV::Item(c, e) => { if c != target { return wrong(self, c); } let t = self.tmp("v"); self.line(&format!("i64 {} = 0;", t)); self.call(&format!("c->h->id_of(c, {}, {}, &{})", target, e, t)); CV::Int(t) }
+            CV::Ref(c, s, e) => {
+                if c != target { return wrong(self, c); }
+                let t = self.tmp("v");
+                self.line(&format!("i64 {} = 0;", t));
+                self.open(&format!("if ({} != 0) {{", s)); self.call(&format!("c->h->id_of(c, {}, {}, &{})", target, e, t)); self.close("}");
+                CV::Int(t)
+            }
+            _ => return no(format!("`{}` holds an id: give it an item, a value that may be null, or `null`", what)),
+        })
+    }
     /// The byte offset in state of a text field's length (u32).
     fn len_at(&self, base: &CV) -> String {
         match base {
@@ -2289,6 +2328,7 @@ impl<'p> G<'p> {
 
     /// A plain (record-style) value at offset `off`.
     fn plain(&mut self, off: usize, t: &Ty, dead: Option<&str>) -> R<CV> {
+        if let (Ty::Scalar(_), Some(target)) = (t, self.prog.id_at(crate::layout::IdAt::Plain(off))) { let v = format!("LD_I64({}, 0)", off); return Ok(self.id_value(target, v)); }
         Ok(match t {
             Ty::Struct(s) => CV::Plain(*s, off),
             Ty::Scalar(s) => self.load(&off.to_string(), "0", *s)?,
@@ -2357,6 +2397,7 @@ impl<'p> G<'p> {
     /// The value of column `ci` of item `idx`: scalars are loaded, strings are read where used, references followed.
     fn col_value(&mut self, c: usize, idx: String, ci: usize, dead: Option<&str>) -> R<CV> {
         let col = self.prog.colls[c].cols[ci].clone();
+        if let Some(target) = self.prog.id_at(crate::layout::IdAt::Col(c, ci)) { let v = format!("LD_I64({}, {})", col.off, idx); return Ok(self.id_value(target, v)); }
         Ok(match col.kind {
             CKind::Scalar(s) => { let v = self.load(&col.off.to_string(), &idx, s)?; self.with_field_range(v, col.range) }
             CKind::StrLen => CV::StateStr(c, idx, ci),

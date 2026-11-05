@@ -43,10 +43,12 @@ full, `add` fails. `checked` adds a generation per slot, so an id from a request
 slot is detected (`Stale`). Use it
 for things that are referred to and come and go: sessions, users, rooms.
 
-**Naming another item.** An item names another by its slot in an integer field (`who: i64`, set from `slot(p)`), read
-back with `pool[slot]`, which checks the slot is live (`or(pool[slot].name, "[gone]")` for a fallback). A slot stored
-in state carries no generation, so a reused slot is not detected there; a generation-checked id held in state is
-planned (`ref<path>` did this and was removed; a different design is wanted).
+**Naming another item.** A field `best: Player?` holds an item's id (its slot and generation, 8 bytes) and reads back as a
+`T?`: null when the item was removed, also after its slot was reused by another item, so it is handled as every `T?` is (`if
+exists(b)` on a local, or `or(game.best.name, "-")`). It is set from an item, a `T?` or `null`, and an answer writes it as the
+id or null. The pool must be a top-level `checked` one (generations tell a reused slot from its item; `Player in path?` when
+several hold Player). An item can also name another by its slot in an integer field (`who: i64`, from `slot(p)`), read back
+with `pool[slot]`, which checks the slot is live but not that it is still the same item.
 
 **`T` and `T?`.** A plain item value (`T`) is always a live item: removals take effect only when the request succeeds, so
 nothing a request holds turns into `null` under it. A value that may be `null` has type `T?`: what `try_add()` gives, and
@@ -202,7 +204,7 @@ Limits:
   inlined (a recursive function is one C function per combination of argument places); recursion is limited to 64 nested calls.
 - Only a string input can be optional; a number takes a default. An item input cannot be optional yet, nor an enum input
   read by name.
-- An item is named by its slot in an integer field; a field holding an id that comes back as `T?` is designed (roadmap, Phase 5).
+- A stored id (`Player?` field) names only items of a top-level pool, not of a nested collection.
 - A real fault in the C code ends the whole process, every worker with it.
 - Pressure marks are absolute megabytes; no idle trim yet.
 - `string<N>` reserves N bytes per slot: 2000-byte chat bodies averaging 120 bytes left 39.5 MB committed for 3.1 MB

@@ -1530,12 +1530,25 @@ static int h_str_set(Ctx *c, int kind, u64 a, u64 b, u32 cc, int clear, const Va
 }
 /* n bytes of state at `at` (a window onto a text field) as a JSON string, read where they are */
 static int h_json_at(Ctx *c, u64 at, u32 n) { Mito *m = M_(c); return a_json_str(&m->out, m->mem.base + at, n) ? 0 : resp_full(m); }
+/* A stored id (slot + 1 in the low 32 bits, 0 for none; the generation in the high 32) of top-level checked pool `t`, read back:
+   *s 1 and the item's index when it is still that item, *s 0 when it is null, no longer live, or its slot was reused. */
+static int h_id_get(Ctx *c, u32 t, i64 v, u32 *s, u32 *idx) {
+    Mito *m = M_(c); u64 slot1 = (u64)v & 0xFFFFFFFFu, out = 0;
+    *s = 0; *idx = 0;
+    if (slot1 && deref_quiet(m, t, slot1 - 1, (u32)((u64)v >> 32), &out)) { *s = 1; *idx = (u32)out; }
+    return 0;
+}
+/* The stored id of item `idx` of top-level checked pool `t`. */
+static int h_id_of(Ctx *c, u32 t, u32 idx, i64 *out) {
+    Mito *m = M_(c); u32 g = (u32)rd(&m->mem, gaddr(&m->mem, t, idx), 4);
+    *out = (i64)(((u64)g << 32) | ((u64)idx + 1)); return 0;
+}
 
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
-    h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at,
+    h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

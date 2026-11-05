@@ -5,32 +5,12 @@
    unless the client sends `Connection: close`; HTTP/1.0 only with `Connection: keep-alive`), and requests sent back to
    back on one connection are answered in order. A request that is malformed or cut short closes its connection.
    `--conns N` connection threads (16) serve connections that have a request waiting; one more thread waits on the idle
-   ones (WSAPoll) and hands a connection back to the threads when its next request arrives; an idle connection is closed
+   ones (poll) and hands a connection back to the threads when its next request arrives; an idle connection is closed
    after 10 s. One program's handler runs for one request at a time (a lock); a system has its own workers.
-   Winsock is loaded at run time. Flags: --port N, --conns N (a system's connection threads), --budget MB, --soft MB,
+   Sockets, threads, locks and timers are runtime/os.c's (Windows and Linux). Flags: --port N, --conns N (a system's connection threads), --budget MB, --soft MB,
    --hard MB (one program's memory), and for tests --seed N and --clock MS. */
 
-void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
-int QueryPerformanceCounter(i64 *t);
-int QueryPerformanceFrequency(i64 *f);
 static int g_timing; /* --timing: every answer carries X-Handler-Ns, the time the handler took (for benchmarks; off, the answers are byte for byte as recorded) */
-void *CreateThread(void *attr, u64 stack, u32 (*fn)(void *), void *arg, u32 flags, u32 *id);
-u32 WaitForSingleObject(void *h, u32 ms);
-int printf(const char *f, ...);
-#ifdef HTTP_SINGLE /* a system's runtime (system.c, before this file) declares these already */
-typedef struct { void *p; } Lock;
-typedef struct { void *p; } Cond;
-void InitializeSRWLock(Lock *l);
-void AcquireSRWLockExclusive(Lock *l);
-void ReleaseSRWLockExclusive(Lock *l);
-void InitializeConditionVariable(Cond *c);
-void WakeConditionVariable(Cond *c);
-int SleepConditionVariableSRW(Cond *c, Lock *l, u32 ms, u32 flags);
-u64 GetTickCount64(void);
-#endif
-void *memmove(void *d, const void *s, u64 n);
-int fflush(void *f);
-void *memcpy(void *d, const void *s, u64 n);
 
 #ifdef HTTP_SINGLE
 void *mito_start(u64 budget, u64 seed);
@@ -45,34 +25,6 @@ void mito_system_set_clock(void *s, i64 ms, int fixed);
 int mito_system_request(void *s, const char *m, u32 mn, const char *t, u32 tn, const MitoPair *h, u32 nh, const char *body, u32 bn, u32 timeout_ms, char *out, u32 cap, u32 *outlen);
 #endif
 
-/* sockets (ws2_32, Winsock) */
-typedef struct { u32 len; char *buf; } WsBuf;
-int WSAStartup(unsigned short version, void *data);
-void *socket(int af, int type, int proto);
-int bind(void *s, const void *addr, int n);
-int listen(void *s, int backlog);
-void *accept(void *s, void *addr, int *n);
-int recv(void *s, char *b, int n, int flags);
-int send(void *s, const char *b, int n, int flags);
-int closesocket(void *s);
-int setsockopt(void *s, int level, int name, const char *v, int n);
-int WSASend(void *s, WsBuf *bufs, u32 n, u32 *sent, u32 flags, void *overlapped, void *done);
-typedef struct { void *fd; short events, revents; } WsPoll;
-int WSAPoll(WsPoll *fds, u32 n, int timeout);
-int getsockname(void *s, void *addr, int *n);
-int sendto(void *s, const char *b, int n, int flags, const void *to, int tn);
-int ioctlsocket(void *s, long cmd, u32 *arg);
-#define ws_socket socket
-#define ws_bind bind
-#define ws_listen listen
-#define ws_accept accept
-#define ws_recv recv
-#define ws_send send
-#define ws_close closesocket
-#define ws_opt setsockopt
-#define ws_sendv WSASend
-#define BAD_SOCKET ((void *)~0ULL)
-static int ws_load(void) { u8 wsa[512]; return WSAStartup(0x0202, wsa) == 0; }
 
 static const char *reason(int code) {
     switch (code) {
@@ -135,15 +87,15 @@ static void trim(const u8 *s, u32 *a, u32 *b) {
 /* A connection's buffer: reserved at its largest when the server starts, committed in 64 KB steps as requests reach
    further into it, and kept at that high-water mark. */
 typedef struct { u8 *p; u64 committed, cap; } Res;
-static int res_init(Res *r, u64 cap) { r->p = (u8 *)VirtualAlloc(0, cap, 0x2000, 4); r->committed = 0; r->cap = cap; return r->p != 0; } /* MEM_RESERVE */
+static int res_init(Res *r, u64 cap) { r->p = (u8 *)os_reserve(cap); r->committed = 0; r->cap = cap; return r->p != 0; }
 static int res_ensure(Res *r, u64 n) {
     if (n <= r->committed) return 1;
     if (n > r->cap) return 0;
     u64 c = (n + 65535) / 65536 * 65536; if (c > r->cap) c = r->cap;
-    if (!VirtualAlloc(r->p, c, 0x1000, 4)) return 0; /* MEM_COMMIT */
+    if (!os_commit(r->p, c)) return 0;
     r->committed = c; return 1;
 }
-typedef struct { void *app; void *listener; Res data, head, body, pairs; u8 *out; u32 carry; } Conn;
+typedef struct { void *app; Sock listener; Res data, head, body, pairs; u8 *out; u32 carry; } Conn;
 /* the head search stops past 64 KB (at most one more 4 KB read), the body read past Content-Length (at most 1 MB) */
 #define HEAD_MAX (64 * 1024 + 4096)
 #define DATA_CAP (HEAD_MAX + 4 + (1 << 20) + 4096)
@@ -151,20 +103,18 @@ typedef struct { void *app; void *listener; Res data, head, body, pairs; u8 *out
 #define MAX_PAIRS (HEAD_MAX / 2 + 1)
 #define OUT_CAP (300 * 1024)
 
-static void send_all(void *c, const char *p, u32 n) { while (n) { int k = ws_send(c, p, (int)n, 0); if (k <= 0) return; p += k; n -= (u32)k; } }
+static void send_all(Sock c, const char *p, u32 n) { while (n) { int k = os_send(c, (const u8 *)p, n); if (k <= 0) return; p += k; n -= (u32)k; } }
 /* head and body in one call: two small sends can wait on the client's delayed acknowledgement of the first */
-static void send_two(void *c, const char *a, u32 an, const char *b, u32 bn) {
-    WsBuf v[2] = { { an, (char *)a }, { bn, (char *)b } }; u32 sent = 0;
-    if (ws_sendv(c, v, bn ? 2 : 1, &sent, 0, 0, 0) != 0) return;
-    if (sent < an) { send_all(c, a + sent, an - sent); send_all(c, b, bn); } else if (sent < an + bn) send_all(c, b + (sent - an), an + bn - sent);
+static void send_two(Sock c, const char *a, u32 an, const char *b, u32 bn) {
+    u64 sent = os_send2(c, (const u8 *)a, an, (const u8 *)b, bn);
+    if (sent < an) { send_all(c, a + sent, an - (u32)sent); send_all(c, b, bn); } else if (sent < (u64)an + bn) send_all(c, b + (sent - an), (u32)(an + bn - sent));
 }
 /* the lock around one program's handler (HTTP_SINGLE): several connection threads, one request in the program at a time */
 static Lock g_app_lock;
 /* Read one request from connection c and answer it. `first`: the connection's first request (an empty one is answered 400;
    later, the client closing the connection between requests ends it quietly). Returns 1 when the connection stays open. */
-static int serve_one(Conn *x, void *c, int first) {
-    u32 to = 5000, one = 1; ws_opt(c, 0xffff, 0x1006, (const char *)&to, 4); /* SO_RCVTIMEO: 5 s */
-    ws_opt(c, 6, 1, (const char *)&one, 4); /* TCP_NODELAY: an answer goes out as soon as it is written */
+static int serve_one(Conn *x, Sock c, int first) {
+    os_sock_setup(c); /* a read waits at most 5 s; an answer goes out as soon as it is written */
     u32 len = x->carry, he = 0xFFFFFFFFu, from = 0, eof = 0;
     x->carry = 0;
     for (;;) {
@@ -173,7 +123,7 @@ static int serve_one(Conn *x, void *c, int first) {
         if (len > 64 * 1024) break;
         from = len >= 3 ? len - 3 : 0;
         if (!res_ensure(&x->data, (u64)len + 4096)) break;
-        int k = ws_recv(c, (char *)x->data.p + len, 4096, 0);
+        int k = os_recv(c, x->data.p + len, 4096);
         if (k <= 0) { eof = 1; break; }
         len += (u32)k;
     }
@@ -236,7 +186,7 @@ static int serve_one(Conn *x, void *c, int first) {
         ls = e < hn ? e + 1 : hn;
     }
     if (want > (1 << 20)) { want = 1 << 20; keep = 0; }
-    while ((u64)len < he + 4 + want && res_ensure(&x->data, (u64)len + 4096)) { int k = ws_recv(c, (char *)x->data.p + len, 4096, 0); if (k <= 0) { eof = 1; break; } len += (u32)k; }
+    while ((u64)len < he + 4 + want && res_ensure(&x->data, (u64)len + 4096)) { int k = os_recv(c, x->data.p + len, 4096); if (k <= 0) { eof = 1; break; } len += (u32)k; }
     u32 bs = he + 4 < len ? he + 4 : len;
     /* the body is Content-Length bytes; what follows is the next request on this connection, kept for it */
     u32 be = (u64)len > he + 4 + want ? (u32)(he + 4 + want) : len;
@@ -247,22 +197,22 @@ static int serve_one(Conn *x, void *c, int first) {
     b_lossy(&body, x->data.p + bs, be - bs);
     u32 rest = len - be;
     int code; const char *resp; u32 rn;
-    i64 t_start = 0, t_end = 0;
-    if (g_timing) QueryPerformanceCounter(&t_start);
+    u64 t_start = 0, t_end = 0;
+    if (g_timing) t_start = os_perf_ns();
 #ifdef HTTP_SINGLE
-    AcquireSRWLockExclusive(&g_app_lock);
+    lk_on(&g_app_lock);
     code = mito_handle(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, 0, 0, (const char *)body.p, body.len);
     resp = mito_response(x->app, &rn);
     if (!utf8_valid((const u8 *)resp, rn)) rn = 0; /* a body that is not UTF-8 is sent empty */
     if (rn > OUT_CAP) rn = 0;
     memcpy(x->out, resp, rn); /* the program's response area is reused by the next request, which may run while this one is sent */
-    ReleaseSRWLockExclusive(&g_app_lock);
+    lk_off(&g_app_lock);
     resp = (const char *)x->out;
 #else
     code = mito_system_request(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, (const char *)body.p, body.len, 10000, (char *)x->out, OUT_CAP, &rn);
     resp = (const char *)x->out;
 #endif
-    if (g_timing) QueryPerformanceCounter(&t_end);
+    if (g_timing) t_end = os_perf_ns();
     char hd[240]; u32 n = 0; const char *r = reason(code);
     #define HPUT(s) do { const char *s_ = (s); while (*s_ && n < sizeof hd) hd[n++] = *s_++; } while (0)
     char num[24]; int dn;
@@ -270,8 +220,7 @@ static int serve_one(Conn *x, void *c, int first) {
     HPUT(" "); HPUT(r); HPUT("\r\nContent-Type: application/json\r\nContent-Length: ");
     { u64 v = rn; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
     if (g_timing) {
-        i64 f = 1; QueryPerformanceFrequency(&f);
-        u64 v = (u64)((double)(t_end - t_start) * 1e9 / (double)f);
+        u64 v = t_end - t_start;
         HPUT("\r\nX-Handler-Ns: "); dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn];
     }
     HPUT(keep ? "\r\nConnection: keep-alive\r\n\r\n" : "\r\nConnection: close\r\n\r\n");
@@ -280,12 +229,12 @@ static int serve_one(Conn *x, void *c, int first) {
     if (keep && rest) { memmove(x->data.p, x->data.p + be, rest); x->carry = rest; }
     return keep;
 }
-static Conn *conn_new(void *app, void *listener) {
-    Conn *x = (Conn *)VirtualAlloc(0, sizeof(Conn), 0x3000, 4);
+static Conn *conn_new(void *app, Sock listener) {
+    Conn *x = (Conn *)os_alloc(sizeof(Conn));
     if (!x) return 0;
     x->app = app; x->listener = listener;
     if (!res_init(&x->data, DATA_CAP) || !res_init(&x->head, TEXT_CAP_) || !res_init(&x->body, TEXT_CAP_) || !res_init(&x->pairs, sizeof(MitoPair) * (u64)MAX_PAIRS)) return 0;
-    x->out = (u8 *)VirtualAlloc(0, OUT_CAP, 0x3000, 4); /* the answer is copied here, so the program can take the next request while it is sent */
+    x->out = (u8 *)os_alloc(OUT_CAP); /* the answer is copied here, so the program can take the next request while it is sent */
     if (!x->out) return 0;
     return x;
 }
@@ -294,37 +243,37 @@ static Conn *conn_new(void *app, void *listener) {
 #define IDLE_CAP 4096
 #define IDLE_MS 10000
 static Lock g_q_lock; static Cond g_q_cv;
-static void *g_ready[READY_CAP]; static u32 g_ready_head, g_ready_len;
+static u64 g_ready[READY_CAP]; static u32 g_ready_head, g_ready_len; /* a connection waiting: its socket * 2, + 1 for its first request */
 /* connections a thread has finished a request on, for the poller to watch (it takes them under the same lock) */
-static void *g_back[IDLE_CAP]; static u32 g_back_len;
-static void *g_wake; static u8 g_wake_addr[16]; /* a UDP socket on 127.0.0.1: a byte sent to it wakes the poller */
-static void ready_push(void *c) {
-    AcquireSRWLockExclusive(&g_q_lock);
+static Sock g_back[IDLE_CAP]; static u32 g_back_len;
+static Sock g_wake; /* the poller's wake-up channel (os_wake_open) */
+static void ready_push(u64 c) {
+    lk_on(&g_q_lock);
     int ok = g_ready_len < READY_CAP;
-    if (ok) { g_ready[(g_ready_head + g_ready_len) % READY_CAP] = c; g_ready_len++; WakeConditionVariable(&g_q_cv); }
-    ReleaseSRWLockExclusive(&g_q_lock);
-    if (!ok) ws_close((void *)((u64)c & ~1ULL));
+    if (ok) { g_ready[(g_ready_head + g_ready_len) % READY_CAP] = c; g_ready_len++; cv_one(&g_q_cv); }
+    lk_off(&g_q_lock);
+    if (!ok) os_close(c >> 1);
 }
-static void *ready_pop(void) {
-    AcquireSRWLockExclusive(&g_q_lock);
-    while (!g_ready_len) SleepConditionVariableSRW(&g_q_cv, &g_q_lock, 0xFFFFFFFFu, 0);
-    void *c = g_ready[g_ready_head]; g_ready_head = (g_ready_head + 1) % READY_CAP; g_ready_len--;
-    ReleaseSRWLockExclusive(&g_q_lock);
+static u64 ready_pop(void) {
+    lk_on(&g_q_lock);
+    while (!g_ready_len) cv_wait(&g_q_cv, &g_q_lock, OS_FOREVER);
+    u64 c = g_ready[g_ready_head]; g_ready_head = (g_ready_head + 1) % READY_CAP; g_ready_len--;
+    lk_off(&g_q_lock);
     return c;
 }
-static void give_back(void *c) {
-    AcquireSRWLockExclusive(&g_q_lock);
+static void give_back(Sock c) {
+    lk_on(&g_q_lock);
     int ok = g_back_len < IDLE_CAP; if (ok) g_back[g_back_len++] = c;
-    ReleaseSRWLockExclusive(&g_q_lock);
-    if (!ok) { ws_close(c); return; }
-    sendto(g_wake, "w", 1, 0, g_wake_addr, 16);
+    lk_off(&g_q_lock);
+    if (!ok) { os_close(c); return; }
+    os_wake_ping();
 }
 /* a connection thread: answer the requests waiting on a connection (back to back ones too), then give it to the poller */
 static u32 conn_loop(void *arg) {
     Conn *x = (Conn *)arg;
     for (;;) {
-        void *c = ready_pop();
-        int first = (int)((u64)c & 1); c = (void *)((u64)c & ~1ULL); /* the low bit marks a new connection */
+        u64 rc = ready_pop();
+        Sock c = rc >> 1; int first = (int)(rc & 1); /* a new connection's first request */
         x->carry = 0;
         int keep = serve_one(x, c, first);
         for (;;) {
@@ -332,59 +281,57 @@ static u32 conn_loop(void *arg) {
             if (!keep) break;
             /* a client that sends its next request as soon as it has the answer: wait for it here a little (1 ms) rather than
                hand the connection to the poller and back, which costs two thread switches */
-            WsPoll one = { c, 0x0100, 0 };
-            if (WSAPoll(&one, 1, 1) <= 0) break;
+            OsPoll one; one.fd = c; one.events = OS_POLLIN; one.revents = 0;
+            if (os_poll(&one, 1, 1) <= 0) break;
             keep = serve_one(x, c, 0);
         }
-        if (keep) give_back(c); else ws_close(c);
+        if (keep) give_back(c); else os_close(c);
     }
     return 0;
 }
 /* the poller: accepts new connections and watches idle ones; one with data (or closed) goes to the connection threads */
-static void *g_idle[IDLE_CAP]; static u64 g_since[IDLE_CAP]; static u8 g_new[IDLE_CAP]; static WsPoll g_fds[IDLE_CAP + 2];
+static Sock g_idle[IDLE_CAP]; static u64 g_since[IDLE_CAP]; static u8 g_new[IDLE_CAP]; static OsPoll g_fds[IDLE_CAP + 2];
 static u32 poll_loop(void *arg) {
-    void *listener = arg; u32 ni = 0;
+    Sock listener = *(Sock *)arg; u32 ni = 0;
     for (;;) {
-        AcquireSRWLockExclusive(&g_q_lock);
-        u64 now = GetTickCount64();
-        for (u32 i = 0; i < g_back_len; i++) { if (ni < IDLE_CAP) { g_idle[ni] = g_back[i]; g_since[ni] = now; g_new[ni] = 0; ni++; } else ws_close(g_back[i]); }
+        lk_on(&g_q_lock);
+        u64 now = os_ticks_ms();
+        for (u32 i = 0; i < g_back_len; i++) { if (ni < IDLE_CAP) { g_idle[ni] = g_back[i]; g_since[ni] = now; g_new[ni] = 0; ni++; } else os_close(g_back[i]); }
         g_back_len = 0;
-        ReleaseSRWLockExclusive(&g_q_lock);
-        g_fds[0].fd = listener; g_fds[0].events = 0x0100; g_fds[0].revents = 0; /* POLLRDNORM */
-        g_fds[1].fd = g_wake; g_fds[1].events = 0x0100; g_fds[1].revents = 0;
-        for (u32 i = 0; i < ni; i++) { g_fds[i + 2].fd = g_idle[i]; g_fds[i + 2].events = 0x0100; g_fds[i + 2].revents = 0; }
-        int r = WSAPoll(g_fds, ni + 2, 1000);
+        lk_off(&g_q_lock);
+        g_fds[0].fd = listener; g_fds[0].events = OS_POLLIN; g_fds[0].revents = 0;
+        g_fds[1].fd = g_wake; g_fds[1].events = OS_POLLIN; g_fds[1].revents = 0;
+        for (u32 i = 0; i < ni; i++) { g_fds[i + 2].fd = g_idle[i]; g_fds[i + 2].events = OS_POLLIN; g_fds[i + 2].revents = 0; }
+        int r = os_poll(g_fds, ni + 2, 1000);
         if (r < 0) continue;
         u32 polled = ni; /* the connections in this poll (one accepted below is not) */
-        if (g_fds[1].revents) { char b[64]; while (ws_recv(g_wake, b, sizeof b, 0) > 0) {} }
-        if (g_fds[0].revents & 0x0100) {
+        if (g_fds[1].revents) os_wake_drain();
+        if (g_fds[0].revents & OS_POLLIN) {
             /* a new connection waits here, like an idle one, until its first request arrives: no thread blocks on a client that has not sent anything */
-            void *c = ws_accept(listener, 0, 0);
-            if (c != BAD_SOCKET) { if (ni < IDLE_CAP) { g_idle[ni] = c; g_since[ni] = GetTickCount64(); g_new[ni] = 1; ni++; } else ws_close(c); }
+            Sock c = os_accept(listener);
+            if (c != OS_BAD_SOCK) { if (ni < IDLE_CAP) { g_idle[ni] = c; g_since[ni] = os_ticks_ms(); g_new[ni] = 1; ni++; } else os_close(c); }
         }
-        now = GetTickCount64();
+        now = os_ticks_ms();
         u32 kept = 0;
         for (u32 i = 0; i < ni; i++) {
             short ev = i < polled ? g_fds[i + 2].revents : 0;
-            if (ev) ready_push((void *)((u64)g_idle[i] | g_new[i])); /* a request (or the client closed: the thread finds out); the low bit marks a first request */
-            else if (now - g_since[i] > IDLE_MS) ws_close(g_idle[i]);
+            if (ev) ready_push(g_idle[i] * 2 + g_new[i]); /* a request (or the client closed: the thread finds out); + 1 marks a first request */
+            else if (now - g_since[i] > IDLE_MS) os_close(g_idle[i]);
             else { g_idle[kept] = g_idle[i]; g_since[kept] = g_since[i]; g_new[kept] = g_new[i]; kept++; }
         }
         ni = kept;
     }
     return 0;
 }
-static int start_threads(void *app, void *listener, u32 nt) {
-    InitializeSRWLock(&g_q_lock); InitializeConditionVariable(&g_q_cv); InitializeSRWLock(&g_app_lock);
-    g_wake = ws_socket(2, 2, 17); /* AF_INET, SOCK_DGRAM, UDP */
-    if (g_wake == BAD_SOCKET) return 0;
-    u8 a[16] = { 2, 0, 0, 0, 127, 0, 0, 1 };
-    int an = 16;
-    if (ws_bind(g_wake, a, 16) != 0 || getsockname(g_wake, g_wake_addr, &an) != 0) return 0;
-    u32 nb = 1; ioctlsocket(g_wake, (long)0x8004667EL, &nb); /* FIONBIO: the poller drains it without blocking */
-    for (u32 i = 0; i < nt; i++) { Conn *x = conn_new(app, listener); if (!x) return 0; CreateThread(0, 0, conn_loop, x, 0, 0); }
-    void *t = CreateThread(0, 0, poll_loop, listener, 0, 0);
-    WaitForSingleObject(t, 0xFFFFFFFFu);
+static OsThread g_threads[257]; static Sock g_listener;
+static int start_threads(void *app, Sock listener, u32 nt) {
+    lk_init(&g_q_lock); cv_init(&g_q_cv); lk_init(&g_app_lock);
+    g_wake = os_wake_open();
+    if (g_wake == OS_BAD_SOCK) return 0;
+    g_listener = listener;
+    for (u32 i = 0; i < nt; i++) { Conn *x = conn_new(app, listener); if (!x) return 0; if (!os_thread_start(&g_threads[i], conn_loop, x)) return 0; }
+    if (!os_thread_start(&g_threads[256], poll_loop, &g_listener)) return 0;
+    os_thread_join(&g_threads[256]);
     return 1;
 }
 
@@ -405,11 +352,9 @@ int main(int argc, char **argv) {
     flag(argc, argv, "--port", &port); flag(argc, argv, "--conns", &conns); flag(argc, argv, "--budget", &budget);
     int marks = flag(argc, argv, "--soft", &soft); if (!flag(argc, argv, "--hard", &hard)) hard = ~0ULL >> 21;
     int seeded = flag(argc, argv, "--seed", &seed), clocked = flag(argc, argv, "--clock", &clock);
-    if (!ws_load()) { printf("error: Winsock did not start\n"); return 1; }
-    void *l = ws_socket(2, 1, 6); /* AF_INET, SOCK_STREAM, TCP */
-    if (l == BAD_SOCKET) { printf("error: no socket\n"); return 1; }
-    u8 addr[16] = { 2, 0, (u8)(port >> 8), (u8)port, 127, 0, 0, 1 };
-    if (ws_bind(l, addr, 16) != 0 || ws_listen(l, 128) != 0) { printf("error: cannot listen on port %u\n", (u32)port); return 1; }
+    if (!os_net_init()) { printf("error: sockets did not start\n"); return 1; }
+    Sock l = os_listen((u32)port);
+    if (l == OS_BAD_SOCK) { printf("error: cannot listen on port %u\n", (u32)port); return 1; }
 #ifdef HTTP_SINGLE
     void *app = mito_start(budget << 20, seeded ? seed : 0);
     if (!app) { printf("error: over budget (%u MB) or out of address space\n", (u32)budget); return 1; }

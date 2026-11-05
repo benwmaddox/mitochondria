@@ -5,42 +5,8 @@
    generated endpoints call. It uses no heap: everything comes from reservations made at start and committed as used.
    It reproduces the Rust runtime's behaviour exactly (tests/cases check both against the same records). */
 
-/* ---------------------------------------------------------------- platform (Windows) */
-/* Built as a DLL by clang, the mito_* interface is exported; TinyCC finds it by name in memory. */
-#if defined(_MSC_VER) || defined(__clang__)
-#define MITO_API __declspec(dllexport)
-#else
-#define MITO_API
-#endif
-void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
-int VirtualFree(void *a, u64 n, u32 type);
-void GetSystemTimeAsFileTime(u64 *ft);
-int BCryptGenRandom(void *alg, u8 *buf, u32 n, u32 flags);
-void *GetStdHandle(u32 which);
-int WriteFile(void *h, const void *b, u32 n, u32 *done, void *ov);
-void *memcpy(void *d, const void *s, u64 n);
-void *memmove(void *d, const void *s, u64 n);
-void *memset(void *d, int c, u64 n);
-#define MEM_COMMIT 0x1000
-#define MEM_RESERVE 0x2000
-#define MEM_DECOMMIT 0x4000
-#define MEM_RELEASE 0x8000
-#define PAGE_NOACCESS 1
-#define PAGE_READWRITE 4
-#define PAGE 4096ULL
-
+/* The operating system's part (memory, clock, randomness, standard error) is runtime/os.c, included before this file. */
 static u64 up(u64 n, u64 to) { return (n + to - 1) / to * to; }
-static void *os_reserve(u64 n) { return VirtualAlloc(0, n, MEM_RESERVE, PAGE_NOACCESS); }
-static int os_commit(void *p, u64 n) { return VirtualAlloc(p, n, MEM_COMMIT, PAGE_READWRITE) != 0; }
-static void os_decommit(void *p, u64 n) { VirtualFree(p, n, MEM_DECOMMIT); }
-static void os_release(void *p) { if (p) VirtualFree(p, 0, MEM_RELEASE); }
-static i64 os_now_ms(void) { u64 ft = 0; GetSystemTimeAsFileTime(&ft); return (i64)((ft - 116444736000000000ULL) / 10000ULL); }
-/* Random bits from the OS (BCryptGenRandom with the system's preferred generator). */
-static u64 os_random(void) {
-    u64 v = 0;
-    BCryptGenRandom(0, (u8 *)&v, 8, 2); /* BCRYPT_USE_SYSTEM_PREFERRED_RNG */
-    return v;
-}
 
 /* A reservation used as a growing array: committed in 64 KB steps as it fills. */
 typedef struct { u8 *p; u64 reserved, committed, len; } Grow;
@@ -586,6 +552,7 @@ typedef struct Mito {
     u8 *areas;
     i64 clock; int fixed_clock; u64 rng;
     i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
+    u64 small;       /* bytes of the block holding the page flags (released with the instance) */
     u32 text_base;   /* where a request's text starts: after the literals, or after a running test's own text */
     /* a test's request being made: its body (JSON), its headers, as names and values in the text area */
     u8 rqbuf[16384]; u32 nrqh; struct { T k, v; } rqh[16];
@@ -1552,7 +1519,7 @@ static int h_log(Ctx *c, u32 line, const Val *v, u32 n) {
     a_str(&m->text, "log: line "); a_u64(&m->text, line); a_str(&m->text, ":");
     for (u32 i = 0; i < n; i++) { a_str(&m->text, " "); if (v[i].tag == 0) a_str(&m->text, "null"); else if (show(m, &v[i])) { m->text.len = mark; return -1; } }
     a_str(&m->text, "\n");
-    u32 done = 0; WriteFile(GetStdHandle((u32)-12), m->text.p + mark, (u32)(m->text.len - mark), &done, 0); /* STD_ERROR_HANDLE */
+    os_err(m->text.p + mark, (u32)(m->text.len - mark));
     m->text.len = mark;
     return 0;
 }
@@ -1570,7 +1537,7 @@ static const H mito_h = {
 MITO_API void *MITO(start)(u64 budget, u64 seed) {
     const MitoProg *pg = &mito_prog;
     if (pg->total > budget) return 0;
-    Mito *m = (Mito *)VirtualAlloc(0, sizeof(Mito), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    Mito *m = (Mito *)os_alloc(sizeof(Mito));
     if (!m) return 0;
     Mem *mem = &m->mem;
     mem->prog = pg;
@@ -1580,13 +1547,14 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     mem->dirty = (u8 *)os_reserve(up(mem->npages * (PAGE / 64 / 8), PAGE));
     if (!mem->dirty) return 0;
     u64 small = up(mem->npages * 2 + (pg->ncolls + 1) * 16, PAGE);
-    u8 *s = (u8 *)VirtualAlloc(0, small, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    u8 *s = (u8 *)os_alloc(small);
+    m->small = small;
     if (!mem->base || !s) return 0;
     mem->committed = s; mem->livepg = s + mem->npages;
     mem->shrinks = (u64 *)(s + up(mem->npages * 2, 8));
     m->pr.stuck = mem->shrinks + pg->ncolls + 1;
     if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
-    m->areas = (u8 *)VirtualAlloc(0, TEXT_CAP + RESPONSE_CAP, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    m->areas = (u8 *)os_alloc(TEXT_CAP + RESPONSE_CAP);
     if (!m->areas) return 0;
     m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
     m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf;
@@ -1614,7 +1582,7 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     }
     return m;
 }
-MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.dirty); os_release(m->mem.jb.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }
+MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return; os_release(m->mem.base, m->mem.reserved); os_release(m->mem.committed, m->small); os_release(m->mem.dirty, up(m->mem.npages * (PAGE / 64 / 8), PAGE)); os_release(m->mem.jb.p, m->mem.jb.reserved); os_release(m->frees.p, m->frees.reserved); os_release(m->sel.p, m->sel.reserved); os_release(m->areas, TEXT_CAP + RESPONSE_CAP); os_release(m, sizeof(Mito)); }
 MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n; }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
 MITO_API void MITO(set_marks)(void *mp_, u64 soft, u64 hard) { Mito *m = (Mito *)mp_;

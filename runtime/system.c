@@ -7,39 +7,11 @@
    and every reply's text. The generated part before this file declares SYS_KINDS (one SysKind per worker kind),
    SYS_NKINDS, SYS_ENTRY and SYS_INFLIGHT. No heap: everything is a reservation made at start. */
 
-void *VirtualAlloc(void *a, u64 n, u32 type, u32 prot);
-int VirtualFree(void *a, u64 n, u32 type);
-void *CreateThread(void *attr, u64 stack, u32 (*fn)(void *), void *arg, u32 flags, u32 *id);
-u32 WaitForSingleObject(void *h, u32 ms);
-int CloseHandle(void *h);
-void *memcpy(void *d, const void *s, u64 n);
-#define S_RESERVE 0x2000
-#define S_COMMIT 0x1000
-#define S_RELEASE 0x8000
-#define S_RW 4
+/* Threads, locks, condition variables, memory and the clock are runtime/os.c's (included before this file). */
 #define REPLY_CAP (256 * 1024)
-
-/* locks and condition variables (kernel32: Windows' SRW locks and condition variables) */
-typedef struct { void *p; } Lock;
-typedef struct { void *p; } Cond;
-void InitializeSRWLock(Lock *l);
-void AcquireSRWLockExclusive(Lock *l);
-void ReleaseSRWLockExclusive(Lock *l);
-void InitializeConditionVariable(Cond *c);
-void WakeConditionVariable(Cond *c);
-void WakeAllConditionVariable(Cond *c);
-int SleepConditionVariableSRW(Cond *c, Lock *l, u32 ms, u32 flags);
-u64 GetTickCount64(void);
-#define lk_init InitializeSRWLock
-#define lk_on AcquireSRWLockExclusive
-#define lk_off ReleaseSRWLockExclusive
-#define cv_init InitializeConditionVariable
-#define cv_one WakeConditionVariable
-#define cv_all WakeAllConditionVariable
-#define cv_wait SleepConditionVariableSRW
-#define ticks GetTickCount64
+#define ticks os_ticks_ms
 static int sys_os(void) { return 1; }
-static void *sys_mem(u64 n) { return VirtualAlloc(0, n, S_RESERVE | S_COMMIT, S_RW); }
+static void *sys_mem(u64 n) { return os_alloc(n); }
 
 /* ---- a mailbox: a ring of `cap` slots of `slot` bytes, each a u32 length and an encoded message ---- */
 typedef struct { Lock lk; Cond cv; u8 *buf; u32 cap, slot, head, len; int closed, waiting; u64 refused; } Box;
@@ -70,7 +42,7 @@ static u32 box_recv(Box *b, u8 *out) {
     lk_on(&b->lk);
     while (b->len == 0) {
         if (b->closed) { lk_off(&b->lk); return 0; }
-        b->waiting = 1; cv_wait(&b->cv, &b->lk, 500, 0); b->waiting = 0;
+        b->waiting = 1; cv_wait(&b->cv, &b->lk, 500); b->waiting = 0;
     }
     u8 *at = b->buf + (u64)b->head * b->slot;
     u32 n; memcpy(&n, at, 4); memcpy(out, at + 4, n);
@@ -84,7 +56,7 @@ static void box_close(Box *b) { lk_on(&b->lk); b->closed = 1; lk_off(&b->lk); cv
 typedef struct { Lock lk; Cond cv; u32 state, code, len; u8 *body; u64 committed; } Reply;
 typedef struct { Lock lk; u32 *free; u32 nfree; } FreeList;
 typedef struct Sys Sys;
-typedef struct { Sys *sys; u32 kind, index, me; void *prog; u8 *msg; MitoPair *pairs; u32 maxpairs; void *thread; u64 handled, forwarded, restarts; } Worker;
+typedef struct { Sys *sys; u32 kind, index, me; void *prog; u8 *msg; MitoPair *pairs; u32 maxpairs; OsThread thread; u64 handled, forwarded, restarts; } Worker;
 struct Sys {
     Lock lk; i64 clock; int fixed; u64 seed; int seeded; u64 rr;
     u32 nworkers; Box *boxes; Worker *workers; u32 base[64], counts[64];
@@ -107,7 +79,7 @@ static void reply_put(Sys *s, u32 id, u32 code, const char *body, u32 n) {
     lk_on(&r->lk);
     if (r->state == 1) {
         if (n > REPLY_CAP) n = REPLY_CAP;
-        if (n > r->committed) { u64 c = (n + 65535) / 65536 * 65536; if (c > REPLY_CAP) c = REPLY_CAP; VirtualAlloc(r->body, c, S_COMMIT, S_RW); r->committed = c; }
+        if (n > r->committed) { u64 c = (n + 65535) / 65536 * 65536; if (c > REPLY_CAP) c = REPLY_CAP; os_commit(r->body, c); r->committed = c; }
         memcpy(r->body, body, n); r->len = n; r->code = code; r->state = 2;
         lk_off(&r->lk); cv_all(&r->cv);
         return;
@@ -211,7 +183,7 @@ MITO_API void *mito_system_start(u64 seed, int seeded) {
     lk_init(&s->fl.lk);
     for (u32 i = 0; i < SYS_INFLIGHT; i++) {
         Reply *r = &s->replies[i]; lk_init(&r->lk); cv_init(&r->cv);
-        r->body = (u8 *)VirtualAlloc(0, REPLY_CAP, S_RESERVE, 1);
+        r->body = (u8 *)os_reserve(REPLY_CAP);
         if (!r->body) return 0;
         s->fl.free[s->fl.nfree++] = SYS_INFLIGHT - 1 - i;
     }
@@ -227,7 +199,7 @@ MITO_API void *mito_system_start(u64 seed, int seeded) {
             if (!w->prog) return 0;
         }
     }
-    for (u32 i = 0; i < n; i++) { s->workers[i].thread = CreateThread(0, 0, worker_main, &s->workers[i], 0, 0); if (!s->workers[i].thread) return 0; }
+    for (u32 i = 0; i < n; i++) { if (!os_thread_start(&s->workers[i].thread, worker_main, &s->workers[i])) return 0; }
     return s;
 }
 MITO_API void mito_system_set_clock(void *sp, i64 ms, int fixed) { Sys *s = (Sys *)sp; lk_on(&s->lk); s->clock = ms; s->fixed = fixed; lk_off(&s->lk); }
@@ -265,7 +237,7 @@ MITO_API int mito_system_request(void *sp, const char *m, u32 mn, const char *t,
     while (r->state == 1) {
         u64 now = ticks();
         if (now >= deadline) { r->state = 3; lk_off(&r->lk); ANSWER(504, "{\"error\":\"no answer in time\"}"); }
-        cv_wait(&r->cv, &r->lk, (u32)(deadline - now), 0);
+        cv_wait(&r->cv, &r->lk, (u32)(deadline - now));
     }
     code = (int)r->code;
     u32 l = r->len < cap ? r->len : cap;
@@ -301,6 +273,6 @@ MITO_API u32 mito_system_report(void *sp, char *buf, u32 cap) {
 MITO_API void mito_system_stop(void *sp) {
     Sys *s = (Sys *)sp;
     for (u32 i = 0; i < s->nworkers; i++) box_close(&s->boxes[i]);
-    for (u32 i = 0; i < s->nworkers; i++) { WaitForSingleObject(s->workers[i].thread, 0xFFFFFFFFu); CloseHandle(s->workers[i].thread); }
+    for (u32 i = 0; i < s->nworkers; i++) { os_thread_join(&s->workers[i].thread); }
     for (u32 i = 0; i < s->nworkers; i++) SYS_KINDS[s->workers[i].kind].stop(s->workers[i].prog);
 }

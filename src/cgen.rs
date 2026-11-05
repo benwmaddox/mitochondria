@@ -533,6 +533,8 @@ pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
 
 /// The C runtime (runtime/*.c), compiled in the same translation unit as a program.
 pub const RUNTIME: &str = include_str!("../runtime/mito.c");
+/// The operating system's part (runtime/os.c: Windows and Linux), first in every translation unit after the prelude's types.
+pub const OS: &str = include_str!("../runtime/os.c");
 /// The runtime's types for the layout tables, ahead of them.
 pub const RUNTIME_TYPES: &str = include_str!("../runtime/types.h");
 
@@ -559,6 +561,7 @@ fn program_c_full(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefi
 #endif
 "); // vector compares, only when the build enables AVX2 (`--cflag -mavx2`)
     o += &direct(PRELUDE);
+    o += OS;
     o += RUNTIME_TYPES;
     o += &format!("#define MITO(x) {}##x\n", prefix);
     o += &layout_c(prog, api);
@@ -604,7 +607,7 @@ pub const SYSTEM: &str = include_str!("../runtime/system.c");
 pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
     let mut units = Vec::new();
     let mut table = String::from("/* ---- the system's worker kinds (generated) ---- */\ntypedef unsigned char u8; typedef unsigned short u16; typedef unsigned int u32; typedef unsigned long long u64; typedef long long i64;\n");
-    table += "#if defined(_MSC_VER) || defined(__clang__)\n#define MITO_API __declspec(dllexport)\n#else\n#define MITO_API\n#endif\n";
+    table += OS;
     table += "typedef struct { const char *k; u32 kn; const char *v; u32 vn; } MitoPair;\n";
     table += "typedef struct { const char *name; u32 count, mailbox, slot; u64 soft, hard; int marks;\n    void *(*start)(u64, u64); void (*stop)(void *); void (*set_clock)(void *, i64, int); void (*set_marks)(void *, u64, u64);\n    int (*handle)(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);\n    const char *(*response)(void *, u32 *); void (*set_system)(void *, u32, const char *const *, const u32 *, u32, u32);\n    u32 (*forward_to)(void *, u32 *, i64 *, MitoPair *, u32); void (*finish_forward)(void *, int); int (*crashed)(void *); } SysKind;\n";
     let fns = ["start", "stop", "set_clock", "set_marks", "handle", "response", "set_system", "forward_to", "finish_forward", "crashed"];

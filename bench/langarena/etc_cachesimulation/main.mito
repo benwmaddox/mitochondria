@@ -1,0 +1,130 @@
+// LangArena Etc::CacheSimulation (kostya/LangArena, MIT): an LRU cache (a hash map from key to a slot, a doubly linked list through the slots, capacity `size`) driven by
+// 1000 lookups of "item_N" (N from the benchmark's random generator below `values`) per run: a hit refreshes the entry with a new value text ("updated_<run>"), a miss adds one
+// ("new_<run>"), evicting the least recently used entry when the cache is full. The checksum combines the hit and miss counts and the size, warmup runs included. The reference's
+// HashMap<String, usize> is lib/strmap.mito (string keys, chained, entries numbered); the reference's node vector is arrays indexed by the map's entry number, so an eviction
+// removes the map entry by number. Each node's value text is built on every put, as the reference's format! does, into a 24-byte slot of a byte array.
+struct Cache {
+    map: strmap<8192>;
+    prev: i32[8192]; next: i32[8192]; vlen: u8[8192]; vbytes: u8[196608];
+    head: i64; tail: i64; size: i64; capacity: i64; values: i64;
+    hits: i64; misses: i64; last: i64; run_id: i64;
+}
+state c: Cache;
+
+fn next_int(max) {
+    c.last = (c.last * 3877 + 29573) % 139968;
+    return int(c.last / 139968.0 * max);
+}
+// the node's value text: `prefix` then the run number (the reference's format!("updated_{}", id) / format!("new_{}", id))
+fn set_value(node, updated) {
+    let base = (node - 1) * 24;
+    var at = 0;
+    if updated == 1 {
+        each index in 0..len("updated_") { c.vbytes[base + at] = "updated_"[index]; at = at + 1; }
+    } else {
+        each index in 0..len("new_") { c.vbytes[base + at] = "new_"[index]; at = at + 1; }
+    }
+    var digits = 1;
+    var rest = c.run_id;
+    each step in 0..12 while rest >= 10 { rest = rest / 10; digits = digits + 1; }
+    var slot = base + at + digits - 1;
+    var remaining = c.run_id;
+    each step in 0..digits {
+        c.vbytes[slot] = 48 + remaining % 10;
+        remaining = remaining / 10;
+        slot = slot - 1;
+    }
+    c.vlen[node - 1] = at + digits;
+}
+fn move_to_front(node) {
+    if node != c.head {
+        let before = c.prev[node - 1];
+        let after = c.next[node - 1];
+        if before != 0 { c.next[before - 1] = after; }
+        if after != 0 { c.prev[after - 1] = before; }
+        if node == c.tail { c.tail = before; }
+        c.prev[node - 1] = 0;
+        c.next[node - 1] = c.head;
+        if c.head != 0 { c.prev[c.head - 1] = node; }
+        c.head = node;
+        if c.tail == 0 { c.tail = node; }
+    }
+}
+fn add_to_front(node) {
+    c.next[node - 1] = c.head;
+    if c.head != 0 { c.prev[c.head - 1] = node; }
+    c.head = node;
+    if c.tail == 0 { c.tail = node; }
+}
+fn remove_oldest() {
+    let node = c.tail;
+    if node != 0 {
+        c.map.remove_entry(node);
+        let before = c.prev[node - 1];
+        if before != 0 { c.next[before - 1] = 0; }
+        c.tail = before;
+        if node == c.head { c.head = 0; }
+        c.size = c.size - 1;
+    }
+}
+// the reference's get: the node (0 if the key is not cached), refreshed to the front
+fn cache_get(key) {
+    let node = c.map.entry_of(key);
+    if node != 0 { move_to_front(node); }
+    return node;
+}
+fn cache_put(key, updated) {
+    let node = c.map.entry_of(key);
+    if node != 0 {
+        set_value(node, updated);
+        move_to_front(node);
+    } else {
+        if c.size >= c.capacity { remove_oldest(); }
+        let made = c.map.add_key(key);
+        c.prev[made - 1] = 0;
+        c.next[made - 1] = 0;
+        set_value(made, updated);
+        add_to_front(made);
+        c.size = c.size + 1;
+    }
+}
+fn one_run() {
+    each step in 0..1000 {
+        let key = "item_" + next_int(c.values);
+        if cache_get(key) != 0 {
+            c.hits = c.hits + 1;
+            cache_put(key, 1);
+        } else {
+            c.misses = c.misses + 1;
+            cache_put(key, 0);
+        }
+    }
+    c.run_id = c.run_id + 1;
+}
+
+@post("/prepare/{values}/{size}")
+fn prepare(values: i64 in 1..1000000, size: i64 in 1..8192) -> Response<{}> {
+    c.map.clear();
+    c.values = values;
+    c.capacity = size;
+    c.head = 0;
+    c.tail = 0;
+    c.size = 0;
+    c.hits = 0;
+    c.misses = 0;
+    c.last = 42;
+    c.run_id = 0;
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { c.last = 42; c.run_id = 0; each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> {
+    var result = 5432;
+    result = ((result << 5) + c.hits) & 0xFFFFFFFF;
+    result = ((result << 5) + c.misses) & 0xFFFFFFFF;
+    result = ((result << 5) + c.size) & 0xFFFFFFFF;
+    return ok({ "checksum": result });
+}

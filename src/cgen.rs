@@ -72,6 +72,8 @@ struct H {
     int (*str_cmp_col)(Ctx *, int, u32, u32, u32, u32, u32, u32, int *); /* a string column against another */
     int (*save_line)(Ctx *, u64, u32);                         /* the first write of the request to a line: the undo log saves it (the inline test found its bit clear) */
     int (*commit_range)(Ctx *, u64, u32);                      /* commit the page of a store the inline test found uncommitted */
+    int (*text_len)(Ctx *, u32 *);                             /* the text area's length now */
+    int (*text_cut)(Ctx *, u32);                               /* cut the text area back to an earlier length (a loop body that keeps no string past its iteration) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -383,6 +385,7 @@ struct G<'p> {
     slot_kinds: &'p [((Option<u32>, u32), K)],           // widened kinds of `var` and `let` slots
     ret_kinds: &'p [(u32, K)],                           // widened result kinds of functions
     widen: Option<Widen>,
+    txt_escapes: Vec<u32>, // slots of variables that were assigned a string (or a value of unknown kind), in the order it happened
     recursive: &'p [bool],                               // per function: is it part of a cycle of calls
     specs: &'p std::cell::RefCell<Vec<Spec>>,            // C functions generated for recursive functions
     dep: bool,                                           // generating a C function: its call depth is the parameter `dep`
@@ -810,7 +813,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1201,6 +1204,7 @@ impl<'p> G<'p> {
             Stmt::Assign(Expr::Var(n, VarRes::Local(slot)), rhs) => {
                 let cur = env[*slot as usize].clone().ok_or_else(|| format!("`{}` has no compiled value", n))?;
                 let v = self.expr(rhs, env, None)?;
+                if matches!(cur, CV::Txt(_) | CV::Any(_)) { self.txt_escapes.push(*slot); }
                 if let Err(e) = self.assign_var(&cur, v.clone()) {
                     if let (Some(a), Some(b)) = (kind(&cur), kind(&v)) {
                         if unify(a, b) == K::Any { why(format!("`{}` holds {} and then {}: a var keeps the kind of its first value", n, kname(self.prog, a), kname(self.prog, b))); }
@@ -1305,7 +1309,15 @@ impl<'p> G<'p> {
                     if changes_instance(self.api, n, body) { return no(format!("a loop over {} calls a function that changes {}; change it after the loop", n, n)); }
                 }
                 let collect = allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
-                self.each(it, env, collect, |g, env, _| g.block(body, env))?;
+                self.each(it, env, collect, |g, env, _| {
+                    // strings built in an iteration are dropped at its end unless the body hands one to a variable declared before the loop
+                    let (mark, first) = (g.tmp("tm"), g.txt_escapes.len());
+                    g.line(&format!("u32 {};", mark));
+                    g.call(&format!("c->h->text_len(c, &{})", mark));
+                    g.block(body, env)?;
+                    if !g.txt_escapes[first..].iter().any(|slot| *slot < it.slot) { g.call(&format!("c->h->text_cut(c, {})", mark)); }
+                    Ok(())
+                })?;
             }
             Stmt::Move(arr, from, to, count) => {
                 let av = self.expr(arr, env, None)?;

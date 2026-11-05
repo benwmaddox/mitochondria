@@ -21,6 +21,10 @@ fn post_churn(n: i64) -> Response<{ size: i64 }> {
     each i in 0..n { app.m.put("k" + i, i); app.m.remove("k" + i); }
     return ok({ "size": app.m.size() });
 }
+@post("/entry/{key}")
+fn post_entry(key: string<64>) -> Response<{ entry: i64, again: i64, size: i64 }> { let entry = app.m.entry_of(key); var made = entry; if entry == 0 { made = app.m.add_key(key); } return ok({ "entry": entry, "again": app.m.entry_of(key) + made * 0, "size": app.m.size() }); }
+@delete("/entry/{entry}")
+fn delete_entry(entry: i64 in 1..6) -> Response<{ size: i64 }> { app.m.remove_entry(entry); return ok({ "size": app.m.size() }); }
 --- requests
 GET /get/a
 POST /put/a/1
@@ -48,3 +52,10 @@ POST /churn/1000
 POST /clear
 GET /get/a
 POST /put/a/1
+POST /entry/p
+POST /entry/p
+POST /entry/q
+DELETE /entry/1
+GET /get/p
+GET /get/q
+POST /put/r/1

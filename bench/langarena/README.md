@@ -52,6 +52,7 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 | Compress::ArithDecode | 0.970 | 1.226 | 0.79x | 1.203 | 0.81x | 0.899 | 1.08x | rewritten-to-match |
 | Compress::LZWEncode | 0.090 | 0.521 | 0.17x | 0.514 | 0.18x | 0.826 | 0.11x | closest-possible |
 | Compress::LZWDecode | 2.116 | 1.188 | 1.78x | 1.162 | 1.82x | 0.523 | 4.05x | rewritten-to-match |
+| Etc::CacheSimulation | 0.482 | 0.813 | 0.59x | 0.818 | 0.59x | 1.835 | 0.26x | rewritten-to-match |
 
 Geometric mean of the 17 like-for-like and rewritten-to-match ports: 1.11x of Rust and 0.87x of Crystal (Matmul::Single and Nbody are closest-possible and left out). Medians agree with best-of within a few percent. Rows for the later ports (from Hash::CRC32 down) were measured in the same way, 3 rounds, after the store speed-ups. Crystal is
 LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
@@ -84,7 +85,7 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 15 | Etc::Sieve | ported |
 | 16 | Etc::TextRaytracer | ported |
 | 17 | Etc::NeuralNet | ported |
-| 18 | Etc::CacheSimulation | blocked: hash map with string keys |
+| 18 | Etc::CacheSimulation | ported (lib/strmap hash map; needed the text area freed per loop iteration) |
 | 19 | Etc::GameOfLife | ported |
 | 20 | Etc::Words | blocked: strings, hash map |
 | 21 | Etc::LogParser | not comparable: regular expressions |
@@ -109,11 +110,13 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 47-48 | Compress::LZWEncode / LZWDecode | ported (encode keys its dictionary by (prefix code, byte) instead of the whole string, which favours Mitochondria: excluded from the geometric mean) |
 | 49-50 | Distance::Jaro / NGram | blocked: strings, hash map |
 
-Counts now: 34 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
-matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 7 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
+Counts now: 35 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
+matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 6 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
 (`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only), `coll.clear()`, `array.fill`, `array.move` and `array.count_below`.
 Still blocked by something else: building text (Base64 output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.
 Where the time goes in what is slower than the reference: Binarytrees::Arena (3.98x of Rust) is pool `add` at about 28 ns against a `Vec` push at a few (75 million adds); the sieve, Fannkuchredux and
 the merge sort are loops of many small array stores, which pay for atomic requests.
 
 Finding while porting LZWDecode: using `array.move` to copy each decoded string into a 1 MB array (instead of a byte loop) made a run about 200x slower (0.2 s against 1 ms); `array.move` between small ranges is fine. Not investigated yet, probably the undo log handling of the destination range.
+
+Language and library added for the string tests: `lib/strmap.mito` (hash map from string keys to i64, chained, entries numbered so a caller can keep its own data per entry, slots reused at once) and a text-area rule: strings built in a loop body are dropped at the end of each iteration unless the body assigns one to a variable declared before the loop (the 256 KB text area of a request otherwise fills after about 20,000 string keys; CacheSimulation builds 5.8 million).

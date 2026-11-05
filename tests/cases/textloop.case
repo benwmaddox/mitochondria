@@ -1,0 +1,47 @@
+// the text area of a request is 256 KB: a loop that builds strings and keeps none past its iteration gives their space back at the end of each iteration, so it can run
+// any number of times; a loop that hands a string to a variable declared before it keeps them (and can run the area full)
+--- program
+struct App { total: i64; last: string<16>; }
+state app: App;
+
+@post("/count/{n}")
+fn post_count(n: i64) -> Response<{ total: i64 }> {
+    each i in 0..n {
+        let key = "item_" + i;
+        app.total = app.total + len(key);
+    }
+    return ok({ "total": app.total });
+}
+@post("/nested/{n}")
+fn post_nested(n: i64) -> Response<{ total: i64 }> {
+    var sum = 0;
+    each i in 0..n {
+        let outer = "outer_" + i;
+        each j in 0..10 {
+            let inner = outer + "_" + j;
+            sum = sum + len(inner);
+        }
+        sum = sum + len(outer);
+    }
+    return ok({ "total": sum });
+}
+@post("/keep/{n}")
+fn post_keep(n: i64) -> Response<{ last: string, len: i64 }> {
+    var kept = "";
+    each i in 0..n { kept = "keep_" + i + "_" + "padding_padding_padding_padding"; }
+    app.last = "x";
+    return ok({ "last": kept, "len": len(kept) });
+}
+@post("/accumulate/{n}")
+fn post_accumulate(n: i64) -> Response<{ len: i64 }> {
+    var all = "";
+    each i in 0..n { all = all + "ab"; }
+    return ok({ "len": len(all) });
+}
+--- requests
+POST /count/10
+POST /count/100000
+POST /nested/50000
+POST /keep/10
+POST /keep/100000
+POST /accumulate/1000

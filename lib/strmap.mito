@@ -48,7 +48,7 @@ pub fn get_or(key, dflt) {
     if found != 0 { value = self.values[found - 1]; }
     return value;
 }
-// A new entry for key at the front of its chain, value as given; the caller knows the key is not there.
+// A new entry for key at the front of its chain, value as given; the caller knows the key is not there. Its entry number.
 fn insert(key, hash, value) {
     if len(key) > 64 { fail 413 "strmap: key longer than 64 bytes"; }
     var entry = self.head.free;
@@ -67,6 +67,7 @@ fn insert(key, hash, value) {
     self.links[entry - 1] = self.heads[hash % N];
     self.heads[hash % N] = entry;
     self.head.size = self.head.size + 1;
+    return entry;
 }
 // Set the value of key (adding the key if it is new); true if it was new.
 pub fn put(key, value) {
@@ -94,25 +95,30 @@ pub fn add_to(key, delta) {
     }
     return value;
 }
+// The entry number (slot + 1) of key, 0 if there is none. Callers that keep their own data per entry (an LRU list, say) index their arrays by entry - 1.
+pub fn entry_of(key) { return self.find(key, self.hash_of(key)); }
+// A new entry for key (the caller knows it is not there) with value 0; its entry number.
+pub fn add_key(key) {
+    return self.insert(key, self.hash_of(key), 0);
+}
+// Remove entry number `entry` (as entry_of or add_key gave it).
+pub fn remove_entry(entry) {
+    let bucket = self.hashes[entry - 1] % N;
+    var cur = self.heads[bucket];
+    var prev = 0;
+    each step in 0..N + 1 while cur != entry && cur != 0 { prev = cur; cur = self.links[cur - 1]; }
+    if cur == entry {
+        if prev == 0 { self.heads[bucket] = self.links[entry - 1]; } else { self.links[prev - 1] = self.links[entry - 1]; }
+        self.links[entry - 1] = self.head.free;
+        self.head.free = entry;
+        self.head.size = self.head.size - 1;
+    }
+}
 // Remove key; true if it was there.
 pub fn remove(key) {
-    let hash = self.hash_of(key);
-    var cur = self.heads[hash % N];
-    var prev = 0;
-    var done = false;
-    each step in 0..N + 1 while cur != 0 && !done {
-        if self.hashes[cur - 1] == hash && self.same(cur, key) {
-            if prev == 0 { self.heads[hash % N] = self.links[cur - 1]; } else { self.links[prev - 1] = self.links[cur - 1]; }
-            self.links[cur - 1] = self.head.free;
-            self.head.free = cur;
-            self.head.size = self.head.size - 1;
-            done = true;
-        } else {
-            prev = cur;
-            cur = self.links[cur - 1];
-        }
-    }
-    return done;
+    let found = self.find(key, self.hash_of(key));
+    if found != 0 { self.remove_entry(found); }
+    return found != 0;
 }
 // Remove every entry.
 pub fn clear() {

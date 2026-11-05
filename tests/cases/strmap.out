@@ -24,5 +24,12 @@ POST /churn/1000 -> 200 {"size":4}
 POST /clear -> 200 {"size":0,"room":6}
 GET /get/a -> 200 {"value":-1,"has":false}
 POST /put/a/1 -> 200 {"added":true,"size":1}
+POST /entry/p -> 200 {"entry":0,"again":2,"size":2}
+POST /entry/p -> 200 {"entry":2,"again":2,"size":2}
+POST /entry/q -> 200 {"entry":0,"again":3,"size":3}
+DELETE /entry/1 -> 200 {"size":2}
+GET /get/p -> 200 {"value":0,"has":true}
+GET /get/q -> 200 {"value":0,"has":true}
+POST /put/r/1 -> 200 {"added":true,"size":3}
 state <plain values> 536
 memory reserved=4096 committed=4096 live=536

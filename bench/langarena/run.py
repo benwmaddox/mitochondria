@@ -142,6 +142,7 @@ META = {
     "compress_arithdecode": (["size"], False),
     "compress_lzwencode": (["size"], False),
     "compress_lzwdecode": (["size"], False),
+    "etc_cachesimulation": (["values", "size"], False),
     "calculator_ast": (["operations"], False),
     "base64_encode": (["size"], "b64enc"),
     "base64_decode": (["size"], "b64dec"),

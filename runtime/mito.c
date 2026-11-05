@@ -1115,11 +1115,12 @@ static int h_fill_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 count, i64 bi
     return 0;
 }
 /* `count` elements of `esize` bytes move within an array at byte offset `base`, from position `from` to `to`: one commit, one
-   undo-log pass over the range they touch, one memmove (the generated code checked the range). */
+   undo-log pass over the range they write, one memmove (the generated code checked the range). */
 static int h_move_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 to, i64 count) {
     if (count <= 0 || from == to) return 0;
     Mem *m = &M_(c)->mem;
-    u64 lo = base + (u64)(from < to ? from : to) * esize, hi = base + (u64)((from > to ? from : to) + count) * esize;
+    /* only the destination is written: commit and save just that range (a move between far apart ranges does not pay for what lies between them) */
+    u64 lo = base + (u64)to * esize, hi = lo + (u64)count * esize;
     ensure(m, lo, hi); save(m, lo, hi - lo);
     memmove(m->base + base + (u64)to * esize, m->base + base + (u64)from * esize, (u64)count * esize);
     return 0;

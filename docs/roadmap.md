@@ -129,6 +129,8 @@ or had the benchmark harness generate the text). There are two text kinds, both 
   local): text, integers and floats (formatted), as `+` already joins them. `s.append(x)` is the same as a function call. Also `s.clear()`, `s.truncate(n)`, `len(s)`, `maxlen(s)`, `substr(s, from, count)`
   without copying, assignment from any text, comparison. Appending past N fails the request (413, naming the field), like a full collection.
   `ascii<N>` takes only ASCII: appending or assigning a byte above 127 is refused (400).
+- A text literal (`"..."`) is either kind, taking the kind of where it is used. One holding a byte above 127 is UTF-8 only: using it
+  as `ascii<N>` is a compile error (the check needs no run time, since the literal is known).
 - `string<N>` is another name for `utf8<N>`, now and later: existing programs keep working unchanged, and either name may be used.
 - Inputs: `name: utf8<1..32>` / `ascii<1..32>` (the length range, both ends included as everywhere).
 - Done when: the ports that build text (Calculator, Template, CSV, Base64's message) use them instead of byte arrays and helpers.

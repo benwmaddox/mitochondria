@@ -91,20 +91,25 @@ signature there is nothing to guess.
 ## Phase 3: tests in the language
 
 ### 3.1 `test` declarations and `mito test`
-- As Stasis: a test is a declaration like a function, named by a string, in the program file or in `app.test.mito` beside it:
+- A test is a special case of a function, as in Stasis: `test "name" { ... }` is shorthand for a function with no parameters whose
+  result is `bool` or text (`utf8<N>`), named by the string, which the test runner calls and interprets. It lives in the program file or
+  in `app.test.mito` beside it:
 
   ```
   test "a full pool answers 503" {
       foreach i in 1..app.players.capacity() { post("/players", { name: "p" + i }); }
       let r = post("/players", { name: "one more" });
-      expect(r.status == 503);
-      expect(app.players.count() == app.players.capacity());
+      if r.status != 503 { return "expected 503, got " + r.status; }
+      return app.players.count() == app.players.capacity();
   }
   ```
-- A test passes when every `expect` holds (a test may also end with `return <bool>`, as a Stasis test does). Requests are calls
-  (`get`, `post`, `put`, `patch`, `delete` with a path, an optional body and headers) answering `{ status, body }`; the state can be read
-  directly. Each test starts from a fresh state; time and randomness are fixed (`--clock`, `--seed` as today).
-- `mito test app.mito` (or `--dir tests`) runs them and reports each failure with the test's name and the `expect`'s line.
+- The runner reads the result: `true` passes, `false` fails, text fails with that text as the message (an empty text passes).
+  A test whose request or code fails (an error the test did not catch) fails with that error and its line.
+- Inside a test, requests are calls (`get`, `post`, `put`, `patch`, `delete` with a path, an optional body and headers) answering
+  `{ status, body }`, and the state can be read directly. Each test starts from a fresh state; time and randomness are fixed
+  (`--clock`, `--seed` as today). Test functions are compiled only by `mito test`, never into a served program.
+- `mito test app.mito` (or `--dir tests`) runs them and reports each failure with the test's name, its message and the line of the
+  `return` that failed it.
 - The recorded form stays available for whole conversations: a `.case`-style file (requests and the answers they must get, blessed
   with `--bless`) run by `mito test app.case`, as the compiler's own tests are now.
 - Done when: the examples ship with tests run by `mito test`, and failures point at the line.

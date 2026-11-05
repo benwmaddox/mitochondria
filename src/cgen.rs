@@ -1312,12 +1312,22 @@ impl<'p> G<'p> {
                 }
                 let collect = allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
                 self.each(it, env, collect, |g, env, _| {
-                    // strings built in an iteration are dropped at its end unless the body hands one to a variable declared before the loop
-                    let (mark, first) = (g.tmp("tm"), g.txt_escapes.len());
-                    g.line(&format!("u32 {};", mark));
-                    g.call(&format!("c->h->text_len(c, &{})", mark));
+                    // strings built in an iteration are dropped at its end unless the body hands one to a variable declared before the loop;
+                    // the mark and the cut are only emitted for a body whose code can build a string
+                    let (start, first) = (g.body.len(), g.txt_escapes.len());
                     g.block(body, env)?;
-                    if !g.txt_escapes[first..].iter().any(|slot| *slot < it.slot) { g.call(&format!("c->h->text_cut(c, {})", mark)); }
+                    let code = &g.body[start..];
+                    let builds = ["->lit(", "->col_txt(", "->plain_txt(", "->arr_txt(", "->builtin(", "->binop(", "->input(", "->field_val("].iter().any(|h| code.contains(h))
+                        || g.specs.borrow().iter().any(|sp| code.contains(&format!("{}(c", sp.name)));
+                    if builds && !g.txt_escapes[first..].iter().any(|slot| *slot < it.slot) {
+                        let mark = g.tmp("tm");
+                        let kept = std::mem::take(&mut g.body);
+                        g.line(&format!("u32 {};", mark));
+                        g.call(&format!("c->h->text_len(c, &{})", mark));
+                        let head = std::mem::replace(&mut g.body, kept);
+                        g.body.insert_str(start, &head);
+                        g.call(&format!("c->h->text_cut(c, {})", mark));
+                    }
                     Ok(())
                 })?;
             }

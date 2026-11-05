@@ -1,0 +1,38 @@
+// fields with a declared range (`limit: i64 in 0..3000000`, both ends included): every write is tested and a value outside fails the request (400,
+// rolled back); reads let the range analysis drop overflow and range tests (here `cells[app.slot]` needs no index test)
+--- program
+struct Cfg { limit: i64 in 0..3000000; slot: u8 in 0..3; delta: i32 in -10..10; plain: i64; }
+struct Item { level: i16 in -5..5; name: string<8>; }
+struct App { cfg: Cfg; cells: i64[4]; items: pool<Item, 4>; }
+state app: App;
+
+@post("/limit/{v}")
+fn post_limit(v: i64) -> Response<{ limit: i64, doubled: i64 }> { app.cfg.limit = v; return ok({ "limit": app.cfg.limit, "doubled": app.cfg.limit * 2 + 1 }); }
+@post("/slot/{v}")
+fn post_slot(v: i64) -> Response<{ cell: i64 }> { app.cfg.slot = v; app.cells[app.cfg.slot] = app.cells[app.cfg.slot] + 1; return ok({ "cell": app.cells[app.cfg.slot] }); }
+@post("/delta/{v}/{fail_after}")
+fn post_delta(v: i64, fail_after: bool) -> Response<{ delta: i64 }> {
+    app.cfg.plain = 99;
+    app.cfg.delta = v;
+    if fail_after { fail 409 "undone"; }
+    return ok({ "delta": app.cfg.delta });
+}
+@post("/items/{level}")
+fn post_items(level: i64) -> Response<{ slot: i64, level: i64 }> { let it = app.items.add(); it.name = "x"; it.level = level; return created({ "slot": slot(it), "level": it.level }); }
+@get("/state")
+fn get_state() -> Response<{ limit: i64, slot: i64, delta: i64, plain: i64, items: i64 }> {
+    return ok({ "limit": app.cfg.limit, "slot": app.cfg.slot, "delta": app.cfg.delta, "plain": app.cfg.plain, "items": app.items.count() });
+}
+--- requests
+POST /limit/3000000
+POST /limit/3000001
+POST /limit/-1
+POST /slot/3
+POST /slot/3
+POST /slot/4
+POST /delta/-10/false
+POST /delta/-11/false
+POST /delta/5/true
+POST /items/-5
+POST /items/6
+GET /state

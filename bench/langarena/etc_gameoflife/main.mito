@@ -6,7 +6,7 @@
 // The seeding uses the reference's random generator (a cell is alive when next_float(1.0) < 0.1), which is reset before prepare.
 struct Pos { x: i32; y: i32; }
 struct Cell { alive: bool; next_state: bool; neighbors: list<Pos, 8>; }
-struct Life { cells: pool<Cell, 250000>; w: i64; h: i64; last: i64; }
+struct Life { cells: pool<Cell, 250000>; w: i64 in 0..500; h: i64 in 0..500; last: i64 in 0..139967; }
 state life: Life;
 
 fn next_float() {

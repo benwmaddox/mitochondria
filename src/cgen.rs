@@ -1100,6 +1100,23 @@ impl<'p> G<'p> {
         if let Some(d) = s.strip_suffix("LL") { if let Ok(v) = d.parse::<i64>() { return Some((v, v)); } }
         self.ranges.get(s).copied()
     }
+    /// A value stored into a field declared with a range (`n: i64 in 0..100`): an integer, tested against the range unless the range analysis
+    /// proves it inside; a value outside fails the request (400), naming the field.
+    fn in_field_range(&mut self, v: CV, (lo, hi): (i64, i64), field: &str) -> R<CV> {
+        let x = self.int_or(v, 400, "a field with a range takes an integer");
+        let x = self.hold_int(x);
+        if let Some((a, b)) = self.interval(&x) { if a >= lo && b <= hi { return Ok(CV::Int(x)); } }
+        let msg = format!("`{}` must be in {}..{}", field, lo, hi);
+        self.line(&format!("if (UNLIKELY({x} < {} || {x} > {})) FAIL(400, {}, {});", c_i64(lo), c_i64(hi), c_lit(msg.as_bytes()), msg.len()));
+        Ok(CV::Int(x))
+    }
+    /// A value read from a field declared with a range: the range analysis may assume it.
+    fn with_field_range(&mut self, v: CV, range: Option<(i64, i64)>) -> CV {
+        match (v, range) {
+            (CV::Int(e), Some(r)) => { let n = self.hold_int(e); if !self.var_names.contains(&n) { self.ranges.insert(n.clone(), r); } CV::Int(n) }
+            (v, _) => v,
+        }
+    }
     /// Check that array position `k` is in 0..n: nothing for a constant in range, else a comparison in line, with the
     /// helper (which builds the error) only when it fails.
     fn elem_check(&mut self, k: &str, n: u64) {
@@ -1379,8 +1396,10 @@ impl<'p> G<'p> {
                         let Some(k) = sd.fields.iter().position(|x| x.0 == *f) else { return no(format!("no field `{}`", f)) };
                         let (code, cap) = match &sd.fields[k].1 { Ty::Ref(p) => (30, self.prog.ref_pool(p).ok_or("ref to an unknown pool")? as u32), t => plain_code(t).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))? };
                         let at = off + sd.offs[k];
+                        let range = sd.ranges[k];
                         self.may_write_plain(at)?;
                         let v = self.expr(rhs, env, None)?;
+                        let v = match range { Some(r) => self.in_field_range(v, r, f)?, None => v };
                         if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap), true, at % scalar_bytes(code) as usize == 0)? { return Ok(()); }
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, {}, {}, {}, &{})", at, code, cap, vv));
@@ -1388,6 +1407,9 @@ impl<'p> G<'p> {
                     }
                     CV::Null => { self.line("TAIL(c->h->dead(c));"); return Ok(()); }
                     CV::Any(x) => {
+                        if self.prog.structs.iter().any(|sd| sd.fields.iter().zip(&sd.ranges).any(|(fd, r)| fd.0 == *f && r.is_some())) {
+                            return no(format!("`{}` has a declared range, and this value's collection is only known when the program runs; assign it through a value of a known collection", f));
+                        }
                         self.may_write_dynamic(Some(f))?;
                         self.line(&format!("if ({}.tag == 0) TAIL(c->h->dead(c));", x));
                         self.line(&format!("if ({}.tag != 5) FAIL(500, \"assignment target is not an item or a state struct\", 50);", x));
@@ -1405,6 +1427,7 @@ impl<'p> G<'p> {
                 };
                 self.may_write_col(c, &path)?;
                 let v = self.expr(rhs, env, None)?;
+                let v = match self.prog.colls[c].cols[ci].range { Some(r) => self.in_field_range(v, r, &path)?, None => v };
                 if !self.int_store(c, &idx, ci, None, &v, &format!("c->h->store(c, {}, {}, {}, &@VAL)", c, idx, ci))? {
                     let vv = self.val(v)?;
                     self.call(&format!("c->h->store(c, {}, {}, {}, &{})", c, idx, ci, vv));
@@ -1866,8 +1889,10 @@ impl<'p> G<'p> {
                 let sd = &self.prog.structs[sid];
                 let Some(k) = sd.fields.iter().position(|x| x.0 == f) else { return no(format!("no field `{}`", f)) };
                 let ty = sd.fields[k].1.clone();
+                let range = sd.ranges[k];
                 if ty.is_coll() { return Ok(CV::Coll(self.prog.plain_coll(off, sid, f).ok_or("plain collection")?, "0".into())); }
-                return self.plain(off + sd.offs[k], &ty, dead);
+                let v = self.plain(off + sd.offs[k], &ty, dead)?;
+                return Ok(self.with_field_range(v, range));
             }
             CV::Null => { match dead { Some(l) => self.line(&format!("goto {};", l)), None => self.line("TAIL(c->h->dead(c));") } return Ok(CV::Null); }
             CV::Any(x) => {
@@ -1892,7 +1917,7 @@ impl<'p> G<'p> {
     fn col_value(&mut self, c: usize, idx: String, ci: usize, dead: Option<&str>) -> R<CV> {
         let col = self.prog.colls[c].cols[ci].clone();
         Ok(match col.kind {
-            CKind::Scalar(s) => self.load(&col.off.to_string(), &idx, s)?,
+            CKind::Scalar(s) => { let v = self.load(&col.off.to_string(), &idx, s)?; self.with_field_range(v, col.range) }
             CKind::StrLen => CV::StateStr(c, idx, ci),
             CKind::Ref(t) => self.load_ref(t, &col.off.to_string(), &idx, dead)?,
             CKind::Arr(..) => CV::ArrCol(c, idx, ci),
@@ -2930,3 +2955,6 @@ fn stmt_sites<'p>(st: &'p Stmt, v: u32, assigned: &std::collections::HashSet<u32
         _ => {}
     }
 }
+
+/// An i64 as a C constant (the smallest one cannot be written as a literal).
+fn c_i64(v: i64) -> String { if v == i64::MIN { "(-9223372036854775807LL - 1)".into() } else { format!("{}LL", v) } }

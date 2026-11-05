@@ -5,7 +5,7 @@
 // starting value, which is what a fresh program has). Kinds: 0 wall, 1 space, 2 start, 3 finish, 4 border; walkable is space, start or finish.
 // The checksum is the sum of the kind of the middle cell after each run plus the FNV-1a hash of the x * y of every space cell, taken after the last run (GET /checksum, outside the timed runs, as the reference's checksum() is).
 struct Cell { kind: u8; x: i32; y: i32; ny: i32[4]; nx: i32[4]; }
-struct M { cells: pool<Cell, 1960000>; w: i64; h: i64; last: i64; result: i64; sy: i32[262144]; sx: i32[262144]; }
+struct M { cells: pool<Cell, 1960000>; w: i64 in 0..1400; h: i64 in 0..1400; last: i64 in 0..139967; result: i64 in 0..4294967295; sy: i32[262144]; sx: i32[262144]; }
 state m: M;
 
 fn next_int(max) {

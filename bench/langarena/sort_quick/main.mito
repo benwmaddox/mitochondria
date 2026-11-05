@@ -3,7 +3,7 @@
 // code works on index ranges (lo..=hi) of the copy, because the language has no slices. The reference clones the data into a new
 // Vec each run; here the copy goes into a second array of the same size. The checksum adds one random element of the input
 // and one of the sorted output per run, warmup runs included, modulo 2^32; the random generator is reset after warmup.
-struct Sort { data: i32[400000]; t: i32[400000]; size: i64; last: i64; result: i64; }
+struct Sort { data: i32[400000]; t: i32[400000]; size: i64 in 0..400000; last: i64 in 0..139967; result: i64 in 0..4294967295; }
 state so: Sort;
 
 fn next_int(max) {

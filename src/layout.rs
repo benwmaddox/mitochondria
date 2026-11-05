@@ -38,7 +38,9 @@ pub enum Ty {
 }
 impl Ty { pub fn is_coll(&self) -> bool { matches!(self, Ty::List(..) | Ty::Pool(..)) } }
 
-pub struct StructDef { pub name: String, pub fields: Vec<(String, Ty)>, pub offs: Vec<usize>, pub size: usize, pub align: usize, state: u8 }
+/// `ranges[k]`: field k's declared range (`limit: i64 in 0..3000000`, both ends included), when it has one: every write is checked against it,
+/// and reads give the range analysis that interval.
+pub struct StructDef { pub name: String, pub fields: Vec<(String, Ty)>, pub ranges: Vec<Option<(i64, i64)>>, pub offs: Vec<usize>, pub size: usize, pub align: usize, state: u8 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind { List(Full), Pool(bool) }
@@ -51,7 +53,7 @@ impl CKind {
     fn align(&self) -> usize { match self { CKind::Scalar(s) | CKind::Arr(s, _) => s.size(), CKind::StrBytes(_) => 1, _ => 4 } }
 }
 #[derive(Clone, Debug)]
-pub struct Col { pub path: String, pub kind: CKind, pub off: usize }
+pub struct Col { pub path: String, pub kind: CKind, pub off: usize, pub range: Option<(i64, i64)> }
 
 #[derive(Clone, Debug)]
 pub struct Coll {
@@ -156,9 +158,23 @@ impl Program {
                 "struct" => {
                     let name = p.ident()?; p.eat("{")?;
                     let mut fields = Vec::new();
-                    while p.peek() != Some("}") { let f = p.ident()?; p.eat(":")?; let ty = p.ty()?; p.eat(";")?; fields.push((f, ty)); }
+                    let mut ranges = Vec::new();
+                    while p.peek() != Some("}") {
+                        let f = p.ident()?; p.eat(":")?; let ty = p.ty()?;
+                        // `in lo..hi`: a declared range for an integer field, both ends included
+                        let range = if p.word("in") { let lo = p.signed()?; p.eat(".")?; p.eat(".")?; let hi = p.signed()?; Some((lo, hi)) } else { None };
+                        if let Some((lo, hi)) = range {
+                            let Ty::Scalar(sc) = &ty else { return Err(format!("`{}.{}`: only an integer field can have a range", name, f)) };
+                            let (tl, th): (i128, i128) = match sc { Scalar::I8 => (-128, 127), Scalar::I16 => (-32768, 32767), Scalar::I32 => (i32::MIN as i128, i32::MAX as i128), Scalar::I64 => (i64::MIN as i128, i64::MAX as i128),
+                                Scalar::U8 => (0, 255), Scalar::U16 => (0, 65535), Scalar::U32 => (0, u32::MAX as i128), Scalar::U64 => (0, i64::MAX as i128), _ => return Err(format!("`{}.{}`: only an integer field can have a range", name, f)) };
+                            if lo > hi || (lo as i128) < tl || (hi as i128) > th { return Err(format!("`{}.{}`: range {}..{} does not fit its type", name, f, lo, hi)); }
+                            if lo > 0 || hi < 0 { return Err(format!("`{}.{}`: range {}..{} must include 0, the value a field starts with", name, f, lo, hi)); }
+                        }
+                        p.eat(";")?;
+                        fields.push((f, ty)); ranges.push(range);
+                    }
                     p.eat("}")?;
-                    structs.push(StructDef { name, fields, offs: Vec::new(), size: 0, align: 1, state: 0 });
+                    structs.push(StructDef { name, fields, ranges, offs: Vec::new(), size: 0, align: 1, state: 0 });
                 }
                 "state" => {
                     let n = p.ident()?; p.eat(":")?; let ty = p.ty()?; p.eat(";")?;
@@ -279,12 +295,12 @@ impl Program {
         }
         let mut leaves = Vec::new();
         let mut kids = Vec::new();
-        self.flatten(&elem, "", &mut leaves, &mut kids, name)?;
+        self.flatten(&elem, "", None, &mut leaves, &mut kids, name)?;
         if kind == Kind::List(Full::DropOldest) && !kids.is_empty() { return Err(format!("`{}`: a drop_oldest list cannot hold nested collections", name)); }
-        for (path, t) in leaves {
-            let place = |k: CKind, o: &mut usize| { *o = up(*o, k.align().max(1)); let col = Col { path: path.clone(), kind: k.clone(), off: *o }; *o += items * k.size(); col };
+        for (path, t, range) in leaves {
+            let place = |k: CKind, o: &mut usize| { *o = up(*o, k.align().max(1)); let col = Col { path: path.clone(), kind: k.clone(), off: *o, range: None }; *o += items * k.size(); col };
             match t {
-                Ty::Scalar(s) => { let col = place(CKind::Scalar(s), &mut o); c.cols.push(col); }
+                Ty::Scalar(s) => { let mut col = place(CKind::Scalar(s), &mut o); col.range = range; c.cols.push(col); }
                 Ty::Arr(e, k) => { let Ty::Scalar(s) = *e else { unreachable!() }; let col = place(CKind::Arr(s, k), &mut o); c.cols.push(col); }
                 Ty::Str(m) => { let a = place(CKind::StrLen, &mut o); c.cols.push(a); let b = place(CKind::StrBytes(m), &mut o); c.cols.push(b); }
                 Ty::Ref(p) => { refs.push((cid, c.cols.len(), p)); let col = place(CKind::Ref(usize::MAX), &mut o); c.cols.push(col); }
@@ -301,12 +317,12 @@ impl Program {
         Ok(cid)
     }
 
-    fn flatten(&self, t: &Ty, prefix: &str, leaves: &mut Vec<(String, Ty)>, kids: &mut Vec<(String, Ty)>, name: &str) -> Result<(), String> {
+    fn flatten(&self, t: &Ty, prefix: &str, range: Option<(i64, i64)>, leaves: &mut Vec<(String, Ty, Option<(i64, i64)>)>, kids: &mut Vec<(String, Ty)>, name: &str) -> Result<(), String> {
         let join = |f: &str| if prefix.is_empty() { f.to_string() } else { format!("{}.{}", prefix, f) };
         match t {
-            Ty::Struct(i) => for (f, ft) in &self.structs[*i].fields { self.flatten(ft, &join(f), leaves, kids, name)?; },
-            Ty::Scalar(_) | Ty::Str(_) | Ty::Ref(_) => leaves.push((prefix.to_string(), t.clone())),
-            Ty::Arr(e, _) if matches!(**e, Ty::Scalar(_)) => leaves.push((prefix.to_string(), t.clone())),
+            Ty::Struct(i) => for (k, (f, ft)) in self.structs[*i].fields.iter().enumerate() { self.flatten(ft, &join(f), self.structs[*i].ranges[k], leaves, kids, name)?; },
+            Ty::Scalar(_) | Ty::Str(_) | Ty::Ref(_) => leaves.push((prefix.to_string(), t.clone(), range)),
+            Ty::Arr(e, _) if matches!(**e, Ty::Scalar(_)) => leaves.push((prefix.to_string(), t.clone(), None)),
             Ty::List(..) | Ty::Pool(..) => kids.push((prefix.to_string(), t.clone())),
             _ => return Err(format!("`{}`: items cannot hold `{}` at `{}`; use a nested list instead of a fixed array of structs", name, self.show(t), prefix)),
         }
@@ -356,6 +372,14 @@ impl P {
     fn ident(&mut self) -> Result<String, String> { let s = self.peek().ok_or("unexpected end of file")?.to_string(); self.i += 1; Ok(s) }
     fn num(&mut self) -> Result<usize, String> { let s = self.ident()?; s.parse().map_err(|_| format!("expected a number, found `{}`", s)) }
     fn word(&mut self, w: &str) -> bool { if self.peek() == Some(w) { self.i += 1; true } else { false } }
+    /// An integer, with an optional minus sign.
+    fn signed(&mut self) -> Result<i64, String> {
+        let neg = self.word("-");
+        let s = self.ident()?;
+        let v: i128 = s.parse().map_err(|_| format!("expected a number, found `{}`", s))?;
+        let v = if neg { -v } else { v };
+        i64::try_from(v).map_err(|_| format!("`{}` does not fit in an i64", v))
+    }
     /// `a.b.c`
     fn path(&mut self) -> Result<String, String> { let mut s = self.ident()?; while self.word(".") { s.push('.'); s += &self.ident()?; } Ok(s) }
     /// A size known when the program is compiled: a number, or + - * / ( ) of them (modules size state from parameters).

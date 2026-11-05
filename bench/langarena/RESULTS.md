@@ -54,9 +54,9 @@ Each table is sorted by its Mito/Rust ratio, best first.
 
 Geometric mean over the 27 like-for-like and rewritten-to-match ports: Mitochondria / Rust 0.961x, / Rust (checked) 0.929x, / Crystal 0.730x; over all 41 ports, / Rust 0.928x.
 
-## Memory (peak working set, MB)
+## Memory (peak, MB)
 
-The most physical memory each process held at once, measured by the operating system (Windows' peak working set). Rust and Crystal run one test per process; Mitochondria is its server process for that test, measured after prepare, warmup and the timed run (its connection threads and request areas included; reserved address space that was never touched is not counted).
+The most physical memory each process held at once, measured by the operating system (Windows' peak working set). The reference implementations run one test per process; Mitochondria is its server process for that test, measured after prepare, warmup and the timed run (its connection threads and request areas included; reserved address space that was never touched is not counted).
 
 | Workload | Mitochondria MB | Rust MB | Mito/Rust | Crystal MB | Mito/Crystal |
 |---|---:|---:|---:|---:|---:|

@@ -1,0 +1,863 @@
+{
+ "BF::Array": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 1.396,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.234375,
+   "s": 1.527909988,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.985,
+   "verified": true
+  },
+  "test": "bf_array"
+ },
+ "BF::Recursion": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 1.429,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.234375,
+   "s": 2.019277343,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 1.41,
+   "verified": true
+  },
+  "test": "bf_recursion"
+ },
+ "Base64::Decode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.204,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 4.125,
+   "s": 1.252005142,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.204,
+   "verified": true
+  },
+  "test": "base64_decode"
+ },
+ "Base64::Encode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.178,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 3.953125,
+   "s": 1.380065648,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.178,
+   "verified": true
+  },
+  "test": "base64_encode"
+ },
+ "Binarytrees::Arena": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 27.26953125,
+   "s": 0.354,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 26.640625,
+   "s": 1.020602797,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 27.26171875,
+   "s": 0.345,
+   "verified": true
+  },
+  "test": "binarytrees_arena"
+ },
+ "Binarytrees::Obj": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 67.203125,
+   "s": 1.751,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 34.375,
+   "s": 2.1009154,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 67.203125,
+   "s": 1.741,
+   "verified": true
+  },
+  "test": "binarytrees_obj"
+ },
+ "CLBG::Fannkuchredux": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.984,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.0625,
+   "s": 1.083460174,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.939,
+   "verified": true
+  },
+  "test": "clbg_fannkuchredux"
+ },
+ "CLBG::Mandelbrot": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.698,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 4.296875,
+   "s": 0.68562779,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.715,
+   "verified": true
+  },
+  "test": "clbg_mandelbrot"
+ },
+ "CLBG::Nbody": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.701,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.234375,
+   "s": 0.917801207,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.703,
+   "verified": true
+  },
+  "test": "clbg_nbody"
+ },
+ "CLBG::Spectralnorm": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.772,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.234375,
+   "s": 0.763764674,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.776,
+   "verified": true
+  },
+  "test": "clbg_spectralnorm"
+ },
+ "CSV::Parse": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.522,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 17.53125,
+   "s": 0.546626414,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.513,
+   "verified": true
+  },
+  "test": "csv_parse"
+ },
+ "Calculator::Ast": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.495,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 6.53125,
+   "s": 0.172977636,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.491,
+   "verified": true
+  },
+  "test": "calculator_ast"
+ },
+ "Calculator::Interpreter": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 50.1875,
+   "s": 0.55,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 31.109375,
+   "s": 0.35710137,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 50.359375,
+   "s": 0.55,
+   "verified": true
+  },
+  "test": "calculator_interpreter"
+ },
+ "Compress::ArithDecode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 1.197,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.578125,
+   "s": 0.990223818,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 1.197,
+   "verified": true
+  },
+  "test": "compress_arithdecode"
+ },
+ "Compress::ArithEncode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.906,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.40625,
+   "s": 1.034737702,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.867,
+   "verified": true
+  },
+  "test": "compress_arithencode"
+ },
+ "Compress::BWTDecode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 42.19921875,
+   "s": 0.847,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 51.734375,
+   "s": 0.860318643,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 42.19140625,
+   "s": 0.875,
+   "verified": true
+  },
+  "test": "compress_bwtdecode"
+ },
+ "Compress::BWTEncode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.303,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 4.46875,
+   "s": 0.459559139,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.303,
+   "verified": true
+  },
+  "test": "compress_bwtencode"
+ },
+ "Compress::HuffDecode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.6,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 5.84375,
+   "s": 1.060300344,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.613,
+   "verified": true
+  },
+  "test": "compress_huffdecode"
+ },
+ "Compress::HuffEncode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.648,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 4.640625,
+   "s": 0.745594661,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.57,
+   "verified": true
+  },
+  "test": "compress_huffencode"
+ },
+ "Compress::LZWDecode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.338,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 6.359375,
+   "s": 0.199357789,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.453125,
+   "s": 0.337,
+   "verified": true
+  },
+  "test": "compress_lzwdecode"
+ },
+ "Compress::LZWEncode": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.455,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.578125,
+   "s": 0.092344423,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.451,
+   "verified": true
+  },
+  "test": "compress_lzwencode"
+ },
+ "Distance::Jaro": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.944,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.40625,
+   "s": 0.959425397,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.936,
+   "verified": true
+  },
+  "test": "distance_jaro"
+ },
+ "Distance::NGram": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.328,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 3.4375,
+   "s": 0.406149926,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.312,
+   "verified": true
+  },
+  "test": "distance_ngram"
+ },
+ "Etc::CacheSimulation": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.543,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.921875,
+   "s": 0.450770759,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.55,
+   "verified": true
+  },
+  "test": "etc_cachesimulation"
+ },
+ "Etc::GameOfLife": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 45.203125,
+   "s": 1.775,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 39.875,
+   "s": 1.787184952,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 45.203125,
+   "s": 1.745,
+   "verified": true
+  },
+  "test": "etc_gameoflife"
+ },
+ "Etc::NeuralNet": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.788,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.40625,
+   "s": 0.834136357,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.812,
+   "verified": true
+  },
+  "test": "etc_neuralnet"
+ },
+ "Etc::Sieve": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 1.645,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 4.984375,
+   "s": 1.768544757,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 1.162,
+   "verified": true
+  },
+  "test": "etc_sieve"
+ },
+ "Etc::TextRaytracer": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.657,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 2.234375,
+   "s": 0.733886502,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 20.625,
+   "s": 0.658,
+   "verified": true
+  },
+  "test": "etc_textraytracer"
+ },
+ "Etc::Words": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 0.708,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 6.703125,
+   "s": 0.559923684,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 0.704,
+   "verified": true
+  },
+  "test": "etc_words"
+ },
+ "Graph::AStar": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 81.640625,
+   "s": 1.307,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 166.71875,
+   "s": 0.786421737,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 81.640625,
+   "s": 1.296,
+   "verified": true
+  },
+  "test": "graph_astar"
+ },
+ "Graph::BFS": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 78.08984375,
+   "s": 0.84,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 166.890625,
+   "s": 0.959676067,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 78.08203125,
+   "s": 0.838,
+   "verified": true
+  },
+  "test": "graph_bfs"
+ },
+ "Graph::DFS": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 78.375,
+   "s": 0.772,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 163.453125,
+   "s": 0.923001537,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 78.375,
+   "s": 0.738,
+   "verified": true
+  },
+  "test": "graph_dfs"
+ },
+ "Hash::CRC32": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 0.779,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 4.640625,
+   "s": 0.819734901,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 0.819,
+   "verified": true
+  },
+  "test": "hash_crc32"
+ },
+ "Hash::SHA256": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 0.637,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 4.296875,
+   "s": 0.667223361,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 0.63,
+   "verified": true
+  },
+  "test": "hash_sha256"
+ },
+ "Matmul::Single": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 27.859375,
+   "s": 3.179,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 40.734375,
+   "s": 3.447716347,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 27.84765625,
+   "s": 3.196,
+   "verified": true
+  },
+  "test": "matmul_single"
+ },
+ "Maze::AStar": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 191.203125,
+   "s": 0.848,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 191.46875,
+   "s": 0.917920746,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 191.015625,
+   "s": 0.945,
+   "verified": true
+  },
+  "test": "maze_astar"
+ },
+ "Maze::BFS": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 179.34765625,
+   "s": 0.607,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 173.765625,
+   "s": 0.42652828,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 179.3359375,
+   "s": 0.611,
+   "verified": true
+  },
+  "test": "maze_bfs"
+ },
+ "Maze::Generator": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 170.9140625,
+   "s": 0.752,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 167.234375,
+   "s": 0.514827534,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 170.55859375,
+   "s": 0.755,
+   "verified": true
+  },
+  "test": "maze_generator"
+ },
+ "Sort::Merge": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 1.288,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 8.421875,
+   "s": 1.471799601,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 1.278,
+   "verified": true
+  },
+  "test": "sort_merge"
+ },
+ "Sort::Quick": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 1.161,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 6.875,
+   "s": 1.377094398,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 24.234375,
+   "s": 1.071,
+   "verified": true
+  },
+  "test": "sort_quick"
+ },
+ "Template::Parse": {
+  "c": {
+   "date": "2026-11-05",
+   "mb": 38.359375,
+   "s": 0.773,
+   "verified": true
+  },
+  "m": {
+   "date": "2026-11-05",
+   "mb": 44.34375,
+   "s": 0.596149516,
+   "verified": true
+  },
+  "r": {
+   "date": "2026-11-05",
+   "mb": 38.21875,
+   "s": 0.795,
+   "verified": true
+  },
+  "test": "template_parse"
+ }
+}

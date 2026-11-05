@@ -22,12 +22,18 @@ here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(here, "..", "ordered"))
 from pin import pin
 
-mito = os.environ.get("MITO_EXE", os.path.join(here, "..", "..", "target", "release", "mito.exe"))  # MITO_EXE: another compiler, for A/B runs (MITO_BUILD_TAG keeps its builds apart)
-rust = os.environ.get("RUST_BENCH", os.path.join(here, "target-rust", "max-perf", "benchmarks.exe"))
-rust_checked = os.environ.get("RUST_CHECKED", os.path.join(here, "target-rust-checked", "max-perf", "benchmarks.exe"))
-crystal = os.environ.get("CRYSTAL", "D:/tools/langarena-crystal/target/bin_crystal.exe")  # LangArena's original (Crystal) implementation, built with `crystal build main.cr --release`
-arena = os.environ.get("LANGARENA", "D:/tmp/langarena")
-build_dir = os.path.join(here, "build")
+exe_suffix = ".exe" if os.name == "nt" else ""
+mito = os.environ.get("MITO_EXE", os.path.join(here, "..", "..", "target", "release", "mito" + exe_suffix))  # MITO_EXE: another compiler, for A/B runs (MITO_BUILD_TAG keeps its builds apart)
+if os.name == "nt":
+    rust = os.environ.get("RUST_BENCH", os.path.join(here, "target-rust", "max-perf", "benchmarks.exe"))
+    rust_checked = os.environ.get("RUST_CHECKED", os.path.join(here, "target-rust-checked", "max-perf", "benchmarks.exe"))
+    crystal = os.environ.get("CRYSTAL", "D:/tools/langarena-crystal/target/bin_crystal.exe")
+else: # Linux (WSL2 here): LangArena's Rust built under the home directory; Crystal when CRYSTAL names a build
+    rust = os.environ.get("RUST_BENCH", os.path.expanduser("~/langarena-target/max-perf/benchmarks"))
+    rust_checked = os.environ.get("RUST_CHECKED", os.path.expanduser("~/langarena-target-checked/max-perf/benchmarks"))
+    crystal = os.environ.get("CRYSTAL", "")  # LangArena's original (Crystal) implementation, built with `crystal build main.cr --release`
+arena = os.environ.get("LANGARENA", "D:/tmp/langarena" if os.name == "nt" else "/mnt/d/tmp/langarena")
+build_dir = os.path.join(here, "build" if os.name == "nt" else "build-linux")
 port = 18150
 
 args = sys.argv[1:]
@@ -56,8 +62,10 @@ if os.environ.get("MITO_BUILD_TAG"): build_dir = os.path.join(build_dir, os.envi
 os.makedirs(build_dir, exist_ok=True)
 
 # results.json keeps every implementation's latest numbers per test; RESULTS.md is written from it after each run
-results_path = os.path.join(here, "results.json")
-markdown_path = os.path.join(here, "RESULTS.md")
+# one file per system: Windows' results.json / RESULTS.md, Linux's results-linux.json / RESULTS-linux.md
+plat = "" if os.name == "nt" else "-linux"
+results_path = os.path.join(here, f"results{plat}.json")
+markdown_path = os.path.join(here, f"RESULTS{plat}.md")
 results = json.load(open(results_path, encoding="utf-8")) if os.path.exists(results_path) else {}
 def save_results():
     with open(results_path, "w", encoding="utf-8") as f: json.dump(results, f, indent=1, sort_keys=True)
@@ -71,8 +79,10 @@ def write_markdown():
     def ratio(a, b): return "" if a is None or not b else f"{a / b:.2f}x"
     def gmean(xs): xs = [x for x in xs if x]; return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else None
     fair = [n for n in names if audit_of(results[n]["test"]) in ("like-for-like", "rewritten-to-match")]
+    # a column with no numbers at all (no Crystal on this machine, no checked Rust build) is left out
+    has_c = any(val(n, "c", "s") for n in names); has_y = any(val(n, "y", "s") for n in names); has_ym = any(val(n, "y", "mb") for n in names)
     dates = sorted({v["date"] for n in names for k, v in results[n].items() if isinstance(v, dict) and "date" in v})
-    o = ["# LangArena results: Mitochondria, Rust and Crystal", "",
+    o = ["# LangArena results: Mitochondria, Rust and Crystal" + ("" if os.name == "nt" else " (Linux)"), "",
          "Written by `run.py` (`python -I bench/langarena/run.py`) from `results.json`; do not edit by hand. Each implementation's numbers are from its "
          "latest run (" + (dates[0] + " to " + dates[-1] if len(dates) > 1 else (dates[0] if dates else "no runs")) + "): a run of only some implementations "
          "(`--mito-only`) keeps the others' last numbers. How the comparison is made, and each port's audit, are in [README.md](README.md).", "",
@@ -81,31 +91,31 @@ def write_markdown():
          "checked column turns them on, as Mitochondria always checks); Crystal is LangArena's original implementation. Ratios are Mitochondria / the column's implementation.", "",
          "Each table is sorted by its Mito/Rust ratio, best first.", "",
          "## Time (seconds for the timed iterations)", "",
-         "| Workload | Mitochondria | Rust | Mito/Rust | Rust (checked) | Mito/Rust (checked) | Crystal | Mito/Crystal | audit |",
-         "|---|---:|---:|---:|---:|---:|---:|---:|---|"]
+         "| Workload | Mitochondria | Rust | Mito/Rust |" + (" Rust (checked) | Mito/Rust (checked) |" if has_c else "") + (" Crystal | Mito/Crystal |" if has_y else "") + " audit |",
+         "|---|---:|---:|---:|" + ("---:|---:|" if has_c else "") + ("---:|---:|" if has_y else "") + "---|"]
     # best Mitochondria / Rust ratio first (ports without both numbers last)
     def by(field): return lambda n: (val(n, "m", field) / val(n, "r", field)) if val(n, "m", field) and val(n, "r", field) else float("inf")
     for n in sorted(names, key=by("s")):
         m, r, c, y = (val(n, k, "s") for k in "mrcy")
-        o.append(f"| {n} | {num(m)} | {num(r)} | {ratio(m, r)} | {num(c)} | {ratio(m, c)} | {num(y)} | {ratio(m, y)} | {audit_of(results[n]['test'])} |")
+        o.append(f"| {n} | {num(m)} | {num(r)} | {ratio(m, r)} |" + (f" {num(c)} | {ratio(m, c)} |" if has_c else "") + (f" {num(y)} | {ratio(m, y)} |" if has_y else "") + f" {audit_of(results[n]['test'])} |")
     gr = gmean([val(n, "m", "s") / val(n, "r", "s") for n in fair if val(n, "m", "s") and val(n, "r", "s")])
     gc = gmean([val(n, "m", "s") / val(n, "c", "s") for n in fair if val(n, "m", "s") and val(n, "c", "s")])
     gy = gmean([val(n, "m", "s") / val(n, "y", "s") for n in fair if val(n, "m", "s") and val(n, "y", "s")])
     ga = gmean([val(n, "m", "s") / val(n, "r", "s") for n in names if val(n, "m", "s") and val(n, "r", "s")])
-    o += ["", f"Geometric mean over the {len(fair)} like-for-like and rewritten-to-match ports: Mitochondria / Rust {num(gr, 3)}x, / Rust (checked) {num(gc, 3)}x, "
-          f"/ Crystal {num(gy, 3)}x; over all {len(names)} ports, / Rust {num(ga, 3)}x.", "",
-          "## Memory (peak working set, MB)", "",
-          "The most physical memory each process held at once, measured by the operating system (Windows' peak working set). Rust and Crystal run one test per process; "
+    o += ["", f"Geometric mean over the {len(fair)} like-for-like and rewritten-to-match ports: Mitochondria / Rust {num(gr, 3)}x"
+          + (f", / Rust (checked) {num(gc, 3)}x" if has_c else "") + (f", / Crystal {num(gy, 3)}x" if has_y else "") + f"; over all {len(names)} ports, / Rust {num(ga, 3)}x.", "",
+          "## Memory (peak, MB)", "",
+          "The most physical memory each process held at once, measured by the operating system (" + ("Windows' peak working set" if os.name == "nt" else "Linux's peak resident set: VmHWM, or ru_maxrss for a process that ended") + "). The reference implementations run one test per process; "
           "Mitochondria is its server process for that test, measured after prepare, warmup and the timed run (its connection threads and request areas included; "
           "reserved address space that was never touched is not counted).", "",
-          "| Workload | Mitochondria MB | Rust MB | Mito/Rust | Crystal MB | Mito/Crystal |",
-          "|---|---:|---:|---:|---:|---:|"]
+          "| Workload | Mitochondria MB | Rust MB | Mito/Rust |" + (" Crystal MB | Mito/Crystal |" if has_ym else ""),
+          "|---|---:|---:|---:|" + ("---:|---:|" if has_ym else "")]
     for n in sorted(names, key=by("mb")):
         m, r, y = val(n, "m", "mb"), val(n, "r", "mb"), val(n, "y", "mb")
-        o.append(f"| {n} | {num(m, 1)} | {num(r, 1)} | {ratio(m, r)} | {num(y, 1)} | {ratio(m, y)} |")
+        o.append(f"| {n} | {num(m, 1)} | {num(r, 1)} | {ratio(m, r)} |" + (f" {num(y, 1)} | {ratio(m, y)} |" if has_ym else ""))
     mr = gmean([val(n, "m", "mb") / val(n, "r", "mb") for n in names if val(n, "m", "mb") and val(n, "r", "mb")])
     my = gmean([val(n, "m", "mb") / val(n, "y", "mb") for n in names if val(n, "m", "mb") and val(n, "y", "mb")])
-    o += ["", f"Geometric mean over all {len(names)} ports: Mitochondria / Rust {num(mr, 2)}x, / Crystal {num(my, 2)}x.", ""]
+    o += ["", f"Geometric mean over all {len(names)} ports: Mitochondria / Rust {num(mr, 2)}x" + (f", / Crystal {num(my, 2)}x" if has_ym else "") + ".", ""]
     with open(markdown_path, "w", encoding="utf-8") as f: f.write("\n".join(o))
     print(f"wrote {markdown_path}", file=sys.stderr)
 
@@ -124,7 +134,13 @@ class _PMC(ctypes.Structure):
                 ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t), ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
                 ("QuotaNonPagedPoolUsage", ctypes.c_size_t), ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
 def peak_mb(p):
-    if os.name != "nt": return None
+    if os.name != "nt":
+        # Linux: a running process's peak resident set (VmHWM); one that ended reports it through wait4 (see run_rust)
+        try:
+            for line in open(f"/proc/{p.pid}/status"):
+                if line.startswith("VmHWM:"): return int(line.split()[1]) / 1024
+        except OSError: pass
+        return None
     m = _PMC(); m.cb = ctypes.sizeof(_PMC)
     k32 = ctypes.windll.kernel32
     k32.K32GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PMC), ctypes.c_uint32]
@@ -145,7 +161,7 @@ def call(method, path, body=None):
 
 
 def build(test):
-    out = os.path.join(build_dir, test + ".exe")
+    out = os.path.join(build_dir, test + exe_suffix)
     src = os.path.join(here, test, "main.mito")
     if not os.path.exists(out) or os.path.getmtime(out) < max(os.path.getmtime(src), os.path.getmtime(mito)):
         r = subprocess.run([mito, "build", src, "-o", out] + [x for f in cflags for x in ("--cflag", f)], capture_output=True, text=True)
@@ -206,8 +222,15 @@ def run_mito(test, name, exe, cfg, params, float_result):
 def run_rust(exe, name):
     name = ref_name.get(name, name)
     p = subprocess.Popen([exe, os.path.join(arena, f"{mode}.js"), name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=os.path.dirname(exe)); pin(p)
-    out = p.communicate()[0]
-    mem = peak_mb(p)
+    if os.name == "nt":
+        out = p.communicate()[0]
+        mem = peak_mb(p)
+    else:
+        # Linux: read the output, then reap the process with wait4 for its peak resident set (ru_maxrss, KB)
+        out = p.stdout.read(); p.stderr.read()
+        _, status, ru = os.wait4(p.pid, 0)
+        p.returncode = os.waitstatus_to_exitcode(status)
+        mem = ru.ru_maxrss / 1024
     m = re.search(rf"{re.escape(name)}: (OK|ERR\[[^\]]*\]) in ([0-9.]+)s", out)
     if not m: return None, False, mem
     return float(m.group(2)), m.group(1) == "OK", mem

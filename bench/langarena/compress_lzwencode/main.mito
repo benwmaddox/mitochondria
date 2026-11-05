@@ -1,0 +1,80 @@
+// LangArena Compress::LZWEncode (kostya/LangArena, MIT): LZW-code a repeating text, `iterations` times.
+// The input is `size` bytes of the repeating pattern "ABRACADABRA"; the coder is the reference's LZW (a dictionary that starts with the 256 single bytes and grows by one string per
+// output code, 16-bit big-endian codes, no reset). The checksum adds the length of every run's output, warmup included.
+struct LZ {
+    data: u8[1048576]; codes: u8[16384]; keys: i32[16384]; values: i32[16384];
+    size: i64; next_code: i64; codes_len: i64; result: i64; 
+}
+state lz: LZ;
+
+fn make_data(size) {
+    each i in 0..size {
+        let slot = i % 11;
+        var byte = 65;
+        if slot == 1 { byte = 66; } else if slot == 2 { byte = 82; } else if slot == 3 { byte = 65; } else if slot == 4 { byte = 67; }
+        else if slot == 5 { byte = 65; } else if slot == 6 { byte = 68; } else if slot == 7 { byte = 65; } else if slot == 8 { byte = 66; }
+        else if slot == 9 { byte = 82; } else if slot == 10 { byte = 65; }
+        lz.data[i] = byte;
+    }
+}
+// the dictionary: a string already in it is (the code of its prefix, its last byte); this is an open-addressing table keyed by prefix * 256 + byte
+fn slot_of(key) { return ((key * 2654435761) >> 7) & 16383; }
+fn lookup(prefix, byte) {
+    let key = prefix * 256 + byte;
+    var slot = slot_of(key);
+    var found = -1;
+    each probe in 0..16384 while lz.keys[slot] >= 0 && found < 0 {
+        if lz.keys[slot] == key { found = lz.values[slot]; } else { slot = (slot + 1) & 16383; }
+    }
+    return found;
+}
+fn insert(prefix, byte, code) {
+    let key = prefix * 256 + byte;
+    var slot = slot_of(key);
+    each probe in 0..16384 while lz.keys[slot] >= 0 { slot = (slot + 1) & 16383; }
+    lz.keys[slot] = key;
+    lz.values[slot] = code;
+}
+fn put_code(code) {
+    lz.codes[lz.codes_len] = (code >> 8) & 255;
+    lz.codes[lz.codes_len + 1] = code & 255;
+    lz.codes_len = lz.codes_len + 2;
+}
+// the reference's lzw_encode
+fn encode() {
+    lz.keys.fill(0, 16384, -1);
+    lz.next_code = 256;
+    lz.codes_len = 0;
+    var current = lz.data[0];
+    each i in 1..lz.size {
+        let byte = lz.data[i];
+        let found = lookup(current, byte);
+        if found >= 0 {
+            current = found;
+        } else {
+            put_code(current);
+            insert(current, byte, lz.next_code);
+            lz.next_code = lz.next_code + 1;
+            current = byte;
+        }
+    }
+    put_code(current);
+}
+
+fn one_run() {
+    encode();
+    lz.result = (lz.result + lz.codes_len) % 4294967296;
+}
+@post("/prepare/{size}")
+fn prepare(size: i64 in 2..1048576) -> Response<{}> {
+    lz.size = size;
+    lz.result = 0;
+    make_data(size);
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": lz.result }); }

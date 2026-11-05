@@ -1,0 +1,120 @@
+// LangArena Compress::LZWDecode (kostya/LangArena, MIT): decode the LZW coding of a repeating text, `iterations` times.
+// The input is `size` bytes of the repeating pattern "ABRACADABRA"; the coder is the reference's LZW (a dictionary that starts with the 256 single bytes and grows by one string per
+// output code, 16-bit big-endian codes, no reset). The checksum adds the length of every run's decoded text, warmup included; plus 100000 when the decoded text equals the input.
+struct LZ {
+    data: u8[1048576]; codes: u8[16384]; keys: i32[16384]; values: i32[16384];
+    size: i64; next_code: i64; codes_len: i64; result: i64; decoded: u8[1048576]; decoded_len: i64; buf: u8[4194304]; off: i32[16384]; elen: i32[16384];
+}
+state lz: LZ;
+
+fn make_data(size) {
+    each i in 0..size {
+        let slot = i % 11;
+        var byte = 65;
+        if slot == 1 { byte = 66; } else if slot == 2 { byte = 82; } else if slot == 3 { byte = 65; } else if slot == 4 { byte = 67; }
+        else if slot == 5 { byte = 65; } else if slot == 6 { byte = 68; } else if slot == 7 { byte = 65; } else if slot == 8 { byte = 66; }
+        else if slot == 9 { byte = 82; } else if slot == 10 { byte = 65; }
+        lz.data[i] = byte;
+    }
+}
+// the dictionary: a string already in it is (the code of its prefix, its last byte); this is an open-addressing table keyed by prefix * 256 + byte
+fn slot_of(key) { return ((key * 2654435761) >> 7) & 16383; }
+fn lookup(prefix, byte) {
+    let key = prefix * 256 + byte;
+    var slot = slot_of(key);
+    var found = -1;
+    each probe in 0..16384 while lz.keys[slot] >= 0 && found < 0 {
+        if lz.keys[slot] == key { found = lz.values[slot]; } else { slot = (slot + 1) & 16383; }
+    }
+    return found;
+}
+fn insert(prefix, byte, code) {
+    let key = prefix * 256 + byte;
+    var slot = slot_of(key);
+    each probe in 0..16384 while lz.keys[slot] >= 0 { slot = (slot + 1) & 16383; }
+    lz.keys[slot] = key;
+    lz.values[slot] = code;
+}
+fn put_code(code) {
+    lz.codes[lz.codes_len] = (code >> 8) & 255;
+    lz.codes[lz.codes_len + 1] = code & 255;
+    lz.codes_len = lz.codes_len + 2;
+}
+// the reference's lzw_encode
+fn encode() {
+    lz.keys.fill(0, 16384, -1);
+    lz.next_code = 256;
+    lz.codes_len = 0;
+    var current = lz.data[0];
+    each i in 1..lz.size {
+        let byte = lz.data[i];
+        let found = lookup(current, byte);
+        if found >= 0 {
+            current = found;
+        } else {
+            put_code(current);
+            insert(current, byte, lz.next_code);
+            lz.next_code = lz.next_code + 1;
+            current = byte;
+        }
+    }
+    put_code(current);
+}
+
+// the reference's lzw_decode: a dictionary of byte strings (each entry is the previous code's string plus one byte, copied), the text is the strings in order
+fn decode() {
+    each i in 0..256 { lz.buf[i] = i; lz.off[i] = i; lz.elen[i] = 1; }
+    var dict_len = 256;
+    var buf_end = 256;
+    var out_len = 0;
+    var old_code = lz.codes[0] * 256 + lz.codes[1];
+    each i in 0..lz.elen[old_code] { lz.decoded[out_len + i] = lz.buf[lz.off[old_code] + i]; }
+    out_len = out_len + lz.elen[old_code];
+    let pairs = lz.codes_len / 2;
+    each pair in 1..pairs {
+        let new_code = lz.codes[pair * 2] * 256 + lz.codes[pair * 2 + 1];
+        // entry = dict[old_code].clone()
+        let entry = buf_end;
+        let old_len = lz.elen[old_code];
+        lz.buf.move(lz.off[old_code], entry, old_len);
+        if new_code < dict_len {
+            lz.buf[entry + old_len] = lz.buf[lz.off[new_code]];
+            each i in 0..lz.elen[new_code] { lz.decoded[out_len + i] = lz.buf[lz.off[new_code] + i]; }
+            out_len = out_len + lz.elen[new_code];
+        } else {
+            lz.buf[entry + old_len] = lz.buf[entry];
+            each i in 0..old_len + 1 { lz.decoded[out_len + i] = lz.buf[entry + i]; }
+            out_len = out_len + old_len + 1;
+        }
+        lz.off[dict_len] = entry;
+        lz.elen[dict_len] = old_len + 1;
+        buf_end = buf_end + old_len + 1;
+        dict_len = dict_len + 1;
+        old_code = new_code;
+    }
+    lz.decoded_len = out_len;
+}
+fn one_run() {
+    decode();
+    lz.result = (lz.result + lz.decoded_len) % 4294967296;
+}
+@post("/prepare/{size}")
+fn prepare(size: i64 in 2..1048576) -> Response<{}> {
+    lz.size = size;
+    lz.result = 0;
+    make_data(size);
+    encode();
+    lz.decoded.fill(0, size, 0);
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> {
+    var same = 0;
+    if lz.decoded_len == lz.size { same = 1; }
+    each i in 0..lz.size { if lz.decoded[i] != lz.data[i] { same = 0; } }
+    return ok({ "checksum": (lz.result + same * 100000) % 4294967296 });
+}

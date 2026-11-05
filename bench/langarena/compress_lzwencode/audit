@@ -1,0 +1,2 @@
+closest-possible
+Same LZW and the same output. The reference's dictionary is a HashMap keyed by the whole byte string (hashing a string as long as the current match, about a thousand bytes by the end); here a string in the dictionary is (the code of its prefix, its last byte), the table is keyed by that pair (the standard LZW dictionary, the language has no map type): same codes, a different data structure with constant work per byte, which favours this port. Stores are checked and undo-logged.

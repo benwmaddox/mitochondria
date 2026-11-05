@@ -50,6 +50,8 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 | Compress::HuffDecode | 1.294 | 0.623 | 2.08x | 0.620 | 2.09x | 0.906 | 1.43x | rewritten-to-match |
 | Compress::ArithEncode | 1.020 | 0.887 | 1.15x | 0.952 | 1.07x | 1.101 | 0.93x | like-for-like |
 | Compress::ArithDecode | 0.970 | 1.226 | 0.79x | 1.203 | 0.81x | 0.899 | 1.08x | rewritten-to-match |
+| Compress::LZWEncode | 0.090 | 0.521 | 0.17x | 0.514 | 0.18x | 0.826 | 0.11x | closest-possible |
+| Compress::LZWDecode | 2.116 | 1.188 | 1.78x | 1.162 | 1.82x | 0.523 | 4.05x | rewritten-to-match |
 
 Geometric mean of the 17 like-for-like and rewritten-to-match ports: 1.11x of Rust and 0.87x of Crystal (Matmul::Single and Nbody are closest-possible and left out). Medians agree with best-of within a few percent. Rows for the later ports (from Hash::CRC32 down) were measured in the same way, 3 rounds, after the store speed-ups. Crystal is
 LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
@@ -104,12 +106,14 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 41-42 | Compress::BWTEncode / BWTDecode | ported (encode's merge sort skips ordered merges: first version without that was 4.98x of Rust, because the reference's library sort detects ordered runs) |
 | 43-44 | Compress::HuffEncode / HuffDecode | ported |
 | 45-46 | Compress::ArithEncode / ArithDecode | ported |
-| 47-48 | Compress::LZWEncode / LZWDecode | to do (LZWEncode needs a hash map from byte strings) |
+| 47-48 | Compress::LZWEncode / LZWDecode | ported (encode keys its dictionary by (prefix code, byte) instead of the whole string, which favours Mitochondria: excluded from the geometric mean) |
 | 49-50 | Distance::Jaro / NGram | blocked: strings, hash map |
 
-Counts now: 32 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
-matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 9 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
+Counts now: 34 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
+matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 7 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
 (`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only), `coll.clear()`, `array.fill`, `array.move` and `array.count_below`.
 Still blocked by something else: building text (Base64 output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.
 Where the time goes in what is slower than the reference: Binarytrees::Arena (3.98x of Rust) is pool `add` at about 28 ns against a `Vec` push at a few (75 million adds); the sieve, Fannkuchredux and
 the merge sort are loops of many small array stores, which pay for atomic requests.
+
+Finding while porting LZWDecode: using `array.move` to copy each decoded string into a 1 MB array (instead of a byte loop) made a run about 200x slower (0.2 s against 1 ms); `array.move` between small ranges is fine. Not investigated yet, probably the undo log handling of the destination range.

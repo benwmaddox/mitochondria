@@ -1,0 +1,14 @@
+POST /code -> 200 {"code":"abc-12"}
+POST /code -> 400 {"error":"`v`: ascii only, byte 195 at 0"}
+POST /name -> 200 {"name":"été!","piece":"é"}
+POST /piece/0/2 -> 200 {"piece":"é"}
+POST /piece/1/2 -> 400 {"error":"substring would split a character","line":12}
+POST /piece/0/1 -> 400 {"error":"substring would split a character","line":12}
+POST /cut/7 -> 400 {"error":"truncate past the end","line":10}
+POST /cut/2 -> 200 {"code":"ab","name":"é"}
+POST /cut/1 -> 400 {"error":"truncate would split a character","line":10}
+POST /clear -> 200 {"code":"","name":"é","word":""}
+POST /compare -> 200 {"eq":true,"piece":true,"cross":true,"less":true}
+state <plain values> 40
+state app.words 35
+memory reserved=8192 committed=8192 live=75

@@ -1,0 +1,42 @@
+// text fields: `s.clear()`, `s.truncate(n)` (utf8 text refuses to split a character, as `substr` does), ascii inputs (bytes 0..127),
+// and windows written into answers where they are
+--- program
+struct Word { text: utf8<16>; }
+struct App { code: ascii<16>; name: utf8<16>; words: pool<Word, 2>; }
+state app: App;
+
+@post("/code")
+fn set_code(v: ascii<1..16>) -> Response<{ code: string }> { app.code = v; return ok({ code: app.code }); }
+@post("/name")
+fn set_name(v: utf8<16>) -> Response<{ name: string, piece: string }> { app.name = v; return ok({ name: app.name, piece: substr(app.name, 0, 2) }); }
+@post("/cut/{n}")
+fn cut(n: i64) -> Response<{ code: string, name: string }> { app.code.truncate(n); app.name.truncate(n); return ok({ code: app.code, name: app.name }); }
+@post("/piece/{a}/{b}")
+fn piece(a: i64, b: i64) -> Response<{ piece: string }> { return ok({ piece: substr(app.name, a, b) }); }
+@post("/clear")
+fn clear_all() -> Response<{ code: string, name: string, word: string }> {
+    let w = app.words.add();
+    w.text = "abc";
+    app.code.clear();
+    w.text.clear();
+    return ok({ code: app.code, name: app.name, word: w.text });
+}
+@post("/compare")
+fn compare() -> Response<{ eq: bool, piece: bool, cross: bool, less: bool }> {
+    app.code = "abc";
+    let w = app.words.add();
+    w.text = "abc";
+    return ok({ eq: app.code == "abc", piece: substr(app.code, 1, 2) == "bc", cross: app.code == w.text, less: substr(app.code, 0, 2) < app.code });
+}
+--- requests
+POST /code {"v": "abc-12"}
+POST /code {"v": "été"}
+POST /name {"v": "été!"}
+POST /piece/0/2
+POST /piece/1/2
+POST /piece/0/1
+POST /cut/7
+POST /cut/2
+POST /cut/1
+POST /clear
+POST /compare

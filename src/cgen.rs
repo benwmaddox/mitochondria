@@ -81,6 +81,8 @@ struct H {
     int (*str_app)(Ctx *, int, u64, u64, u32, const Val *);      /* append a value to a string field in place (kind: plain/column, and empty it first) */
     int (*str_app_at)(Ctx *, int, u64, u64, u32, u64, u32);      /* the same from n bytes of state at an offset (a window onto a text field): one copy */
     int (*str_set)(Ctx *, int, u64, u64, u32, int, const Val *, u32); /* several pieces at once (from the start when the int is 1): one call */
+    int (*json_at)(Ctx *, u64, u32);                             /* n bytes of state at an offset (a window onto text) as a JSON string, read where they are */
+    int (*str_cmp_at)(Ctx *, int, int, u64, u32, int, u64, u32, int *); /* two texts compared where they are (each in state or a literal) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -903,6 +905,7 @@ enum SpecErr { Conflict(K), Other(String) }
 fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
+            Expr::Call(_, _, CallRes::Builtin(B::Truncate)) => true,
             Expr::Call(_, a, r) => a.iter().any(|x| ex(api, x, seen)) || match r { CallRes::User(k) if !seen.contains(k) => { seen.push(*k); writes(api, &api.fns[*k as usize].body, seen) } _ => false },
             Expr::Field(b, ..) | Expr::Un(_, b) => ex(api, b, seen),
             Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),
@@ -983,7 +986,7 @@ impl<'p> G<'p> {
                 InTy::Int(a, b) => (1, *a, *b, 0),
                 InTy::Flt => (2, 0, 0, 0),
                 InTy::Bool => (3, 0, 0, 0),
-                InTy::Str(a, b) => (4, *a, *b, 0),
+                InTy::Str(a, b, ascii) => (if *ascii { 7 } else { 4 }, *a, *b, 0),
                 InTy::Item(t, p) => { let c = self.item_pool(&inp.name, t, p.as_deref())?; (if matches!(inp.src, Src::Header(_)) { 5 } else { 6 }, c as i64, 0, c) }
             };
             let v = self.tmp("in");
@@ -1863,7 +1866,15 @@ impl<'p> G<'p> {
                 self.close("}");
             }
             Stmt::Clear(coll) => {
-                let CV::Coll(c, inst) = self.expr(coll, env, None)? else { return no("`clear` is a function of a collection") };
+                let v = self.expr(coll, env, None)?;
+                if let CV::PlainStr(_) | CV::StateStr(..) = &v {
+                    // `s.clear()`: the text becomes empty
+                    match &v { CV::PlainStr(off) => self.may_write_plain(*off)?, CV::StateStr(c, _, ci) => { let p = self.prog.colls[*c].cols[*ci].path.clone(); self.may_write_col(*c, &p)? } _ => {} }
+                    let at = self.len_at(&v);
+                    self.call(&format!("c->h->wr_int(c, {}, 4, 0)", at));
+                    return Ok(());
+                }
+                let CV::Coll(c, inst) = v else { return no("`clear` is a function of a collection or text") };
                 self.may_add_or_free(c, "clear")?;
                 self.call(&format!("c->h->clear_coll(c, {}, {})", c, inst));
             }
@@ -2119,6 +2130,14 @@ impl<'p> G<'p> {
             CV::PlainStr(off) => format!("{}ULL + (u64)({})", off + 4, from),
             CV::StateStr(c, idx, ci) => { let b = &self.prog.colls[*c].cols[*ci + 1]; let CKind::StrBytes(m) = b.kind else { unreachable!() }; format!("{}ULL + (u64)({}) * {}ULL + (u64)({})", b.off, idx, m, from) }
             _ => unreachable!("a window's base is a text field"),
+        }
+    }
+    /// The byte offset in state of a text field's length (u32).
+    fn len_at(&self, base: &CV) -> String {
+        match base {
+            CV::PlainStr(off) => format!("{}ULL", off),
+            CV::StateStr(c, idx, ci) => format!("{}ULL + (u64)({}) * 4ULL", self.prog.colls[*c].cols[*ci].off, idx),
+            _ => unreachable!("a text field"),
         }
     }
     /// A text field's length now (a C expression).
@@ -2476,6 +2495,10 @@ impl<'p> G<'p> {
         let (lk, rk) = (kind(&l), kind(&r));
         let joined = op == "+" && (lk == "string" || rk == "string") && [lk, rk].iter().all(|k| matches!(*k, "string" | "i64" | "f64" | "bool" | "null"));
         let compared = matches!(op, "<" | "<=" | ">" | ">=" | "==" | "!=") && lk == "string" && rk == "string";
+        // text compared is text that lives somewhere: built on the spot it would be a temporary copy (tests may: they report)
+        if compared && !self.test && [a, b].iter().any(|e| matches!(e, Expr::Bin(o, ..) if o == "+")) {
+            return no("text compared is text that lives somewhere: build it in a field first (`work.key = ...`), then compare the field");
+        }
         if !joined && !compared && lk != "?" && rk != "?" {
             // a null here comes from a copy of a function made for a null argument, in a branch that cannot run with it
             // (a walk with no `from`): it fails if reached, as it always has; any other mix does not load
@@ -2486,6 +2509,21 @@ impl<'p> G<'p> {
         if compared {
             // a string column against a literal or another column is compared where it is, without copying it into the text area
             let flip = [0, 1, 4, 5, 2, 3][code];
+            // a window onto a plain field or a piece of a field: compared where it is, against a literal or another field
+            let place = |g: &mut Self, v: &CV| -> Option<(i32, String, String)> { match v {
+                CV::Lit(s) => Some((1, format!("{}ULL", intern_lit(s.as_bytes())), format!("{}", s.len()))),
+                b @ (CV::PlainStr(_) | CV::StateStr(..)) => Some((0, g.sub_bytes_at(b, "0"), format!("(u32)({})", g.field_len(b)))),
+                CV::Sub(b, from, n) => Some((0, g.sub_bytes_at(b, from), format!("(u32)({})", n))),
+                _ => None,
+            } };
+            if matches!(l, CV::PlainStr(_) | CV::Sub(..)) || matches!(r, CV::PlainStr(_) | CV::Sub(..)) {
+                if let (Some((ak, ao, an)), Some((bk, bo, bn))) = (place(self, &l), place(self, &r)) {
+                    let t = self.tmp("r");
+                    self.line(&format!("int {};", t));
+                    self.call(&format!("c->h->str_cmp_at(c, {}, {}, {}, {}, {}, {}, {}, &{})", code, ak, ao, an, bk, bo, bn, t));
+                    return Ok(CV::Bool(format!("({} != 0)", t)));
+                }
+            }
             let res = match (&l, &r) {
                 (CV::StateStr(c, i, ci), CV::Lit(s)) => Some((format!("c->h->str_cmp_lit(c, {}, {}, {}, {}, {}, {}, &@)", code, c, i, ci, intern_lit(s.as_bytes()), s.len()), ())),
                 (CV::Lit(s), CV::StateStr(c, i, ci)) => Some((format!("c->h->str_cmp_lit(c, {}, {}, {}, {}, {}, {}, &@)", flip, c, i, ci, intern_lit(s.as_bytes()), s.len()), ())),
@@ -2584,6 +2622,24 @@ impl<'p> G<'p> {
     fn builtin(&mut self, bi: B, n: &str, _args: &'p [Expr], a: Vec<CV>, lit: impl Fn(Option<&Expr>) -> Option<String>,
         int_out: impl Fn(&mut Self, String) -> CV, txt_out: impl Fn(&mut Self, String) -> CV, val_out: impl Fn(&mut Self, String) -> CV) -> R<CV> {
         let _ = (&lit, &txt_out, &val_out);
+        if bi == B::Truncate {
+            // `s.truncate(n)`: keep the first n bytes (0 <= n <= length); in utf8 text, n must not split a character
+            let [s, n] = <[CV; 2]>::try_from(a).map_err(|_| "`truncate` takes the number of bytes to keep: `s.truncate(n)`".to_string())?;
+            if !matches!(s, CV::PlainStr(_) | CV::StateStr(..)) { return no("`truncate` is a function of a text field"); }
+            match &s { CV::PlainStr(off) => self.may_write_plain(*off)?, CV::StateStr(c, _, ci) => { let p = self.prog.colls[*c].cols[*ci].path.clone(); self.may_write_col(*c, &p)? } _ => {} }
+            let n = self.int_or(n, 400, "`truncate` takes an integer");
+            let n = self.hold_int(n);
+            let len = self.field_len(&s);
+            let len = self.hold_int(len);
+            self.line(&format!("if (UNLIKELY({n} < 0 || {n} > {len})) FAIL(400, \"truncate past the end\", 21);"));
+            if !self.is_ascii(&s) {
+                let at = self.sub_bytes_at(&s, &n);
+                self.line(&format!("if (UNLIKELY({n} < {len} && (LD_U8({at}, 0) & 0xC0) == 0x80)) FAIL(400, \"truncate would split a character\", 32);"));
+            }
+            let at = self.len_at(&s);
+            self.call(&format!("c->h->wr_int(c, {}, 4, {})", at, n));
+            return Ok(CV::Null);
+        }
         if bi == B::JsonField {
             // `field(text, "name")` in a test: the field of a JSON object (a string's characters, anything else as written)
             let [j, k] = <[CV; 2]>::try_from(a).map_err(|_| "`field` takes a JSON text and a field name: `field(r.body, \"id\")`".to_string())?;
@@ -2712,6 +2768,12 @@ impl<'p> G<'p> {
                     let (base, start, have) = match text { CV::Sub(b, s0, n0) => (*b, s0, n0), b => { let l = self.field_len(&b); let l = self.hold_int(l); (b, "0".to_string(), l) } };
                     self.line(&format!("if (UNLIKELY({from} < 0 || {count} < 0 || {from} + {count} > (i64)({have}))) FAIL(400, \"substring out of range\", 22);"));
                     let s2 = if start == "0" { from.clone() } else { let t = self.tmp("v"); self.line(&format!("i64 {} = {} + {};", t, start, from)); t };
+                    if !self.is_ascii(&base) {
+                        // utf8: a piece starts and ends on a character's first byte (or the end)
+                        let flen = self.field_len(&base);
+                        let (a0, a1) = (self.sub_bytes_at(&base, &s2), self.sub_bytes_at(&base, &format!("{} + {}", s2, count)));
+                        self.line(&format!("if (UNLIKELY(({s2} < {flen} && (LD_U8({a0}, 0) & 0xC0) == 0x80) || ({s2} + {count} < {flen} && (LD_U8({a1}, 0) & 0xC0) == 0x80))) FAIL(400, \"substring would split a character\", 33);"));
+                    }
                     return Ok(CV::Sub(Box::new(base), s2, count));
                 }
                 let t = self.txt_of(text)?;
@@ -3136,7 +3198,8 @@ impl<'p> G<'p> {
             CV::Bool(e) => self.line(&format!("CALL({} ? c->h->out(c, \"true\", 4) : c->h->out(c, \"false\", 5));", e)),
             CV::Lit(s) => { let j = json_lit(&s); self.out(&j); }
             CV::Txt(t) => self.line(&format!("CALL({}.present ? c->h->json_txt(c, &{}) : c->h->out(c, \"null\", 4));", t, t)),
-            v @ (CV::PlainStr(_) | CV::Sub(..)) => { let t = self.txt_of(v)?; self.call(&format!("c->h->json_txt(c, &{})", t)); }
+            CV::PlainStr(off) => { let at = self.sub_bytes_at(&CV::PlainStr(off), "0"); let n = self.field_len(&CV::PlainStr(off)); self.call(&format!("c->h->json_at(c, {}, (u32)({}))", at, n)); }
+            CV::Sub(base, from, count) => { let at = self.sub_bytes_at(&base, &from); self.call(&format!("c->h->json_at(c, {}, (u32)({}))", at, count)); }
             CV::Any(v) => self.call(&format!("c->h->json_val(c, &{})", v)),
             CV::StateStr(c, idx, ci) => self.call(&format!("c->h->json_col(c, {}, {}, {})", c, idx, ci)),
             CV::Null => self.out("null"),
@@ -3603,6 +3666,7 @@ fn returns_value(stmts: &[Stmt]) -> bool {
 fn assigns_field(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
+            Expr::Call(_, _, CallRes::Builtin(B::Truncate)) => true,
             Expr::Call(_, a, r) => a.iter().any(|x| ex(api, x, seen)) || match r { CallRes::User(k) if !seen.contains(k) => { seen.push(*k); assigns_field(api, &api.fns[*k as usize].body, seen) } _ => false },
             Expr::Field(b, _) | Expr::Un(_, b) => ex(api, b, seen),
             Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),

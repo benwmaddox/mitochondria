@@ -14,7 +14,7 @@ pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField }
+pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -120,7 +120,7 @@ pub enum Src { Path, Body, Query, Header(String), Fwd }
 /// An input's type: an integer in lo..hi, a number, a bool, a string of lo..hi bytes, or an item (`Player`, or
 /// `Player in game.players`): from the path an id, from a header a session token.
 #[derive(Debug, Clone, PartialEq)]
-pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64), Item(String, Option<String>) }
+pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64, bool), Item(String, Option<String>) }
 #[derive(Debug, Clone)]
 /// A function. A module instance's functions are named `instance.name` (written by `modules::expand`); `public` ones
 /// (`pub fn`) can be called from outside the module.
@@ -328,12 +328,13 @@ impl P {
             "f32" | "f64" => InTy::Flt,
             "bool" => InTy::Bool,
             "string" | "utf8" | "ascii" => {
+                let ascii = tn == "ascii";
                 self.eat("<")?;
                 let a = self.int()?;
                 let (lo, hi) = if self.sym("..") { (a, self.int()?) } else { (0, a) };
                 self.eat(">")?;
                 if lo > hi || lo < 0 { return Err(format!("input `{}`: string<{}..{}> is not a length range", name, lo, hi)); }
-                InTy::Str(lo, hi)
+                InTy::Str(lo, hi, ascii)
             }
             t => { let pool = if self.is_kw("in") { self.i += 1; let mut p = self.id()?; while self.sym(".") { p = format!("{}.{}", p, self.id()?); } Some(p) } else { None }; InTy::Item(t.to_string(), pool) }
         };
@@ -826,7 +827,7 @@ impl Binder<'_> {
         let Expr::Call(n, args, _) = e else { return };
         if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
         let Some((recv, op)) = n.rsplit_once('.') else { return };
-        if !matches!(op, "add" | "try_add" | "remove" | "move" | "fill" | "clear" | "count_below" | "count" | "capacity") { return; }
+        if !matches!(op, "add" | "try_add" | "remove" | "move" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
         let mut parts = recv.split('.');
         let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
         for f in parts { r = Expr::Field(Box::new(r), f.to_string()); }
@@ -955,6 +956,8 @@ impl Binder<'_> {
                     (".clear", _) => return self.err("`coll.clear()` is a statement".into()),
                     (".count" | ".capacity" | ".add" | ".try_add", k) => return self.err(format!("`{}()` takes no arguments, given {}", &n[1..], k - 1)),
                     (".remove", k) => return self.err(format!("`remove` takes one item, given {}", k - 1)),
+                    (".truncate", 2) => CallRes::Builtin(B::Truncate),
+                    (".truncate", k) => return self.err(format!("`text.truncate(n)` takes the number of bytes to keep, given {} arguments", k - 1)),
                     (".count_below", 4) => CallRes::Builtin(B::CountBelow),
                     (".count_below", k) => return self.err(format!("`array.count_below(n, target, inclusive)` takes three arguments, given {}", k - 1)),
                     (".move", _) => return self.err("`array.move(from, to, count)` is a statement".into()),

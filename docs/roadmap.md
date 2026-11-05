@@ -229,9 +229,10 @@ or had the benchmark harness generate the text). There are two text kinds, both 
   and is a compile error on `utf8<N>` / `string<N>` (`ascii.case`). Not yet: ascii inputs (`name: ascii<1..32>` checks lengths only).
 - Done: the Base64 ports build the reference's final message ("encode aaaa... to YWFh...: <sum>") in a request field and answer its
   hash; the harness no longer formats it. With Calculator, CSV and Template above, the text ports build their text in fields.
-- Not yet: ascii inputs (lengths only are checked), reading a plain-field window for an answer or a general comparison without the
-  copy (`json_txt` after `plain_txt`), `utf8<N>` character-boundary rules (`truncate`, a character asked for at a byte that is not
-  a start), `s.clear()` / `s.truncate(n)`, and comparisons of built expressions refused.
+- Done (the items left open): ascii inputs (`v: ascii<1..16>` refuses a byte above 127, 400); windows onto plain fields and pieces
+  of fields are written into answers and compared (against literals and other fields) where they are, no copy; `s.clear()` and
+  `s.truncate(n)`; in utf8 text `truncate` and `substr` refuse to split a character (a cut on a continuation byte, 400); comparing
+  text built on the spot (`app.code == "x" + n`) is a compile error saying to build it in a field first (`textops.case`).
 
 ## Phase 5: later
 

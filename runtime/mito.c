@@ -990,12 +990,13 @@ static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, 
             if (text) { if (b_eq(tp, tn, (const u8 *)"true", 4)) *out = v_bool(1); else if (b_eq(tp, tn, (const u8 *)"false", 5)) *out = v_bool(0); else return in_bad(m, 400, name, nn, ": expected true or false"); }
             else { if (v.tag != 3) return in_bad(m, 400, name, nn, ": expected true or false"); *out = v; }
             return 0;
-        case 4: {
+        case 4: case 7: {
             T t;
             if (text) { if (t_push(m, tp, tn, &t)) return -1; }
             else { if (v.tag != 4) return in_bad(m, 400, name, nn, ": expected a string"); t.off = v.a; t.len = v.b; }
             if ((i64)t.len > hi) { in_bad(m, 413, name, nn, ": "); a_u64(&m->emsg, t.len); a_str(&m->emsg, " bytes, at most "); a_i64(&m->emsg, hi); return -1; }
             if ((i64)t.len < lo) { in_bad(m, 400, name, nn, ": at least "); a_i64(&m->emsg, lo); a_str(&m->emsg, lo == 1 ? " byte" : " bytes"); return -1; }
+            if (kind == 7) { const u8 *p = t_ptr(m, t); for (u32 i = 0; i < t.len; i++) if (p[i] > 127) { in_bad(m, 400, name, nn, ": ascii only, byte "); a_u64(&m->emsg, p[i]); a_str(&m->emsg, " at "); a_u64(&m->emsg, i); return -1; } }
             *out = v_str(t); return 0;
         }
         case 6: {
@@ -1090,6 +1091,12 @@ static inline int h_count_below(Ctx *c, u64 base, u32 code, i64 n, i64 target, i
 static int h_str_cmp_lit(Ctx *c, int op, u32 cid, u32 idx, u32 ci, u32 off, u32 len, int *out) {
     Mito *m = M_(c); const u8 *p; u32 n; col_view(m, cid, idx, ci, &p, &n);
     *out = cmp_res(op, bytes_cmp(p, n, t_ptr(m, (T){ off, len }), len)); return 0;
+}
+/* Two texts compared where they are: each n bytes at an offset in state (k 0) or in the text area (k 1, a literal). */
+static int h_str_cmp_at(Ctx *c, int op, int ak, u64 aoff, u32 an, int bk, u64 boff, u32 bn, int *out) {
+    Mito *m = M_(c);
+    const u8 *p = ak ? m->text.p + aoff : m->mem.base + aoff, *q = bk ? m->text.p + boff : m->mem.base + boff;
+    *out = cmp_res(op, bytes_cmp(p, an, q, bn)); return 0;
 }
 static int h_str_cmp_col(Ctx *c, int op, u32 ca, u32 ia, u32 cia, u32 cb, u32 ib, u32 cib, int *out) {
     Mito *m = M_(c); const u8 *p, *q; u32 n, k; col_view(m, ca, ia, cia, &p, &n); col_view(m, cb, ib, cib, &q, &k);
@@ -1521,12 +1528,14 @@ static int h_str_set(Ctx *c, int kind, u64 a, u64 b, u32 cc, int clear, const Va
     if (cur != start || clear) wr(&m->mem, len_at, 4, cur);
     return 0;
 }
+/* n bytes of state at `at` (a window onto a text field) as a JSON string, read where they are */
+static int h_json_at(Ctx *c, u64 at, u32 n) { Mito *m = M_(c); return a_json_str(&m->out, m->mem.base + at, n) ? 0 : resp_full(m); }
 
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
-    h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set,
+    h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

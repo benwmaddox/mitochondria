@@ -36,28 +36,31 @@ Decided against, for now: request-local scratch arrays (`unlogged` state covers 
 
 ### 2.1 Loops: `foreach`, `for`, `while`, `break`, `continue`
 - `foreach item, i in collection { }` (index optional: `foreach item in collection`), over lists, pools, arrays, module collections
-  and ranges (`foreach i in 0..n`). It replaces `each`; its modifiers stay: `reverse`, `where cond`, `limit n`, `from k`.
-- `for i = 0; i < n; i += 1 { }` (parentheses allowed, as for `if`): all three clauses.
+  and ranges (`foreach i in 0..n - 1`, see 2.2). It replaces `each`; its modifiers stay: `reverse`, `where cond`, `limit n`, `from k`.
+- `for i = 0; i < n; i += 1 { }`: all three clauses.
 - `while cond { }`.
+- Parentheses around the head of `if`, `for`, `foreach` and `while` are allowed and never required: `if x > 3 { }` and `if (x > 3) { }`
+  are the same.
 - `break` and `continue`, in every loop.
 - A loop with no fixed extent (`while`, `for`) has a per-request step budget (default 100 million iterations, `--loop-budget N`):
   past it the request fails (500, "loop ran too long", with its line), so a mistaken infinite loop cannot hold a worker.
 - `each ... while` and `[each ...]` (in answers) become `foreach`; old forms get a message saying what to write.
-- Open: the `for` header without parentheses (as `if`) or with them (as Stasis)? Proposal: both accepted.
 - Done when: the ports and examples are rewritten without fake bounds (`each step in 0..1000000000 while ...`) or flag variables, and
   the loop-versioning optimisations still apply (they key on a counter and its bounds, which `for` gives directly).
 
-### 2.2 One meaning for `..`
-- `a..b` is a half-open range everywhere: `a` included, `b` not. That is what loops already mean.
-- `a..=b` is the inclusive range, for where the last value belongs: `n: i64 in 0..=100`, `level: i8 in -5..=5`.
-- Today input and field ranges (`in 0..100`) include the end: they change meaning, so every program is migrated by a one-time
-  rewrite (`in a..b` becomes `in a..=b`) and the compiler rejects `in a..b` without `=` for one release with a message saying which.
-- Done when: the ports, examples, tests and docs use the new forms.
+### 2.2 One meaning for `..`: both ends included
+- `a..b` includes both ends everywhere: `n: i64 in 0..100` (as inputs and fields already mean), `foreach i in 1..10` (ten values),
+  `match x { 0..9 => ... }`.
+- Today loop ranges (`each i in 0..n`) exclude the end: they change meaning. A loop over the positions of something of size `n` becomes
+  `foreach i in 0..n - 1`, or better `foreach x, i in array` (no range at all). Every program is migrated by a one-time rewrite of loop
+  ranges (`0..n` becomes `0..n - 1`), and for one release a loop range is flagged with a message saying it now includes its end.
+- Open: a half-open form for the many `0..n - 1` loops (`0..<n`, as Swift)? Proposal: decide after the rewrite shows how often it is needed.
+- Done when: the ports, examples, tests and docs use the new meaning, and the loop-versioning optimisations still apply.
 
 ### 2.3 Typed function parameters and results
-- `fn build(item: i32, depth: i64) -> Node { }`; `-> T?` as today; `-> void` or no arrow for no result.
-- Parameter types are required (as Stasis); a call with a value of another kind is a compile error at the call.
-- The result type is required when the function returns a value.
+- Every function has a full signature: `fn build(item: i32, depth: i64) -> Node { }`; `-> T?` as today; no arrow for no result.
+- Parameter types and the result type are required (as Stasis); a call with a value of another kind is a compile error at the call,
+  and a body that returns something other than its declared result is an error in the body.
 - This removes the recursion rule (below) and the guessing behind it, gives better errors, and lets functions be compiled once
   instead of once per argument kind.
 - Done when: the library modules, ports and examples are typed, and the per-kind specialisation of recursive functions is gone.
@@ -88,29 +91,41 @@ signature there is nothing to guess.
 ## Phase 3: tests in the language
 
 ### 3.1 `test` declarations and `mito test`
-- A test is declared like a function: `test "a full pool answers 503" { ... }`, in the program file or in `app.test.mito` beside it.
-- Inside, requests are calls with checks: `let r = post("/players", { name: "ada" }); expect(r.status == 201); expect(r.body.id == "0.0");`,
-  and the state can be read directly (`expect(app.players.count() == 1)`). Each test starts from a fresh state; time and randomness
-  are fixed (`--clock`, `--seed` as today).
-- `mito test app.mito` runs them and reports each with its line on failure.
+- As Stasis: a test is a declaration like a function, named by a string, in the program file or in `app.test.mito` beside it:
+
+  ```
+  test "a full pool answers 503" {
+      foreach i in 1..app.players.capacity() { post("/players", { name: "p" + i }); }
+      let r = post("/players", { name: "one more" });
+      expect(r.status == 503);
+      expect(app.players.count() == app.players.capacity());
+  }
+  ```
+- A test passes when every `expect` holds (a test may also end with `return <bool>`, as a Stasis test does). Requests are calls
+  (`get`, `post`, `put`, `patch`, `delete` with a path, an optional body and headers) answering `{ status, body }`; the state can be read
+  directly. Each test starts from a fresh state; time and randomness are fixed (`--clock`, `--seed` as today).
+- `mito test app.mito` (or `--dir tests`) runs them and reports each failure with the test's name and the `expect`'s line.
 - The recorded form stays available for whole conversations: a `.case`-style file (requests and the answers they must get, blessed
   with `--bless`) run by `mito test app.case`, as the compiler's own tests are now.
-- Open: the exact shape of requests and checks inside a test. Proposal above; to be tried on the examples first.
 - Done when: the examples ship with tests run by `mito test`, and failures point at the line.
 
 ## Phase 4: text
 
-### 4.1 `string<N>` as a fixed-size builder
-- Today a `string<N>` field holds a value: text built in the request's text area (`"n=" + 5`, `substr`) is copied in whole when
-  assigned (413 if longer than N), and there is no way to build text in state piece by piece (the ports wrote bytes into `u8` arrays
-  with helper functions, or had the benchmark harness generate text).
-- A `string<N>` (UTF-8, at most N bytes) becomes a builder in place: `s.append(x)` (text, integers and floats formatted),
-  `s.append_byte(b)`, `s.clear()`, `s.truncate(n)`, `len(s)`, `s[i]` to read a byte, `substr(s, from, count)` without copying.
-  Appending past N fails the request (413, naming the field), like a full collection.
-- Assignment (`s = "x" + y`) and comparison keep working as now.
-- Open: an `ascii<N>` kind (one byte per character, so byte writes `s[i] = b` are allowed) beside `string<N>`? Proposal: yes, for
-  parsers and encoders; UTF-8 strings stay read-only by index.
-- Done when: the ports that build text (Calculator, Template, CSV, Base64's message) use it instead of byte arrays and helpers.
+### 4.1 `ascii<N>` and `utf8<N>`: fixed-size text you build in place
+Today a `string<N>` field holds a value: text built in the request's text area (`"n=" + 5`, `substr`) is copied in whole when assigned
+(413 if longer than N), and text cannot be built in state piece by piece (the ports wrote bytes into `u8` arrays with helper functions,
+or had the benchmark harness generate the text). Two text kinds replace `string<N>`, both with a fixed maximum of N bytes:
+
+- **`ascii<N>`**: one byte per character (values 0..127). Written by index (`s[i] = b`) and read by index; a builder.
+- **`utf8<N>`**: UTF-8 text. Read by byte index, never written by index (that could split a character); it changes only by whole text:
+  appending, assigning, truncating at a character boundary. A byte index that is not a character's start is refused where a
+  character is asked for.
+- Both: `s.append(x)` (text, integers and floats formatted), `s.clear()`, `s.truncate(n)`, `len(s)`, `maxlen(s)`, `substr(s, from, count)`
+  without copying, assignment from any text, comparison. Appending past N fails the request (413, naming the field), like a full collection.
+  `ascii<N>` takes only ASCII: appending or assigning a byte above 127 is refused (400).
+- `string<N>` becomes `utf8<N>` (a one-time rewrite; for one release `string<N>` is accepted with a message).
+- Inputs: `name: utf8<1..32>` / `ascii<1..32>` (the length range, both ends included as everywhere).
+- Done when: the ports that build text (Calculator, Template, CSV, Base64's message) use them instead of byte arrays and helpers.
 
 ## Phase 5: later
 

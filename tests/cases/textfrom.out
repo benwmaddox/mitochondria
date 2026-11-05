@@ -1,0 +1,19 @@
+POST /set/0/97 -> 200 {}
+POST /set/1/98 -> 200 {}
+POST /set/2/99 -> 200 {}
+POST /set/3/100 -> 200 {}
+GET /plain/0/4 -> 200 {"text":"abcd","len":4,"same":false}
+GET /plain/1/2 -> 200 {"text":"bc","len":2,"same":true}
+GET /plain/4/0 -> 200 {"text":"","len":0,"same":false}
+GET /plain/6/3 -> 400 {"error":"text_from out of range"}
+GET /plain/-1/1 -> 400 {"error":"text_from out of range"}
+POST /rows -> 201 {"slot":0}
+GET /row/0/0/4 -> 200 {"text":"xyz!"}
+GET /row/0/1/2 -> 200 {"text":"yz"}
+GET /row/0/3/2 -> 400 {"error":"text_from out of range"}
+GET /sub?word=abcdef&from=1&count=3 -> 200 {"piece":"bcd","again":"cde"}
+GET /sub?word=abcdef&from=0&count=4 -> 200 {"piece":"abcd","again":"bcde"}
+GET /sub?word=abcdef&from=4&count=3 -> 400 {"error":"substring out of range"}
+state <plain values> 8
+state app.rows 28
+memory reserved=8192 committed=8192 live=36

@@ -1,0 +1,33 @@
+// text_from(bytes, from, count): bytes of a state array of u8 (plain state or an item's) as a string copied into the text area, range checked; substr(text, from, count): a piece of a string
+--- program
+struct Row { cells: u8[4]; }
+struct App { bytes: u8[8]; rows: pool<Row, 2>; }
+state app: App;
+
+@post("/set/{i}/{b}")
+fn post_set(i: i64, b: i64) -> Response<{}> { app.bytes[i] = b; return ok({}); }
+@get("/plain/{from}/{count}")
+fn get_plain(from: i64, count: i64) -> Response<{ text: string, len: i64, same: bool }> { let t = text_from(app.bytes, from, count); return ok({ "text": t, "len": len(t), "same": t == "bc" }); }
+@post("/rows")
+fn post_rows() -> Response<{ slot: i64 }> { let r = app.rows.add(); r.cells[0] = 120; r.cells[1] = 121; r.cells[2] = 122; r.cells[3] = 33; return created({ "slot": slot(r) }); }
+@get("/row/{s}/{from}/{count}")
+fn get_row(s: i64, from: i64, count: i64) -> Response<{ text: string }> { let r = app.rows[s]; return ok({ "text": text_from(r.cells, from, count) }); }
+@get("/sub")
+fn get_sub(word: string<16>, from: i64, count: i64) -> Response<{ piece: string, again: string }> { return ok({ "piece": substr(word, from, count), "again": substr(substr(word, 1, 4), from, count) }); }
+--- requests
+POST /set/0/97
+POST /set/1/98
+POST /set/2/99
+POST /set/3/100
+GET /plain/0/4
+GET /plain/1/2
+GET /plain/4/0
+GET /plain/6/3
+GET /plain/-1/1
+POST /rows
+GET /row/0/0/4
+GET /row/0/1/2
+GET /row/0/3/2
+GET /sub?word=abcdef&from=1&count=3
+GET /sub?word=abcdef&from=0&count=4
+GET /sub?word=abcdef&from=4&count=3

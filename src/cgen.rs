@@ -73,6 +73,7 @@ struct H {
     int (*save_line)(Ctx *, u64, u32);                         /* the first write of the request to a line: the undo log saves it (the inline test found its bit clear) */
     int (*commit_range)(Ctx *, u64, u32);                      /* commit the page of a store the inline test found uncommitted */
     int (*text_len)(Ctx *, u32 *);                             /* the text area's length now */
+    int (*arr_txt)(Ctx *, u64, u32, Txt *);                    /* count bytes of a state byte array at a byte offset, copied into the text area as a string */
     int (*text_cut)(Ctx *, u32);                               /* cut the text area back to an earlier length (a loop body that keeps no string past its iteration) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
@@ -2054,6 +2055,30 @@ impl<'p> G<'p> {
                 self.line(&format!("if (UNLIKELY({from} < 0 || {count} < 0 || {from} + {count} > (i64){t}.len)) FAIL(400, \"substring out of range\", 22);"));
                 let r = self.tmp("t");
                 self.line(&format!("Txt {r} = {{ (u32)({t}.off + {from}), (u32){count}, 1 }};"));
+                CV::Txt(r)
+            }
+            B::TextFrom => {
+                // `text_from(bytes, from, count)`: the bytes of a state array of u8 as a string (copied into the request's text area), range checked
+                let [arr, from, count] = <[CV; 3]>::try_from(a).map_err(|_| "`text_from` takes a byte array, a start and a count".to_string())?;
+                let (base, len) = match arr {
+                    CV::ArrCol(c, idx, ci) => {
+                        let col = &self.prog.colls[c].cols[ci];
+                        let CKind::Arr(_, len) = col.kind else { unreachable!() };
+                        if col.kind.size() != len { return no("`text_from` reads an array of u8"); }
+                        (format!("{}ULL + (u64)({}) * {}ULL", col.off, idx, col.kind.size()), len)
+                    }
+                    CV::PlainArr(off, e, len) => {
+                        if self.prog.plain_size(&e).0 != 1 { return no("`text_from` reads an array of u8"); }
+                        (format!("{}ULL", off), len)
+                    }
+                    _ => return no("`text_from` reads a fixed array of u8"),
+                };
+                let (from, count) = (self.int_or(from, 400, "a start and a count must be integers"), self.int_or(count, 400, "a start and a count must be integers"));
+                let (from, count) = (self.hold_int(from), self.hold_int(count));
+                self.line(&format!("if (UNLIKELY({from} < 0 || {count} < 0 || {from} + {count} > {len}LL)) FAIL(400, \"text_from out of range\", 22);"));
+                let r = self.tmp("t");
+                self.line(&format!("Txt {r};"));
+                self.call(&format!("c->h->arr_txt(c, {base} + (u64){from}, (u32){count}, &{r})"));
                 CV::Txt(r)
             }
             B::Abs => match a.as_slice() {

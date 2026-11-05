@@ -1,0 +1,40 @@
+// sqrt, exp, floor and abs: IEEE results as the platform's math library gives them (the library Rust also calls); abs of the most negative
+// integer is an overflow, like any integer operation
+--- program
+struct M { v: f64; n: i64; }
+state m: M;
+
+@get("/sqrt/{x}")
+fn get_sqrt(x: f64) -> Response<{ r: f64 }> { return ok({ "r": sqrt(x) }); }
+@get("/sqrt-int/{n}")
+fn get_sqrt_int(n: i64) -> Response<{ r: f64 }> { return ok({ "r": sqrt(n) }); }
+@get("/exp/{x}")
+fn get_exp(x: f64) -> Response<{ r: f64 }> { return ok({ "r": exp(x) }); }
+@get("/floor/{x}")
+fn get_floor(x: f64) -> Response<{ r: f64 }> { return ok({ "r": floor(x) }); }
+@get("/abs/{n}")
+fn get_abs(n: i64) -> Response<{ r: i64 }> { return ok({ "r": abs(n) }); }
+@get("/absf/{x}")
+fn get_absf(x: f64) -> Response<{ r: f64 }> { return ok({ "r": abs(x) }); }
+@get("/combo/{x}")
+fn get_combo(x: f64) -> Response<{ r: f64 }> { m.v = sqrt(x * x + 1.0); return ok({ "r": floor(exp(m.v)) + abs(m.v - 100.0) }); }
+@get("/loop/{n}")
+fn get_loop(n: i64 in 1..1000) -> Response<{ r: f64 }> { var s = 0.0; each i in 1..n + 1 { s = s + sqrt(i); } return ok({ "r": s }); }
+--- requests
+GET /sqrt/2.0
+GET /sqrt/16.0
+GET /sqrt/0.0
+GET /sqrt-int/81
+GET /exp/1.0
+GET /exp/0.0
+GET /exp/-2.5
+GET /floor/2.7
+GET /floor/-2.1
+GET /floor/5.0
+GET /abs/-7
+GET /abs/7
+GET /abs/0
+GET /abs/-9223372036854775808
+GET /absf/-2.5
+GET /combo/3.0
+GET /loop/100

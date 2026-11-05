@@ -14,14 +14,14 @@ pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow }
+pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
         Some(match n {
             "body" => Body, "param" => Param, "query" => Query, "header" => Header, "fwd" => Fwd, "int" => Int, "str" => Str, "len" => Len, "now" => Now,
             "random" => Random, "min" => Min, "max" => Max, "count" => Count, "capacity" => Capacity, "slot" => Slot, "stat" => Stat, "token" => Token,
-            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen,
+            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs,
             _ => return None,
         })
     }
@@ -134,6 +134,12 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
             if id.len() > MAX_NAME { return Err(format!("line {}: a name longer than {} bytes", line, MAX_NAME)); }
             out.push(Tok::Id(id));
         }
+        else if ch == '0' && matches!(c.get(i + 1), Some('x') | Some('X')) && c.get(i + 2).map_or(false, |d| d.is_ascii_hexdigit()) {
+            // 0x...: a hexadecimal integer, at most i64::MAX
+            i += 2; let s = i; while i < c.len() && c[i].is_ascii_hexdigit() { i += 1; }
+            let digits: String = c[s..i].iter().collect();
+            out.push(Tok::Int(i64::from_str_radix(&digits, 16).map_err(|_| "number too large".to_string())?));
+        }
         else if ch.is_ascii_digit() {
             let s = i; while i < c.len() && c[i].is_ascii_digit() { i += 1; }
             if c.get(i) == Some(&'.') && c.get(i + 1).map_or(false, |d| d.is_ascii_digit()) { i += 1; while i < c.len() && c[i].is_ascii_digit() { i += 1; } out.push(Tok::Flt(c[s..i].iter().collect::<String>().parse().unwrap())); }
@@ -151,7 +157,7 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
         }
         else {
             let two: String = c[i..(i + 2).min(c.len())].iter().collect();
-            if ["==", "!=", "<=", ">=", "&&", "||", "->", "..", "+=", "-=", "*=", "/="].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
+            if ["==", "!=", "<=", ">=", "&&", "||", "->", "..", "+=", "-=", "*=", "/=", "<<", ">>"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
             else { out.push(Tok::Sym(ch.to_string())); i += 1; }
         }
     }
@@ -432,7 +438,9 @@ impl P {
 
     fn expr(&mut self) -> R<Expr> { self.bin(0) }
     fn bin(&mut self, level: usize) -> R<Expr> {
-        const LV: [&[&str]; 5] = [&["||"], &["&&"], &["==", "!=", "<", "<=", ">", ">="], &["+", "-"], &["*", "/", "%"]];
+        // Rust's precedence, loosest first: `||`, `&&`, comparisons, `|`, `^`, `&`, shifts, `+ -`, `* / %` (comparisons bind looser than the
+        // bit operators, unlike C)
+        const LV: [&[&str]; 9] = [&["||"], &["&&"], &["==", "!=", "<", "<=", ">", ">="], &["|"], &["^"], &["&"], &["<<", ">>"], &["+", "-"], &["*", "/", "%"]];
         if level == LV.len() { return self.unary(); }
         let mut l = self.bin(level + 1)?;
         loop {

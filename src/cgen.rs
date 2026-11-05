@@ -108,6 +108,28 @@ struct H {
 /* The undo log and the page commit flags do not change for the length of a request, so a generated function keeps them in locals (jn_, dr_,
    cm_) and a store of a naturally aligned scalar (never across a 64-byte line or a page) is: commit test (pool items only), undo-log bit test,
    the store; the runtime is called only the first time a line is written or a page is touched. */
+/* bit operators on 64-bit integers: << keeps the low 64 bits, >> is arithmetic; a shift count outside 0..63 is an error unless an interval proved it in range */
+/* maths: the compiler's inline instructions where it has them, the platform's math library otherwise (the library Rust also calls) */
+#ifdef __clang__
+#define SQRT_(x) __builtin_sqrt(x)
+#define EXP_(x) __builtin_exp(x)
+#define FLOOR_(x) __builtin_floor(x)
+#define FABS_(x) __builtin_fabs(x)
+#else
+double sqrt(double); double exp(double); double floor(double); double fabs(double);
+#define SQRT_(x) sqrt(x)
+#define EXP_(x) exp(x)
+#define FLOOR_(x) floor(x)
+#define FABS_(x) fabs(x)
+#endif
+#define ABS_(r, x) i64 r; if (UNLIKELY((x) == I64MIN)) OVERFLOW_; r = (x) < 0 ? -(x) : (x)
+#define BAND(r, x, y) i64 r = (x) & (y)
+#define BOR(r, x, y) i64 r = (x) | (y)
+#define BXOR(r, x, y) i64 r = (x) ^ (y)
+#define SHL(r, x, y) i64 r; if (UNLIKELY((u64)(y) > 63)) FAIL(500, "shift count out of range", 24); r = (i64)((u64)(x) << (y))
+#define SHR(r, x, y) i64 r; if (UNLIKELY((u64)(y) > 63)) FAIL(500, "shift count out of range", 24); r = (x) >> (y)
+#define NSHL(r, x, y) i64 r = (i64)((u64)(x) << (y))
+#define NSHR(r, x, y) i64 r = (x) >> (y)
 #define NADD(r, x, y) i64 r = (x) + (y)
 #define NSUB(r, x, y) i64 r = (x) - (y)
 #define NMUL(r, x, y) i64 r = (x) * (y)
@@ -1708,6 +1730,43 @@ impl<'p> G<'p> {
             let mac = match op { "+" => "ADD", "-" => "SUB", "*" => "MUL", "/" => "DIV", "%" => "MOD", _ => "" };
             match op {
                 "<" | "<=" | ">" | ">=" => return Ok(CV::Bool(format!("({} {} {})", x, op, y))),
+                "&" | "|" | "^" | "<<" | ">>" => {
+                    let (ix, iy) = (self.interval(&x), self.interval(&y));
+                    let nonneg = |i: Option<(i64, i64)>| i.filter(|(l, _)| *l >= 0);
+                    match op {
+                        "&" => {
+                            // with a non-negative operand the result is between 0 and that operand's largest value, whatever the other is
+                            let hi = [nonneg(ix), nonneg(iy)].iter().flatten().map(|(_, h)| *h).min();
+                            self.line(&format!("BAND({}, {}, {});", r, x, y));
+                            if let Some(h) = hi { self.ranges.insert(r.clone(), (0, h)); }
+                        }
+                        "|" | "^" => {
+                            self.line(&format!("{}({}, {}, {});", if op == "|" { "BOR" } else { "BXOR" }, r, x, y));
+                            if let (Some((_, xh)), Some((_, yh))) = (nonneg(ix), nonneg(iy)) {
+                                let m = xh.max(yh) as u64;
+                                let top = if m == 0 { 0 } else { u64::MAX >> m.leading_zeros() };
+                                if top <= i64::MAX as u64 { self.ranges.insert(r.clone(), (0, top as i64)); }
+                            }
+                        }
+                        _ => {
+                            // a count proven inside 0..63 needs no test
+                            let counted = iy.map_or(false, |(l, h)| l >= 0 && h <= 63);
+                            let left = op == "<<";
+                            self.line(&format!("{}{}({}, {}, {});", if counted { "N" } else { "" }, if left { "SHL" } else { "SHR" }, r, x, y));
+                            if let (Some((xl, xh)), Some((sl, sh))) = (ix, iy) {
+                                if counted {
+                                    let mut lo = i128::MAX; let mut hi = i128::MIN;
+                                    for &xv in &[xl as i128, xh as i128] { for &sv in &[sl, sh] {
+                                        let v = if left { xv * (1i128 << sv) } else { xv >> sv };
+                                        lo = lo.min(v); hi = hi.max(v);
+                                    } }
+                                    if lo >= i64::MIN as i128 && hi <= i64::MAX as i128 { self.ranges.insert(r.clone(), (lo as i64, hi as i64)); }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(CV::Int(r));
+                }
                 "+" | "-" | "*" | "/" | "%" => {
                     // with intervals for both operands, arithmetic that provably cannot overflow (or divide by zero) has no check; the
                     // result's interval is recorded for what is computed from it
@@ -1926,6 +1985,17 @@ impl<'p> G<'p> {
                 Some(CV::Item(c, i)) => CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)),
                 Some(CV::Ref(c, s, i)) => { self.line(&format!("if ({} == 0) FAIL(500, \"slot(item)\", 10);", s)); CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)) }
                 _ => unreachable!("generic above"),
+            },
+            B::Sqrt | B::Exp | B::Floor => {
+                // IEEE results, as the platform's math library gives them (a negative square root is NaN)
+                let name = match bi { B::Sqrt => "sqrt", B::Exp => "exp", _ => "floor" };
+                let x = match a.as_slice() { [CV::Flt(e)] => e.clone(), [CV::Int(e)] => format!("(double)({})", e), _ => return no(format!("`{}` takes one number", name)) };
+                CV::Flt(format!("{}_({})", name.to_uppercase(), x))
+            }
+            B::Abs => match a.as_slice() {
+                [CV::Flt(e)] => CV::Flt(format!("FABS_({})", e)),
+                [CV::Int(e)] => { let e = self.hold_int(e.clone()); let r = self.tmp("v"); self.line(&format!("ABS_({}, {});", r, e)); CV::Int(r) }
+                _ => return no("`abs` takes one number"),
             },
             B::Crash => { self.line("TAIL(c->h->crash(c));"); CV::Null }
             _ => unreachable!("handled above"),
@@ -2242,7 +2312,7 @@ impl<'p> G<'p> {
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
     let t = ctoks(body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "SAVE_", "COMMIT_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
@@ -2272,7 +2342,7 @@ pub fn check_profile(body: &str) -> Result<(), String> {
                 j += 1;
             }
         }
-        if ["ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "NADD", "NSUB", "NMUL", "NDIV", "NMOD"].contains(&tok) && next == "(" { if let Some(r) = t.get(i + 2) { declared.push(r); } }
+        if ["ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "ABS_"].contains(&tok) && next == "(" { if let Some(r) = t.get(i + 2) { declared.push(r); } }
         if is_id(tok) && next == "(" {
             let member = prev == "->";
             if member {

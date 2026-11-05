@@ -1,0 +1,19 @@
+POST /setup -> 200 {}
+GET /ops/12/10 -> 200 {"and":8,"or":14,"xor":6}
+GET /ops/-1/255 -> 200 {"and":255,"or":-1,"xor":-256}
+GET /ops/-8/3 -> 200 {"and":0,"or":-5,"xor":-5}
+GET /shift/1/62 -> 200 {"left":4611686018427387904,"right":0}
+GET /shift/1/63 -> 200 {"left":-9223372036854775808,"right":0}
+GET /shift/-16/2 -> 200 {"left":-64,"right":-4}
+GET /shift/5/0 -> 200 {"left":5,"right":5}
+GET /shift/1/64 -> 500 {"error":"shift count out of range"}
+GET /shift/1/-1 -> 500 {"error":"shift count out of range"}
+GET /hex -> 200 {"a":255,"b":3988292384,"c":9223372036854775807}
+GET /prec -> 200 {"shift":24,"mixed":10,"chain":1,"cmp":true,"sum":4}
+GET /table/5 -> 200 {"v":101}
+GET /table/-1 -> 200 {"v":103}
+GET /rotr/305419896/8 -> 200 {"v":2014458966}
+GET /rotr/1/1 -> 200 {"v":2147483648}
+GET /crc -> 200 {"crc":3421780262}
+state <plain values> 48
+memory reserved=4096 committed=4096 live=48

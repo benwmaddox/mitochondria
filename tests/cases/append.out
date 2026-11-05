@@ -1,0 +1,11 @@
+POST /log/7 -> 200 {"log":"n=7;"}
+POST /log/-12 -> 200 {"log":"n=7;n=-12;"}
+POST /long -> 413 {"error":"string of 30 bytes does not fit string<24>","line":34}
+GET /log -> 200 {"log":"n=7;n=-12;","n":0}
+POST /mix -> 200 {"log":"x2|true|1.5"}
+POST /twice -> 200 {"log":"<abab"}
+POST /notes -> 201 {"text":"note 1!","count":1}
+POST /notes -> 201 {"text":"note 2!","count":2}
+state <plain values> 40
+state app.notes 46
+memory reserved=8192 committed=8192 live=86

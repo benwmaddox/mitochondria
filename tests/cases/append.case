@@ -1,0 +1,50 @@
+// `s += x` appends to a string field in place (plain and items' fields), formatting numbers and bools as `+` does; an assignment
+// that starts with text is written as pieces; past the capacity the request fails (413) and is undone
+--- program
+struct Note { text: string<16>; }
+struct App { log: string<24>; notes: pool<Note, 4>; n: i64; }
+state app: App;
+
+@post("/log/{n}")
+fn add_log(n: i64) -> Response<{ log: string }> {
+    app.log += "n=";
+    app.log += n;
+    app.log += ";";
+    return ok({ log: app.log });
+}
+@post("/mix")
+fn mix() -> Response<{ log: string }> {
+    app.log = "x" + str(2) + "|" + true + "|" + 1.5;
+    return ok({ log: app.log });
+}
+@post("/twice")
+fn twice() -> Response<{ log: string }> {
+    app.log = "ab";
+    app.log += app.log;
+    app.log = "<" + app.log;
+    return ok({ log: app.log });
+}
+@post("/notes")
+fn add_note() -> Response<{ text: string, count: i64 }> {
+    let it = app.notes.add();
+    it.text = "note " + str(app.notes.count());
+    it.text += "!";
+    return created({ text: it.text, count: app.notes.count() });
+}
+@post("/long")
+fn long() -> Response<{}> {
+    app.n += 1;
+    app.log += "0123456789abcdefghij";
+    return ok({});
+}
+@get("/log")
+fn get_log() -> Response<{ log: string, n: i64 }> { return ok({ log: app.log, n: app.n }); }
+--- requests
+POST /log/7
+POST /log/-12
+POST /long
+GET /log
+POST /mix
+POST /twice
+POST /notes
+POST /notes

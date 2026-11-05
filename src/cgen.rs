@@ -78,6 +78,7 @@ struct H {
     int (*rq_put)(Ctx *, int, const char *, u32, const Val *);  /* a test's request: a body field (0) or a header (1), by name */
     int (*rq_send)(Ctx *, int, const Txt *, i64 *, Txt *);       /* a test's request: send it (method, path); its status and body */
     int (*json_field)(Ctx *, const Txt *, const char *, u32, Txt *); /* a top-level field of a JSON object text, as text (null: absent) */
+    int (*str_app)(Ctx *, int, u64, u64, u32, const Val *);      /* append a value to a string field in place (kind: plain/column, and empty it first) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -1620,6 +1621,7 @@ impl<'p> G<'p> {
                         let at = off + sd.offs[k];
                         let range = sd.ranges[k];
                         self.may_write_plain(at)?;
+                        if code == 20 { if let Some((clear, pieces)) = str_pieces(&Expr::Field(base.clone(), f.clone()), rhs) { return self.str_append(0, format!("{}ULL", at), format!("{}ULL", cap), 0, clear, &pieces, env); } }
                         let v = self.expr(rhs, env, None)?;
                         let v = match range { Some(r) => self.in_field_range(v, r, f)?, None => v };
                         self.skip_save = self.unlogged_at(at);
@@ -1639,6 +1641,9 @@ impl<'p> G<'p> {
                     return no(if known { format!("assigning `.{}` as a whole is not supported yet; assign its fields", path) } else { format!("no field `{}`", path) });
                 };
                 self.may_write_col(c, &path)?;
+                if matches!(self.prog.colls[c].cols[ci].kind, CKind::StrLen) {
+                    if let Some((clear, pieces)) = str_pieces(&Expr::Field(base.clone(), f.clone()), rhs) { return self.str_append(1, format!("{}ULL", c), format!("(u64)({})", idx), ci as u32, clear, &pieces, env); }
+                }
                 let v = self.expr(rhs, env, None)?;
                 let v = match self.prog.colls[c].cols[ci].range { Some(r) => self.in_field_range(v, r, &path)?, None => v };
                 self.skip_save = self.prog.colls[c].unlogged;
@@ -1984,6 +1989,19 @@ impl<'p> G<'p> {
             (CV::Ref(a, s, k), CV::Item(b, e)) if *a == b => self.line(&format!("{} = 1; {} = {};", s, k, e)),
             (CV::Ref(_, s, _), CV::Null) => self.line(&format!("{} = 0;", s)),
             _ => return no("a `var` assigned a value of another kind"),
+        }
+        Ok(())
+    }
+
+    /// Append pieces to a string field in place (`kind` 0 plain, 1 an item's column; a, b, cc as `str_app` takes them), emptying it first
+    /// when `clear` (an assignment). A piece that is not text is formatted as `+` would.
+    fn str_append(&mut self, kind: i32, a: String, b: String, cc: u32, clear: bool, pieces: &[&'p Expr], env: &mut Vec<Option<CV>>) -> R<()> {
+        for (i, p) in pieces.iter().enumerate() {
+            let v = self.expr(p, env, None)?;
+            if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("only text, numbers and bools can be added to a string"); }
+            let vv = self.val(v)?;
+            let k = kind | if clear && i == 0 { 2 } else { 0 };
+            self.call(&format!("c->h->str_app(c, {}, {}, {}, {}, &{})", k, a, b, cc, vv));
         }
         Ok(())
     }
@@ -3415,6 +3433,28 @@ fn returns_value(stmts: &[Stmt]) -> bool {
 }
 
 /// An error with the place (`line:col: `) of the statement it came from, unless it has one already.
+/// `target = a + b + ...` or `target += ...` (the parser's `target = target + ...`) on a string field, as pieces to append in place:
+/// (whether to empty it first, the pieces). Only a join that is surely text: an append (it starts with the field itself), or an
+/// assignment starting with a literal or `str(...)` and not reading the field. A right operand that is itself such a join is split too.
+fn str_pieces<'e>(target: &Expr, rhs: &'e Expr) -> Option<(bool, Vec<&'e Expr>)> {
+    fn texty(e: &Expr) -> bool { matches!(e, Expr::Str(_)) || matches!(e, Expr::Call(n, _, _) if n == "str" || n == "substr") }
+    fn leftmost(e: &Expr) -> &Expr { match e { Expr::Bin(op, l, _) if op == "+" => leftmost(l), o => o } }
+    fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match e {
+            Expr::Bin(op, l, r) if op == "+" => { split(l, out); if texty(leftmost(r)) { split(r, out); } else { out.push(r); } }
+            o => out.push(o),
+        }
+    }
+    let Expr::Bin(op, _, _) = rhs else { return None };
+    if op != "+" { return None; }
+    let mut pieces = Vec::new();
+    split(rhs, &mut pieces);
+    let t = format!("{:?}", target);
+    if format!("{:?}", pieces[0]) == t { pieces.remove(0); return Some((false, pieces)); }
+    if !texty(pieces[0]) || pieces.iter().any(|p| format!("{:?}", p).contains(&t)) { return None; }
+    Some((true, pieces))
+}
+
 fn place_err(at: (u32, u32), e: String) -> String { if at.0 == 0 || crate::lang::starts_with_place(&e) { e } else { format!("{}:{}: {}", at.0, at.1, e) } }
 /// `"12:5: rest"` as (`"12:5: "`, `"rest"`).
 fn split_place(e: &str) -> Option<(&str, &str)> {

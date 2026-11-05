@@ -1442,11 +1442,31 @@ static int h_json_field(Ctx *c, const Txt *j, const char *name, u32 nn, Txt *out
     return 0;
 }
 
+/* Append a value, formatted as `+` would, to a string field in place: kind bit 0 clear: a plain string (a: its offset, b: its
+   capacity); set: an item's string column (a: collection, b: item, cc: its length column). Bit 1: empty it first (an assignment
+   written as pieces). Only the appended bytes and the length are written (and saved to the undo log). */
+static int h_str_app(Ctx *c, int kind, u64 a, u64 b, u32 cc, const Val *v) {
+    Mito *m = M_(c);
+    u64 len_at, bytes_at, cap;
+    if (kind & 1) { const MitoColl *k = coll(&m->mem, (u32)a); len_at = caddr(m, (u32)a, b, cc); bytes_at = caddr(m, (u32)a, b, cc + 1); cap = k->cols[cc + 1].n; }
+    else { len_at = a; bytes_at = a + 4; cap = b; }
+    u64 cur = (kind & 2) ? 0 : rd(&m->mem, len_at, 4);
+    const u8 *p; u64 n; u32 mark = m->text.len;
+    if (v->tag == 4) { p = t_ptr(m, (T){ v->a, v->b }); n = v->b; }
+    else if (v->tag == 0) { p = 0; n = 0; }
+    else { if (show(m, v)) return -1; p = m->text.p + mark; n = m->text.len - mark; }
+    if (cur + n > cap) { m->text.len = mark; err(m, E_TOOLONG, 413); a_str(&m->emsg, "string of "); a_u64(&m->emsg, cur + n); a_str(&m->emsg, " bytes does not fit string<"); a_u64(&m->emsg, cap); a_str(&m->emsg, ">"); return -1; }
+    if (n) put(&m->mem, bytes_at + cur, p, n);
+    if (n || (kind & 2)) wr(&m->mem, len_at, 4, cur + n);
+    m->text.len = mark;
+    return 0;
+}
+
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
-    h_rq_put, h_rq_send, h_json_field,
+    h_rq_put, h_rq_send, h_json_field, h_str_app,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

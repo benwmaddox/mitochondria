@@ -198,6 +198,19 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 - Inputs: `name: utf8<1..32>` / `ascii<1..32>` (the length range, both ends included as everywhere).
 - Done when: the ports that build text (Calculator, Template, CSV, Base64's message) use them instead of byte arrays and helpers.
 
+**Decided 2026-11-05: built text lives only in declared storage** (as StasisLang, where data lives only in defined globals).
+- A local holds numbers, bools, handles (an item, a plain struct, a struct-valued part of an item) and text *windows* (a field's
+  text, an input, a literal, a `substr` of one): where the bytes are, never a copy. A `let` that names a field is a window onto it:
+  reading through it always sees the field as it is now (a later change shows through), and writing through it writes the field.
+  A local cannot own or build text: `var t = ""` and `let s = "n=" + str(n)` go.
+- Text expressions flow only into a destination: a field (`row.label = "n=" + str(n)` and `row.label += x` append into it in place),
+  an answer (already streamed), a window parameter. A function that would return text takes its destination as a parameter.
+- Temporary text goes in a declared per-request struct beside the state: `request work: Work;` is zeroed at the start of each
+  request, not journaled, never kept (a declared frame; state fields as scratch would cost undo-log writes and leave leftovers).
+- The hidden text area shrinks to the request's input and the response: the "text area full" error goes, every overflow names its
+  field. Order: in-place appends to fields; windows as the only local text; `request` storage; the text ports; then string locals and
+  string results become errors that say what to write.
+
 ## Phase 5: later
 
 - **Stored ids that come back as `T?`:** a field holding an item's slot and generation (the role `ref<>` had), read back as `T?` so a

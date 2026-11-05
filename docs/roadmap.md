@@ -35,12 +35,16 @@ Decided against, for now: request-local scratch arrays (`unlogged` state covers 
 - Done when: the docs and examples say `mito`, and both names work.
 - Done: Cargo builds `mito.exe` and `mitochondria.exe` from the same source; the usage, tutorial and bench scripts say `mito`.
 
-### 1.4 `mito serve --watch`
+### 1.4 `mito serve --watch` (done 2026-11-05)
 - Rebuilds (TinyCC, milliseconds) and restarts when the program file or a file it includes changes; a compile error is printed and the
   last good build keeps serving.
 - State is lost on restart (the reservation is the process's). Optional: `--replay requests.txt` sends a request script after
   each restart to rebuild state (the same request format as test files, 3.1).
 - Done when: editing an example under `serve --watch` shows the new behaviour within a second.
+- Done: the watcher polls the program's modification time (a system: every `.mito` file beside it) every 100 ms; a save is
+  answered by the new build 200-340 ms later (TinyCC build 30-45 ms, restart 50-80 ms). A compile error is printed and the old
+  server keeps serving; the servers stop with the watcher (a job object). Not yet: `--replay`, which waits for the request
+  format of test files (3.1).
 
 ## Phase 2: syntax closer to StasisLang
 

@@ -77,8 +77,10 @@ mito check examples/scoreboard/score.mito
 mito serve examples/scoreboard/score.mito --port 8080
 ```
 
-`check` finds problems before anything runs (a misspelt field gives ``no field `nmae` ``); `serve` builds and runs
-it at once. Then:
+`check` finds problems before anything runs (a misspelt field gives ``no field `nmae` (did you mean `name`?)``, with the
+line and a caret under the place); `serve` builds and runs it at once. With `--watch`, `serve` rebuilds and restarts each
+time you save (a fraction of a second; the state starts empty again), and a program that does not compile is reported while the
+last good build keeps serving. Then:
 
 ```
 curl.exe -X POST http://127.0.0.1:8080/players -d '{"name": "ada"}'

@@ -19,11 +19,12 @@ const USAGE: &str = "usage: mito <command> <program> [options]
 
 A program is one `.mito` file: a program, or a system of workers (a file holding `system { ... }`).
 
-  check  <program>                  report the first problem, or say it loads
+  check  <program>                  report the problems found, or say it loads
   build  <program> [-o app.exe] [--tcc]
                                     an executable serving HTTP (clang -O3; --tcc builds in milliseconds, unoptimised)
-  serve  <program> [--clang] [executable options]
-                                    build with TinyCC (or clang) and run it at once
+  serve  <program> [--clang] [--watch] [executable options]
+                                    build with TinyCC (or clang) and run it at once; --watch rebuilds and restarts
+                                    when the program changes (state starts empty each time)
   emit-c <program> [-o file.c]       (a system: -o dir, one file per worker kind and system.c)
                                     the generated C, to read or build yourself
 
@@ -77,17 +78,22 @@ fn read_program(files: &[&String]) -> (String, String, bool) {
 /// A program's C translation units for an executable, and a name for it.
 fn program(files: &[&String]) -> (Vec<String>, String) {
     let (f, text, system) = read_program(files);
-    let path = std::path::Path::new(&f);
+    compile(&f, &text, system).unwrap_or_else(|e| die(e))
+}
+
+/// The same from a program's text; the error is ready to print.
+fn compile(f: &str, text: &str, system: bool) -> Result<(Vec<String>, String), String> {
+    let path = std::path::Path::new(f);
     let name = path.file_stem().map_or("app".into(), |n| n.to_string_lossy().into_owned());
     if system {
-        let spec = spec::parse_spec(&text, path.parent().unwrap_or(std::path::Path::new("."))).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
-        return (cgen::system_exe(&spec).unwrap_or_else(|e| die(e)), name);
+        let spec = spec::parse_spec(text, path.parent().unwrap_or(std::path::Path::new("."))).map_err(|e| format!("{}: {}", f, e))?;
+        return Ok((cgen::system_exe(&spec)?, name));
     }
     let file = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-    let (s, code) = source::load(&text).unwrap_or_else(|e| die(report(&file, &text, &e)));
-    let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(report(&file, &text, &e)));
-    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(report(&file, &text, &e)));
-    (cgen::program_exe(&prog, &a, Some((&file, &code))).unwrap_or_else(|e| die(e)), name)
+    let (s, code) = source::load(text).map_err(|e| report(&file, text, &e))?;
+    let prog = layout::Program::parse(&s).map_err(|e| report(&file, text, &e))?;
+    let a = cgen::check(&prog, &code).map_err(|e| report(&file, text, &e))?;
+    Ok((cgen::program_exe(&prog, &a, Some((&file, &code)))?, name))
 }
 
 /// `build <program> [-o app.exe] [--tcc]`
@@ -102,18 +108,103 @@ fn build_exe(args: &[String]) {
     println!("built {}", out.display());
 }
 
-/// `serve <program> [--clang] [executable options]`: build into the temp directory and run, passing the options on.
+/// `serve <program> [--clang] [--watch] [executable options]`: build into the temp directory and run, passing the options on.
 fn serve(args: &[String]) {
     let files = inputs(args);
-    let (units, name) = program(&files);
     let clang = args.iter().any(|a| a == "--clang");
+    let pass: Vec<&String> = args[files.len()..].iter().filter(|a| *a != "--clang" && *a != "--watch").collect();
+    if args.iter().any(|a| a == "--watch") { return serve_watch(&files, clang, &pass); }
+    let (units, name) = program(&files);
     let exe = std::env::temp_dir().join(format!("mito-serve-{}-{}.exe", name, std::process::id()));
     build::exe(&units, &exe, !clang, &[]).unwrap_or_else(|e| die(e));
-    let pass: Vec<&String> = args[files.len()..].iter().filter(|a| *a != "--clang").collect();
     let status = std::process::Command::new(&exe).args(pass).status().unwrap_or_else(|e| die(format!("{}: {}", exe.display(), e)));
     let _ = std::fs::remove_file(&exe);
     std::process::exit(status.code().unwrap_or(1));
 }
+
+/// `serve --watch`: rebuild and restart whenever the program changes (for a system: any `.mito` file beside it). A
+/// program that does not compile is reported and the last good build keeps serving. State starts empty on each restart.
+fn serve_watch(files: &[&String], clang: bool, pass: &[&String]) {
+    let (f, _, system) = read_program(files);
+    let path = std::path::PathBuf::from(&f);
+    let watched = |p: &std::path::Path| -> Vec<std::path::PathBuf> {
+        if !system { return vec![p.to_path_buf()]; }
+        let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        std::fs::read_dir(dir).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|x| x.extension().map_or(false, |e| e == "mito")).collect()).unwrap_or_default()
+    };
+    // the files' modification times: a change in any is a change
+    let stamp = || -> Vec<(std::path::PathBuf, Option<std::time::SystemTime>)> {
+        let mut v: Vec<_> = watched(&path).into_iter().map(|p| { let t = std::fs::metadata(&p).and_then(|m| m.modified()).ok(); (p, t) }).collect();
+        v.sort();
+        v
+    };
+    let (mut child, mut exe): (Option<std::process::Child>, Option<std::path::PathBuf>) = (None, None);
+    let mut seen = stamp();
+    let mut generation = 0u32;
+    loop {
+        // build; on success replace the running server (the old one stops first: they share the port)
+        let started = std::time::Instant::now();
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", f, e));
+        let built = text.and_then(|t| compile(&f, &t, system)).and_then(|(units, name)| {
+            generation += 1;
+            let next = std::env::temp_dir().join(format!("mito-serve-{}-{}-{}.exe", name, std::process::id(), generation));
+            build::exe(&units, &next, !clang, &[]).map(|_| next)
+        });
+        match built {
+            Err(e) => eprintln!("error: {}\n(watching {}: {})", e, f, if child.is_some() { "the last good build keeps serving" } else { "nothing is serving yet" }),
+            Ok(next) => {
+                let built_ms = started.elapsed().as_millis();
+                if let Some(mut c) = child.take() { let _ = c.kill(); let _ = c.wait(); }
+                if let Some(old) = exe.take() { let _ = std::fs::remove_file(old); }
+                match std::process::Command::new(&next).args(pass).spawn() {
+                    Ok(c) => { stop_with_me(&c); eprintln!("(watching {}: built in {} ms, serving {} ms later)", f, built_ms, started.elapsed().as_millis() - built_ms); child = Some(c); }
+                    Err(e) => eprintln!("error: {}: {}", next.display(), e),
+                }
+                exe = Some(next);
+            }
+        }
+        // wait for a change; report a server that stops on its own
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Some(c) = child.as_mut() {
+                if let Ok(Some(st)) = c.try_wait() { eprintln!("(watching {}: the server stopped ({}); waiting for a change)", f, st); child = None; }
+            }
+            let now = stamp();
+            if now != seen {
+                // editors write in steps: let the file settle
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                seen = stamp();
+                break;
+            }
+        }
+    }
+}
+
+/// The server stops when the watcher does, however it stops: it joins a job object that ends its processes when the
+/// watcher's handle to it closes.
+#[cfg(windows)]
+fn stop_with_me(child: &std::process::Child) {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    extern "system" {
+        fn CreateJobObjectW(attrs: *mut c_void, name: *const u16) -> *mut c_void;
+        fn SetInformationJobObject(job: *mut c_void, class: i32, info: *mut c_void, len: u32) -> i32;
+        fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+    }
+    static JOB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+        if job.is_null() { return 0; }
+        // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (144 bytes): LimitFlags at byte 16 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        let mut info = [0u64; 18];
+        info[2] = 0x2000;
+        SetInformationJobObject(job, 9, info.as_mut_ptr() as *mut c_void, 144);
+        job as usize
+    });
+    if job != 0 { unsafe { AssignProcessToJobObject(job as *mut c_void, child.as_raw_handle() as *mut c_void); } }
+}
+#[cfg(not(windows))]
+fn stop_with_me(_: &std::process::Child) {}
 
 /// `emit-c <program> [-o file.c]`; for a system, `-o dir`: one file per worker kind, and system.c.
 fn emit_c(args: &[String]) {

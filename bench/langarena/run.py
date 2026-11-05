@@ -81,6 +81,8 @@ def run_mito(test, name, exe, cfg, params, float_result):
         _, res = call("GET", "/result" if float_result else "/checksum")
         if float_result == "matmul":      # the centre value is the same every run: the reference adds its hash once per run
             got = (checksum_f64(res["result"]) * (warm + iters)) % 4294967296
+        elif float_result == "nbody":     # (hash(energy before) << 5) & hash(energy after), in 32 bits
+            got = ((checksum_f64(res["v1"]) << 5) & 0xFFFFFFFF) & checksum_f64(res["v2"])
         elif float_result == "spectral":  # one checksum, from sqrt(vBv / vv) of the final vectors
             got = checksum_f64(math.sqrt(res["result"]))
         else:
@@ -107,6 +109,9 @@ META = {
     "matmul_single": (["n"], "matmul"),
     "clbg_spectralnorm": (["size"], "spectral"),
     "clbg_mandelbrot": (["w", "h"], False),
+    "clbg_nbody": ([], "nbody"),
+    "hash_crc32": (["size"], False),
+    "hash_sha256": (["size"], False),
 }
 rows = []
 for test in tests:

@@ -1,0 +1,41 @@
+// LangArena Hash::CRC32 (kostya/LangArena, MIT): the bitwise CRC-32 (polynomial 0xEDB88320, one bit at a time, no table) of a buffer of 1,200,000
+// pseudo-random bytes, `iterations` times; each run first overwrites one random byte with a random value. Same loop as the reference; its u32
+// arithmetic is 64-bit integers that never leave 0..2^32 (the xor of two such values and a right shift cannot). The checksum adds the CRC of every
+// run, warmup runs included, modulo 2^32; the random generator is reset after warmup.
+struct Buf { data: u8[1200000]; size: i64; last: i64; result: i64; }
+state h: Buf;
+
+fn next_int(max) {
+    h.last = (h.last * 3877 + 29573) % 139968;
+    return int(h.last / 139968.0 * max);
+}
+fn crc32() {
+    var crc = 0xFFFFFFFF;
+    each i in 0..h.size {
+        crc = crc ^ h.data[i];
+        each bit in 0..8 {
+            if (crc & 1) != 0 { crc = (crc >> 1) ^ 0xEDB88320; } else { crc = crc >> 1; }
+        }
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+fn one_run() {
+    let ch = next_int(256);
+    h.data[next_int(h.size)] = ch;
+    h.result = (h.result + crc32()) % 4294967296;
+}
+
+@post("/prepare/{size}")
+fn prepare(size: i64 in 1..1200000) -> Response<{}> {
+    h.size = size;
+    h.last = 42;
+    h.result = 0;
+    each i in 0..size { h.data[i] = next_int(256); }
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { h.last = 42; each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": h.result }); }

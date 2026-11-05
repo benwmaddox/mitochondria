@@ -1,0 +1,2 @@
+like-for-like
+Same bitwise CRC-32 loop over the same buffer, and the same per-run byte overwrite. The reference's u32 arithmetic is 64-bit integers that stay within 0..2^32 (the xor of two such values and a right shift cannot leave it). Stores are checked and undo-logged.

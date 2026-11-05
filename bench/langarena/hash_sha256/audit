@@ -1,0 +1,2 @@
+like-for-like
+Same per-byte mixing on eight accumulators, the same digest bytes and the same little-endian read of the first four. The reference's u32 wrapping operations are 64-bit integers masked to 32 bits at the same points; the accumulators are u32 in both. The four digest bytes are combined by multiplication (the reference uses from_le_bytes). Stores are checked and undo-logged.

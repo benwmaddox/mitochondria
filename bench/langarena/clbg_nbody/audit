@@ -1,0 +1,2 @@
+closest-possible
+Same arithmetic in the same order as the reference's advance, energy and offset_momentum, the same constants (written as decimal expansions of the exact doubles, since the language has no exponent notation). The reference keeps an array of Planet structs; here each field is a five-element array. The energy before the runs is taken in prepare and the energy after them by GET /result; the harness combines their hashes as the reference does ((hash(v1) << 5) & hash(v2), 32 bits).

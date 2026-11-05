@@ -1,0 +1,52 @@
+// LangArena Hash::SHA256 (kostya/LangArena, MIT): the reference's "SimpleSHA256", which is not the real algorithm: eight 32-bit accumulators, byte i
+// goes into accumulator i % 8 by hash = hash * 33 + byte, then hash = (hash + (hash << 10)) ^ (hash >> 6); the digest is the eight accumulators
+// as big-endian bytes, and the run's hash is its first four bytes read little-endian. A buffer of 1,100,000 pseudo-random bytes, `iterations`
+// times, each run first overwriting one random byte. The reference's u32 wrapping arithmetic is 64-bit integers masked to 32 bits at the same
+// points. The checksum adds the hash of every run, warmup runs included, modulo 2^32; the random generator is reset after warmup.
+struct Buf { data: u8[1100000]; hashes: u32[8]; digest: u8[32]; size: i64; last: i64; result: i64; }
+state h: Buf;
+
+fn next_int(max) {
+    h.last = (h.last * 3877 + 29573) % 139968;
+    return int(h.last / 139968.0 * max);
+}
+fn digest() {
+    h.hashes[0] = 0x6a09e667; h.hashes[1] = 0xbb67ae85; h.hashes[2] = 0x3c6ef372; h.hashes[3] = 0xa54ff53a;
+    h.hashes[4] = 0x510e527f; h.hashes[5] = 0x9b05688c; h.hashes[6] = 0x1f83d9ab; h.hashes[7] = 0x5be0cd19;
+    each i in 0..h.size {
+        let idx = i % 8;
+        var hash = h.hashes[idx];
+        hash = ((hash << 5) + hash + h.data[i]) & 0xFFFFFFFF;
+        hash = ((hash + ((hash << 10) & 0xFFFFFFFF)) & 0xFFFFFFFF) ^ (hash >> 6);
+        h.hashes[idx] = hash;
+    }
+    each i in 0..8 {
+        let hash = h.hashes[i];
+        h.digest[i * 4] = (hash >> 24) & 255;
+        h.digest[i * 4 + 1] = (hash >> 16) & 255;
+        h.digest[i * 4 + 2] = (hash >> 8) & 255;
+        h.digest[i * 4 + 3] = hash & 255;
+    }
+}
+fn one_run() {
+    let ch = next_int(256);
+    h.data[next_int(h.size)] = ch;
+    digest();
+    let hash = h.digest[0] + h.digest[1] * 256 + h.digest[2] * 65536 + h.digest[3] * 16777216;
+    h.result = (h.result + hash) % 4294967296;
+}
+
+@post("/prepare/{size}")
+fn prepare(size: i64 in 1..1100000) -> Response<{}> {
+    h.size = size;
+    h.last = 42;
+    h.result = 0;
+    each i in 0..size { h.data[i] = next_int(256); }
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { h.last = 42; each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": h.result }); }

@@ -1,0 +1,120 @@
+// LangArena CLBG::Nbody (kostya/LangArena, MIT): the n-body simulation of the Sun and four planets, 1000 steps of dt = 0.01 per run, `iterations`
+// runs. Same arithmetic in the same order as the reference's Planet::advance (a pair at a time, then the position update), the same
+// energy() and offset_momentum(), the same constants. The reference keeps an array of Planet structs; here each field is a five-element
+// array (closest-possible: same arithmetic, different shape). The reference's checksum combines the hashes of the energy before the runs and
+// after them ((hash(v1) << 5) & hash(v2) in 32 bits); this port answers both energies (GET /result) and the benchmark harness hashes
+// them exactly as the reference does.
+struct NB { x: f64[5]; y: f64[5]; z: f64[5]; vx: f64[5]; vy: f64[5]; vz: f64[5]; mass: f64[5]; v1: f64; }
+state nb: NB;
+
+fn energy() {
+    var e = 0.0;
+    each i in 0..5 {
+        e = e + 0.5 * nb.mass[i] * (nb.vx[i] * nb.vx[i] + nb.vy[i] * nb.vy[i] + nb.vz[i] * nb.vz[i]);
+        each j in i + 1..5 {
+            let dx = nb.x[i] - nb.x[j];
+            let dy = nb.y[i] - nb.y[j];
+            let dz = nb.z[i] - nb.z[j];
+            let distance = sqrt(dx * dx + dy * dy + dz * dz);
+            e = e - (nb.mass[i] * nb.mass[j]) / distance;
+        }
+    }
+    return e;
+}
+fn offset_momentum() {
+    var px = 0.0;
+    var py = 0.0;
+    var pz = 0.0;
+    each i in 0..5 {
+        let m = nb.mass[i];
+        px = px + nb.vx[i] * m;
+        py = py + nb.vy[i] * m;
+        pz = pz + nb.vz[i] * m;
+    }
+    let solar_mass = 4.0 * 3.141592653589793 * 3.141592653589793;
+    nb.vx[0] = -px / solar_mass;
+    nb.vy[0] = -py / solar_mass;
+    nb.vz[0] = -pz / solar_mass;
+}
+fn one_run() {
+    let dt = 0.01;
+    each step in 0..1000 {
+        each i in 0..5 {
+            each j in i + 1..5 {
+                let dx = nb.x[i] - nb.x[j];
+                let dy = nb.y[i] - nb.y[j];
+                let dz = nb.z[i] - nb.z[j];
+                let distance = sqrt(dx * dx + dy * dy + dz * dz);
+                let mag = dt / (distance * distance * distance);
+                let b_mass_mag = nb.mass[i] * mag;
+                let b2_mass_mag = nb.mass[j] * mag;
+                nb.vx[i] = nb.vx[i] - dx * b2_mass_mag;
+                nb.vy[i] = nb.vy[i] - dy * b2_mass_mag;
+                nb.vz[i] = nb.vz[i] - dz * b2_mass_mag;
+                nb.vx[j] = nb.vx[j] + dx * b_mass_mag;
+                nb.vy[j] = nb.vy[j] + dy * b_mass_mag;
+                nb.vz[j] = nb.vz[j] + dz * b_mass_mag;
+            }
+            nb.x[i] = nb.x[i] + dt * nb.vx[i];
+            nb.y[i] = nb.y[i] + dt * nb.vy[i];
+            nb.z[i] = nb.z[i] + dt * nb.vz[i];
+        }
+    }
+}
+
+@post("/prepare")
+fn prepare() -> Response<{}> {
+    let days_per_year = 365.24;
+    let solar_mass = 4.0 * 3.141592653589793 * 3.141592653589793;
+    nb.x[0] = 0.0;
+    nb.y[0] = 0.0;
+    nb.z[0] = 0.0;
+    nb.vx[0] = 0.0;
+    nb.vy[0] = 0.0;
+    nb.vz[0] = 0.0;
+    nb.mass[0] = 1.0;
+    nb.x[1] = 4.841431442464720902307817596011;
+    nb.y[1] = -1.160320044027428387778400065145;
+    nb.z[1] = -0.103622044471123109232735259866;
+    nb.vx[1] = 0.001660076642744036943058483224;
+    nb.vy[1] = 0.00769901118419740425335984213;
+    nb.vz[1] = -0.000069046001697206302316622839;
+    nb.mass[1] = 0.000954791938424326609193004689;
+    nb.x[2] = 8.343366718244579871566202200484;
+    nb.y[2] = 4.124798564124304789402231108397;
+    nb.z[2] = -0.403523417114321381049535375496;
+    nb.vx[2] = -0.002767425107268624111245269859;
+    nb.vy[2] = 0.004998528012349172378048223209;
+    nb.vz[2] = 0.000023041729757376392881407234;
+    nb.mass[2] = 0.000285885980666130811583824922;
+    nb.x[3] = 12.894369562139130991340607579332;
+    nb.y[3] = -15.111151401698631246972581720911;
+    nb.z[3] = -0.223307578892655733682204299839;
+    nb.vx[3] = 0.002964601375647616179898058419;
+    nb.vy[3] = 0.002378471739594809498258287661;
+    nb.vz[3] = -0.000029658956854023755568550147;
+    nb.mass[3] = 0.00004366244043351562981441355;
+    nb.x[4] = 15.379697114850916506156863761134;
+    nb.y[4] = -25.919314609987964104220736771822;
+    nb.z[4] = 0.179258772950371181309492385481;
+    nb.vx[4] = 0.002680677724903893222041517674;
+    nb.vy[4] = 0.001628241700382422954551664418;
+    nb.vz[4] = -0.000095159225451971586953736626;
+    nb.mass[4] = 0.000051513890204661145133177569;
+    each i in 1..5 {
+        nb.vx[i] = nb.vx[i] * days_per_year;
+        nb.vy[i] = nb.vy[i] * days_per_year;
+        nb.vz[i] = nb.vz[i] * days_per_year;
+        nb.mass[i] = nb.mass[i] * solar_mass;
+    }
+    nb.mass[0] = 1.0 * solar_mass;
+    offset_momentum();
+    nb.v1 = energy();
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..1000000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..1000000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/result")
+fn result() -> Response<{ v1: f64, v2: f64 }> { return ok({ "v1": nb.v1, "v2": energy() }); }

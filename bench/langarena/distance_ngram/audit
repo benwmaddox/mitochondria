@@ -1,0 +1,2 @@
+rewritten-to-match
+Same generator and algorithm (4-grams packed in a 32-bit number, counts in a map for the first string, running counts for the second compared with the first's, intersection over the distinct grams of both). The reference's two HashMap<u32, i32> are two lib/intmap.mito maps (chained hash maps over plain arrays), cleared for each pair where the reference allocates new maps with a capacity of the string's length; the strings are one byte array. Stores are checked and undo-logged.

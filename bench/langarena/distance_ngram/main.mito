@@ -1,0 +1,64 @@
+// LangArena Distance::NGram (kostya/LangArena, MIT): the 4-gram similarity of `count` pairs of random strings (4 to size + 3 letters from "abcdefghij", the reference's generator and random
+// sequence), all pairs per run, `iterations` runs; per pair: count the 4-grams (the four bytes packed in a u32) of the first string, then walk the second string's 4-grams counting them and
+// adding to the intersection each time the running count is at most the first string's count; the similarity is intersection / (distinct grams of both). The checksum adds int(similarity * 1000)
+// of every pair, warmup included. The reference's two HashMap<u32, i32> are two lib/intmap.mito maps (cleared for each pair, as the reference builds new ones); the strings are one byte array.
+struct Pairs { text: u8[600000]; off1: i32[16]; len1: i32[16]; off2: i32[16]; len2: i32[16]; first: intmap<16384>; second: intmap<16384>; count: i64; last: i64; result: i64; }
+state p: Pairs;
+
+fn next_int(max) {
+    p.last = (p.last * 3877 + 29573) % 139968;
+    return int(p.last / 139968.0 * max);
+}
+fn ngram(off1, len1, off2, len2) {
+    if len1 < 4 || len2 < 4 { return 0.0; }
+    p.first.clear();
+    each i in 0..len1 - 3 {
+        let gram = (p.text[off1 + i] << 24) | (p.text[off1 + i + 1] << 16) | (p.text[off1 + i + 2] << 8) | p.text[off1 + i + 3];
+        p.first.add_to(gram, 1);
+    }
+    p.second.clear();
+    var intersection = 0;
+    each i in 0..len2 - 3 {
+        let gram = (p.text[off2 + i] << 24) | (p.text[off2 + i + 1] << 16) | (p.text[off2 + i + 2] << 8) | p.text[off2 + i + 3];
+        let seen = p.second.add_to(gram, 1);
+        let before = p.first.get_or(gram, -1);
+        if before >= 0 && seen <= before { intersection = intersection + 1; }
+    }
+    let total = p.first.size() + p.second.size();
+    if total > 0 { return intersection * 1.0 / total; }
+    return 0.0;
+}
+fn one_run() {
+    var total = p.result;
+    each pair in 0..p.count {
+        total = total + int(ngram(p.off1[pair], p.len1[pair], p.off2[pair], p.len2[pair]) * 1000.0);
+    }
+    p.result = total % 4294967296;
+}
+
+@post("/prepare/{count}/{size}")
+fn prepare(count: i64 in 1..16, size: i64 in 1..29000) -> Response<{}> {
+    p.count = count;
+    p.last = 42;
+    var at = 0;
+    each pair in 0..count {
+        let first_len = next_int(size) + 4;
+        let second_len = next_int(size) + 4;
+        p.off1[pair] = at;
+        p.len1[pair] = first_len;
+        each i in 0..first_len { p.text[at + i] = 97 + next_int(10); }
+        at = at + first_len;
+        p.off2[pair] = at;
+        p.len2[pair] = second_len;
+        each i in 0..second_len { p.text[at + i] = 97 + next_int(10); }
+        at = at + second_len;
+    }
+    p.result = 0;
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": p.result }); }

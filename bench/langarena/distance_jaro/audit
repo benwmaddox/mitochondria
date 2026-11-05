@@ -1,0 +1,2 @@
+rewritten-to-match
+Same generator, same Jaro algorithm line by line (window, match flags, transposition count, the three-term mean). The reference's Vec<(String, String)> is a byte array with an offset and length per string, and its per-call boolean vectors are two state arrays cleared with fill. The window loop skips a start beyond the end by the empty range. Stores are checked and undo-logged.

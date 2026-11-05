@@ -1,0 +1,51 @@
+// lib/intmap.mito: a hash map from i64 keys to i64 values: put/get/add_to/remove/clear, negative and large keys, chains (6 entries in a table of 6 buckets), a full map (507),
+// rollback of a failed request, and many puts and removes in one request
+--- program
+struct App { m: intmap<6>; }
+state app: App;
+
+@post("/put/{key}/{value}")
+fn post_put(key: i64, value: i64) -> Response<{ added: bool, size: i64 }> { let added = app.m.put(key, value); return ok({ "added": added, "size": app.m.size() }); }
+@get("/get/{key}")
+fn get_key(key: i64) -> Response<{ value: i64, has: bool }> { return ok({ "value": app.m.get_or(key, -1), "has": app.m.has(key) }); }
+@post("/add/{key}/{delta}")
+fn post_add(key: i64, delta: i64) -> Response<{ value: i64, size: i64 }> { let value = app.m.add_to(key, delta); return ok({ "value": value, "size": app.m.size() }); }
+@delete("/x/{key}")
+fn delete_key(key: i64) -> Response<{ removed: bool, size: i64 }> { let removed = app.m.remove(key); return ok({ "removed": removed, "size": app.m.size() }); }
+@post("/clear")
+fn post_clear() -> Response<{ size: i64, room: i64 }> { app.m.clear(); return ok({ "size": app.m.size(), "room": app.m.room() }); }
+@post("/fail/{key}")
+fn post_fail(key: i64) -> Response<{}> { app.m.put(key, 99); fail 400 "no"; }
+@post("/churn/{n}")
+fn post_churn(n: i64) -> Response<{ size: i64 }> {
+    each i in 0..n { app.m.put(i * 7919 - 500, i); app.m.remove(i * 7919 - 500); }
+    return ok({ "size": app.m.size() });
+}
+--- requests
+GET /get/1
+POST /put/1/10
+POST /put/2/20
+POST /put/-3/30
+POST /put/4294967296/40
+POST /put/1/11
+GET /get/1
+GET /get/-3
+GET /get/4294967296
+GET /get/4294967297
+POST /add/1/5
+POST /add/100/7
+POST /put/5/50
+POST /put/6/60
+POST /put/7/70
+GET /get/7
+DELETE /x/2
+DELETE /x/2
+POST /put/7/70
+DELETE /x/7
+DELETE /x/6
+POST /fail/8
+GET /get/8
+POST /churn/1000
+POST /clear
+GET /get/1
+POST /put/1/1

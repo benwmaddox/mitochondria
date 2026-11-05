@@ -153,6 +153,8 @@ META = {
     "compress_arithdecode": (["size"], False),
     "compress_lzwencode": (["size"], False),
     "compress_lzwdecode": (["size"], False),
+    "distance_jaro": (["count", "size"], False),
+    "distance_ngram": (["count", "size"], False),
     "etc_words": ("words", False),
     "etc_cachesimulation": (["values", "size"], False),
     "calculator_ast": (["operations"], False),

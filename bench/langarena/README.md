@@ -54,6 +54,8 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 | Compress::LZWDecode | 2.116 | 1.188 | 1.78x | 1.162 | 1.82x | 0.523 | 4.05x | rewritten-to-match |
 | Etc::CacheSimulation | 0.482 | 0.813 | 0.59x | 0.818 | 0.59x | 1.835 | 0.26x | rewritten-to-match |
 | Etc::Words | 0.597 | 0.772 | 0.77x | 0.783 | 0.76x | 0.799 | 0.75x | closest-possible |
+| Distance::Jaro | 0.994 | 1.063 | 0.94x | 0.986 | 1.01x | 1.145 | 0.87x | rewritten-to-match |
+| Distance::NGram | 0.437 | 0.347 | 1.26x | 0.361 | 1.21x | 0.642 | 0.68x | rewritten-to-match |
 
 Geometric mean of the 17 like-for-like and rewritten-to-match ports: 1.11x of Rust and 0.87x of Crystal (Matmul::Single and Nbody are closest-possible and left out). Medians agree with best-of within a few percent. Rows for the later ports (from Hash::CRC32 down) were measured in the same way, 3 rounds, after the store speed-ups. Crystal is
 LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
@@ -109,10 +111,10 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 43-44 | Compress::HuffEncode / HuffDecode | ported |
 | 45-46 | Compress::ArithEncode / ArithDecode | ported |
 | 47-48 | Compress::LZWEncode / LZWDecode | ported (encode keys its dictionary by (prefix code, byte) instead of the whole string, which favours Mitochondria: excluded from the geometric mean) |
-| 49-50 | Distance::Jaro / NGram | blocked: strings, hash map |
+| 49-50 | Distance::Jaro / NGram | ported (NGram uses the new lib/intmap hash map) |
 
-Counts now: 36 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
-matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 5 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
+Counts now: 38 ported (the 7 in the first batch, both Brainfuck tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
+matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 3 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
 (`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only), `coll.clear()`, `array.fill`, `array.move` and `array.count_below`.
 Still blocked by something else: building text (Base64 output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.
 Where the time goes in what is slower than the reference: Binarytrees::Arena (3.98x of Rust) is pool `add` at about 28 ns against a `Vec` push at a few (75 million adds); the sieve, Fannkuchredux and
@@ -123,3 +125,5 @@ Finding while porting LZWDecode: using `array.move` to copy each decoded string 
 Language and library added for the string tests: `lib/strmap.mito` (hash map from string keys to i64, chained, entries numbered so a caller can keep its own data per entry, slots reused at once) and a text-area rule: strings built in a loop body are dropped at the end of each iteration unless the body assigns one to a variable declared before the loop (the 256 KB text area of a request otherwise fills after about 20,000 string keys; CacheSimulation builds 5.8 million).
 
 Also added: `substr(text, from, count)` (a piece of a string sharing its bytes, range checked) and a 4 MB text area (was 256 KB). Found and fixed while porting Words: a `let` of a `var` (`let start = at;` and then `at = at + 1`) shared the var's C variable, so the `let` changed with it (numbers, floats, strings, references); a `let` now copies a `var`'s value (tests/cases/letcopy.case). No earlier port was affected (their checksums still verify).
+
+`lib/intmap.mito` (hash map from i64 keys to i64 values, same design as strmap) was added for NGram.

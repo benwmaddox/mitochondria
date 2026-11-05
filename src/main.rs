@@ -21,7 +21,7 @@ const USAGE: &str = "usage: mito <command> <program> [options]
 
 A program is one `.mito` file: a program, or a system of workers (a file holding `system { ... }`).
 
-  check  <program>                  report the problems found, or say it loads
+  check  <program> [--kinds]        report the problems found, or say it loads; --kinds lists every local's kind
   build  <program> [-o app.exe] [--tcc]
                                     an executable serving HTTP (clang -O3; --tcc builds in milliseconds, unoptimised)
   serve  <program> [--clang] [--watch] [executable options]
@@ -59,6 +59,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = args.get(1..).unwrap_or(&[]);
     match args.first().map(|s| s.as_str()) {
+        Some("check") if rest.iter().any(|a| a == "--kinds") => kinds(rest),
         Some("check") => { let (_, name) = program(&inputs(rest)); println!("{}: loads", name); }
         Some("build") => build_exe(rest),
         Some("serve") => serve(rest),
@@ -268,4 +269,19 @@ fn test(args: &[String]) {
     let status = std::process::Command::new(&exe).arg(&file).status().unwrap_or_else(|e| die(format!("{}: {}", exe.display(), e)));
     let _ = std::fs::remove_file(&exe);
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// `check <program> --kinds`: every local's kind as the compiler sees it, by function and endpoint, with its line.
+fn kinds(args: &[String]) {
+    let (f, text, _) = read_program(&inputs(args));
+    let file = std::path::Path::new(&f).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let (state, code) = source::load(&text).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let prog = layout::Program::parse(&state).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let mut last = String::new();
+    for (place, line, name, kind) in cgen::local_kinds(&prog, &a) {
+        if place != last { println!("{}", place); last = place.clone(); }
+        // a library module's code comes after the file's lines
+        if line as usize > text.lines().count() { println!("  (module code)  {}: {}", name, kind); } else { println!("  {}:{}  {}: {}", file, line, name, kind); }
+    }
 }

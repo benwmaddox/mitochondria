@@ -5,14 +5,23 @@
   "version": "0.0.1",
   "publisher": "maddox-labs",
   "license": "Apache-2.0",
-  "engines": { "vscode": "^1.80.0" },
-  "categories": ["Programming Languages"],
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "mitochondria",
-        "aliases": ["Mitochondria", "mito"],
-        "extensions": [".mito"],
+        "aliases": [
+          "Mitochondria",
+          "mito"
+        ],
+        "extensions": [
+          ".mito"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -21,6 +30,23 @@
         "language": "mitochondria",
         "scopeName": "source.mitochondria",
         "path": "./syntaxes/mitochondria.tmLanguage.json"
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "mito",
+        "owner": "mitochondria",
+        "fileLocation": [
+          "autoDetect",
+          "${workspaceFolder}"
+        ],
+        "pattern": {
+          "regexp": "^error: (.*?):(\\d+):(\\d+): (.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "message": 4
+        }
       }
     ]
   }

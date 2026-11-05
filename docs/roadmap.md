@@ -251,5 +251,7 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 - **`log(...)` (done 2026-11-05):** a builtin that writes to the server's standard error (not part of the answer), for debugging:
   `log("n is", app.n)` prints `log: line 12: n is 5`.
 - **Editor support:** syntax highlighting for VS Code, then errors on save through `mito check`, then hover for inferred kinds.
-- **Seeing inferred kinds:** `mito check --kinds` printing each local's and function's kind.
+  Done (2026-11-05): highlighting and a `$mito` problem matcher for `mito check` output (`editors/vscode`); not yet: hover.
+- **Seeing inferred kinds (done 2026-11-05):** `mito check app.mito --kinds` prints every local's kind by function, endpoint and test,
+  with its line (`let e: Entry`, `let w: text (a window onto a field)`); functions' kinds are their signatures.
 - **Persistence across restarts** (so `serve --watch` keeps state): a design question for the language as a whole, not only tooling.

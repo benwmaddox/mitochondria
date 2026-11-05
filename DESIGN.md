@@ -194,7 +194,7 @@ crawlers), irregular graphs, exploratory scripting. Durable data belongs in a da
 ## Status (2026-11-05)
 Everything above is built. A program or system compiles to one C program (runtime/mito.c, system.c, http.c), built by
 clang -O3 or, in milliseconds, the bundled TinyCC; Rust is only the compiler. The command is `mito` (`check`, `build`,
-`serve [--watch]`, `test`, `emit-c`; `mitochondria` is the same program): `serve --watch` rebuilds and restarts on save, keeping
+`serve [--watch]`, `test`, `emit-c`, and `check --kinds` listing every local's kind; `mitochondria` is the same program): `serve --watch` rebuilds and restarts on save, keeping
 the last good build when a change does not compile. Errors name `file:line:col` with the line and a caret, suggest the nearest
 name for a misspelt one, list every independent error of a file, and say what to write for a habit from other languages (`i++`,
 `each`); `tests/errors` holds a program per mistake with its expected message. The 51 cases in `tests/cases` and

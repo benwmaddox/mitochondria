@@ -405,6 +405,8 @@ thread_local! {
     static WHY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The kinds of every call's arguments and result, per function (for `mito sigs`, which writes signatures from them).
     static SIGS: std::cell::RefCell<Vec<(u32, Vec<String>, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Every local's kind as it is compiled (for `mito check --kinds`): where (a function or an endpoint), the line, the name, the kind.
+    static KINDS: std::cell::RefCell<Vec<(String, u32, String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 /// A value's kind as a type name: what a parameter of a function that receives it would be declared as.
 fn type_text(prog: &Program, v: &CV) -> String {
@@ -417,6 +419,15 @@ fn type_text(prog: &Program, v: &CV) -> String {
         CV::Plain(sd, o) => format!("plain {}@{}", prog.structs[*sd].name, o),
         CV::Part(..) => "part".into(), CV::ArrCol(..) => "arrcol".into(), CV::Resp(..) => "response".into(), CV::PlainArr(_, t, n) => format!("plainarr {:?}[{}]", t, n),
     }
+}
+/// Every local of the program and its kind (`mito check --kinds`), in source order, each once: (where, line, name, kind).
+pub fn local_kinds(prog: &Program, api: &Api) -> Vec<(String, u32, String, String)> {
+    KINDS.with(|k| k.borrow_mut().clear());
+    let _ = generate_tests(prog, api);
+    let mut v = KINDS.with(|k| k.borrow().clone());
+    v.sort_by_key(|x| x.1);
+    v.dedup();
+    v
 }
 /// For every function called anywhere: its name, each parameter's kinds and its result's kinds over all calls.
 pub fn sigs(prog: &Program, api: &Api) -> Vec<(String, Vec<Vec<String>>, Vec<String>)> {
@@ -1619,6 +1630,12 @@ impl<'p> G<'p> {
                     if built { return no(format!("`let {}` would hold text built here: build it in a field instead (`work.line = ...` in a `request` struct, or a field of the state), or write it straight into the answer", n)); }
                 }
                 let v = match self.slot_kind(*slot) { Some(k) => self.coerce(v, k, mutable)?, None => self.hold(v, mutable)? };
+                {
+                    let place = match self.inlining.last() { Some(k) => format!("fn {}", self.api.fns[*k as usize].name), None => self.ep.text.clone() };
+                    let name = match s { Stmt::Let(n, ..) | Stmt::Var(n, ..) => format!("{} {}", if mutable { "var" } else { "let" }, n), _ => String::new() };
+                    let kind = match &v { CV::StateStr(..) | CV::PlainStr(_) | CV::Sub(..) => "text (a window onto a field)".to_string(), CV::Lit(_) => "text (a literal)".to_string(), other => type_text(self.prog, other) };
+                    if !name.contains("__mito__") { KINDS.with(|k| k.borrow_mut().push((place, self.at.0, name, kind))); }
+                }
                 env[*slot as usize] = Some(v);
             }
             Stmt::Assign(Expr::Var(n, VarRes::Local(slot)), rhs) => {

@@ -142,7 +142,24 @@ impl Program {
     pub fn plain_coll(&self, off: usize, sid: usize, field: &str) -> Option<usize> { self.plain_colls.iter().find(|p| p.0 == off && p.1 == sid && p.2 == field).map(|p| p.3) }
 
     pub fn parse(src: &str) -> Result<Program, String> {
-        let mut p = P { t: tokenize(src), i: 0 };
+        let (t, pos) = tokenize(src);
+        let mut p = P { t, i: 0, pos };
+        let places = declared_places(&p);
+        Self::parse_tokens(&mut p).map_err(|e| {
+            if crate::lang::starts_with_place(&e) { return e; }
+            // stopped while reading: where it stopped (a missing `;` at the end of what came before)
+            if p.i < p.t.len() {
+                let k = if e.starts_with("expected `;`") { p.i.saturating_sub(1) } else { p.i };
+                let (l, c) = p.pos[k];
+                let c = if k < p.i { c + p.t[k].chars().count() as u32 } else { c };
+                return format!("{}:{}: {}", l, c, e);
+            }
+            // found later: at the declaration of the first struct or field the message names
+            let named = e.split('`').skip(1).step_by(2).find_map(|n| places.iter().find(|x| x.0 == n).map(|x| x.1));
+            match named { Some((l, c)) => format!("{}:{}: {}", l, c, e), None => e }
+        })
+    }
+    fn parse_tokens(p: &mut P) -> Result<Program, String> {
         if let Some(t) = p.t.iter().find(|t| t.len() > crate::lang::MAX_NAME) { return Err(format!("a name longer than {} bytes: `{}...`", crate::lang::MAX_NAME, t.chars().take(32).collect::<String>())); }
         let mut structs: Vec<StructDef> = Vec::new();
         let mut globals: Vec<(String, Ty)> = Vec::new();
@@ -354,19 +371,40 @@ fn resolve(t: Ty, names: &HashMap<String, usize>) -> Result<Ty, String> {
     })
 }
 
-fn tokenize(src: &str) -> Vec<String> {
+/// Tokens, and the line and column (1-based) each one starts at.
+fn tokenize(src: &str) -> (Vec<String>, Vec<(u32, u32)>) {
     let c: Vec<char> = src.chars().collect();
-    let (mut i, mut out) = (0, Vec::new());
+    let (mut i, mut out, mut pos, mut line, mut line_start) = (0, Vec::new(), Vec::new(), 1u32, 0usize);
     while i < c.len() {
-        if c[i].is_whitespace() { i += 1; }
+        let at = (line, (i - line_start + 1) as u32);
+        if c[i] == '\n' { line += 1; line_start = i + 1; i += 1; }
+        else if c[i].is_whitespace() { i += 1; }
         else if c[i] == '/' && c.get(i + 1) == Some(&'/') { while i < c.len() && c[i] != '\n' { i += 1; } }
-        else if c[i].is_alphanumeric() || c[i] == '_' { let s = i; while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') { i += 1; } out.push(c[s..i].iter().collect()); }
-        else { out.push(c[i].to_string()); i += 1; }
+        else if c[i].is_alphanumeric() || c[i] == '_' { let s = i; while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') { i += 1; } out.push(c[s..i].iter().collect()); pos.push(at); }
+        else { out.push(c[i].to_string()); pos.push(at); i += 1; }
+    }
+    (out, pos)
+}
+/// Where each struct (`Name`), field (`Name.field`) and the state (`name`) is declared, for errors found after reading.
+fn declared_places(p: &P) -> Vec<(String, (u32, u32))> {
+    let (mut out, mut i, mut current) = (Vec::new(), 0, String::new());
+    while i < p.t.len() {
+        match p.t[i].as_str() {
+            "struct" if i + 1 < p.t.len() => { current = p.t[i + 1].clone(); out.push((current.clone(), p.pos[i + 1])); i += 2; }
+            "state" if i + 1 < p.t.len() => { out.push((p.t[i + 1].clone(), p.pos[i + 1])); i += 2; }
+            "}" => { current.clear(); i += 1; }
+            x if !current.is_empty() && p.t.get(i + 1).map(|s| s.as_str()) == Some(":") && (p.t[i - 1] == "{" || p.t[i - 1] == ";") => {
+                out.push((format!("{}.{}", current, x), p.pos[i])); out.push((x.to_string(), p.pos[i]));
+                if let Some(ty) = p.t.get(i + 2) { out.push((ty.clone(), p.pos[i + 2])); } // the type it names (an unknown one is reported there)
+                i += 2;
+            }
+            _ => i += 1,
+        }
     }
     out
 }
 
-struct P { t: Vec<String>, i: usize }
+struct P { t: Vec<String>, i: usize, pos: Vec<(u32, u32)> }
 impl P {
     fn peek(&self) -> Option<&str> { self.t.get(self.i).map(|s| s.as_str()) }
     fn eat(&mut self, s: &str) -> Result<(), String> { if self.peek() == Some(s) { self.i += 1; Ok(()) } else { Err(format!("expected `{}`, found `{}`", s, self.peek().unwrap_or("end of file"))) } }

@@ -404,6 +404,7 @@ struct G<'p> {
     fast_sites: std::collections::HashSet<*const Expr>, // array indexes a versioned loop's guard proved in range (their stores' ranges already saved)
     versioned: u32, // how many versioned loops enclose the code being generated (each doubles its body; at most 3 deep)
     loop_hint: Option<(i64, i64)>, // the next range loop's counter interval, proven by a versioning guard (its fast copy)
+    at: (u32, u32), // the source line and column of the statement being generated (for error messages)
     checked: Vec<(String, u64)>, // range tests done since the last statement start, block boundary, label or goto: (index, size) need not be tested again
     skip_save: bool, // the next inline store needs no undo-log test (its range was saved by a loop guard)
     txt_escapes: Vec<u32>, // slots of variables that were assigned a string (or a value of unknown kind), in the order it happened
@@ -725,8 +726,9 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             let mut g = G::new(prog, api, ep, &slot_kinds, &ret_kinds, &recursive, &specs);
             let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
             let r = g.inputs(ep, &mut env).and_then(|_| g.block(&ep.body, &mut env));
-            let (widen, body) = (g.widen, std::mem::take(&mut g.body));
+            let (widen, body, at) = (g.widen, std::mem::take(&mut g.body), g.at);
             drop(g);
+            let r = r.map_err(|e| place_err(at, e));
             match (r, widen) {
                 (Err(_), Some(w)) if tries < 32 => match w {
                     Widen::Slot(f, sl, k) => match slot_kinds.iter_mut().find(|x| x.0 == (f, sl)) { Some(x) => x.1 = unify(x.1, k), None => slot_kinds.push(((f, sl), k)) },
@@ -757,7 +759,7 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             }
             Err(why) => {
                 if let Some(sf) = source { src += &source_comment(ep, sf); src += &format!("// not compiled: {}\n", why); }
-                notes.push(format!("{}: {}", ep.text, why));
+                notes.push(match split_place(&why) { Some((place, rest)) => format!("{}{}: {}", place, ep.text, rest), None => format!("{}: {}", ep.text, why) });
             }
         }
     }
@@ -836,7 +838,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), at: (0, 0), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1081,7 +1083,7 @@ impl<'p> G<'p> {
                 (Err(_), Some(Widen::Ret(f2, u))) if f2 == k => return Err(SpecErr::Conflict(u)),
                 (Err(_), Some(Widen::Slot(fr, sl, kk))) => match slot_kinds.iter_mut().find(|x| x.0 == (fr, sl)) { Some(x) => x.1 = unify(x.1, kk), None => slot_kinds.push(((fr, sl), kk)) },
                 (Err(_), Some(Widen::Ret(f2, kk))) => match ret_kinds.iter_mut().find(|x| x.0 == f2) { Some(x) => x.1 = unify(x.1, kk), None => ret_kinds.push((f2, kk)) },
-                (Err(e), None) => return Err(SpecErr::Other(e)),
+                (Err(e), None) => return Err(SpecErr::Other(place_err(g.at, e))),
             }
         }
         Err(SpecErr::Other("kinds did not settle".into()))
@@ -1414,6 +1416,7 @@ impl<'p> G<'p> {
 
     fn stmt(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<()> {
         match s {
+            Stmt::At(l, c) => { self.at = (*l, *c); }
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
                 let v = self.expr(e, env, None)?;
@@ -2388,7 +2391,7 @@ impl<'p> G<'p> {
 
     fn inline_body(&mut self, k: u32, f: &'p Func, fenv: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<CV> {
         // a function that is just `return e;` needs no block
-        if let [Stmt::Return(Some(body))] = f.body.as_slice() {
+        if let Some(Stmt::Return(Some(body))) = only_stmt(&f.body) {
             self.inlining.push(k);
             let r = self.expr(body, fenv, dead);
             self.inlining.pop();
@@ -3094,4 +3097,19 @@ fn returns_value(stmts: &[Stmt]) -> bool {
         Stmt::Each(_, b) => returns_value(b),
         _ => false,
     })
+}
+
+/// An error with the place (`line:col: `) of the statement it came from, unless it has one already.
+fn place_err(at: (u32, u32), e: String) -> String { if at.0 == 0 || crate::lang::starts_with_place(&e) { e } else { format!("{}:{}: {}", at.0, at.1, e) } }
+/// `"12:5: rest"` as (`"12:5: "`, `"rest"`).
+fn split_place(e: &str) -> Option<(&str, &str)> {
+    if !crate::lang::starts_with_place(e) { return None; }
+    let k = e.match_indices(": ").next()?.0 + 2;
+    Some((&e[..k], &e[k..]))
+}
+/// The one statement of a body, position markers aside.
+fn only_stmt(body: &[Stmt]) -> Option<&Stmt> {
+    let mut it = body.iter().filter(|s| !matches!(s, Stmt::At(..)));
+    let first = it.next()?;
+    if it.next().is_some() { None } else { Some(first) }
 }

@@ -30,6 +30,23 @@ memory pressure); --conns N (a system's connection threads, 16); --seed N and --
 
 fn die(e: String) -> ! { eprintln!("error: {}", e); std::process::exit(1) }
 
+/// A program's error as `file:line:col: message`, with the line quoted and a caret under the column, when it names a
+/// place (`line:col: ...`) inside the file; otherwise `file: message`.
+fn report(file: &str, text: &str, e: &str) -> String {
+    let mut parts = e.splitn(3, ':');
+    let (Some(l), Some(c), Some(rest)) = (parts.next(), parts.next(), parts.next()) else { return format!("{}: {}", file, e) };
+    let (Ok(l), Ok(c)) = (l.parse::<usize>(), c.parse::<usize>()) else { return format!("{}: {}", file, e) };
+    let rest = rest.trim_start();
+    match text.lines().nth(l.wrapping_sub(1)) {
+        Some(line) => {
+            let shown = line.replace('\t', " ");
+            let caret: String = shown.chars().take(c.saturating_sub(1)).map(|_| ' ').collect();
+            format!("{}:{}:{}: {}\n{:>5} | {}\n      | {}^", file, l, c, rest, l, shown, caret)
+        }
+        None => format!("{}: {} (in library module code)", file, rest),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = args.get(1..).unwrap_or(&[]);
@@ -63,9 +80,9 @@ fn program(files: &[&String]) -> (Vec<String>, String) {
         return (cgen::system_exe(&spec).unwrap_or_else(|e| die(e)), name);
     }
     let file = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-    let (s, code) = source::load(&text).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
-    let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
-    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
+    let (s, code) = source::load(&text).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(report(&file, &text, &e)));
     (cgen::program_exe(&prog, &a, Some((&file, &code))).unwrap_or_else(|e| die(e)), name)
 }
 
@@ -113,9 +130,9 @@ fn emit_c(args: &[String]) {
         return;
     }
     let file = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-    let (state, code) = source::load(&text).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
-    let prog = layout::Program::parse(&state).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
-    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(format!("{}: {}", file, e)));
+    let (state, code) = source::load(&text).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let prog = layout::Program::parse(&state).unwrap_or_else(|e| die(report(&file, &text, &e)));
+    let a = cgen::check(&prog, &code).unwrap_or_else(|e| die(report(&file, &text, &e)));
     let c = cgen::emit(&prog, &a, (&file, &code)).unwrap_or_else(|e| die(e));
     match out { Some(p) => { std::fs::write(&p, c).unwrap_or_else(|e| die(format!("{}: {}", p, e))); println!("wrote {}", p); } None => print!("{}", c) }
 }

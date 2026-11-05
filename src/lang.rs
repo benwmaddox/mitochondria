@@ -86,6 +86,8 @@ pub enum Stmt {
     /// Hand the request on to another worker: `forward rooms[key] { "user": expr };`
     Forward { kind: String, key: Expr, fields: Vec<(String, Expr)> },
     Do(Expr),
+    /// Where the next statement starts in the source (line, column): kept for error messages; generates nothing.
+    At(u32, u32),
 }
 
 #[derive(Debug, Clone)]
@@ -120,21 +122,22 @@ pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 pub const MAX_NAME: usize = 128;
 pub const MAX_FAIL: usize = 1024;
 
-/// Tokens, and the source line each one starts on.
-fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
+/// Tokens, and the source line and column (1-based, in characters) each one starts on.
+fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
     let c: Vec<char> = src.chars().collect();
-    let (mut i, mut out, mut at, mut line, mut tl) = (0, Vec::new(), Vec::new(), 1u32, 1u32);
+    let (mut i, mut out, mut at, mut line, mut tl, mut line_start, mut tc) = (0, Vec::new(), Vec::new(), 1u32, 1u32, 0usize, 1u32);
     while i < c.len() {
         let ch = c[i];
-        while at.len() < out.len() { at.push(tl); } // tokens pushed by the last step started on its line
+        while at.len() < out.len() { at.push((tl, tc)); } // tokens pushed by the last step started where it started
         tl = line;
-        if ch == '\n' { line += 1; }
+        tc = (i - line_start + 1) as u32;
+        if ch == '\n' { line += 1; line_start = i + 1; }
         if ch.is_whitespace() { i += 1; }
         else if ch == '/' && c.get(i + 1) == Some(&'/') { while i < c.len() && c[i] != '\n' { i += 1; } }
         else if ch.is_alphabetic() || ch == '_' {
             let s = i; while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') { i += 1; }
             let id: String = c[s..i].iter().collect();
-            if id.len() > MAX_NAME { return Err(format!("line {}: a name longer than {} bytes", line, MAX_NAME)); }
+            if id.len() > MAX_NAME { return Err(format!("{}:{}: a name longer than {} bytes", tl, tc, MAX_NAME)); }
             out.push(Tok::Id(id));
         }
         else if ch == '0' && matches!(c.get(i + 1), Some('x') | Some('X')) && c.get(i + 2).map_or(false, |d| d.is_ascii_hexdigit()) {
@@ -154,7 +157,8 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
                 if c[i] == '\\' && i + 1 < c.len() { i += 1; s.push(match c[i] { 'n' => '\n', 't' => '\t', o => o }); } else { s.push(c[i]); }
                 i += 1;
             }
-            if i >= c.len() { return Err("unterminated string".into()); }
+            if i >= c.len() { return Err(format!("{}:{}: a text that is never closed (a `\"` is missing)", tl, tc)); }
+            if let Some(k) = c[..i].iter().rposition(|x| *x == '\n') { if k + 1 > line_start { line_start = k + 1; } }
             line += s.matches('\n').count() as u32;
             i += 1; out.push(Tok::Str(s));
         }
@@ -164,20 +168,40 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<u32>), String> {
             else { out.push(Tok::Sym(ch.to_string())); i += 1; }
         }
     }
-    while at.len() < out.len() { at.push(tl); }
+    while at.len() < out.len() { at.push((tl, tc)); }
     Ok((out, at))
 }
 
 /// `pre`: statements an initializer (`coll.add() { f: v }`) puts before the statement it is in; `init_ok`: whether
 /// an initializer may appear here (not in a condition, a loop's clauses or a JSON array, where it would run at a
 /// different time); `tmp`: hidden locals made so far.
-struct P { t: Vec<Tok>, i: usize, lines: Vec<u32>, pre: Vec<Stmt>, init_ok: bool, tmp: u32, in_endpoint: bool }
+struct P { t: Vec<Tok>, i: usize, lines: Vec<(u32, u32)>, pre: Vec<Stmt>, init_ok: bool, tmp: u32, in_endpoint: bool }
 type R<T> = Result<T, String>;
 
 pub fn parse(src: &str) -> R<Api> {
     let (t, lines) = lex_lines(src)?;
     let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0, in_endpoint: false };
     let mut api = Api::default();
+    parse_items(&mut p, &mut api).map_err(|e| {
+        if starts_with_place(&e) { return e; }
+        // a missing `;` or `}` belongs at the end of what came before, not at the next token (often on the next line)
+        let k = if e.starts_with("expected `;`") || e.starts_with("missing `}`") { p.i.saturating_sub(1) } else { p.i.min(p.t.len().saturating_sub(1)) };
+        let (l, c) = p.lines.get(k).copied().unwrap_or((1, 1));
+        let c = if k < p.i { c + tok_width(&p.t[k]) } else { c };
+        format!("{}:{}: {}", l, c, e)
+    })?;
+    Ok(api)
+}
+/// Does an error already start with `line:col: `?
+pub fn starts_with_place(e: &str) -> bool {
+    let mut parts = e.splitn(3, ':');
+    matches!((parts.next(), parts.next()), (Some(a), Some(b)) if !a.is_empty() && a.chars().all(|c| c.is_ascii_digit()) && !b.is_empty() && b.chars().all(|c| c.is_ascii_digit()))
+}
+/// The characters a token takes in the source (a text's escapes counted as written once).
+fn tok_width(t: &Tok) -> u32 {
+    match t { Tok::Id(x) | Tok::Sym(x) => x.chars().count() as u32, Tok::Str(x) => x.chars().count() as u32 + 2, Tok::Int(n) => n.to_string().len() as u32, Tok::Flt(f) => f.to_string().len() as u32 }
+}
+fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
     while p.i < p.t.len() {
         let public = p.is_kw("pub");
         if public { p.i += 1; if !p.is_kw("fn") { return Err(format!("expected `fn` after `pub`, found {}", p.here())); } }
@@ -196,7 +220,7 @@ pub fn parse(src: &str) -> R<Api> {
         }
         if p.is_kw("endpoint") { return Err("endpoints are functions with an attribute: `@post(\"/path\") fn name() -> Response<T> { ... }`".into()); }
         // `@get("/path") fn name() -> Response<T> { ... }`
-        let first = p.lines.get(p.i).copied().unwrap_or(0);
+        let first = p.lines.get(p.i).map_or(0, |x| x.0);
         p.eat("@")?;
         let verb = p.id()?;
         let method = match verb.as_str() { "get" | "post" | "put" | "patch" | "delete" => verb.to_uppercase(), v => return Err(format!("`@{}`: an endpoint is `@get`, `@post`, `@put`, `@patch` or `@delete`", v)) };
@@ -217,10 +241,10 @@ pub fn parse(src: &str) -> R<Api> {
         p.in_endpoint = false;
         let body = body?;
         let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(n) => format!("/{{{}}}", n) }).collect::<String>());
-        let last = p.lines.get(p.i.saturating_sub(1)).copied().unwrap_or(first);
+        let last = p.lines.get(p.i.saturating_sub(1)).map_or(first, |x| x.0);
         api.eps.push(Endpoint { method, segs, body, text, slots: 0, lines: (first, last), name, resp, inputs });
     }
-    Ok(api)
+    Ok(())
 }
 
 /// `/rooms/{room}/messages` as segments.
@@ -311,7 +335,7 @@ impl P {
         Ok(if self.sym("?") { RType::Opt(Box::new(t)) } else { t })
     }
     fn peek(&self) -> Option<&Tok> { self.t.get(self.i) }
-    fn here(&self) -> String { format!("{:?}", self.peek()) }
+    fn here(&self) -> String { describe(self.peek()) }
     fn sym(&mut self, s: &str) -> bool { if matches!(self.peek(), Some(Tok::Sym(x)) if x == s) { self.i += 1; true } else { false } }
     fn eat(&mut self, s: &str) -> R<()> { if self.sym(s) { Ok(()) } else { Err(format!("expected `{}`, found {}", s, self.here())) } }
     fn is_kw(&self, k: &str) -> bool { matches!(self.peek(), Some(Tok::Id(x)) if x == k) }
@@ -331,7 +355,9 @@ impl P {
         let mut v = Vec::new();
         while !self.sym("}") {
             if self.peek().is_none() { return Err("missing `}`".into()); }
+            let (l, c) = self.lines.get(self.i).copied().unwrap_or((0, 0));
             let st = self.stmt()?;
+            v.push(Stmt::At(l, c));
             v.append(&mut self.pre);
             v.push(st);
         }
@@ -521,20 +547,20 @@ pub fn path_of(e: &Expr) -> Option<String> {
 }
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32 }
+struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32) }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
 pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> {
     let fns: Vec<(String, usize, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0 };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0) };
         for p in &f.params { b.declare(p, false); }
         b.block(&mut f.body)?;
         f.slots = b.max;
     }
     for e in &mut api.eps {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0 };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0) };
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         b.block(&mut e.body)?;
         e.slots = b.max;
@@ -554,7 +580,7 @@ fn answers(body: &[Stmt]) -> bool {
 }
 
 impl Binder<'_> {
-    fn err<T>(&self, m: String) -> R<T> { Err(format!("{}: {}", self.place, m)) }
+    fn err<T>(&self, m: String) -> R<T> { if self.at.0 > 0 { Err(format!("{}:{}: {}: {}", self.at.0, self.at.1, self.place, m)) } else { Err(format!("{}: {}", self.place, m)) } }
     fn declare(&mut self, n: &str, mutable: bool) -> u32 {
         let s = self.next; self.next += 1; self.max = self.max.max(self.next);
         self.names.push((n.to_string(), s, mutable)); s
@@ -596,6 +622,7 @@ impl Binder<'_> {
         *n = format!(".{}", op);
     }
     fn stmt(&mut self, s: &mut Stmt) -> R<()> {
+        if let Stmt::At(l, c) = s { self.at = (*l, *c); return Ok(()); }
         // collection operations that are statements: `let p = coll.add();`, `coll.add();`, `coll.remove(p);`
         match s {
             Stmt::Let(_, _, e) | Stmt::Do(e) => self.operation(e),
@@ -618,6 +645,7 @@ impl Binder<'_> {
         };
         if let Some(l) = lowered { *s = l; }
         match s {
+            Stmt::At(..) => {}
             Stmt::Let(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, false); }
             Stmt::Var(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, true); }
             Stmt::Alloc { var, slot, coll, .. } => { self.expr(coll)?; *slot = self.declare(var, false); }
@@ -709,5 +737,17 @@ impl Binder<'_> {
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// A token as an error message names it.
+fn describe(t: Option<&Tok>) -> String {
+    match t {
+        None => "the end of the file".into(),
+        Some(Tok::Id(x)) => format!("`{}`", x),
+        Some(Tok::Sym(x)) => format!("`{}`", x),
+        Some(Tok::Int(n)) => format!("the number {}", n),
+        Some(Tok::Flt(f)) => format!("the number {}", f),
+        Some(Tok::Str(x)) => format!("the text \"{}\"", x.chars().take(20).collect::<String>()),
     }
 }

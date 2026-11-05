@@ -405,6 +405,7 @@ struct G<'p> {
     var_names: std::collections::HashSet<String>, // the C names of `var`s: a `let` of one must copy it
     fast_sites: std::collections::HashSet<*const Expr>, // array indexes a versioned loop's guard proved in range (their stores' ranges already saved)
     versioned: u32, // how many versioned loops enclose the code being generated (each doubles its body; at most 3 deep)
+    checked: Vec<(String, u64)>, // range tests done since the last statement start, block boundary, label or goto: (index, size) need not be tested again
     skip_save: bool, // the next inline store needs no undo-log test (its range was saved by a loop guard)
     txt_escapes: Vec<u32>, // slots of variables that were assigned a string (or a value of unknown kind), in the order it happened
     recursive: &'p [bool],                               // per function: is it part of a cycle of calls
@@ -834,7 +835,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1089,7 +1090,10 @@ impl<'p> G<'p> {
         let t = format!("{}{}", p, self.n);
         if ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"].contains(&t.as_str()) { format!("{}_{}", p, self.n) } else { t } // never a type's name
     }
-    fn line(&mut self, s: &str) { for _ in 0..self.depth + 1 { self.body.push_str("    "); } self.body.push_str(s); self.body.push('\n'); }
+    fn line(&mut self, s: &str) {
+        if s.ends_with(": ;") || s.contains("goto ") { self.checked.clear(); } // control joins or leaves here: a test seen before may not have run
+        for _ in 0..self.depth + 1 { self.body.push_str("    "); } self.body.push_str(s); self.body.push('\n');
+    }
     /// The interval a C integer is proven to lie in: a literal, or a name recorded in `ranges` (names that are never assigned again).
     fn interval(&self, s: &str) -> Option<(i64, i64)> {
         if let Some(d) = s.strip_suffix("LL") { if let Ok(v) = d.parse::<i64>() { return Some((v, v)); } }
@@ -1100,11 +1104,14 @@ impl<'p> G<'p> {
     fn elem_check(&mut self, k: &str, n: u64) {
         if let Some(v) = k.strip_suffix("LL").and_then(|d| d.parse::<u64>().ok()) { if v < n { return; } }
         if let Some((lo, hi)) = self.interval(k) { if lo >= 0 && (hi as u64) < n { return; } }
+        // the same index against the same size, tested earlier in this straight run of code (as in `a[i] = a[i] + 1`)
+        if self.checked.iter().any(|(x, m)| x == k && *m == n) { return; }
         self.line(&format!("if (RANGE_({k} < 0 || {k} >= {n}LL)) {{"));
         self.depth += 1;
         self.call(&format!("c->h->elem(c, {}, {})", k, n));
         self.depth -= 1;
         self.line("}");
+        self.checked.push((k.to_string(), n));
     }
     /// Generate a loop statement (the loop, its body, and the text-area mark and cut when the body can build a string).
     fn loop_stmt(&mut self, it: &'p Iter, body: &'p [Stmt], env: &mut Vec<Option<CV>>, collect: bool) -> R<()> {
@@ -1267,6 +1274,9 @@ impl<'p> G<'p> {
                     (Some(l), None) => Some(format!("{w} < {l}")),
                     _ => None,
                 };
+                // no test when the value is proven to fit (as `x & 255` for a u8)
+                let bounds: Option<(i64, i64)> = match code { 1 => Some((-128, 127)), 2 => Some((-32768, 32767)), 3 => Some((i32::MIN as i64, i32::MAX as i64)), 5 => Some((0, 255)), 6 => Some((0, 65535)), 7 => Some((0, u32::MAX as i64)), 8 => Some((0, i64::MAX)), _ => None };
+                let cond = match (cond, bounds, self.interval(e)) { (Some(_), Some((bl, bh)), Some((vl, vh))) if vl >= bl && vh <= bh => None, (c, _, _) => c };
                 match cond {
                     Some(cond) => {
                         self.line(&format!("if (UNLIKELY({})) {{", cond));
@@ -1319,11 +1329,11 @@ impl<'p> G<'p> {
         match self.or_dead.clone() { Some(l) => self.line(&format!("CALL_OR_DEAD({}, {});", s, l)), None => self.line(&format!("CALL({});", s)) }
     }
     fn fail(&mut self, code: u16, m: &str) { self.line(&format!("FAIL({}, {}, {});", code, c_lit(m.as_bytes()), m.len())); }
-    fn open(&mut self, head: &str) { self.line(head); self.depth += 1; }
-    fn close(&mut self, tail: &str) { self.depth -= 1; self.line(tail); }
+    fn open(&mut self, head: &str) { self.checked.clear(); self.line(head); self.depth += 1; }
+    fn close(&mut self, tail: &str) { self.checked.clear(); self.depth -= 1; self.line(tail); }
 
     fn block(&mut self, stmts: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<()> {
-        for s in stmts { self.stmt(s, env)?; }
+        for s in stmts { self.checked.clear(); self.stmt(s, env)?; }
         Ok(())
     }
 

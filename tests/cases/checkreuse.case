@@ -1,0 +1,23 @@
+// a range test is not repeated for the same index and size in one straight run of code (`a[i] = a[i] + 1`), but a test inside a branch that may
+// not run (the right side of `&&`, an if) does not count for code after it, and a u8 store of `x & 255` needs no test that the value fits
+--- program
+struct App { cells: i64[4]; bytes: u8[4]; }
+state app: App;
+
+@post("/inc/{k}")
+fn post_inc(k: i64) -> Response<{ value: i64 }> { app.cells[k] = app.cells[k] + 1; return ok({ "value": app.cells[k] }); }
+@get("/short/{flag}/{k}")
+fn get_short(flag: bool, k: i64) -> Response<{ hit: bool }> { let hit = (flag && app.cells[k] == 1) || app.cells[k] == 0; return ok({ "hit": hit }); }
+@post("/wrap/{k}/{v}")
+fn post_wrap(k: i64, v: i64) -> Response<{ value: i64 }> { app.bytes[k] = (app.bytes[k] + v) & 255; return ok({ "value": app.bytes[k] }); }
+--- requests
+POST /inc/1
+POST /inc/1
+POST /inc/4
+GET /short/true/1
+GET /short/false/1
+GET /short/true/9
+GET /short/false/9
+POST /wrap/2/300
+POST /wrap/2/-50
+POST /wrap/5/1

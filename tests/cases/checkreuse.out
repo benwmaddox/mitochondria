@@ -1,0 +1,12 @@
+POST /inc/1 -> 200 {"value":1}
+POST /inc/1 -> 200 {"value":2}
+POST /inc/4 -> 400 {"error":"index 4 out of range (fixed size 4)"}
+GET /short/true/1 -> 200 {"hit":false}
+GET /short/false/1 -> 200 {"hit":false}
+GET /short/true/9 -> 400 {"error":"index 9 out of range (fixed size 4)"}
+GET /short/false/9 -> 400 {"error":"index 9 out of range (fixed size 4)"}
+POST /wrap/2/300 -> 200 {"value":44}
+POST /wrap/2/-50 -> 200 {"value":250}
+POST /wrap/5/1 -> 400 {"error":"index 5 out of range (fixed size 4)"}
+state <plain values> 40
+memory reserved=4096 committed=4096 live=40

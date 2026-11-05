@@ -22,7 +22,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(here, "..", "ordered"))
 from pin import pin
 
-mito = os.path.join(here, "..", "..", "target", "release", "mitochondria.exe")
+mito = os.environ.get("MITO_EXE", os.path.join(here, "..", "..", "target", "release", "mitochondria.exe"))  # MITO_EXE: another compiler, for A/B runs (MITO_BUILD_TAG keeps its builds apart)
 rust = os.environ.get("RUST_BENCH", os.path.join(here, "target-rust", "max-perf", "benchmarks.exe"))
 rust_checked = os.environ.get("RUST_CHECKED", os.path.join(here, "target-rust-checked", "max-perf", "benchmarks.exe"))
 crystal = os.environ.get("CRYSTAL", "D:/tools/langarena-crystal/target/bin_crystal.exe")  # LangArena's original (Crystal) implementation, built with `crystal build main.cr --release`
@@ -42,6 +42,7 @@ if mito_only: args.remove("--mito-only")
 config = {c["name"]: c for c in json.load(open(os.path.join(here, f"{mode}.js")))}
 tests = args or sorted(d for d in os.listdir(here) if os.path.isfile(os.path.join(here, d, "main.mito")))
 if cflags: build_dir = os.path.join(here, "build", "flags-" + "_".join(f.strip("-").replace("=", "-") for f in cflags))
+if os.environ.get("MITO_BUILD_TAG"): build_dir = os.path.join(build_dir, os.environ["MITO_BUILD_TAG"])
 os.makedirs(build_dir, exist_ok=True)
 
 

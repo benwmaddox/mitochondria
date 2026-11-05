@@ -479,6 +479,9 @@ struct G<'p> {
     loops: Vec<(String, String, bool, bool)>, // the loops being generated, innermost last: break label, continue label, whether each is used
     checked: Vec<(String, u64)>, // range tests done since the last statement start, block boundary, label or goto: (index, size) need not be tested again
     skip_save: bool, // the next inline store needs no undo-log test (its range was saved by a loop guard)
+    /// inside an outermost loop: the small logged plain fields and arrays (byte offset, size) its stores skip the undo-log test for;
+    /// the loop saves them whole once, before it starts (see `stmt`)
+    presave: Option<Vec<(usize, usize)>>,
     txt_escapes: Vec<u32>, // slots of variables that were assigned a string (or a value of unknown kind), in the order it happened
     recursive: &'p [bool],                               // per function: is it part of a cycle of calls
     specs: &'p std::cell::RefCell<Vec<Spec>>,            // C functions generated for recursive functions
@@ -780,6 +783,51 @@ fn load_interval(e: &str) -> Option<(i64, i64)> {
     None
 }
 
+/// Whether two generated copies of a loop are the same code up to the names of their own temporaries (`tmp` names numbered above
+/// `n_pre`, the counter before the guard): those are renamed in order of first appearance in each copy, and the results compared.
+/// A copy that uses a name the guard (`guard`) declared is never the same.
+fn same_code(n_pre: usize, guard: &str, a: &str, b: &str) -> bool {
+    fn tokens(s: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c.is_ascii_alphabetic() || c == b'_' {
+                let st = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
+                out.push(&s[st..i]);
+            } else if c.is_ascii_digit() {
+                let st = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'.') { i += 1; }
+                out.push(&s[st..i]);
+            } else if c.is_ascii_whitespace() { i += 1; }
+            else { out.push(&s[i..i + 1]); i += 1; }
+        }
+        out
+    }
+    let (ta, tb, tg) = (tokens(a), tokens(b), tokens(guard));
+    if ta.len() != tb.len() { return false; }
+    // a temporary: lowercase letters, an optional `_`, then its number (see `tmp`)
+    let fresh = |t: &str| {
+        let d = t.trim_start_matches(|c: char| c.is_ascii_lowercase());
+        let d = if d.len() < t.len() { d.strip_prefix('_').unwrap_or(d) } else { return false };
+        !["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"].contains(&t) && !d.is_empty() && d.bytes().all(|c| c.is_ascii_digit()) && d.parse::<usize>().map_or(false, |n| n > n_pre)
+    };
+    let guard_names: std::collections::HashSet<&str> = tg.iter().copied().filter(|t| fresh(t)).collect();
+    let (mut ma, mut mb) = (std::collections::HashMap::new(), std::collections::HashMap::new());
+    for (x, y) in ta.iter().zip(&tb) {
+        if guard_names.contains(x) || guard_names.contains(y) { return false; }
+        let (fx, fy) = (fresh(x), fresh(y));
+        if fx != fy { return false; }
+        if fx {
+            let (n, m) = (ma.len(), mb.len());
+            if *ma.entry(*x).or_insert(n) != *mb.entry(*y).or_insert(m) { return false; }
+        } else if x != y { return false; }
+    }
+    true
+}
+
 fn is_ident(x: &str) -> bool { x.bytes().next().map_or(false, |b| b.is_ascii_alphabetic() || b == b'_') && x.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') }
 
 /// Whether a line of generated C may change the variable `x`: an assignment (`x = `, `x += `, ...), `x++`/`x--`, `++x`/`--x`, or its
@@ -1033,7 +1081,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1664,7 +1712,37 @@ impl<'p> G<'p> {
         Ok(())
     }
 
+    /// A whole plain field or array of at most PRESAVE_MAX bytes stored into inside a loop: saved to the undo log before the loop (whatever
+    /// the loop then writes there is restored from that copy), so its stores skip the per-store test. False outside loops. The save is the
+    /// stores' own inline test, once per line: a loop entered very often (a small loop in a recursive function) pays no more than before.
+    fn presaved(&mut self, off: usize, size: usize) -> bool {
+        const PRESAVE_MAX: usize = 512; // eight 64-byte lines: each is one inline test before the loop, about what one store's test costs
+        let Some(list) = &mut self.presave else { return false };
+        if size > PRESAVE_MAX { return false; }
+        if !list.contains(&(off, size)) { list.push((off, size)); }
+        true
+    }
     fn stmt(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<()> {
+        if let (Stmt::Each(..), None) = (s, &self.presave) {
+            // an outermost loop: generate it, then put the saves of the small fields it stores into in front of it
+            let start = self.body.len();
+            self.presave = Some(Vec::new());
+            let r = self.stmt_inner(s, env);
+            let list = self.presave.take().unwrap_or_default();
+            r?;
+            if !list.is_empty() {
+                let kept = std::mem::take(&mut self.body);
+                let mut lines: Vec<usize> = list.iter().flat_map(|(off, size)| off / 64..(off + size + 63) / 64).collect();
+                lines.sort(); lines.dedup();
+                for l in lines { self.line(&format!("SAVE_({}ULL, 64);", l * 64)); }
+                let head = std::mem::replace(&mut self.body, kept);
+                self.body.insert_str(start, &head);
+            }
+            return Ok(());
+        }
+        self.stmt_inner(s, env)
+    }
+    fn stmt_inner(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<()> {
         match s {
             Stmt::At(l, c) => { self.at = (*l, *c); self.line("#undef AT_"); self.line(&format!("#define AT_ {}", l)); }
             Stmt::Break => { let l = self.loops.last_mut().ok_or("`break` outside a loop")?; l.2 = true; let g = format!("goto {};", l.0); self.line(&g); }
@@ -1729,7 +1807,7 @@ impl<'p> G<'p> {
                         if ascii { self.ascii_lit(&v, f)?; }
                         let v = match range { Some(r) if code != 20 => self.in_field_range(v, r, f)?, _ => v };
                         let code = if ascii { 21 } else { code };
-                        self.skip_save = self.unlogged_at(at);
+                        self.skip_save = self.unlogged_at(at) || (code != 21 && self.presaved(at, scalar_bytes(code) as usize));
                         if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap), true, at % scalar_bytes(code) as usize == 0)? { return Ok(()); }
                         self.skip_save = false;
                         let vv = self.val(v)?;
@@ -1810,7 +1888,7 @@ impl<'p> G<'p> {
                         if !covered { self.elem_check(&k, n as u64); }
                         let v = self.expr(rhs, env, None)?;
                         let esz = self.prog.plain_size(&e).0;
-                        self.skip_save = covered || self.unlogged_at(off);
+                        self.skip_save = covered || self.unlogged_at(off) || self.presaved(off, n as usize * esz as usize);
                         if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap), true, off % esz as usize == 0)? { self.skip_save = false; return Ok(()); }
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, esz, code, cap, vv));
@@ -1874,10 +1952,12 @@ impl<'p> G<'p> {
                         }
                     }
                 }
+                let (pre, n_pre) = (self.body.len(), self.n);
                 match self.version_guard(it, body, env)? {
                     Some((guard, sites, hints, counter)) => {
                         // the fast copy: the guard proved every listed array access of the loop in range and saved the stored ranges to the undo log
                         self.versioned += 1;
+                        let fast_start = self.body.len();
                         self.open(&format!("if ({}) {{", guard));
                         let joined: std::collections::HashSet<*const Expr> = sites.union(&self.fast_sites).copied().collect();
                         let kept = std::mem::replace(&mut self.fast_sites, joined);
@@ -1889,10 +1969,23 @@ impl<'p> G<'p> {
                         self.ranges = ranges_kept;
                         self.fast_sites = kept;
                         self.close("}");
+                        let slow_start = self.body.len();
                         self.open("else {");
                         self.loop_stmt(it, body, env, collect)?;
                         self.close("}");
                         self.versioned -= 1;
+                        // the two copies came out the same (the range analysis had already proved every access, nothing was left to drop):
+                        // keep one, without the guard
+                        let guard_text = &self.body[pre..fast_start];
+                        let fast = self.body[fast_start..slow_start].strip_prefix(&"    ".repeat(self.depth + 1)).and_then(|t| t.strip_prefix(&format!("if ({}) ", guard)));
+                        let slow = self.body[slow_start..].strip_prefix(&"    ".repeat(self.depth + 1)).and_then(|t| t.strip_prefix("else "));
+                        if let (Some(fast), Some(slow)) = (fast, slow) {
+                            if same_code(n_pre, guard_text, fast, slow) {
+                                let one = format!("{}{}", "    ".repeat(self.depth + 1), slow);
+                                self.body.truncate(pre);
+                                self.body.push_str(&one);
+                            }
+                        }
                     }
                     None => self.loop_stmt(it, body, env, collect)?,
                 }

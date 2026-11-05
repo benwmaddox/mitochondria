@@ -1,0 +1,10 @@
+POST /run/3/-1 -> 200 {}
+GET /look -> 200 {"v4":6,"c0":3,"c7":3,"total":3,"hits":24}
+POST /run/5/2 -> 409 {"error":"failed inside the loop","line":12}
+GET /look -> 200 {"v4":6,"c0":3,"c7":3,"total":3,"hits":24}
+POST /run/4/-2 -> 409 {"error":"failed after the loop","line":14}
+GET /look -> 200 {"v4":6,"c0":3,"c7":3,"total":3,"hits":24}
+POST /run/2/-1 -> 200 {}
+GET /look -> 200 {"v4":10,"c0":5,"c7":5,"total":4,"hits":40}
+state <plain values> 88
+memory reserved=4096 committed=4096 live=88

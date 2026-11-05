@@ -956,3 +956,17 @@ inner loop compiled to the same instructions either way; only where clang placed
 Largest time gains: BF::Recursion -17%, BF::Array -14%, Etc::NeuralNet and Etc::GameOfLife -15%, Maze::Generator -10%; geometric mean -2.8% against the
 previous compiler. Memory: Maze ports -45% to -49%, Template::Parse, GameOfLife, BWTDecode -42% to -45%, Graph ports -37% (the undo log no longer copies
 the zero pages `prepare` fills).
+
+## Round 30: small fields saved before a loop, one copy of a loop when versioning drops nothing (2026-11-05)
+
+- Inside an outermost loop, a store into a logged plain field or fixed array of at most 512 bytes skips its undo-log test; the loop
+  saves those fields' lines once, before it starts, with the same inline test (one per 64-byte line). A first version saved up to 4 KB
+  through a runtime call and made BF::Recursion and Calculator::Ast 2x slower (small loops entered millions of times from recursion).
+- Loop versioning keeps one copy, without its guard, when the fast and checked copies came out the same up to temporary names (the
+  range analysis had already proved every access): CLBG::Nbody went from 14 guards to none.
+- `-falign-loops=64` instead of 32: Compress::HuffDecode still swung 12% with strictly leaner code at 32; at 64 every port of a
+  10-port subset was at or below the previous compiler.
+
+Whole suite against the previous compiler (3 rounds, pinned): geometric mean 0.977x. Etc::NeuralNet -27%, Calculator::Ast -11%,
+Base64 -7% to -9%, Maze::Generator -6%, the arithmetic coders -4%; Etc::Sieve +6% (no change in its code worth that; placement).
+All 41 against Rust: 0.886x time (Round 29: 0.909x), 0.94x memory.

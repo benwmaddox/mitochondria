@@ -1,0 +1,32 @@
+// small logged fields and arrays stored into inside a loop are saved to the undo log whole, once, before the loop: a request
+// that fails after the loop (or inside it, in a nested loop or an inlined function) still puts every old value back
+--- program
+struct Small { v: f64[5]; c: i32[8]; total: i64; hits: u8; }
+state s: Small;
+
+fn bump(i: i64) { s.c[i] = s.c[i] + 1; s.hits = s.hits + 1; }
+
+@post("/run/{rounds}/{fail_at}")
+fn run(rounds: i64 in 0..100, fail_at: i64) -> Response<{}> {
+    foreach r in 0..rounds - 1 {
+        foreach i in 0..4 { s.v[i] = s.v[i] + 0.5 * i; }
+        foreach j in 0..7 { bump(j); }
+        s.total = s.total + r;
+        if r == fail_at { fail 409 "failed inside the loop"; }
+    }
+    if fail_at == -2 { fail 409 "failed after the loop"; }
+    return ok({});
+}
+@get("/look")
+fn look() -> Response<{ v4: f64, c0: i64, c7: i64, total: i64, hits: i64 }> {
+    return ok({ v4: s.v[4], c0: s.c[0], c7: s.c[7], total: s.total, hits: s.hits });
+}
+--- requests
+POST /run/3/-1
+GET /look
+POST /run/5/2
+GET /look
+POST /run/4/-2
+GET /look
+POST /run/2/-1
+GET /look

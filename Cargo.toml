@@ -8,3 +8,13 @@ license = "Apache-2.0"
 
 [profile.release]
 debug = false
+
+# the command is `mito`; `mitochondria` is the same program under its long name
+[[bin]]
+name = "mito"
+path = "src/main.rs"
+
+[[bin]]
+name = "mitochondria"
+path = "src/main.rs"
+test = false

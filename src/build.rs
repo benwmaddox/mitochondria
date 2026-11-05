@@ -1,4 +1,4 @@
-//! `mitochondria build`: a program or a system as one executable, its HTTP server included (runtime/http.c).
+//! `mito build`: a program or a system as one executable, its HTTP server included (runtime/http.c).
 //! clang (optimised) by default; `--tcc` builds with the bundled TinyCC in a few milliseconds, for development.
 
 /// The clang to build with: `MITO_CLANG`, or LLVM's default install. None if neither exists.

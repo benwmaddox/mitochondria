@@ -22,7 +22,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(here, "..", "ordered"))
 from pin import pin
 
-mito = os.environ.get("MITO_EXE", os.path.join(here, "..", "..", "target", "release", "mitochondria.exe"))  # MITO_EXE: another compiler, for A/B runs (MITO_BUILD_TAG keeps its builds apart)
+mito = os.environ.get("MITO_EXE", os.path.join(here, "..", "..", "target", "release", "mito.exe"))  # MITO_EXE: another compiler, for A/B runs (MITO_BUILD_TAG keeps its builds apart)
 rust = os.environ.get("RUST_BENCH", os.path.join(here, "target-rust", "max-perf", "benchmarks.exe"))
 rust_checked = os.environ.get("RUST_CHECKED", os.path.join(here, "target-rust-checked", "max-perf", "benchmarks.exe"))
 crystal = os.environ.get("CRYSTAL", "D:/tools/langarena-crystal/target/bin_crystal.exe")  # LangArena's original (Crystal) implementation, built with `crystal build main.cr --release`

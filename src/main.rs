@@ -15,7 +15,7 @@ mod spec;
 #[cfg_attr(not(test), allow(dead_code))]
 mod tcc;
 
-const USAGE: &str = "usage: mitochondria <command> <program> [options]
+const USAGE: &str = "usage: mito <command> <program> [options]
 
 A program is one `.mito` file: a program, or a system of workers (a file holding `system { ... }`).
 

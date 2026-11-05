@@ -30,9 +30,10 @@ Decided against, for now: request-local scratch arrays (`unlogged` state covers 
   endpoint with a problem (a problem inside a function is reported once, at its own line); parsing still stops at the first.
   `tests/errors/*.mito` (first lines `// expect: <text>`) is run by `cargo test`.
 
-### 1.3 `mito` as the command
+### 1.3 `mito` as the command (done 2026-11-05)
 - The executable is `mito` (`mito check`, `mito build`, `mito serve`, `mito test`); `mitochondria` stays as a second name for a while.
 - Done when: the docs and examples say `mito`, and both names work.
+- Done: Cargo builds `mito.exe` and `mitochondria.exe` from the same source; the usage, tutorial and bench scripts say `mito`.
 
 ### 1.4 `mito serve --watch`
 - Rebuilds (TinyCC, milliseconds) and restarts when the program file or a file it includes changes; a compile error is printed and the

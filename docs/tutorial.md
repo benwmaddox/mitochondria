@@ -19,7 +19,7 @@ cd mitochondria
 cargo build --release
 ```
 
-The compiler is `target\release\mitochondria.exe` (below: `mitochondria`). It builds with the bundled TinyCC, or with
+The compiler is `target\release\mito.exe` (`mitochondria.exe` beside it is the same program under its long name). It builds with the bundled TinyCC, or with
 clang if you install LLVM.
 
 ## 1. The state
@@ -73,8 +73,8 @@ fn add_player(name: string<1..24>) -> Response<{ id: Player }> {
 ## 3. Check and run
 
 ```
-mitochondria check examples/scoreboard/score.mito
-mitochondria serve examples/scoreboard/score.mito --port 8080
+mito check examples/scoreboard/score.mito
+mito serve examples/scoreboard/score.mito --port 8080
 ```
 
 `check` finds problems before anything runs (a misspelt field gives ``no field `nmae` ``); `serve` builds and runs
@@ -186,7 +186,7 @@ checks them on every build (TinyCC, clang, and clang with undefined-behaviour ch
 
 ## Next
 
-- `mitochondria build examples/scoreboard/score.mito -o score.exe` makes an optimised executable; `emit-c` writes the C it is made of.
+- `mito build examples/scoreboard/score.mito -o score.exe` makes an optimised executable; `emit-c` writes the C it is made of.
 - `examples/chat` adds sessions (`who: Session from header("X-Session")`); `examples/chat-sharded` runs workers on
   several threads.
 - [DESIGN.md](../DESIGN.md) has the whole design and what is not built yet.

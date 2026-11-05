@@ -3,7 +3,7 @@
 usage: python -I run.py N OPS ROUNDS [mito.exe]
 Each round starts a fresh Mito server, runs the workloads as one request each (timed here; a request's connection cost
 is under a millisecond against seconds of work), then runs the Rust baseline. Prints the median ns/op per workload and
-memory. The Mito exe is built with `mitochondria build bench/ordered/ordered.mito -o bench/ordered/ordered.exe`.
+memory. The Mito exe is built with `mito build bench/ordered/ordered.mito -o bench/ordered/ordered.exe`.
 """
 import http.client, json, statistics, subprocess, sys, time, os
 

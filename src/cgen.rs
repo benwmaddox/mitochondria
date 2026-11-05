@@ -655,7 +655,8 @@ pub fn layout_c(prog: &Program, api: &Api) -> String {
     o += "static const u64 mito_unlogged[] = {";
     for (a, b) in &prog.unlogged { o += &format!(" {}ULL, {}ULL,", a, b); }
     o += " 0, 0 };\n";
-    o += &format!("static const MitoProg mito_prog = {{ {}, mito_colls, {}, {}, {}, mito_routes, {}, mito_unlogged }};\n", prog.colls.len(), prog.plain_end, prog.total, api.eps.len(), prog.unlogged.len());
+    let (ro, rs) = prog.request.unwrap_or((0, 0));
+    o += &format!("static const MitoProg mito_prog = {{ {}, mito_colls, {}, {}, {}, mito_routes, {}, mito_unlogged, {}, {} }};\n", prog.colls.len(), prog.plain_end, prog.total, api.eps.len(), prog.unlogged.len(), ro, rs);
     o
 }
 

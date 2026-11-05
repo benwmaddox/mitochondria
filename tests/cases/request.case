@@ -1,0 +1,36 @@
+// `request work: Work;`: plain fields for the work of one request: zeroed before each request, not in the undo log, never kept;
+// text is built there in place and answered from there
+--- program
+struct Work { line: string<64>; n: i64; parts: i64[4]; }
+struct App { saved: string<64>; count: i64; }
+state app: App;
+request work: Work;
+
+fn put_pair(k: string, v: i64) { work.line += k; work.line += "="; work.line += v; work.line += ";"; work.n += 1; }
+
+@post("/build/{v}")
+fn build(v: i64) -> Response<{ line: string, n: i64, before: i64 }> {
+    let before = work.n;
+    put_pair("a", v);
+    put_pair("b", v * 2);
+    work.parts[1] = v;
+    app.saved = work.line;
+    app.count += 1;
+    return ok({ line: work.line, n: work.n, before: before });
+}
+@post("/fail")
+fn fail_late() -> Response<{}> {
+    work.line += "half";
+    app.count += 1;
+    fail 409 "stopped";
+}
+@get("/look")
+fn look() -> Response<{ line: string, n: i64, part: i64, saved: string, count: i64 }> {
+    return ok({ line: work.line, n: work.n, part: work.parts[1], saved: app.saved, count: app.count });
+}
+--- requests
+POST /build/7
+GET /look
+POST /fail
+GET /look
+POST /build/1

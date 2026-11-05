@@ -27,7 +27,7 @@ pub fn split(src: &str) -> Result<(String, String), String> {
         let line = src[..i].matches('\n').count() + 1;
         match word {
             "struct" | "enum" => { let e = end_of_block(src, i).ok_or_else(|| format!("line {}: unclosed struct", line))?; put(&mut state, &mut code, &src[i..e]); i = e; }
-            "state" | "instance" => { let e = src[i..].find(';').map(|e| i + e + 1).ok_or_else(|| format!("line {}: expected `;`", line))?; put(&mut state, &mut code, &src[i..e]); i = e; }
+            "state" | "instance" | "request" => { let e = src[i..].find(';').map(|e| i + e + 1).ok_or_else(|| format!("line {}: expected `;`", line))?; put(&mut state, &mut code, &src[i..e]); i = e; }
             "fn" | "pub" | "endpoint" | "test" => {
                 // an endpoint's path may hold `{param}`: its body starts after the path
                 let from = if word == "endpoint" { skip_words(src, word_end, 2) } else { i };

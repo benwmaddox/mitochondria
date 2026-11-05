@@ -210,6 +210,9 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 - The hidden text area shrinks to the request's input and the response: the "text area full" error goes, every overflow names its
   field. Order: in-place appends to fields; windows as the only local text; `request` storage; the text ports; then string locals and
   string results become errors that say what to write.
+- Done so far (2026-11-05): in-place appends and assignments-as-appends to fields (`tests/cases/append.case`); text windows for
+  `let` of plain and item text fields (`windows.case`; reading through one still copies at the use, to be removed); `request` storage
+  (`request.case`). Next: the text ports, then string locals and string results as errors.
 
 ## Phase 5: later
 

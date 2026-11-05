@@ -1585,6 +1585,7 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     m->now = m->fixed_clock ? m->clock : os_now_ms();
     begin(&m->mem);
     m->frees.len = 0; m->sel.len = 0;
+    if (mito_prog.req_size) memset(m->mem.base + mito_prog.req_off, 0, mito_prog.req_size); /* the request struct starts empty */
     Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p, 0, m->loop_budget };
     int res = mito_eps[ei](&ctx);
     if (res < 0 && m->ekind == E_FORWARD) { m->out.len = 0; m->pending = 1; return 0; } /* committed or rolled back by MITO(finish_forward) */

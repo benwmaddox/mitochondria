@@ -115,6 +115,12 @@ never required. A `foreach` is bounded by a capacity or a range; a `while` or `f
 budget (100 million, `--loop-budget N`), past which the request fails with "loop ran too long". A counted `for` (`i < n` or
 `i <= n`, step `i += 1`, neither changed in the body) compiles as a range loop.
 
+**Text.** Built text lives in declared fields. `s += x` appends to a string field in place (only the new bytes and the length
+are written and saved to the undo log; past the capacity the request fails, 413), and `s = "n=" + str(n)` is written as the same
+appends. A `let` that names a text field is a window onto it: nothing is copied, and a later change to the field shows through.
+Text for the work of one request goes in `request work: Work;`, a struct of plain fields beside the state, zeroed before each
+request, kept out of the undo log and never kept. Literals are stored once in the program and copied with memcpy where used.
+
 **Enums and match.** `enum Op { Plus, Minus }` (or `enum Cmd: u8 { Plus = 43, Minus = 45 }`) names integer values; a field of an
 enum type is stored in the smallest integer that holds them and a write outside their range fails (400), and an answer field
 declared with an enum type is written as the value's name. `Op.Plus` is its integer in code. `match x { Op.Plus => { } Op.Minus,

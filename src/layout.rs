@@ -94,6 +94,9 @@ pub struct EnumDef { pub name: String, pub base: Scalar, pub values: Vec<(String
 
 pub struct Program {
     pub enums: Vec<EnumDef>,
+    /// `request work: Work;`: the per-request struct (offset, bytes on whole 64-byte lines): zeroed before each request, kept out of
+    /// the undo log, never kept between requests.
+    pub request: Option<(usize, usize)>,
     /// byte ranges kept out of the undo log (unlogged plain fields, unlogged collections), each on whole 64-byte lines
     pub unlogged: Vec<(usize, usize)>,
     pub instances: Vec<ModInst>,
@@ -173,6 +176,7 @@ impl Program {
         let mut globals: Vec<(String, Ty)> = Vec::new();
         let mut instances: Vec<ModInst> = Vec::new();
         let mut enums: Vec<EnumDef> = Vec::new();
+        let mut request: Option<(String, Ty)> = None;
         while p.i < p.t.len() {
             match p.ident()?.as_str() {
                 "enum" => {
@@ -229,6 +233,12 @@ impl Program {
                     if let Some(g) = globals.first() { return Err(format!("a program has one state; `{}` is the second (the first is `{}`): put everything in one struct", n, g.0)); }
                     globals.push((n, ty));
                 }
+                // `request work: Work;`: plain fields for the work of one request (zeroed before it, never kept)
+                "request" => {
+                    let n = p.ident()?; p.eat(":")?; let ty = p.ty()?; p.eat(";")?;
+                    if let Some(r) = &request { return Err(format!("a program has one request struct; `{}` is the second (the first is `{}`)", n, r.0)); }
+                    request = Some((n, ty));
+                }
                 "global" => return Err("`global` was replaced by `state`: a program has one state, a struct holding everything (`state game: Game;`)".into()),
                 // written by module expansion: `instance game.board of sorted key points;`
                 "instance" => {
@@ -237,7 +247,7 @@ impl Program {
                     p.eat(";")?;
                     instances.push(ModInst { name, module, key });
                 }
-                o => return Err(format!("expected `struct` or `state`, found `{}`", o)),
+                o => return Err(format!("expected `struct`, `enum`, `state` or `request`, found `{}`", o)),
             }
         }
         if globals.is_empty() { return Err("a program has one state (`state game: Game;`), and this one has none".into()); }
@@ -252,7 +262,7 @@ impl Program {
                 else { sd.fields[k].1 = Ty::Scalar(en.base); if sd.ranges[k].is_none() { sd.ranges[k] = Some((lo, hi)); } }
             }
         }
-        let mut prog = Program { enums, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
+        let mut prog = Program { enums, request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
             let fs = std::mem::take(&mut prog.structs[i].fields);
@@ -270,6 +280,18 @@ impl Program {
             prog.globals.push(Global { name: n, ty, off, coll: None });
             off += s;
         }
+        // the request struct: its own 64-byte lines after the state's plain values
+        if let Some((n, ty)) = request {
+            let ty = resolve(ty, &names)?;
+            if prog.globals.iter().any(|g| g.name == n) { return Err(format!("`{}` names both the state and the request struct", n)); }
+            if contains_coll(&prog, &ty) { return Err(format!("request `{}`: the request struct holds plain fields (text, numbers, arrays, structs); keep collections in the state", n)); }
+            let (s, _) = prog.plain_size(&ty);
+            off = up(off, 64);
+            let size = up(s.max(1), 64);
+            prog.globals.push(Global { name: n, ty, off, coll: None });
+            prog.request = Some((off, size));
+            off += size;
+        }
         prog.plain_end = off;
         // then every collection, each starting on a page so it can be trimmed on its own
         let mut cur = up(off, PAGE);
@@ -285,10 +307,11 @@ impl Program {
             } else if contains_coll(&prog, &ty) {
                 return Err(format!("`{}`: collections inside fixed arrays are not supported; use a nested list", name));
             }
-        // the bytes kept out of the undo log
-        for g in 0..prog.globals.len() { if let Ty::Struct(st) = prog.globals[g].ty.clone() { let base = prog.globals[g].off; prog.plain_unlogged(st, base, false); } }
-        for c in 0..prog.colls.len() { if prog.colls[c].unlogged && prog.colls[c].parent.is_none() { let (a, b) = (prog.colls[c].start, prog.colls[c].end); prog.unlogged.push((a, up(b, 64))); } }
         }
+        // the bytes kept out of the undo log (the request struct whole)
+        for g in 0..prog.globals.len() { if let Ty::Struct(st) = prog.globals[g].ty.clone() { let base = prog.globals[g].off; if prog.request.map_or(true, |r| r.0 != base) { prog.plain_unlogged(st, base, false); } } }
+        for c in 0..prog.colls.len() { if prog.colls[c].unlogged && prog.colls[c].parent.is_none() { let (a, b) = (prog.colls[c].start, prog.colls[c].end); prog.unlogged.push((a, up(b, 64))); } }
+        if let Some((a, n)) = prog.request { prog.unlogged.push((a, a + n)); }
         prog.total = cur;
         Ok(prog)
     }

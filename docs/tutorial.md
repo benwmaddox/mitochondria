@@ -6,8 +6,8 @@ shown is the program's real answer: `tests/cases/scoreboard.case` sends the same
 ## The idea
 
 You declare all of a program's state up front, with a maximum for everything. The program reserves that address space
-once, at start, which costs no memory; memory is committed (backed by the OS) only where data is written, and given
-back when that data is gone. Reaching a maximum is an ordinary error the program answers, never a crash.
+once, at start, which costs no memory; a page takes memory only where data is written, and with memory pressure on
+(`--soft`, `--hard`) pages that hold nothing live are given back. Reaching a maximum is an ordinary error the program answers, never a crash.
 
 ## Setup
 
@@ -157,11 +157,11 @@ Dee reuses bo's slot 1 with a new generation (`"1.1"`). Bo's old game still says
 ## 8. Memory you can see
 
 ```
-GET /stats   {"players":3,"games":26,"reserved_kb":172,"committed_kb":52,"live_kb":1}
+GET /stats   {"players":3,"games":26,"reserved_kb":172,"committed_kb":172,"live_kb":1}
 ```
 
-Room for 1000 players is reserved (172 KB); 52 KB is committed where data was written; about 1 KB is live. With
-`--soft MB` and `--hard MB` the program gives back pages that hold nothing live when committed memory passes the soft
+Room for 1000 players is reserved (172 KB); without pressure marks it is all committed at start (commit charge; pages take
+memory only once written); about 1 KB is live. With `--soft MB` and `--hard MB` pages are committed only where data is written, and the program gives back pages that hold nothing live when committed memory passes the soft
 mark, and refuses writes (503) above the hard one.
 
 ## 9. Tests

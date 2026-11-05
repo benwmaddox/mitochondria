@@ -38,7 +38,7 @@ DELETE /session -> 200 {"ok":true}
 GET /rooms/0.0/messages -> 200 {"room":"lobby","messages":[{"seq":8,"author":"bob \"b\"","at":1000,"body":"m7 é"},{"seq":7,"author":"[deleted]","at":1000,"body":"m6 é"},{"seq":6,"author":"bob \"b\"","at":1000,"body":"m5 é"},{"seq":5,"author":"[deleted]","at":1000,"body":"m4 é"},{"seq":4,"author":"bob \"b\"","at":1000,"body":"m3 é"}]}
 GET /rooms/0.0/messages -> 401 {"error":"session ended"}
 GET /rooms -> 401 {"error":"session ended"}
-GET /stats -> 200 {"sessions":1,"rooms":2,"messages":5,"next_seq":8,"committed_kb":32,"live_kb":0,"reserved_kb":40}
+GET /stats -> 200 {"sessions":1,"rooms":2,"messages":5,"next_seq":8,"committed_kb":40,"live_kb":0,"reserved_kb":40}
 POST /rooms/0.0/messages -> 201 {"seq":9}
 POST /rooms/0.0/messages -> 201 {"seq":10}
 POST /rooms/0.0/messages -> 201 {"seq":11}
@@ -86,4 +86,4 @@ state chat.rooms.items 63
 state chat.rooms.items.messages 181
 state chat.rooms.items.typing 72
 state chat.rooms.links 218
-memory reserved=40960 committed=32768 live=773
+memory reserved=40960 committed=40960 live=773

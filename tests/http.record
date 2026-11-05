@@ -54,7 +54,7 @@
 > 
 < HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n
 > GET /stats HTTP/1.1\r\n\r\n
-< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 101\r\nConnection: close\r\n\r\n{"sessions":9,"rooms":2,"messages":2,"next_seq":2,"committed_kb":68,"live_kb":0,"reserved_kb":126936}
+< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 105\r\nConnection: close\r\n\r\n{"sessions":9,"rooms":2,"messages":2,"next_seq":2,"committed_kb":126936,"live_kb":0,"reserved_kb":126936}
 > GET /rooms HTTP/1.1\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...(65237 more bytes)
 < HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n
 > POST /sessions HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n{"name":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz...(1048328 more bytes)
@@ -115,7 +115,7 @@
 > 
 < HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n
 > GET /stats HTTP/1.1\r\n\r\n
-< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 54\r\nConnection: close\r\n\r\n{"shard":1,"sessions":4,"committed_kb":28,"live_kb":0}
+< HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 55\r\nConnection: close\r\n\r\n{"shard":1,"sessions":4,"committed_kb":256,"live_kb":0}
 > GET /rooms HTTP/1.1\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...(65237 more bytes)
 < HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n
 > POST /sessions HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n{"name":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz...(1048328 more bytes)

@@ -12,8 +12,9 @@ state chat: Chat;
 **Reserved, not allocated.** From those maximums the compiler knows the exact size and place of everything, and the
 program reserves that address space once, when it starts. Reserving costs no memory.
 
-**Grows and shrinks by pages.** Memory is committed (backed by the OS) only where data is written, and given back when
-the data in it is gone, in a pressure-driven trim. A program declared for 64 rooms of 1,000 messages that holds 3
+**Grows and shrinks by pages.** A page takes physical memory only when data is first written to it, and with memory
+pressure on (`--soft`, `--hard`) pages are committed only where data is written and given back when the data in it is gone, in a
+pressure-driven trim. Without pressure, state up to 1 GiB is committed whole at start (commit charge, not memory), so writes never test for it. A program declared for 64 rooms of 1,000 messages that holds 3
 messages costs memory for 3. There is no heap allocator and no garbage collector.
 
 **Access is a lookup.** Because every collection's place is fixed when the program is built, reading data is

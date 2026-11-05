@@ -7,7 +7,8 @@ over implicit, compile time first). Measurements behind it: [docs/measurements.m
 
 ## Principles
 1. **Everything has a declared maximum.** Exceeding one is a typed failure, never a crash or an out-of-memory kill.
-2. **One reservation, commit on use.** Reserving address space is free; memory is committed only where bytes are live.
+2. **One reservation, memory on use.** Reserving address space is free; a page takes memory only once written. With memory pressure on,
+   pages are committed only where bytes are live; without it, state up to 1 GiB is committed whole at start (see Commit and trim).
 3. **Liveness is structural.** Lengths and live bits say what is in use; nothing is traced or guessed.
 4. **No hidden work.** No garbage collector, no hidden allocation, no implicit copies of collections.
 5. **Every kind is known when compiling.** Values, request inputs and answers are all typed.
@@ -51,8 +52,10 @@ with no index. A parent that does not exist costs nothing; removing it empties w
 reset when it ends. Running out fails that request (507, or 413 if the request itself does not fit). There is no heap
 allocator anywhere.
 
-**Commit and trim.** Pages are committed when first written. A trim returns pages holding no live byte, one collection
-at a time, driven by pressure:
+**Commit and trim.** Without `--soft`/`--hard`, state up to 1 GiB (`COMMIT_ALL_MAX`) is committed whole at start: committing reserves
+the system's commit charge, not physical memory (a page is backed when first written), and nothing is ever trimmed, so no store, add or
+helper tests or commits pages. Larger state, or any program with pressure marks, commits pages when first written. A trim returns pages
+holding no live byte, one collection at a time, driven by pressure:
 
 | Committed memory | Behaviour |
 |---|---|

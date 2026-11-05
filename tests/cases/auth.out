@@ -17,4 +17,4 @@ state chat.rooms.items 16
 state chat.rooms.items.messages 0
 state chat.rooms.items.typing 0
 state chat.rooms.links 16
-memory reserved=40960 committed=16384 live=235
+memory reserved=40960 committed=40960 live=235

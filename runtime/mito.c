@@ -250,14 +250,19 @@ typedef struct {
     u64 *shrinks;        /* per collection (top level): bumped whenever something in it is freed or cleared */
     Grow jb; int jon;
     u8 *dirty;           /* one bit per 64-byte line of the reservation: set once the request has saved the line */
+    int all;             /* all of the state was committed at start (no memory pressure, at most COMMIT_ALL_MAX): nothing needs committing, so ensure() returns at once */
 } Mem;
 
 static const MitoColl *coll(Mem *m, u32 c) { return &m->prog->colls[c]; }
-static void ensure(Mem *m, u64 a, u64 b) {
-    if (b <= a) return;
-#ifdef MITO_MEASURE_NO_COMMIT /* measuring only: everything was committed at start */
-    return;
+#if defined(__clang__) || defined(__GNUC__)
+#define NOINLINE_ __attribute__((noinline))
+#else
+#define NOINLINE_
 #endif
+static void ensure_pages(Mem *m, u64 a, u64 b);
+/* commit [a, b) if it is not yet: nothing when all of the state was committed at start (the test stays in line, the work does not) */
+static inline void ensure(Mem *m, u64 a, u64 b) { if (m->all || b <= a) return; ensure_pages(m, a, b); }
+static NOINLINE_ void ensure_pages(Mem *m, u64 a, u64 b) {
     u64 p = a / PAGE, last = (b - 1) / PAGE;
     while (p <= last) {
         if (!m->committed[p]) {
@@ -376,7 +381,7 @@ static int is_full(Mem *m, u32 c, u64 inst) {
 /* Append to a list (dropping the oldest if declared) or take the lowest free slot of a pool. ~0 when full. */
 /* commit and undo-log a small range (within one page and one line is the usual case) for a write that follows: the two checks inline, the general routines only when one fails */
 static inline void touch(Mem *m, u64 a, u32 n) {
-    if (UNLIKELY(!m->committed[a / PAGE] || (a + n - 1) / PAGE != a / PAGE)) ensure(m, a, a + n);
+    if (!m->all && UNLIKELY(!m->committed[a / PAGE] || (a + n - 1) / PAGE != a / PAGE)) ensure(m, a, a + n);
     if (m->jon) { u64 l = a / LINE; if (UNLIKELY((a + n - 1) / LINE != l || !(m->dirty[l >> 3] & (1u << (l & 7))))) save(m, a, n); }
 }
 static u64 push_item(Mem *m, u32 c, u64 inst) {
@@ -551,6 +556,12 @@ static void relieve(Mem *m, Pressure *p) {
 
 /* ---------------------------------------------------------------- a running program */
 #define TEXT_CAP (4 * 1024 * 1024)
+#if defined(MITO_MEASURE_NO_COMMIT) && !defined(COMMIT_ALL_MAX)
+#define COMMIT_ALL_MAX (~0ULL) /* measuring only: commit all state at start whatever its size */
+#endif
+#ifndef COMMIT_ALL_MAX
+#define COMMIT_ALL_MAX (1ULL << 30) /* state up to 1 GiB is committed whole at start (see MITO(start)) */
+#endif
 #define RESPONSE_CAP (256 * 1024)
 /* The declared limits of a request, the same in every runtime (serve.rs MAX_QUERY ...). A route has at most 32 parts
    (checked when the program loads), names at most 128 bytes and fail messages 1024, so messages fit `ebuf`. */
@@ -1395,11 +1406,14 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
     m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf;
     m->rng = seed;
-#ifdef MITO_MEASURE_NO_COMMIT /* measuring only: commit all state at start, so that no commit test is needed */
-    if (!os_commit(mem->base, mem->reserved) || !os_commit(mem->dirty, up(mem->npages * (PAGE / 64 / 8), PAGE))) return 0;
-    for (u64 q = 0; q < mem->npages; q++) mem->committed[q] = 1;
-    mem->cpages = mem->npages;
-#endif
+    /* State of at most COMMIT_ALL_MAX is committed whole at start: committing reserves the system's commit charge, not physical memory (a page takes
+       memory when first written), and then no store, add or helper needs to test or commit pages. Trims happen only under memory pressure; turning
+       pressure on (set_marks) gives back what is not live and returns to committing on demand, so its accounting is exact. */
+    if (mem->reserved <= COMMIT_ALL_MAX && os_commit(mem->base, mem->reserved) && os_commit(mem->dirty, up(mem->npages * (PAGE / 64 / 8), PAGE))) {
+        for (u64 q = 0; q < mem->npages; q++) mem->committed[q] = 1;
+        mem->cpages = mem->npages;
+        mem->all = 1;
+    }
     ensure(mem, 0, pg->plain_end);
     for (u32 c = 0; c < pg->ncolls; c++) { const MitoColl *k = &pg->colls[c]; if (k->parent < 0) ensure(mem, k->hdr, k->hdr + hdr_fields(k) * 4); }
     return m;
@@ -1408,6 +1422,7 @@ MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return; os_
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
 MITO_API void MITO(set_marks)(void *mp_, u64 soft, u64 hard) { Mito *m = (Mito *)mp_;
     m->pr.on = 1; m->pr.soft = soft; m->pr.hard = hard; m->pr.refusing = 0; m->pr.trims = m->pr.full_trims = m->pr.freed = 0;
+    if (m->mem.all) { m->mem.all = 0; trim_all(&m->mem); } /* pressure needs exact accounting: give back what is not live, commit on demand from here */
     for (u32 c = 0; c < m->mem.prog->ncolls; c++) m->pr.stuck[c] = ~0ULL;
 }
 static void out_err(Mito *m, const u8 *msg, u64 n) { m->out.len = 0; a_str(&m->out, "{\"error\":"); a_json_str(&m->out, msg, n); a_str(&m->out, "}"); }

@@ -19,4 +19,4 @@ state app.w1.s 28
 state app.ms 40
 state app.rs 24
 state app.rs.m 12
-memory reserved=4034560 committed=32768 live=168
+memory reserved=4034560 committed=4034560 live=168

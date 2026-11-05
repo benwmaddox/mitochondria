@@ -15,11 +15,11 @@ fn merge(low, mid, high) {
     var i = low;
     var j = mid + 1;
     var k = low;
-    foreach w in 0..999999999 while i <= mid && j <= high {
+    while i <= mid && j <= high {
         if before(bw.tmp[i], bw.tmp[j]) { bw.sa[k] = bw.tmp[i]; i = i + 1; } else { bw.sa[k] = bw.tmp[j]; j = j + 1; }
         k = k + 1;
     }
-    foreach w in 0..999999999 while i <= mid { bw.sa[k] = bw.tmp[i]; i = i + 1; k = k + 1; }
+    while i <= mid { bw.sa[k] = bw.tmp[i]; i = i + 1; k = k + 1; }
 }
 fn msort(low, high) {
     if low < high {

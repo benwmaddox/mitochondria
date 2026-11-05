@@ -52,7 +52,7 @@ fn dig(y0, x0) {
     var sp = 1;
     m.sy[0] = y0;
     m.sx[0] = x0;
-    foreach step in 0..999999999 while sp > 0 {
+    while sp > 0 {
         sp = sp - 1;
         let y = m.sy[sp];
         let x = m.sx[sp];
@@ -184,14 +184,14 @@ fn one_run() {
     var found = 0;
     var length = 0;
     var mid_value = 0;
-    foreach step in 0..999999999 while m.hn > 0 && found == 0 {
+    while m.hn > 0 && found == 0 {
         heap_pop();
         let current = m.cur_v;
         if current == target {
             found = 1;
             var count = 0;
             var cur = current;
-            foreach t in 0..999999999 while cur != -1 { count = count + 1; cur = m.came[cur]; }
+            while cur != -1 { count = count + 1; cur = m.came[cur]; }
             length = count;
             // forward index count / 2 is count - 1 - count / 2 steps back from the finish
             var node = current;

@@ -52,7 +52,7 @@ fn dig(y0, x0) {
     var sp = 1;
     m.sy[0] = y0;
     m.sx[0] = x0;
-    foreach step in 0..999999999 while sp > 0 {
+    while sp > 0 {
         sp = sp - 1;
         let y = m.sy[sp];
         let x = m.sx[sp];

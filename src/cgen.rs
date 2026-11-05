@@ -103,8 +103,9 @@ struct H {
 #define CALL_OR_DEAD(x, l) do { if ((st = (x)) != 0) { if (st < 0 && c->h->was_dead(c)) goto l; c->at = AT_; return st; } } while (0)
 #define TAIL(x) do { c->at = AT_; return (x); } while (0)
 #define FAIL(code, msg, n) do { c->at = AT_; return c->h->fail(c, (code), (msg), (n)); } while (0)
-/* a round of a loop without a fixed extent (`while`, a `for` that is not counted): counted against the request's step budget */
-#define ROUND_() do { if (--c->steps < 0) FAIL(500, "loop ran too long", 17); } while (0)
+/* a round of a loop without a fixed extent (`while`, a `for` that is not counted), k its round counter: charged to the request's
+   step budget 65536 rounds at a time (a test of the counter in a register, not a store each round) */
+#define ROUND_(k) do { if (UNLIKELY(((k) & 65535) == 65535) && (c->steps -= 65536) < 0) FAIL(500, "loop ran too long", 17); } while (0)
 #define OVERFLOW_ FAIL(500, "integer overflow", 16)
 #ifdef __clang__
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -2616,7 +2617,7 @@ impl<'p> G<'p> {
         }
         if let Some(l) = &lim { self.line(&format!("if ({} >= {}) break;", hits, l)); }
         // a loop without a fixed extent counts its rounds against the request's budget, so a mistake cannot hold the program
-        if it.budget { self.line("ROUND_();"); }
+        if it.budget { self.line(&format!("ROUND_({});", k)); }
         env[it.slot as usize] = Some(CV::Int(k.clone()));
         // the counter is never assigned in the body: between the smallest lower bound and one below the largest upper bound
         if let (Some((lo_min, _)), Some((_, hi_max))) = (self.interval(&lo), self.interval(&hi)) { if hi_max > lo_min { self.ranges.insert(k.clone(), (lo_min, hi_max - 1)); } }

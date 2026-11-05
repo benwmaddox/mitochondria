@@ -40,7 +40,7 @@ fn execute() {
     var pc = 0;
     var result = 0;
     var bad = 0;
-    foreach step in 0..8999999999999 while pc < g.ncmds && bad == 0 {
+    while pc < g.ncmds && bad == 0 {
         let cmd = g.cmds[pc];
         if cmd == 43 {
             g.tape[pos] = (g.tape[pos] + 1) & 255;

@@ -29,7 +29,7 @@ fn one_run() {
     g.sd[0] = 0;
     var sp = 1;
     var best = 2147483647;
-    foreach step in 0..99999999 while sp > 0 {
+    while sp > 0 {
         sp = sp - 1;
         let v = g.sv[sp];
         let dist = g.sd[sp];

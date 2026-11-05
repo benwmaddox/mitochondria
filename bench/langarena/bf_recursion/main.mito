@@ -51,7 +51,7 @@ fn execute(head) {
         } else if kind == 4 {
             g.result = (g.result << 2) + g.tape[g.tpos];
         } else {
-            foreach w in 0..8999999999999 while g.tape[g.tpos] != 0 { execute(g.body[node]); }
+            while g.tape[g.tpos] != 0 { execute(g.body[node]); }
         }
         node = g.nxt[node];
     }

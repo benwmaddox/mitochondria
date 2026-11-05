@@ -52,7 +52,7 @@ fn dig(y0, x0) {
     var sp = 1;
     m.sy[0] = y0;
     m.sx[0] = x0;
-    foreach step in 0..999999999 while sp > 0 {
+    while sp > 0 {
         sp = sp - 1;
         let y = m.sy[sp];
         let x = m.sx[sp];
@@ -137,7 +137,7 @@ fn one_run() {
     var found = 0;
     var length = 0;
     var mid_value = 0;
-    foreach step in 0..999999999 while qh < qt && found == 0 {
+    while qh < qt && found == 0 {
         let pid = m.q[qh];
         qh = qh + 1;
         let c = m.cells[m.py[pid] * w + m.px[pid]];
@@ -150,7 +150,7 @@ fn one_run() {
                     // the path is the finish, then pid and its parents back to the start
                     var count = 2;
                     var cur = m.pp[pid];
-                    foreach t in 0..999999999 while cur >= 0 { count = count + 1; cur = m.pp[cur]; }
+                    while cur >= 0 { count = count + 1; cur = m.pp[cur]; }
                     length = count;
                     let from_end = count - 1 - count / 2;
                     if from_end == 0 {

@@ -48,7 +48,7 @@ Decided against, for now: request-local scratch arrays (`unlogged` state covers 
 
 ## Phase 2: syntax closer to StasisLang
 
-### 2.1 Loops: `foreach`, `for`, `while`, `break`, `continue`
+### 2.1 Loops: `foreach`, `for`, `while`, `break`, `continue` (done 2026-11-05, with 2.2)
 - `foreach item, i in collection { }` (index optional: `foreach item in collection`), over lists, pools, arrays, module collections
   and ranges (`foreach i in 0..n - 1`, see 2.2). It replaces `each`; its modifiers stay: `reverse`, `where cond`, `limit n`, `from k`.
 - `for i = 0; i < n; i += 1 { }`: all three clauses.
@@ -61,8 +61,20 @@ Decided against, for now: request-local scratch arrays (`unlogged` state covers 
 - `each ... while` and `[each ...]` (in answers) become `foreach`; old forms get a message saying what to write.
 - Done when: the ports and examples are rewritten without fake bounds (`each step in 0..1000000000 while ...`) or flag variables, and
   the loop-versioning optimisations still apply (they key on a counter and its bounds, which `for` gives directly).
+- Done: `foreach item[, i] in coll` (the index counts the live items visited, not slots), `for [var] i = e; cond; step` (`i` is a new
+  variable of the loop), `while cond`, `break`, `continue` (in a `for` it still runs the step), parentheses optional on every head.
+  `each` and `[each ...]` are errors that say what to write. A counted `for` (`i < n` / `i <= n`, step `i += 1`, neither changed in the
+  body, `n` a number or local) compiles as a range loop: the same C as `foreach i in 0..n - 1`, versioning included. `while` and
+  other `for` loops are range loops with a condition, so every analysis applies to them unchanged; they charge the request's budget
+  65536 rounds at a time (a test of the loop counter, no store per round; `--loop-budget N`, default 100 million; the LangArena runner
+  passes a huge one, as BF::Array runs more rounds than that in one request).
+- Measured on the 11 ports whose fake bounds became `while` (5 rounds, median): within 2% except Sort::Quick, 4.5% slower: its inner
+  `while so.t[i] < pivot { i += 1; }` loops are two instructions and the budget test is a third. A first version that decremented a
+  budget in memory each round cost 11% (BF::Array) and 16% (Sort::Quick).
+- Not yet: `foreach` over a fixed array (`foreach x, i in app.arr`), and the ports' flag variables (`while going == 1`) rewritten
+  with `break`.
 
-### 2.2 One meaning for `..`: both ends included
+### 2.2 One meaning for `..`: both ends included (done 2026-11-05, with 2.1)
 - `a..b` includes both ends everywhere: `n: i64 in 0..100` (as inputs and fields already mean), `foreach i in 1..10` (ten values),
   `match x { 0..9 => ... }`.
 - Today loop ranges (`each i in 0..n`) exclude the end: they change meaning. A loop over the positions of something of size `n` becomes
@@ -70,6 +82,10 @@ Decided against, for now: request-local scratch arrays (`unlogged` state covers 
   ranges (`0..n` becomes `0..n - 1`), and for one release a loop range is flagged with a message saying it now includes its end.
 - Open: a half-open form for the many `0..n - 1` loops (`0..<n`, as Swift)? Proposal: decide after the rewrite shows how often it is needed.
 - Done when: the ports, examples, tests and docs use the new meaning, and the loop-versioning optimisations still apply.
+- Done: shipped together with `foreach` so no loop changed meaning silently: `each` (end excluded) is an error, `foreach` includes the
+  end. A one-time rewrite turned 653 loops `each i in a..b` into `foreach i in a..b - 1` (numbers lowered by one, `+ 1` dropped); the
+  parser takes a trailing `- 1` off again, so 47 of 52 programs give byte-identical C and 5 fold a `constant + 1` they computed before.
+  The half-open form is still open: `0..n - 1` costs nothing, so it is only a question of how it reads.
 
 ### 2.3 Typed function parameters and results
 - Every function has a full signature: `fn build(item: i32, depth: i64) -> Node { }`; `-> T?` as today; no arrow for no result.

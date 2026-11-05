@@ -16,9 +16,9 @@ fn qs(lo, hi) {
         let pivot = so.t[lo + len / 2];
         var i = lo;
         var j = hi;
-        foreach outer in 0..999999 while i <= j {
-            foreach w in 0..999999 while so.t[i] < pivot { i = i + 1; }
-            foreach w in 0..999999 while so.t[j] > pivot { j = j - 1; }
+        while i <= j {
+            while so.t[i] < pivot { i = i + 1; }
+            while so.t[j] > pivot { j = j - 1; }
             if i <= j {
                 let tmp = so.t[i];
                 so.t[i] = so.t[j];

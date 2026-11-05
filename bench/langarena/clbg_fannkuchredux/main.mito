@@ -13,7 +13,7 @@ fn one_run() {
     var checksum = 0;
     var r = n;
     var running = 1;
-    foreach outer in 0..999999999 while running == 1 {
+    while running == 1 {
         foreach w in 0..31 while r > 1 { f.count[r - 1] = r; r = r - 1; }
         foreach i in 0..n - 1 { f.perm[i] = f.perm1[i]; }
         var flips = 0;

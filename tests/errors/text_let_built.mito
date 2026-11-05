@@ -1,0 +1,3 @@
+// expect: `let s` would hold text built here: build it in a field instead
+struct Row { label: string<32>; } struct App { rows: pool<Row, 4>; title: string<16>; } state app: App;
+@get("/a") fn a(n: i64) -> Response<{ s: string }> { let s = "n=" + n; return ok({ s: s }); }

@@ -218,7 +218,13 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 - Text ports (5 rounds, median, against the byte-array versions): Calculator::Ast 0.201 s (was 0.209), Calculator::Interpreter
   0.359 s (0.385: names are windows, not copies), CSV::Parse 0.573 s (0.602), Template::Parse 0.651 s (0.644; its output stays a byte
   array written a byte at a time, as the reference pushes characters). Their `put`/`put_int` helpers are gone.
-- Next: `ascii` rules (bytes 0..127; writing by index), string locals and string results as errors, Base64's message.
+- Done: text locals and text results are errors that say what to write (`var t` would hold its own text; `let s` would hold text built
+  here; `label` would return text). Tests are exempt (their messages are built text). The cases that used them build in a `request`
+  field now; `textloop.case` shows why: a loop rewriting a field 100,000 times passes where the text area used to fill (507).
+  Etc::CacheSimulation builds its key in `work.key` (0.450 s against 0.441 s for the old text-area version on the previous compiler):
+  an assignment of several pieces is one helper call (integers formatted straight into the field), and a loop that assigns no field
+  reads the lengths of the text it indexes once, windows passed to inlined functions included.
+- Next: `ascii` rules (bytes 0..127; writing by index), Base64's message.
 
 ## Phase 5: later
 

@@ -1,6 +1,5 @@
 GET /ints -> 200 {"b":1,"c":5,"d":7,"e":8}
 GET /floats -> 200 {"b":1.5,"c":3}
-GET /strings -> 200 {"b":"one","c":"one!","d":"other"}
 POST /items -> 200 {"first":1,"second":2}
 state <plain values> 8
 state app.items 40

@@ -2,6 +2,7 @@
 --- program
 enum Op { Plus, Minus, Right, Left, Out }
 enum Cmd: u8 { Plus = 43, Minus = 45, Out = 46 }
+enum Size { None, Few, Negative, Many }
 struct Step { op: Op; n: i64; }
 struct App { steps: list<Step, 8>; last: Op; code: Cmd; }
 state app: App;
@@ -15,14 +16,14 @@ fn apply(op: Op, acc: i64, n: i64) -> i64 {
     }
     return 0;
 }
-fn size(n: i64) -> string {
+fn size(n: i64) -> Size {
     match n {
-        0 => { return "none"; }
-        1..9 => { return "few"; }
-        -5..-1 => { return "negative"; }
-        else => { return "many"; }
+        0 => { return Size.None; }
+        1..9 => { return Size.Few; }
+        -5..-1 => { return Size.Negative; }
+        else => { return Size.Many; }
     }
-    return "";
+    return Size.Many;
 }
 
 @post("/steps")
@@ -42,7 +43,7 @@ fn run() -> Response<{ acc: i64, ops: [Op], raw: [i64] }> {
     return ok({ acc: acc, ops: [foreach s in app.steps s.op], raw: [foreach s in app.steps s.op] });
 }
 @get("/sizes")
-fn sizes() -> Response<{ a: string, b: string, c: string, d: string, plus: i64 }> {
+fn sizes() -> Response<{ a: Size, b: Size, c: Size, d: Size, plus: i64 }> {
     return ok({ a: size(0), b: size(7), c: size(-3), d: size(40), plus: Cmd.Plus });
 }
 @post("/bad/{v}")

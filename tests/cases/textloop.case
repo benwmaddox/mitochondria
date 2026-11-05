@@ -1,14 +1,16 @@
-// the text area of a request is 4 MB: a loop that builds strings and keeps none past its iteration gives their space back at the end of each iteration, so it can run
-// any number of times; a loop that hands a string to a variable declared before it keeps them (and can run the area full)
+// text built in a loop goes into a field (here the request struct's), rewritten or appended in place: nothing accumulates anywhere
+// else, so a loop can run any number of times; only appending past a field's capacity fails (413, naming no hidden area)
 --- program
 struct App { total: i64; last: string<16>; }
 state app: App;
+struct Work { key: string<32>; inner: string<48>; kept: string<64>; all: string<4096>; }
+request work: Work;
 
 @post("/count/{n}")
 fn post_count(n: i64) -> Response<{ total: i64 }> {
     foreach i in 0..n - 1 {
-        let key = "item_" + i;
-        app.total = app.total + len(key);
+        work.key = "item_" + i;
+        app.total = app.total + len(work.key);
     }
     return ok({ "total": app.total });
 }
@@ -16,27 +18,26 @@ fn post_count(n: i64) -> Response<{ total: i64 }> {
 fn post_nested(n: i64) -> Response<{ total: i64 }> {
     var sum = 0;
     foreach i in 0..n - 1 {
-        let outer = "outer_" + i;
+        work.key = "outer_" + i;
         foreach j in 0..9 {
-            let inner = outer + "_" + j;
-            sum = sum + len(inner);
+            work.inner = substr(work.key, 0, len(work.key));
+            work.inner += "_" + j;
+            sum = sum + len(work.inner);
         }
-        sum = sum + len(outer);
+        sum = sum + len(work.key);
     }
     return ok({ "total": sum });
 }
 @post("/keep/{n}")
 fn post_keep(n: i64) -> Response<{ last: string, len: i64 }> {
-    var kept = "";
-    foreach i in 0..n - 1 { kept = "keep_" + i + "_" + "padding_padding_padding_padding"; }
+    foreach i in 0..n - 1 { work.kept = "keep_" + i + "_" + "padding_padding_padding_padding"; }
     app.last = "x";
-    return ok({ "last": kept, "len": len(kept) });
+    return ok({ "last": work.kept, "len": len(work.kept) });
 }
 @post("/accumulate/{n}")
 fn post_accumulate(n: i64) -> Response<{ len: i64 }> {
-    var all = "";
-    foreach i in 0..n - 1 { all = all + "ab"; }
-    return ok({ "len": len(all) });
+    foreach i in 0..n - 1 { work.all += "ab"; }
+    return ok({ "len": len(work.all) });
 }
 --- requests
 POST /count/10
@@ -45,3 +46,4 @@ POST /nested/200000
 POST /keep/10
 POST /keep/100000
 POST /accumulate/1000
+POST /accumulate/3000

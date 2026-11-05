@@ -735,6 +735,7 @@ pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: 
         if let Some(Stmt::At(l, c)) = f.body.first() { b.at = (*l, *c); }
         if f.test.is_some() { b.test = true; b.place = format!("test \"{}\"", f.test.as_deref().unwrap_or("")); }
         if f.test.is_none() { if let Some(i) = f.ptys.iter().position(|t| t.is_none()) { errs.push(b.err::<()>(format!("parameter `{}` needs a type: `{}: i64` (or f64, bool, string, an item type, ...)", f.params[i], f.params[i])).unwrap_err()); continue; }
+        if let Some(t) = &f.ret { if matches!(t.name.as_str(), "string" | "utf8" | "ascii") && t.field.is_none() { errs.push(b.err::<()>(format!("`{}` would return text: a function writes text into a field instead; pass the item or struct that holds it, `fn {}(..., out: Row)`, and write `out.label = ...`", f.name, f.name)).unwrap_err()); continue; } }
         if f.ret.is_none() && gives_value(&f.body) { errs.push(b.err::<()>(format!("`{}` returns a value: declare its result, `fn {}(...) -> T`", f.name, f.name)).unwrap_err()); continue; } }
         if let Err(e) = b.block(&mut f.body) { errs.push(e); }
         f.slots = b.max;

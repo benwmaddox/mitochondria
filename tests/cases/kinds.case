@@ -6,6 +6,8 @@ struct App {
     top: Top;
 }
 state app: App;
+struct Work { names: string<64>; }
+request work: Work;
 struct Top { head: i64; }
 
 fn find(name: string) -> Node? { foreach n in app.nodes { if n.name == name { return n; } } return null; }
@@ -22,12 +24,11 @@ fn delete_nodes_name(name: string<4096>) -> Response<{}> { let n = find(name); i
 @get("/walk")
 fn get_walk() -> Response<{ names: string, steps: i64 }> {
     var cur = app.top.head;
-    var names = "";
     var steps = 0;
     foreach n in app.nodes {
-        if cur != 0 && exists(app.nodes[cur - 1]) { let node = app.nodes[cur - 1]; names = names + node.name + ","; cur = node.next; steps = steps + 1; }
+        if cur != 0 && exists(app.nodes[cur - 1]) { let node = app.nodes[cur - 1]; work.names += node.name + ","; cur = node.next; steps = steps + 1; }
     }
-    return ok({ "names": names, "steps": steps });
+    return ok({ "names": work.names, "steps": steps });
 }
 @get("/find/{name}")
 fn get_find_name(name: string<4096>) -> Response<{ found: bool, name: string }> { let n = find(name); return ok({ "found": exists(n), "name": or(n.name, "-") }); }

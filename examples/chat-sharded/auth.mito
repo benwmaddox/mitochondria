@@ -6,8 +6,7 @@ struct Gate {
 }
 state gate: Gate;
 
-// "shard.slot": a user id that is unique across auth shards (references do not cross workers)
-fn user_id(who: Session) -> string { return str(worker_index()) + "." + str(slot(who)); }
+// a forward names its user "shard.slot": an id that is unique across auth shards (references do not cross workers)
 fn rate_limited(who: Session) {
     let t = now();
     if t - who.window > 60000 { who.window = t; who.sent = 0; }
@@ -31,29 +30,29 @@ fn sign_out(who: Session from header("X-Session")) -> Response<{ ok: bool }> {
 // who sent it. The directory of rooms lives on rooms[0].
 @post("/rooms")
 fn add_room(who: Session from header("X-Session"), name: string<1..48>) -> Response<{ id: i64, name: string, shard: i64 }> {
-    forward rooms[0] { user: user_id(who), author: who.name };
+    forward rooms[0] { user: str(worker_index()) + "." + str(slot(who)), author: who.name };
 }
 @get("/rooms")
 fn rooms(who: Session from header("X-Session")) -> Response<{ rooms: [{ id: i64, name: string }] }> {
-    forward rooms[0] { user: user_id(who), author: who.name };
+    forward rooms[0] { user: str(worker_index()) + "." + str(slot(who)), author: who.name };
 }
 
 @post("/rooms/{room}/messages")
 fn post_message(who: Session from header("X-Session"), room: i64, body: string<1..2000>) -> Response<{ seq: i64 }> {
     rate_limited(who);
-    forward rooms[room] { user: user_id(who), author: who.name };
+    forward rooms[room] { user: str(worker_index()) + "." + str(slot(who)), author: who.name };
 }
 @get("/rooms/{room}/messages")
 fn messages(who: Session from header("X-Session"), room: i64, limit: i64 = 50) -> Response<{ room: string, messages: [{ seq: i64, author: string, at: i64, body: string }] }> {
-    forward rooms[room] { user: user_id(who), author: who.name };
+    forward rooms[room] { user: str(worker_index()) + "." + str(slot(who)), author: who.name };
 }
 @post("/rooms/{room}/typing")
 fn typing(who: Session from header("X-Session"), room: i64) -> Response<{ ok: bool }> {
-    forward rooms[room] { user: user_id(who), author: who.name };
+    forward rooms[room] { user: str(worker_index()) + "." + str(slot(who)), author: who.name };
 }
 @get("/rooms/{room}/typing")
 fn who_is_typing(who: Session from header("X-Session"), room: i64) -> Response<{ typing: [{ name: string }] }> {
-    forward rooms[room] { user: user_id(who), author: who.name };
+    forward rooms[room] { user: str(worker_index()) + "." + str(slot(who)), author: who.name };
 }
 
 // this shard only: one-way forwarding has no fan-out to total the other workers

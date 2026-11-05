@@ -80,6 +80,7 @@ struct H {
     int (*json_field)(Ctx *, const Txt *, const char *, u32, Txt *); /* a top-level field of a JSON object text, as text (null: absent) */
     int (*str_app)(Ctx *, int, u64, u64, u32, const Val *);      /* append a value to a string field in place (kind: plain/column, and empty it first) */
     int (*str_app_at)(Ctx *, int, u64, u64, u32, u64, u32);      /* the same from n bytes of state at an offset (a window onto a text field): one copy */
+    int (*str_set)(Ctx *, int, u64, u64, u32, int, const Val *, u32); /* several pieces at once (from the start when the int is 1): one call */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -1603,6 +1604,14 @@ impl<'p> G<'p> {
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
                 let v = self.expr(e, env, None)?;
+                // text lives in fields: a local is a window onto text (a field, an input, a literal, a piece of one), never its own copy
+                // or text it builds (tests may: their messages are built text)
+                if !self.test && matches!(v, CV::Txt(_) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)) {
+                    let n = match s { Stmt::Let(n, ..) | Stmt::Var(n, ..) => n.clone(), _ => String::new() };
+                    if mutable { return no(format!("`var {}` would hold its own text: text lives in fields. Name a field with `let` (a window onto it), or build the text in a field of the state or of a `request` struct (`work.line += ...`)", n)); }
+                    let built = match e { Expr::Bin(op, ..) => op == "+", Expr::Call(f, _, r) => f == "str" || matches!(r, CallRes::User(_)), _ => false };
+                    if built { return no(format!("`let {}` would hold text built here: build it in a field instead (`work.line = ...` in a `request` struct, or a field of the state), or write it straight into the answer", n)); }
+                }
                 let v = match self.slot_kind(*slot) { Some(k) => self.coerce(v, k, mutable)?, None => self.hold(v, mutable)? };
                 env[*slot as usize] = Some(v);
             }
@@ -1741,7 +1750,7 @@ impl<'p> G<'p> {
                 let collect = allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
                 // a loop that writes no state cannot change a text field's length: read it once, here, for the reads by index inside
                 let mut cached = Vec::new();
-                if !writes(self.api, body, &mut Vec::new()) {
+                if !assigns_field(self.api, body, &mut Vec::new()) {
                     let mut bases = Vec::new();
                     index_bases(body, &mut bases);
                     for arr in bases {
@@ -2026,8 +2035,20 @@ impl<'p> G<'p> {
     /// Append pieces to a string field in place (`kind` 0 plain, 1 an item's column; a, b, cc as `str_app` takes them), emptying it first
     /// when `clear` (an assignment). A piece that is not text is formatted as `+` would.
     fn str_append(&mut self, kind: i32, a: String, b: String, cc: u32, clear: bool, pieces: &[&'p Expr], env: &mut Vec<Option<CV>>) -> R<()> {
-        for (i, p) in pieces.iter().enumerate() {
-            let v = self.expr(p, env, None)?;
+        // no window among the pieces: all of them in one call
+        let vals: Vec<CV> = pieces.iter().map(|p| self.expr(p, env, None)).collect::<R<Vec<CV>>>()?;
+        if !vals.iter().any(|v| matches!(v, CV::Sub(..) | CV::PlainStr(_) | CV::StateStr(..))) {
+            let mut names = Vec::new();
+            for v in vals {
+                if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("only text, numbers and bools can be added to a string"); }
+                names.push(self.val(v)?);
+            }
+            let argv = self.tmp("argv");
+            self.line(&format!("Val {}[{}] = {{ {} }};", argv, names.len(), names.join(", ")));
+            self.call(&format!("c->h->str_set(c, {}, {}, {}, {}, {}, {}, {})", kind, a, b, cc, clear as i32, argv, names.len()));
+            return Ok(());
+        }
+        for (i, v) in vals.into_iter().enumerate() {
             if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("only text, numbers and bools can be added to a string"); }
             let k = kind | if clear && i == 0 { 2 } else { 0 };
             // a text field or a window onto one: copied from where it is, field to field
@@ -3529,11 +3550,32 @@ fn returns_value(stmts: &[Stmt]) -> bool {
 }
 
 /// An error with the place (`line:col: `) of the statement it came from, unless it has one already.
+/// Does running these statements (inlined calls included) assign a field? Only that changes a text field's length (writing an
+/// element of an array, or an item's field by index, never does).
+fn assigns_field(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
+    fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
+        match e {
+            Expr::Call(_, a, r) => a.iter().any(|x| ex(api, x, seen)) || match r { CallRes::User(k) if !seen.contains(k) => { seen.push(*k); assigns_field(api, &api.fns[*k as usize].body, seen) } _ => false },
+            Expr::Field(b, _) | Expr::Un(_, b) => ex(api, b, seen),
+            Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| match s {
+        Stmt::Assign(Expr::Field(..), _) | Stmt::Clear(..) => true,
+        Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
+        Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
+        Stmt::If(c, t, e) => ex(api, c, seen) || assigns_field(api, t, seen) || assigns_field(api, e, seen),
+        Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || it.whil.as_ref().map_or(false, |w| ex(api, w, seen)) || assigns_field(api, b, seen),
+        _ => false,
+    })
+}
+
 /// The state paths indexed anywhere in these statements (`x.text[i]`: `x.text`), loops and branches included.
 fn index_bases<'p>(stmts: &'p [Stmt], out: &mut Vec<&'p Expr>) {
     fn ex<'p>(e: &'p Expr, out: &mut Vec<&'p Expr>) {
         match e {
-            Expr::Index(a, i) => { if state_path(a) && !out.iter().any(|x| format!("{:?}", x) == format!("{:?}", a)) { out.push(a); } ex(a, out); ex(i, out); }
+            Expr::Index(a, i) => { if (state_path(a) || matches!(**a, Expr::Var(_, VarRes::Local(_)))) && !out.iter().any(|x| format!("{:?}", x) == format!("{:?}", a)) { out.push(a); } ex(a, out); ex(i, out); }
             Expr::Field(b, _) | Expr::Un(_, b) => ex(b, out),
             Expr::Bin(_, a, b) => { ex(a, out); ex(b, out); }
             Expr::Call(_, args, _) => for a in args { ex(a, out); },
@@ -3569,7 +3611,7 @@ fn str_pieces<'e>(target: &Expr, rhs: &'e Expr) -> Option<(bool, Vec<&'e Expr>)>
     if op != "+" { return None; }
     let mut pieces = Vec::new();
     split(rhs, &mut pieces);
-    if format!("{:?}", pieces[0]) == t { pieces.remove(0); return Some((false, pieces)); }
+    if format!("{:?}", pieces[0]) == t { pieces.remove(0); if pieces.iter().any(|p| format!("{:?}", p).contains(&t)) { return None; } return Some((false, pieces)); }
     if !texty(pieces[0]) || pieces.iter().any(|p| format!("{:?}", p).contains(&t)) { return None; }
     Some((true, pieces))
 }

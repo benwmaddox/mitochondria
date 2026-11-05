@@ -10,7 +10,7 @@ struct App {
 }
 state app: App;
 
-fn first_positive() -> string { foreach i in app.items where i.score > 0 { i.score = i.score; return i.tag; } return "-"; }
+fn first_positive() -> Item in app.items? { foreach i in app.items where i.score > 0 { i.score = i.score; return i; } return null; }
 @post("/items")
 fn post_items(score: i64, tag: string<4096>?) -> Response<{ slot: i64 }> { let it = app.items.add(); it.score = score; it.tag = tag; return created({ "slot": slot(it) }); }
 @post("/double")
@@ -26,8 +26,8 @@ fn post_boxes() -> Response<{ n: i64, scores: [i64] }> {
 @get("/firsts")
 fn get_firsts() -> Response<{ calls: i64, first: string }> {
     var n = 0;
-    foreach a in app.items { foreach b in app.items { if first_positive() != "-" { n = n + 1; } } }
-    return ok({ "calls": n, "first": first_positive() });
+    foreach a in app.items { foreach b in app.items { if exists(first_positive()) { n = n + 1; } } }
+    return ok({ "calls": n, "first": or(first_positive().tag, "-") });
 }
 @get("/list")
 fn get_list() -> Response<{ x: [string] }> { return ok({ "x": [foreach i in app.items i.tag + ":" + i.score] }); }

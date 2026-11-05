@@ -10,6 +10,8 @@ struct Cache {
     hits: i64; misses: i64; last: i64; run_id: i64;
 }
 state c: Cache;
+struct Work { key: ascii<32>; }
+request work: Work; // the key of the operation being made
 
 fn next_int(max: i64) -> i64 {
     c.last = (c.last * 3877 + 29573) % 139968;
@@ -90,7 +92,8 @@ fn cache_put(key: string, updated: i64) {
 }
 fn one_run() {
     foreach step in 0..999 {
-        let key = "item_" + next_int(c.values);
+        work.key = "item_" + next_int(c.values);
+        let key = work.key;
         if cache_get(key) != 0 {
             c.hits = c.hits + 1;
             cache_put(key, 1);

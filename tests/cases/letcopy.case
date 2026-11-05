@@ -1,4 +1,4 @@
-// a `let` copies the value it is given: a later assignment to the `var` it came from does not change it (numbers, floats, strings, references)
+// a `let` copies the value it is given: a later assignment to the `var` it came from does not change it (numbers, floats, references; text is held in fields, and a `let` naming one is a window: windows.case)
 --- program
 struct Item { n: i64; }
 struct App { items: pool<Item, 4>; total: i64; }
@@ -29,17 +29,6 @@ fn get_floats() -> Response<{ b: f64, c: f64 }> {
     f = 0.0;
     return ok({ "b": b, "c": c });
 }
-@get("/strings")
-fn get_strings() -> Response<{ b: string, c: string, d: string }> {
-    var s = "one";
-    let b = s;
-    s = s + "!";
-    let c = s;
-    s = "other";
-    let d = s;
-    s = "last";
-    return ok({ "b": b, "c": c, "d": d });
-}
 @post("/items")
 fn post_items() -> Response<{ first: i64, second: i64 }> {
     let a = app.items.add();
@@ -54,5 +43,4 @@ fn post_items() -> Response<{ first: i64, second: i64 }> {
 --- requests
 GET /ints
 GET /floats
-GET /strings
 POST /items

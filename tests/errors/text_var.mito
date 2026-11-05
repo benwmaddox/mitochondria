@@ -1,0 +1,3 @@
+// expect: 3:48: GET /a: `var t` would hold its own text: text lives in fields
+struct Row { label: string<32>; } struct App { rows: pool<Row, 4>; title: string<16>; } state app: App;
+@get("/a") fn a() -> Response<{ t: string }> { var t = app.title; return ok({ t: t }); }

@@ -1,12 +1,12 @@
 POST /motd -> 200 {"motd":"hello","len":5,"max":16}
-POST /motd -> 413 {"error":"string of 20 bytes does not fit string<16>","line":10}
-GET /notes -> 404 {"error":"position 0 is past the end","line":23}
+POST /motd -> 413 {"error":"string of 20 bytes does not fit string<16>","line":12}
+GET /notes -> 404 {"error":"position 0 is past the end","line":24}
 POST /notes -> 201 {"text":"[a]"}
 POST /notes -> 201 {"text":"[quote\"d]"}
 POST /notes -> 201 {"text":"[0123456789]"}
 GET /notes -> 200 {"all":"[a][quote\"d][0123456789]","first":"[a]","eq":true,"lt":true,"hdr":"none","q":null}
 GET /notes?q=hi -> 200 {"all":"[a][quote\"d][0123456789]","first":"[a]","eq":true,"lt":true,"hdr":"zed","q":"hi"}
 GET /concat -> 200 {"a":"n=5","b":"t=true","c":"xnull","d":"12false"}
-state <plain values> 20
+state <plain values> 192
 state app.notes 44
-memory reserved=8192 committed=8192 live=64
+memory reserved=8192 committed=8192 live=236

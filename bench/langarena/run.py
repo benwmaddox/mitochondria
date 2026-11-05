@@ -103,6 +103,8 @@ def run_mito(test, name, exe, cfg, params, float_result):
             got = checksum_bytes(f"encode aaaa... to {''.join(chr(res['encoded' + str(k)]) for k in range(4))}...: {res['result']}".encode())
         elif float_result == "b64dec":    # "decode <first four encoded>... to aaaa...: <sum>"
             got = checksum_bytes(f"decode {''.join(chr(res['encoded' + str(k)]) for k in range(4))}... to {''.join(chr(res['decoded' + str(k)]) for k in range(4))}...: {res['result']}".encode())
+        elif float_result == "csv":       # the three averages are the same every run: (hash(x) + hash(y) + hash(z)) per run, plus the hash of the text
+            got = (((checksum_f64(res["x"]) + checksum_f64(res["y"]) + checksum_f64(res["z"])) * (warm + iters)) + res["hash"]) % 4294967296
         elif float_result == "sum":       # the answer is one float, hashed once
             got = checksum_f64(res["result"])
         elif float_result == "spectral":  # one checksum, from sqrt(vBv / vv) of the final vectors
@@ -157,6 +159,7 @@ META = {
     "distance_ngram": (["count", "size"], False),
     "template_parse": (["count"], False),
     "calculator_interpreter": (["operations"], False),
+    "csv_parse": (["rows"], "csv"),
     "etc_words": ("words", False),
     "etc_cachesimulation": (["values", "size"], False),
     "calculator_ast": (["operations"], False),

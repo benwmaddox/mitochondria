@@ -2,7 +2,7 @@
 // jump table) and interprets it on a tape of 30,000 cells that grows if the pointer passes the end; `.` folds the cell into a 32-bit result (result = result * 4 + cell). The
 // program text and the warmup program (a small program run 1000 times before the timed run) are given to prepare; the checksum adds each run's result. The reference's
 // match on the command is an if-chain here (the language has no switch). The reference's u32 and u8 wrapping is masking.
-struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096]; srclen: i64; cmds: u8[4096]; ncmds: i64; jumps: i32[4096]; stack: i32[4096]; tape: u8[100000]; tlen: i64; out: i64; bad: i64; ok: i64; result: i64; }
+struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096] unlogged; srclen: i64; cmds: u8[4096] unlogged; ncmds: i64; jumps: i32[4096] unlogged; stack: i32[4096] unlogged; tape: u8[100000] unlogged; tlen: i64; out: i64; bad: i64; ok: i64; result: i64; }
 state g: BF;
 
 fn compile() {

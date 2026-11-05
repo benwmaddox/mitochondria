@@ -2,7 +2,7 @@
 // The input is `size` bytes of the repeating pattern "ABRACADABRA"; the coder is the reference's 32-bit integer arithmetic coder (low/high range, cumulative frequency tables,
 // pending bits for the straddle case, bits packed most significant first). The checksum adds the length of every run's output, warmup included.
 struct AR {
-    data: u8[131072]; out: u8[131072]; freq: i32[256]; low_table: i64[256]; high_table: i64[256];
+    data: u8[131072]; out: u8[131072] unlogged; freq: i32[256]; low_table: i64[256]; high_table: i64[256];
     size: i64; total: i64; buffer: i64; bit_pos: i64; out_len: i64; result: i64; 
 }
 state ar: AR;

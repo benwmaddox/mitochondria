@@ -3,7 +3,7 @@
 // output code, 16-bit big-endian codes, no reset). The checksum adds the length of every run's decoded text, warmup included; plus 100000 when the decoded text equals the input.
 struct LZ {
     data: u8[1048576]; codes: u8[16384]; keys: i32[16384]; values: i32[16384];
-    size: i64; next_code: i64; codes_len: i64; result: i64; decoded_len: i64; buf: u8[5242880]; off: i32[16384]; elen: i32[16384];
+    size: i64; next_code: i64; codes_len: i64; result: i64; decoded_len: i64; buf: u8[5242880] unlogged; off: i32[16384] unlogged; elen: i32[16384] unlogged;
 }
 state lz: LZ;
 

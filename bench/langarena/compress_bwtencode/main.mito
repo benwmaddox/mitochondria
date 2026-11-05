@@ -3,7 +3,7 @@
 // first byte, rank them, then for k = 1, 2, 4, ... sort the suffix array by the pair (rank[i], rank[(i + k) % n]) with a stable sort and re-rank. The reference's `sort_by`
 // (a library stable sort that detects runs already in order) is a top-down merge sort here (as in the Sort::Merge port) that skips the merge when the two halves are already in order, the per-round pair and rank vectors live in state arrays, and the new ranks are written
 // over the old ones (the pairs hold the old ranks). The checksum adds the length of the result of every run, warmup included.
-struct BW { data: u8[131072]; trans: u8[131072]; sa: i32[131072]; rank: i32[131072]; pr0: i32[131072]; pr1: i32[131072]; tmp: i32[131072]; counts: i32[256]; positions: i32[256]; fill: i32[256]; size: i64; orig: i64; result: i64; }
+struct BW { data: u8[131072]; trans: u8[131072] unlogged; sa: i32[131072] unlogged; rank: i32[131072] unlogged; pr0: i32[131072] unlogged; pr1: i32[131072] unlogged; tmp: i32[131072] unlogged; counts: i32[256]; positions: i32[256]; fill: i32[256]; size: i64; orig: i64; result: i64; }
 state bw: BW;
 
 // a before b (or equal): the reference's comparison of the pairs, ties keep their order

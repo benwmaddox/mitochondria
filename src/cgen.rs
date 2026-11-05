@@ -573,7 +573,10 @@ pub fn layout_c(prog: &Program, api: &Api) -> String {
     o += "typedef int (*EpFn)(Ctx *);\nstatic const EpFn mito_eps[] = {";
     for k in 0..api.eps.len() { o += &format!(" ep{},", k); }
     o += " 0 };\n";
-    o += &format!("static const MitoProg mito_prog = {{ {}, mito_colls, {}, {}, {}, mito_routes }};\n", prog.colls.len(), prog.plain_end, prog.total, api.eps.len());
+    o += "static const u64 mito_unlogged[] = {";
+    for (a, b) in &prog.unlogged { o += &format!(" {}ULL, {}ULL,", a, b); }
+    o += " 0, 0 };\n";
+    o += &format!("static const MitoProg mito_prog = {{ {}, mito_colls, {}, {}, {}, mito_routes, {}, mito_unlogged }};\n", prog.colls.len(), prog.plain_end, prog.total, api.eps.len(), prog.unlogged.len());
     o
 }
 
@@ -1110,6 +1113,8 @@ impl<'p> G<'p> {
         self.line(&format!("if (UNLIKELY({x} < {} || {x} > {})) FAIL(400, {}, {});", c_i64(lo), c_i64(hi), c_lit(msg.as_bytes()), msg.len()));
         Ok(CV::Int(x))
     }
+    /// Is the byte at plain-state offset `off` kept out of the undo log (an unlogged field)?
+    fn unlogged_at(&self, off: usize) -> bool { self.prog.unlogged.iter().any(|(a, b)| off >= *a && off < *b) }
     /// A value read from a field declared with a range: the range analysis may assume it.
     fn with_field_range(&mut self, v: CV, range: Option<(i64, i64)>) -> CV {
         match (v, range) {
@@ -1430,7 +1435,9 @@ impl<'p> G<'p> {
                         self.may_write_plain(at)?;
                         let v = self.expr(rhs, env, None)?;
                         let v = match range { Some(r) => self.in_field_range(v, r, f)?, None => v };
+                        self.skip_save = self.unlogged_at(at);
                         if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap), true, at % scalar_bytes(code) as usize == 0)? { return Ok(()); }
+                        self.skip_save = false;
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, {}, {}, {}, &{})", at, code, cap, vv));
                         return Ok(());
@@ -1458,7 +1465,10 @@ impl<'p> G<'p> {
                 self.may_write_col(c, &path)?;
                 let v = self.expr(rhs, env, None)?;
                 let v = match self.prog.colls[c].cols[ci].range { Some(r) => self.in_field_range(v, r, &path)?, None => v };
-                if !self.int_store(c, &idx, ci, None, &v, &format!("c->h->store(c, {}, {}, {}, &@VAL)", c, idx, ci))? {
+                self.skip_save = self.prog.colls[c].unlogged;
+                let inline = self.int_store(c, &idx, ci, None, &v, &format!("c->h->store(c, {}, {}, {}, &@VAL)", c, idx, ci))?;
+                self.skip_save = false;
+                if !inline {
                     let vv = self.val(v)?;
                     self.call(&format!("c->h->store(c, {}, {}, {}, &{})", c, idx, ci, vv));
                 }
@@ -1474,7 +1484,10 @@ impl<'p> G<'p> {
                         let CKind::Arr(_, n) = self.prog.colls[c].cols[ci].kind else { unreachable!() };
                         self.elem_check(&k, n as u64);
                         let v = self.expr(rhs, env, None)?;
-                        if !self.int_store(c, &idx, ci, Some(&k), &v, &format!("c->h->store_elem(c, {}, {}, {}, {}, &@VAL)", c, idx, ci, k))? {
+                        self.skip_save = self.prog.colls[c].unlogged;
+                        let inline = self.int_store(c, &idx, ci, Some(&k), &v, &format!("c->h->store_elem(c, {}, {}, {}, {}, &@VAL)", c, idx, ci, k))?;
+                        self.skip_save = false;
+                        if !inline {
                             let vv = self.val(v)?;
                             self.call(&format!("c->h->store_elem(c, {}, {}, {}, {}, &{})", c, idx, ci, k, vv));
                         }
@@ -1486,7 +1499,7 @@ impl<'p> G<'p> {
                         if !covered { self.elem_check(&k, n as u64); }
                         let v = self.expr(rhs, env, None)?;
                         let esz = self.prog.plain_size(&e).0;
-                        self.skip_save = covered;
+                        self.skip_save = covered || self.unlogged_at(off);
                         if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap), true, off % esz as usize == 0)? { self.skip_save = false; return Ok(()); }
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, esz, code, cap, vv));

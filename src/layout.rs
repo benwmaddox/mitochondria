@@ -40,7 +40,8 @@ impl Ty { pub fn is_coll(&self) -> bool { matches!(self, Ty::List(..) | Ty::Pool
 
 /// `ranges[k]`: field k's declared range (`limit: i64 in 0..3000000`, both ends included), when it has one: every write is checked against it,
 /// and reads give the range analysis that interval.
-pub struct StructDef { pub name: String, pub fields: Vec<(String, Ty)>, pub ranges: Vec<Option<(i64, i64)>>, pub offs: Vec<usize>, pub size: usize, pub align: usize, state: u8 }
+/// `unlogged[k]`: field k is kept out of the undo log (`scratch: u8[4096] unlogged`): a failed request leaves what it wrote there.
+pub struct StructDef { pub name: String, pub fields: Vec<(String, Ty)>, pub ranges: Vec<Option<(i64, i64)>>, pub unlogged: Vec<bool>, pub offs: Vec<usize>, pub size: usize, pub align: usize, state: u8 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind { List(Full), Pool(bool) }
@@ -64,6 +65,7 @@ pub struct Coll {
     /// The struct its items are, when they are structs (an input of type `Player` finds its pool by this).
     pub item: Option<usize>,
     pub parent: Option<usize>, // the collection whose items hold this one
+    pub unlogged: bool,        // kept out of the undo log (declared `unlogged`, or inside an unlogged collection's items)
     pub hdr: usize,  // list: len, head; pool: high-water, count, hint, ever. Each a u32 array of `mult` entries
     pub live: usize, // pool: live bits, `words()` u64 per instance
     pub gen: usize,  // checked pool: u32 per item
@@ -87,6 +89,8 @@ pub struct Global { pub name: String, pub ty: Ty, pub off: usize, pub coll: Opti
 pub struct ModInst { pub name: String, pub module: String, pub key: Option<String> }
 
 pub struct Program {
+    /// byte ranges kept out of the undo log (unlogged plain fields, unlogged collections), each on whole 64-byte lines
+    pub unlogged: Vec<(usize, usize)>,
     pub instances: Vec<ModInst>,
     pub structs: Vec<StructDef>,
     pub globals: Vec<Global>,
@@ -159,6 +163,7 @@ impl Program {
                     let name = p.ident()?; p.eat("{")?;
                     let mut fields = Vec::new();
                     let mut ranges = Vec::new();
+                    let mut unlogged = Vec::new();
                     while p.peek() != Some("}") {
                         let f = p.ident()?; p.eat(":")?; let ty = p.ty()?;
                         // `in lo..hi`: a declared range for an integer field, both ends included
@@ -170,11 +175,13 @@ impl Program {
                             if lo > hi || (lo as i128) < tl || (hi as i128) > th { return Err(format!("`{}.{}`: range {}..{} does not fit its type", name, f, lo, hi)); }
                             if lo > 0 || hi < 0 { return Err(format!("`{}.{}`: range {}..{} must include 0, the value a field starts with", name, f, lo, hi)); }
                         }
+                        // `unlogged`: kept out of the undo log (a plain field, or a whole collection with what its items hold)
+                        let unl = p.word("unlogged");
                         p.eat(";")?;
-                        fields.push((f, ty)); ranges.push(range);
+                        fields.push((f, ty)); ranges.push(range); unlogged.push(unl);
                     }
                     p.eat("}")?;
-                    structs.push(StructDef { name, fields, ranges, offs: Vec::new(), size: 0, align: 1, state: 0 });
+                    structs.push(StructDef { name, fields, ranges, unlogged, offs: Vec::new(), size: 0, align: 1, state: 0 });
                 }
                 "state" => {
                     let n = p.ident()?; p.eat(":")?; let ty = p.ty()?; p.eat(";")?;
@@ -193,7 +200,7 @@ impl Program {
             }
         }
         if globals.is_empty() { return Err("a program has one state (`state game: Game;`), and this one has none".into()); }
-        let mut prog = Program { instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
+        let mut prog = Program { unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
             let fs = std::mem::take(&mut prog.structs[i].fields);
@@ -219,7 +226,7 @@ impl Program {
             let ty = prog.globals[g].ty.clone();
             let name = prog.globals[g].name.clone();
             if ty.is_coll() {
-                let cid = prog.build_coll(&name, &ty, 1, None, &mut cur, &mut refs, 0)?;
+                let cid = prog.build_coll(&name, &ty, 1, None, false, &mut cur, &mut refs, 0)?;
                 prog.globals[g].coll = Some(cid);
             } else if let Ty::Struct(s) = ty {
                 let base = prog.globals[g].off;
@@ -227,6 +234,9 @@ impl Program {
             } else if contains_coll(&prog, &ty) {
                 return Err(format!("`{}`: collections inside fixed arrays are not supported; use a nested list", name));
             }
+        // the bytes kept out of the undo log
+        for g in 0..prog.globals.len() { if let Ty::Struct(st) = prog.globals[g].ty.clone() { let base = prog.globals[g].off; prog.plain_unlogged(st, base, false); } }
+        for c in 0..prog.colls.len() { if prog.colls[c].unlogged && prog.colls[c].parent.is_none() { let (a, b) = (prog.colls[c].start, prog.colls[c].end); prog.unlogged.push((a, up(b, 64))); } }
         }
         for (cid, ci, name) in refs {
             let Some(t) = prog.ref_pool(&name) else { return Err(not_a_target(&name)) };
@@ -246,11 +256,14 @@ impl Program {
         match self.structs[i].state { 2 => return Ok(()), 1 => return Err(format!("struct `{}` contains itself directly: sizes must be fixed (nest it in a list or pool)", self.structs[i].name)), _ => {} }
         self.structs[i].state = 1;
         let fields = self.structs[i].fields.clone();
+        let unlogged = self.structs[i].unlogged.clone();
         for (_, t) in &fields { self.layout_deps(t)?; }
         let (mut off, mut align, mut offs) = (0, 1, Vec::new());
-        for (_, t) in &fields {
+        for (k, (_, t)) in fields.iter().enumerate() {
             if t.is_coll() { offs.push(usize::MAX); continue; }
             let (s, a) = self.plain_size(t);
+            // an unlogged field has its own 64-byte lines: the undo log saves and restores whole lines, so no logged byte may share one
+            let (s, a) = if unlogged[k] { (up(s, 64), a.max(64)) } else { (s, a) };
             off = up(off, a); offs.push(off); off += s; align = align.max(a);
         }
         let s = &mut self.structs[i];
@@ -262,12 +275,23 @@ impl Program {
         match t { Ty::Struct(i) => self.layout_struct(*i), Ty::Arr(e, _) => self.layout_deps(e), _ => Ok(()) } // collections break cycles
     }
 
+    /// The byte ranges of unlogged plain fields under struct `s` at `base` (`all`: the whole struct is inside an unlogged field).
+    fn plain_unlogged(&mut self, s: usize, base: usize, all: bool) {
+        let fields = self.structs[s].fields.clone();
+        for (k, (_, t)) in fields.iter().enumerate() {
+            if t.is_coll() { continue; }
+            let o = base + self.structs[s].offs[k];
+            let unl = all || self.structs[s].unlogged[k];
+            if let Ty::Struct(c) = t { self.plain_unlogged(*c, o, unl); continue; }
+            if unl { let (sz, _) = self.plain_size(t); self.unlogged.push((o, o + up(sz, 64))); }
+        }
+    }
     fn plain_struct_colls(&mut self, s: usize, base: usize, path: &str, cur: &mut usize, refs: &mut Vec<(usize, usize, String)>) -> Result<(), String> {
         let fields = self.structs[s].fields.clone();
         for (k, (n, t)) in fields.iter().enumerate() {
             let p = format!("{}.{}", path, n);
             if t.is_coll() {
-                let cid = self.build_coll(&p, t, 1, None, cur, refs, 0)?;
+                let cid = self.build_coll(&p, t, 1, None, self.structs[s].unlogged[k], cur, refs, 0)?;
                 self.plain_colls.push((base, s, n.clone(), cid));
             } else if let Ty::Struct(c) = t {
                 let o = base + self.structs[s].offs[k];
@@ -279,7 +303,7 @@ impl Program {
         Ok(())
     }
 
-    fn build_coll(&mut self, name: &str, ty: &Ty, mult: usize, parent: Option<usize>, cur: &mut usize, refs: &mut Vec<(usize, usize, String)>, depth: usize) -> Result<usize, String> {
+    fn build_coll(&mut self, name: &str, ty: &Ty, mult: usize, parent: Option<usize>, unlogged: bool, cur: &mut usize, refs: &mut Vec<(usize, usize, String)>, depth: usize) -> Result<usize, String> {
         if depth > 8 { return Err(format!("`{}`: collections nested more than 8 deep (a struct that contains itself?)", name)); }
         let (elem, cap, kind) = match ty { Ty::List(e, n, f) => ((**e).clone(), *n, Kind::List(*f)), Ty::Pool(e, n, c) => ((**e).clone(), *n, Kind::Pool(*c)), _ => unreachable!() };
         if cap == 0 { return Err(format!("`{}`: capacity must be at least 1", name)); }
@@ -287,7 +311,7 @@ impl Program {
         let cid = self.colls.len();
         let start = up(*cur, PAGE);
         let item = if let Ty::Struct(s) = &elem { Some(*s) } else { None };
-        let mut c = Coll { name: name.to_string(), kind, cap, mult, item, parent, hdr: start, live: 0, gen: 0, cols: Vec::new(), children: Vec::new(), start, end: 0 };
+        let mut c = Coll { name: name.to_string(), kind, cap, mult, item, parent, unlogged, hdr: start, live: 0, gen: 0, cols: Vec::new(), children: Vec::new(), start, end: 0 };
         let mut o = start + c.hdr_fields() * 4 * mult;
         if let Kind::Pool(checked) = kind {
             o = up(o, 8); c.live = o; o += mult * c.words() * 8;
@@ -310,7 +334,7 @@ impl Program {
         self.colls.push(c);
         *cur = o;
         for (path, t) in kids {
-            let k = self.build_coll(&format!("{}.{}", name, path), &t, items, Some(cid), cur, refs, depth + 1)?;
+            let k = self.build_coll(&format!("{}.{}", name, path), &t, items, Some(cid), unlogged, cur, refs, depth + 1)?;
             self.colls[cid].children.push((path, k));
         }
         self.colls[cid].end = *cur;
@@ -320,7 +344,10 @@ impl Program {
     fn flatten(&self, t: &Ty, prefix: &str, range: Option<(i64, i64)>, leaves: &mut Vec<(String, Ty, Option<(i64, i64)>)>, kids: &mut Vec<(String, Ty)>, name: &str) -> Result<(), String> {
         let join = |f: &str| if prefix.is_empty() { f.to_string() } else { format!("{}.{}", prefix, f) };
         match t {
-            Ty::Struct(i) => for (k, (f, ft)) in self.structs[*i].fields.iter().enumerate() { self.flatten(ft, &join(f), self.structs[*i].ranges[k], leaves, kids, name)?; },
+            Ty::Struct(i) => for (k, (f, ft)) in self.structs[*i].fields.iter().enumerate() {
+                if self.structs[*i].unlogged[k] { return Err(format!("`{}`: `{}` is declared unlogged, but items of a collection are logged or not as a whole: declare the collection `unlogged`", name, join(f))); }
+                self.flatten(ft, &join(f), self.structs[*i].ranges[k], leaves, kids, name)?;
+            },
             Ty::Scalar(_) | Ty::Str(_) | Ty::Ref(_) => leaves.push((prefix.to_string(), t.clone(), range)),
             Ty::Arr(e, _) if matches!(**e, Ty::Scalar(_)) => leaves.push((prefix.to_string(), t.clone(), None)),
             Ty::List(..) | Ty::Pool(..) => kids.push((prefix.to_string(), t.clone())),

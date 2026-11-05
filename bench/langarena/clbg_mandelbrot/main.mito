@@ -4,7 +4,7 @@
 // and the checksum hashes the whole buffer after the last run (hash = hash * 33 + byte, modulo 2^32), outside the timed runs.
 // The language has no bit operators, so the shifts and the or are arithmetic: `acc << 1` is acc * 2, `acc |= 1` is acc + 1 on a
 // value whose low bit is zero, `acc <<= k` is acc * 2^k.
-struct Mandel { buf: u8[2500000]; pos: i64; w: i64; h: i64; }
+struct Mandel { buf: u8[2500000] unlogged; pos: i64; w: i64; h: i64; }
 state md: Mandel;
 
 fn put_byte(b) { md.buf[md.pos] = b; md.pos = md.pos + 1; }

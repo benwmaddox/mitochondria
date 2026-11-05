@@ -1,2 +1,2 @@
 like-for-like
-Same coder statement by statement: the reference's u64 range arithmetic (64-bit here), its frequency table, pending-bit handling and bit writer. The reference's Vec push is a store into an output array. Stores are checked and undo-logged.
+Same coder statement by statement: the reference's u64 range arithmetic (64-bit here), its frequency table, pending-bit handling and bit writer. The reference's Vec push is a store into an output array. Other stores are checked and undo-logged. Scratch state rebuilt every run (the reference's locals: out) is declared `unlogged`, kept out of the undo log.

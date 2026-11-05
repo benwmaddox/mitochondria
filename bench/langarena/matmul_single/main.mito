@@ -4,7 +4,7 @@
 // matrix is one array indexed i * n + j (closest-possible: same arithmetic, different shape). The reference's checksum hashes the
 // text of the centre element of every run's product; the centre value is identical every run, so this port answers it (GET /result)
 // and the benchmark harness formats and hashes it exactly as the reference does, over the warmup and timed runs.
-struct Mat { a: f64[810000]; b: f64[810000]; bt: f64[810000]; c: f64[810000]; n: i64; center: f64; }
+struct Mat { a: f64[810000]; b: f64[810000]; bt: f64[810000] unlogged; c: f64[810000] unlogged; n: i64; center: f64; }
 state m: Mat;
 
 fn matgen_into_a_and_b() {

@@ -2,7 +2,7 @@
 // of every run (warmup included) and the benchmark's final message names the first four characters of the data and of the encoded text. This port answers those characters and the
 // sum (GET /result); the benchmark harness builds the message and hashes it exactly as the reference does. The reference calls the base64-simd library (SIMD); this is a plain
 // scalar loop over three input bytes at a time.
-struct B64 { data: u8[500000]; encoded: u8[666672]; alphabet: u8[64]; size: i64; encoded_len: i64; result: i64; }
+struct B64 { data: u8[500000]; encoded: u8[666672] unlogged; alphabet: u8[64]; size: i64; encoded_len: i64; result: i64; }
 state b: B64;
 
 fn encode() {

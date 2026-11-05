@@ -900,3 +900,30 @@ A trivial endpoint (`GET /n`, handler about 200 ns), Windows loopback, unpinned:
 | 8 Python client threads, kept connections | | 48,000-57,000 req/s (the client is the limit) |
 
 With 40 connections that never sent anything and 40 idle kept ones open (more than the 16 threads), a new client was answered in 0.7 ms.
+
+## Round 27: `unlogged` scratch state (2026-11-05)
+
+`unlogged` on a plain field (`scratch: u8[4096] unlogged`) or a whole collection (`pool<Node, N> unlogged`, with what its items hold) keeps it out of the undo log: a failed request
+leaves what it wrote there, while logged data rolls back as before (removals still happen only when a request succeeds). The runtime marks those lines saved once at start and never
+journals them, so every save path skips them; generated stores to them have no undo-log test. Unlogged plain fields get their own 64-byte lines (the log saves and restores whole lines).
+
+30 LangArena ports now declare the state they rebuild every run (the reference's locals: scratch arrays, output buffers, per-run arenas and trees) unlogged; their audit files say which.
+Same compiler, logged sources against unlogged ones, best of 2 alternating rounds:
+
+| Workload | logged s | unlogged scratch s | change |
+|---|---|---|---|
+| Base64::Encode | 2.531 | 1.188 | -53% |
+| Base64::Decode | 1.625 | 1.059 | -35% |
+| Hash::SHA256 | 0.938 | 0.637 | -32% |
+| CLBG::Fannkuchredux | 1.332 | 0.916 | -31% |
+| Graph::AStar | 0.894 | 0.640 | -28% |
+| Compress::HuffEncode | 0.755 | 0.600 | -21% |
+| Compress::HuffDecode | 1.054 | 0.900 | -15% |
+| Template::Parse, Brainfuck::Recursion | | | -11% |
+| Calculator::Ast, Graph::DFS, Sort::Merge, Binarytrees::Arena, Sort::Quick, Distance::Jaro | | | -7% to -9% |
+| Compress::BWTEncode, Etc::Sieve, Brainfuck::Array, LZWEncode, Maze::AStar | | | -4% to -6% |
+| the other 10 | | | -3% to +3% |
+
+Geometric mean over the 31 measured: -10.9%. Maze::Generator was measured too and got 20-25% slower with its two stack arrays unlogged; with the undo log compiled out entirely it is also slower
+(0.63-0.65 s against 0.49 s logged, and Round 25 showed the same: 0.37 s without range and commit tests, 0.42 s with the log also off). Something about journaling those lines makes this
+port faster; not explained yet, so Maze::Generator keeps its arrays logged.

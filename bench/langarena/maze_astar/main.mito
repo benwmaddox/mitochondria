@@ -5,7 +5,7 @@
 // starting value, which is what a fresh program has). Kinds: 0 wall, 1 space, 2 start, 3 finish, 4 border; walkable is space, start or finish.
 // The checksum is the sum of the path lengths plus the x * y of the middle cell of the last path.
 struct Cell { kind: u8; x: i32; y: i32; ny: i32[4]; nx: i32[4]; }
-struct M { cells: pool<Cell, 1960000>; w: i64; h: i64; last: i64; result: i64; sy: i32[262144]; sx: i32[262144]; came: i32[1960000]; gs: i32[1960000]; bf: i32[1960000]; hf: i32[4096]; hv: i32[4096]; hn: i64; cur_v: i64; mid: i64; }
+struct M { cells: pool<Cell, 1960000>; w: i64; h: i64; last: i64; result: i64; sy: i32[262144]; sx: i32[262144]; came: i32[1960000] unlogged; gs: i32[1960000] unlogged; bf: i32[1960000] unlogged; hf: i32[4096] unlogged; hv: i32[4096] unlogged; hn: i64; cur_v: i64; mid: i64; }
 state m: M;
 
 fn next_int(max) {

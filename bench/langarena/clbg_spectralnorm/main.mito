@@ -4,7 +4,7 @@
 // they are state arrays (the language has no per-call allocation). The reference's checksum is taken once, after the last run, from
 // sqrt(vBv / vv) of the final u and v; the language has no sqrt, so this port answers vBv / vv (GET /result) and the benchmark
 // harness takes that one square root and hashes the formatted value exactly as the reference does.
-struct Spec { u: f64[1200]; v: f64[1200]; tmp: f64[1200]; size: i64; }
+struct Spec { u: f64[1200]; v: f64[1200]; tmp: f64[1200] unlogged; size: i64; }
 state sp: Spec;
 
 fn eval_a(i, j) {

@@ -3,7 +3,7 @@
 // the head of another list (nodes in arrays: the language has no variable-length nested vectors); parse and execute recurse as in the reference. The tape starts with one cell and grows
 // by one when the pointer passes the end. `.` folds the cell into a 64-bit result (result = result * 4 + cell); the checksum adds each run's result as u32. The program text and
 // the warmup program (run 1000 times before the timed run) are given to prepare.
-struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096]; srclen: i64; pos: i64; op: u8[4096]; nxt: i32[4096]; body: i32[4096]; nops: i64; tape: u8[100000]; tlen: i64; tpos: i64; result: i64; total: i64; }
+struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096] unlogged; srclen: i64; pos: i64; op: u8[4096] unlogged; nxt: i32[4096] unlogged; body: i32[4096] unlogged; nops: i64; tape: u8[100000] unlogged; tlen: i64; tpos: i64; result: i64; total: i64; }
 state g: BF;
 
 // the reference's parse: the list of operations up to the matching `]` (or the end of the text); returns its first node, -1 for an empty list

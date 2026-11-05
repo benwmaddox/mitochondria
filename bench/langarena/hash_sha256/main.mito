@@ -3,7 +3,7 @@
 // as big-endian bytes, and the run's hash is its first four bytes read little-endian. A buffer of 1,100,000 pseudo-random bytes, `iterations`
 // times, each run first overwriting one random byte. The reference's u32 wrapping arithmetic is 64-bit integers masked to 32 bits at the same
 // points. The checksum adds the hash of every run, warmup runs included, modulo 2^32; the random generator is reset after warmup.
-struct Buf { data: u8[1100000]; hashes: u32[8]; digest: u8[32]; size: i64 in 0..1100000; last: i64 in 0..139967; result: i64 in 0..4294967295; }
+struct Buf { data: u8[1100000]; hashes: u32[8] unlogged; digest: u8[32] unlogged; size: i64 in 0..1100000; last: i64 in 0..139967; result: i64 in 0..4294967295; }
 state h: Buf;
 
 fn next_int(max) {

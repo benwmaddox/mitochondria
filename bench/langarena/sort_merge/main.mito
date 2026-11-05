@@ -3,7 +3,7 @@
 // slices, a second array for the copy, and the temp array lives in the state instead of being allocated per run. The checksum
 // adds one random element of the input and one of the sorted output per run, warmup runs included, modulo 2^32; the random
 // generator is reset after warmup.
-struct Sort { data: i32[400000]; t: i32[400000]; tmp: i32[400000]; size: i64 in 0..400000; last: i64 in 0..139967; result: i64 in 0..4294967295; }
+struct Sort { data: i32[400000]; t: i32[400000] unlogged; tmp: i32[400000] unlogged; size: i64 in 0..400000; last: i64 in 0..139967; result: i64 in 0..4294967295; }
 state so: Sort;
 
 fn next_int(max) {

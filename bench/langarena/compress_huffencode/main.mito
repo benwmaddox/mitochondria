@@ -3,7 +3,7 @@
 // joined and the parent inserted at the position Rust's `binary_search_by` returns; codes are built by recursion, bits are packed most significant first. The reference's
 // Box nodes are arrays (the tree has 9 nodes). The checksum adds the length of every run's output, warmup included.
 struct HF {
-    data: u8[1048576]; out: u8[1048576]; freq: i32[256]; code_len: i32[256]; codes: i32[256];
+    data: u8[1048576]; out: u8[1048576] unlogged; freq: i32[256]; code_len: i32[256]; codes: i32[256];
     node_freq: i32[600]; node_byte: i32[600]; node_leaf: i32[600]; node_left: i32[600]; node_right: i32[600]; nodes: i64;
     list: i32[600]; list_len: i64; root: i64;
     size: i64; out_len: i64; bit_count: i64; result: i64; 

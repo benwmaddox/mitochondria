@@ -2,7 +2,7 @@
 // checksum adds the decoded length of every run (warmup included) and the benchmark's final message names the first four characters of the encoded and of the decoded text. This
 // port answers those characters and the sum (GET /result); the benchmark harness builds the message and hashes it exactly as the reference does. The reference calls the
 // base64-simd library (SIMD); this is a plain scalar loop over four input characters at a time with a 256-entry lookup table (255 = not a Base64 character).
-struct B64 { encoded: u8[666672]; decoded: u8[500000]; alphabet: u8[64]; table: u8[256]; size: i64; encoded_len: i64; decoded_len: i64; result: i64; bad: i64; }
+struct B64 { encoded: u8[666672]; decoded: u8[500000] unlogged; alphabet: u8[64]; table: u8[256]; size: i64; encoded_len: i64; decoded_len: i64; result: i64; bad: i64; }
 state b: B64;
 
 fn encode_input() {

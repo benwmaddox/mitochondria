@@ -2,7 +2,7 @@
 // 32-element working arrays as the reference; the reference's `loop`/`return` are state machines here (the language has no
 // break), and `x >> 1` is `x / 2` (the values are never negative). The checksum adds checksum*100 + max_flips of every run,
 // warmup runs included, modulo 2^32.
-struct Fannkuch { perm1: i32[32]; perm: i32[32]; count: i32[32]; n: i64 in 0..32; result: i64 in 0..4294967295; }
+struct Fannkuch { perm1: i32[32] unlogged; perm: i32[32] unlogged; count: i32[32] unlogged; n: i64 in 0..32; result: i64 in 0..4294967295; }
 state f: Fannkuch;
 
 fn one_run() {

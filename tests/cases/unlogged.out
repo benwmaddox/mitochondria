@@ -1,0 +1,14 @@
+POST /write/5/false -> 200 {}
+GET /state -> 200 {"count":5,"buf3":5,"kept":5,"logged":5,"nodes":1,"plain":1,"values":[5]}
+POST /write/7/true -> 409 {"error":"failed after writing"}
+GET /state -> 200 {"count":7,"buf3":7,"kept":5,"logged":5,"nodes":2,"plain":1,"values":[5,7]}
+POST /remove-then-fail -> 409 {"error":"removals undone"}
+GET /state -> 200 {"count":7,"buf3":7,"kept":5,"logged":5,"nodes":2,"plain":1,"values":[5,7]}
+POST /remove -> 200 {"count":0}
+GET /state -> 200 {"count":7,"buf3":7,"kept":5,"logged":5,"nodes":0,"plain":1,"values":[]}
+POST /loop/40/true -> 409 {"error":"failed"}
+GET /state -> 200 {"count":47,"buf3":35,"kept":5,"logged":5,"nodes":0,"plain":1,"values":[]}
+state <plain values> 256
+state app.nodes 16
+state app.plain 33
+memory reserved=12288 committed=12288 live=305

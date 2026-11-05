@@ -1,0 +1,45 @@
+// `unlogged` keeps a plain field or a whole collection out of the undo log: a request that fails after writing there leaves what it wrote (logged data
+// next to it, even on the same 64-byte line before the layout split them, is rolled back as before); adds and field writes in an unlogged pool survive
+// a failure, removals still happen only when a request succeeds
+--- program
+struct Node { value: i64; tag: u8; }
+struct Scratch { count: i64 unlogged; buf: u8[16] unlogged; kept: i64; }
+struct App { s: Scratch; logged: i64; nodes: pool<Node, 8> unlogged; plain: pool<Node, 8>; }
+state app: App;
+
+@post("/write/{v}/{fail_after}")
+fn post_write(v: i64, fail_after: bool) -> Response<{}> {
+    app.s.count = v;
+    app.s.buf[3] = v % 256;
+    app.s.kept = v;
+    app.logged = v;
+    let n = app.nodes.add(); n.value = v;
+    let m = app.plain.add(); m.value = v;
+    if fail_after { fail 409 "failed after writing"; }
+    return ok({});
+}
+@post("/remove-then-fail")
+fn post_remove_then_fail() -> Response<{}> { each n in app.nodes { app.nodes.remove(n); } fail 409 "removals undone"; }
+@post("/remove")
+fn post_remove() -> Response<{ count: i64 }> { each n in app.nodes { app.nodes.remove(n); } return ok({ "count": 0 }); }
+@post("/loop/{n}/{fail_after}")
+fn post_loop(n: i64, fail_after: bool) -> Response<{}> {
+    each i in 0..n { app.s.buf[i % 16] = i; app.s.count = app.s.count + 1; }
+    if fail_after { fail 409 "failed"; }
+    return ok({});
+}
+@get("/state")
+fn get_state() -> Response<{ count: i64, buf3: i64, kept: i64, logged: i64, nodes: i64, plain: i64, values: [i64] }> {
+    return ok({ "count": app.s.count, "buf3": app.s.buf[3], "kept": app.s.kept, "logged": app.logged, "nodes": app.nodes.count(), "plain": app.plain.count(), "values": [each n in app.nodes n.value] });
+}
+--- requests
+POST /write/5/false
+GET /state
+POST /write/7/true
+GET /state
+POST /remove-then-fail
+GET /state
+POST /remove
+GET /state
+POST /loop/40/true
+GET /state

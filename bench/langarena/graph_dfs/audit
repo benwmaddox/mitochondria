@@ -1,2 +1,2 @@
 rewritten-to-match
-Same graph shape. The reference's stack Vec is an array of 65,536 (it reaches 28,567 for the run parameters, measured by simulating it); the per-run visited array is a fill. The loop and the neighbour scan follow the reference line by line. Stores are checked and undo-logged.
+Same graph shape. The reference's stack Vec is an array of 65,536 (it reaches 28,567 for the run parameters, measured by simulating it); the per-run visited array is a fill. The loop and the neighbour scan follow the reference line by line. Other stores are checked and undo-logged. Scratch state rebuilt every run (the reference's locals: visited, sv, sd) is declared `unlogged`, kept out of the undo log.

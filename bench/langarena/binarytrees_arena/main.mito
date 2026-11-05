@@ -3,7 +3,7 @@
 // nodes, a node's index is its slot (nodes are added in the order the reference pushes them), and starting a fresh arena is coll.clear(). The checksum adds each
 // run's sum, warmup runs included, modulo 2^32.
 struct Node { item: i32; left: i32; right: i32; }
-struct T { arena: pool<Node, 2097151>; depth: i64; result: i64; }
+struct T { arena: pool<Node, 2097151> unlogged; depth: i64; result: i64; }
 state tree: T;
 
 fn build(item, depth) {

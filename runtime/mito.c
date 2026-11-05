@@ -1416,6 +1416,15 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     }
     ensure(mem, 0, pg->plain_end);
     for (u32 c = 0; c < pg->ncolls; c++) { const MitoColl *k = &pg->colls[c]; if (k->parent < 0) ensure(mem, k->hdr, k->hdr + hdr_fields(k) * 4); }
+    /* Unlogged bytes: their lines are marked saved once, here, and never journaled, so no store, add or helper saves them and a rollback
+       leaves them as written. The undo log clears the mark only of lines it saved, so these stay marked. */
+    for (u32 r = 0; r < pg->nunlogged; r++) {
+        u64 a = pg->unlogged[2 * r], b = pg->unlogged[2 * r + 1];
+        if (b <= a) continue;
+        u64 d0 = (a / PAGE) * (PAGE / 64 / 8) & ~(PAGE - 1), d1 = up(((b - 1) / PAGE + 1) * (PAGE / 64 / 8), PAGE);
+        if (!os_commit(mem->dirty + d0, d1 - d0)) return 0;
+        for (u64 l = a / LINE; l < (b + LINE - 1) / LINE; l++) mem->dirty[l >> 3] |= (u8)(1u << (l & 7));
+    }
     return m;
 }
 MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return; os_release(m->mem.base); os_release(m->mem.committed); os_release(m->mem.dirty); os_release(m->mem.jb.p); os_release(m->frees.p); os_release(m->sel.p); os_release(m->areas); os_release(m); }

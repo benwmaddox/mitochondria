@@ -5,7 +5,7 @@
 // texts); String texts are byte arrays (the text, 8 MB, and the rendered output), written a byte at a time; a name is cut out of the text with text_from (the bytes copied into the
 // request's text area, where the reference borrows them).
 struct T {
-    text: u8[8388608]; text_len: i64; rendered: u8[8388608]; rendered_len: i64;
+    text: u8[8388608]; text_len: i64; rendered: u8[8388608] unlogged; rendered_len: i64;
     vars: strmap<150016>;
     names: u8[256]; name_off: i32[32]; name_len: i32[32]; names_len: i64;
     count: i64; result: i64;

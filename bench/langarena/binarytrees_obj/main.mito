@@ -3,7 +3,7 @@
 // right child (item + 2^(depth-1)); sum adds item + 1 over the tree. Each node is a pool item with two references (the reference's Option<Box<TreeNode>>), and
 // dropping the tree at the end of a run is coll.clear(). The checksum adds each run's sum, warmup runs included, modulo 2^32 (item as u32 is item modulo 2^32).
 struct Node { item: i32; left: ref<tree.nodes>; right: ref<tree.nodes>; }
-struct T { nodes: pool<Node, 2097151> checked; depth: i64; result: i64; }
+struct T { nodes: pool<Node, 2097151> checked unlogged; depth: i64; result: i64; }
 state tree: T;
 
 fn build(item, depth) {

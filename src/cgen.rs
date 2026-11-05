@@ -405,6 +405,7 @@ struct G<'p> {
     var_names: std::collections::HashSet<String>, // the C names of `var`s: a `let` of one must copy it
     fast_sites: std::collections::HashSet<*const Expr>, // array indexes a versioned loop's guard proved in range (their stores' ranges already saved)
     versioned: u32, // how many versioned loops enclose the code being generated (each doubles its body; at most 3 deep)
+    loop_hint: Option<(i64, i64)>, // the next range loop's counter interval, proven by a versioning guard (its fast copy)
     checked: Vec<(String, u64)>, // range tests done since the last statement start, block boundary, label or goto: (index, size) need not be tested again
     skip_save: bool, // the next inline store needs no undo-log test (its range was saved by a loop guard)
     txt_escapes: Vec<u32>, // slots of variables that were assigned a string (or a value of unknown kind), in the order it happened
@@ -835,7 +836,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, checked: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1142,7 +1143,7 @@ impl<'p> G<'p> {
     /// stays inside its array for the whole loop, and save the ranges the loop stores into to the undo log in one pass when it
     /// does. Returns the test's C name and the accesses the fast copy may do without their own range test and undo-log test;
     /// None when the loop has no such access. The checked copy runs when the test fails, so behaviour is unchanged.
-    fn version_guard(&mut self, it: &'p Iter, body: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<Option<(String, std::collections::HashSet<*const Expr>)>> {
+    fn version_guard(&mut self, it: &'p Iter, body: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<Option<(String, std::collections::HashSet<*const Expr>, Vec<(String, (i64, i64))>, Option<(i64, i64)>)>> {
         let (Some(hi), None) = (&it.hi, &it.via) else { return Ok(None) };
         if self.versioned >= 3 { return Ok(None); }
         let assigned = assigned_slots(body);
@@ -1174,20 +1175,29 @@ impl<'p> G<'p> {
         const BIG: &str = "1099511627776LL"; // 2^40: every value in the test is checked against it first, so no sum in it overflows
         let mut fast = std::collections::HashSet::new();
         let mut saves: Vec<(String, String, String)> = Vec::new(); // (nonempty test, byte offset, byte count)
+        // what the guard proves about values, for the fast copy's range analysis: every bound is within 2^40, so the counter and a stepped
+        // variable (which stays below its limit plus one step) are within 2^41, and arithmetic on them that cannot overflow needs no test
+        const BOUND: i64 = 1 << 40;
+        let mut hints: Vec<(String, (i64, i64))> = Vec::new();
+        let mut counter: Option<(i64, i64)> = None;
         for (slot, sites, bound) in plans {
             // the smallest and largest value of the counter or stepped variable in the loop, and whether the loop runs at all
             let (vmin, vmax) = match bound {
                 Bound::Range(lo, hi) => {
                     let lo = { let v = self.expr(lo, env, None)?; let k = self.int_or(v, 500, "a range needs integers"); self.hold_int(k) };
                     let hi = { let v = self.expr(hi, env, None)?; let k = self.int_or(v, 500, "a range needs integers"); self.hold_int(k) };
+                    counter = Some((-BOUND, BOUND));
                     (lo, format!("({} - 1)", hi))
                 }
                 Bound::Stepped(limit, inclusive, step) => {
+                    let step_expr = step;
                     let Some(CV::Int(start)) = env[slot as usize].clone() else { continue };
                     let start = self.hold_int(start);
                     let limit = { let v = self.expr(limit, env, None)?; let k = self.int_or(v, 500, "a bound must be an integer"); self.hold_int(k) };
                     let step = { let v = self.expr(step, env, None)?; let k = self.int_or(v, 500, "a step must be an integer"); self.hold_int(k) };
-                    self.line(&format!("if (!({step} > 0)) {guard} = 0;"));
+                    self.line(&format!("if (!({step} > 0 && {step} <= {BIG})) {guard} = 0;"));
+                    if let Some(CV::Int(name)) = env[slot as usize].clone() { hints.push((name, (-2 * BOUND, 2 * BOUND))); }
+                    if let Expr::Var(_, VarRes::Local(ss)) = step_expr { if let Some(CV::Int(name)) = env[*ss as usize].clone() { hints.push((name, (1, BOUND))); } }
                     (start, if inclusive { limit } else { format!("({} - 1)", limit) })
                 }
             };
@@ -1216,6 +1226,7 @@ impl<'p> G<'p> {
             }
         }
         if fast.is_empty() { return Ok(None); }
+        // a counter whose loop has no array access to version still gets nothing: only plans with sites reach here
         for (nonempty, at, count) in saves {
             self.line(&format!("if ({guard} && {nonempty}) {{"));
             self.depth += 1;
@@ -1223,7 +1234,7 @@ impl<'p> G<'p> {
             self.depth -= 1;
             self.line("}");
         }
-        Ok(Some((guard, fast)))
+        Ok(Some((guard, fast, hints, counter)))
     }
 
     /// One store of `size` bytes (the bits `bits`) at byte offset `addr`. A naturally aligned one (`aligned`: it cannot cross a 64-byte line or a
@@ -1457,13 +1468,18 @@ impl<'p> G<'p> {
                 }
                 let collect = allocates(self.api, body, &mut Vec::new()) || (it.wher.is_some() && writes(self.api, body, &mut Vec::new()));
                 match self.version_guard(it, body, env)? {
-                    Some((guard, sites)) => {
+                    Some((guard, sites, hints, counter)) => {
                         // the fast copy: the guard proved every listed array access of the loop in range and saved the stored ranges to the undo log
                         self.versioned += 1;
                         self.open(&format!("if ({}) {{", guard));
                         let joined: std::collections::HashSet<*const Expr> = sites.union(&self.fast_sites).copied().collect();
                         let kept = std::mem::replace(&mut self.fast_sites, joined);
+                        let ranges_kept = self.ranges.clone();
+                        for (name, iv) in hints { self.ranges.insert(name, iv); }
+                        self.loop_hint = counter;
                         self.loop_stmt(it, body, env, collect)?;
+                        self.loop_hint = None;
+                        self.ranges = ranges_kept;
                         self.fast_sites = kept;
                         self.close("}");
                         self.open("else {");
@@ -2451,6 +2467,7 @@ impl<'p> G<'p> {
         env[it.slot as usize] = Some(CV::Int(k.clone()));
         // the counter is never assigned in the body: between the smallest lower bound and one below the largest upper bound
         if let (Some((lo_min, _)), Some((_, hi_max))) = (self.interval(&lo), self.interval(&hi)) { if hi_max > lo_min { self.ranges.insert(k.clone(), (lo_min, hi_max - 1)); } }
+        if let Some(h) = self.loop_hint.take() { self.ranges.entry(k.clone()).or_insert(h); } // a versioning guard proved the bounds within 2^40
         if let Some(w) = &it.whil { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) break;", wc)); }
         if let Some(w) = &it.wher {
             let wv = self.expr(w, env, None)?;

@@ -15,9 +15,9 @@ state m: M;
 @post("/inc/{k}")
 fn post_inc_k(k: i64) -> Response<{ shard: i64, n: i64, from: i64, seen: i64 }> { m.n = m.n + 1; forward count[k] { "from": worker_index(), "seen": m.n }; }
 @post("/bad")
-fn post_bad() -> Response<none> { forward nowhere[0] { "x": 1 }; }
+fn post_bad() -> Response<null> { forward nowhere[0] { "x": 1 }; }
 @post("/odd/{k}")
-fn post_odd_k(k: i64) -> Response<none> { forward count[k] {}; }
+fn post_odd_k(k: i64) -> Response<null> { forward count[k] {}; }
 @get("/front")
 fn get_front() -> Response<{ n: i64, me: i64, of: i64 }> { return ok({ "n": m.n, "me": worker_index(), "of": worker_count() }); }
 --- file count.mito
@@ -27,7 +27,7 @@ state c: C;
 @post("/inc/{k}")
 fn post_inc_k_2(k: string<4096>, forwarded from: i64, forwarded seen: i64) -> Response<{ shard: i64, n: i64, from: i64, seen: i64 }> { c.n = c.n + 1; return ok({ "shard": worker_index(), "n": c.n, "from": from, "seen": seen }); }
 @post("/odd/{k}")
-fn post_odd_k_2(k: string<4096>) -> Response<none> { fail 409 "the shard said no"; }
+fn post_odd_k_2(k: string<4096>) -> Response<null> { fail 409 "the shard said no"; }
 --- requests
 *4 POST /inc/0
 *2 POST /inc/1

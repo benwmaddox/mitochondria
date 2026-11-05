@@ -17,7 +17,7 @@ fn post_swap() -> Response<{ got: bool }> { each t in app.ts { app.ts.remove(t);
 @get("/count")
 fn get_count() -> Response<{ n: i64, c: i64 }> { return ok({ "n": app.ts.count(), "c": app.c.n }); }
 @post("/f")
-fn post_f() -> Response<none> { app.c.n = 5; forward other[1] { "x": 1 }; }
+fn post_f() -> Response<null> { app.c.n = 5; forward other[1] { "x": 1 }; }
 --- requests
 POST /t
 POST /t

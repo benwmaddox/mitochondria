@@ -14,7 +14,7 @@ state c: C;
 @post("/inc")
 fn post_inc() -> Response<{ n: i64 }> { c.n = c.n + 1; return ok({ "n": c.n }); }
 @post("/crash")
-fn post_crash() -> Response<none> { c.n = 99; __crash(); }
+fn post_crash() -> Response<null> { c.n = 99; __crash(); }
 --- requests
 POST /inc
 POST /inc

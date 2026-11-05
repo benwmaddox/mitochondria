@@ -237,7 +237,7 @@ impl std::fmt::Display for Shape {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Shape::Int => write!(f, "i64"), Shape::Flt => write!(f, "f64"), Shape::Bool => write!(f, "bool"), Shape::Str => write!(f, "string"),
-            Shape::Null => write!(f, "null"), Shape::Any => write!(f, "any"), Shape::Nothing => write!(f, "none"),
+            Shape::Null => write!(f, "null"), Shape::Any => write!(f, "any"), Shape::Nothing => write!(f, "no body"),
             Shape::Opt(s) => write!(f, "{}?", s), Shape::Arr(s) => write!(f, "[{}]", s),
             Shape::Id(_, n) => write!(f, "{}", if n.is_empty() { "an item" } else { n }),
             Shape::Obj(fs) if fs.is_empty() => write!(f, "{{}}"),
@@ -272,6 +272,7 @@ fn fits_shape(prog: &Program, shape: &Shape, want: &RType, at: &str) -> Result<(
     let bad = || Err(format!("{} is {}, declared {}", here(), shape, show_rtype(want)));
     if *shape == Shape::Any { return Err(format!("{}'s kind is known only at run time", here())); }
     match want {
+        RType::Name(n) if n == "none" => Err("`none` is not a type: an answer without a body is `Response<null>`".into()),
         RType::Name(n) if n == "any" => Err("`any` is not a type: every value's kind is known when the program is compiled".into()),
         RType::Opt(t) => if matches!(shape, Shape::Null) { Ok(()) } else if let Shape::Opt(s) = shape { fits_shape(prog, s, t, at) } else { fits_shape(prog, shape, t, at) },
         RType::Arr(t) => match shape { Shape::Arr(e) => fits_shape(prog, e, t, &format!("{}[]", at)), _ => bad() },
@@ -292,7 +293,7 @@ fn fits_shape(prog: &Program, shape: &Shape, want: &RType, at: &str) -> Result<(
                 "f32" | "f64" => matches!(shape, Shape::Flt | Shape::Int),
                 "bool" => *shape == Shape::Bool,
                 "string" => *shape == Shape::Str,
-                "none" => *shape == Shape::Nothing,
+                "null" => *shape == Shape::Nothing, // no body
                 // an item type: the answer holds an item of a pool of that struct, written as its id
                 _ if matches!(shape, Shape::Id(..)) => { let Shape::Id(c, _) = shape else { unreachable!() }; prog.colls[*c].item.map_or(false, |s| prog.structs[s].name == *n) }
                 _ => {
@@ -2937,7 +2938,7 @@ mod profile_tests {
             ("@get(\"/a\") fn a() -> Response<{ n: string }> { return ok({ n: 1 }); }", "`n` is i64, declared string"),
             ("@get(\"/a\") fn a() -> Response<{ x: [i64] }> { return ok({ x: [each it in app.items it.name] }); }", "`x[]` is string, declared i64"),
             ("@get(\"/a\") fn a() -> Response<[Row]> { return ok([each it in app.items { name: it.name }]); }", "has no `n`"),
-            ("@get(\"/a\") fn a() -> Response<none> { return ok({}); }", "declared none"),
+            ("@get(\"/a\") fn a() -> Response<null> { return ok({}); }", "declared null"),
             ("@get(\"/a\") fn a() -> Response<{}> { return status(404, {}); }", "an answer is a success (2xx)"),
             ("@get(\"/a\") fn a() -> Response<{}> { return {}; }", "an endpoint returns its answer"),
             ("@get(\"/a\") fn a() -> Response<{}> { respond 200 {}; }", "`respond` was replaced"),
@@ -2958,7 +2959,7 @@ mod profile_tests {
         for api in [
             "@get(\"/a\") fn a() -> Response<[Row]> { return ok([each it in app.items { name: it.name, n: it.n }]); }",
             "@get(\"/a\") fn a(x: string<8>?) -> Response<{ n: string? }> { return ok({ n: or(x, null) }); }",
-            "@delete(\"/a\") fn a() -> Response<none> { return no_content(); }",
+            "@delete(\"/a\") fn a() -> Response<null> { return no_content(); }",
             "@post(\"/a\") fn a() -> Response<{ total: i64 }> { app.total += 1; if app.total > 2 { return status(202, { total: app.total }); } return created({ total: app.total }); }",
         ] {
             assert_eq!(load(api), "", "{}", api);

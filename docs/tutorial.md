@@ -141,7 +141,7 @@ A full pool answers 503. Nothing grows past what was declared, so nothing runs o
 
 ```
 @delete("/players/{p}")
-fn remove_player(p: Player) -> Response<none> {
+fn remove_player(p: Player) -> Response<null> {
     game.board.remove(game.board.get(p.entry));
     game.players.remove(p);
     return no_content();

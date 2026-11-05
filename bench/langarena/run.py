@@ -84,6 +84,8 @@ def run_mito(test, name, exe, cfg, params, float_result):
             got = (checksum_f64(res["result"]) * (warm + iters)) % 4294967296
         elif float_result == "nbody":     # (hash(energy before) << 5) & hash(energy after), in 32 bits
             got = ((checksum_f64(res["v1"]) << 5) & 0xFFFFFFFF) & checksum_f64(res["v2"])
+        elif float_result == "sum":       # the answer is one float, hashed once
+            got = checksum_f64(res["result"])
         elif float_result == "spectral":  # one checksum, from sqrt(vBv / vv) of the final vectors
             got = checksum_f64(math.sqrt(res["result"]))
         else:
@@ -122,6 +124,8 @@ META = {
     "maze_astar": (["w", "h"], False),
     "binarytrees_obj": (["depth"], False),
     "binarytrees_arena": (["depth"], False),
+    "etc_neuralnet": ([], "sum"),
+    "etc_textraytracer": (["w", "h"], False),
     "brainfuck_array": ("program", False),
     "brainfuck_recursion": ("program", False),
 }

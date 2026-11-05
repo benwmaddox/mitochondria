@@ -1,0 +1,90 @@
+// LangArena Etc::TextRaytracer (kostya/LangArena, MIT): a ray tracer over a w x h grid of rays against three spheres (red, green, blue) lit by one white light; a pixel is a
+// character chosen by the shading (".-+*XM", a space for a miss) and the checksum adds each pixel's character code (32-bit wrapping), for every run. The reference's Vector,
+// Color, Ray, Sphere and Light structs are scalars and per-sphere arrays; every expression is computed in the reference's order (normalize = scale by 1.0 / magnitude, the
+// dot products left to right, the first sphere the ray hits wins). The reference's ray origin is the zero vector: subtracting or adding that zero is left out.
+struct Scene { cx: f64[3]; cy: f64[3]; cz: f64[3]; radius: f64[3]; red: f64[3]; green: f64[3]; blue: f64[3]; w: i64; h: i64; result: i64; }
+state sc: Scene;
+
+fn one_run() {
+    let fw = sc.w * 1.0;
+    let fh = sc.h * 1.0;
+    var total = sc.result;
+    each row in 0..sc.h {
+        each column in 0..sc.w {
+            // the primary ray, normalised
+            let raw_x = (column * 1.0 - fw / 2.0) / fw;
+            let raw_y = (row * 1.0 - fh / 2.0) / fh;
+            let inverse = 1.0 / sqrt(raw_x * raw_x + raw_y * raw_y + 1.0 * 1.0);
+            let dir_x = raw_x * inverse;
+            let dir_y = raw_y * inverse;
+            let dir_z = 1.0 * inverse;
+            var hit = -1;
+            var hit_t = 0.0;
+            each sphere in 0..3 while hit < 0 {
+                let to_x = sc.cx[sphere];
+                let to_y = sc.cy[sphere];
+                let to_z = sc.cz[sphere];
+                let tca = to_x * dir_x + to_y * dir_y + to_z * dir_z;
+                if tca >= 0.0 {
+                    let d2 = (to_x * to_x + to_y * to_y + to_z * to_z) - tca * tca;
+                    let r2 = sc.radius[sphere] * sc.radius[sphere];
+                    if d2 <= r2 {
+                        let t0 = tca - sqrt(r2 - d2);
+                        if t0 <= 10000.0 { hit = sphere; hit_t = t0; }
+                    }
+                }
+            }
+            var pixel = 32;
+            if hit >= 0 {
+                // shade_pixel: the hit point, the sphere's normal, the light direction, diffuse shading
+                let hit_x = dir_x * hit_t;
+                let hit_y = dir_y * hit_t;
+                let hit_z = dir_z * hit_t;
+                let nx = hit_x - sc.cx[hit];
+                let ny = hit_y - sc.cy[hit];
+                let nz = hit_z - sc.cz[hit];
+                let n_inverse = 1.0 / sqrt(nx * nx + ny * ny + nz * nz);
+                let normal_x = nx * n_inverse;
+                let normal_y = ny * n_inverse;
+                let normal_z = nz * n_inverse;
+                let lx = 0.7 - hit_x;
+                let ly = -1.0 - hit_y;
+                let lz = 1.7 - hit_z;
+                let l_inverse = 1.0 / sqrt(lx * lx + ly * ly + lz * lz);
+                let light_x = lx * l_inverse;
+                let light_y = ly * l_inverse;
+                let light_z = lz * l_inverse;
+                let lambert = light_x * normal_x + light_y * normal_y + light_z * normal_z;
+                var clamped = lambert;
+                if lambert < 0.0 { clamped = 0.0; } else if lambert > 1.0 { clamped = 1.0; }
+                let light_level = 1.0 * (clamped * 0.5);
+                let shade_r = light_level + sc.red[hit] * 0.3;
+                let shade_g = light_level + sc.green[hit] * 0.3;
+                let shade_b = light_level + sc.blue[hit] * 0.3;
+                let level = (shade_r + shade_g + shade_b) / 3.0;
+                let index = int(floor(level * 6.0));
+                if index == 0 { pixel = 46; } else if index == 1 { pixel = 45; } else if index == 2 { pixel = 43; }
+                else if index == 3 { pixel = 42; } else if index == 4 { pixel = 88; } else if index == 5 { pixel = 77; }
+            }
+            total = total + pixel;
+        }
+    }
+    sc.result = total % 4294967296;
+}
+
+@post("/prepare/{w}/{h}")
+fn prepare(w: i64 in 1..4096, h: i64 in 1..4096) -> Response<{}> {
+    sc.w = w;
+    sc.h = h;
+    sc.result = 0;
+    sc.cx[0] = -1.0; sc.cy[0] = 0.0; sc.cz[0] = 3.0; sc.radius[0] = 0.3; sc.red[0] = 1.0; sc.green[0] = 0.0; sc.blue[0] = 0.0;
+    sc.cx[1] = 0.0; sc.cy[1] = 0.0; sc.cz[1] = 3.0; sc.radius[1] = 0.8; sc.red[1] = 0.0; sc.green[1] = 1.0; sc.blue[1] = 0.0;
+    sc.cx[2] = 1.0; sc.cy[2] = 0.0; sc.cz[2] = 3.0; sc.radius[2] = 0.4; sc.red[2] = 0.0; sc.green[2] = 0.0; sc.blue[2] = 1.0;
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": sc.result }); }

@@ -1,0 +1,111 @@
+// LangArena Etc::NeuralNet (kostya/LangArena, MIT): a 2-10-1 sigmoid network trained on XOR by back-propagation with momentum; a run is 1000 passes over the four
+// XOR cases. The reference's Neuron and Synapse objects (with index lists) are flat arrays: the 2x10 synapses from the inputs and the 10 from the hidden layer to the
+// output are `hidden_w`/`hidden_prev` (index input * 10 + hidden) and `out_w`/`out_prev`, in the reference's connection order, so that every sum is added in the same
+// order as the reference's synapse lists and the same random numbers (thresholds of the 13 neurons first, then the synapse weights) are drawn in the same order. The
+// answer is the sum of the four outputs; the benchmark harness hashes it exactly as the reference does.
+struct NN {
+    in_out: f64[2];
+    hid_th: f64[10]; hid_prev_th: f64[10]; hid_out: f64[10]; hid_err: f64[10];
+    out_th: f64; out_prev_th: f64; out_out: f64; out_err: f64;
+    hidden_w: f64[20]; hidden_prev: f64[20];
+    out_w: f64[10]; out_prev: f64[10];
+    last: i64;
+}
+state nn: NN;
+
+fn next_float() {
+    nn.last = (nn.last * 3877 + 29573) % 139968;
+    return nn.last / 139968.0;
+}
+fn feed_forward() {
+    each hidden in 0..10 {
+        var activation = 0.0;
+        each input in 0..2 { activation = activation + nn.hidden_w[input * 10 + hidden] * nn.in_out[input]; }
+        activation = activation - nn.hid_th[hidden];
+        nn.hid_out[hidden] = 1.0 / (1.0 + exp(-activation));
+    }
+    var activation = 0.0;
+    each hidden in 0..10 { activation = activation + nn.out_w[hidden] * nn.hid_out[hidden]; }
+    activation = activation - nn.out_th;
+    nn.out_out = 1.0 / (1.0 + exp(-activation));
+}
+fn train(in0, in1, target) {
+    nn.in_out[0] = in0;
+    nn.in_out[1] = in1;
+    feed_forward();
+    let rate = 0.3;
+    // the output neuron
+    nn.out_err = (target - nn.out_out) * (nn.out_out * (1.0 - nn.out_out));
+    each hidden in 0..10 {
+        let old_weight = nn.out_w[hidden];
+        nn.out_w[hidden] = old_weight + ((rate * 1.0 * nn.out_err * nn.hid_out[hidden]) + (0.3 * (old_weight - nn.out_prev[hidden])));
+        nn.out_prev[hidden] = old_weight;
+    }
+    let old_out_th = nn.out_th;
+    nn.out_th = old_out_th + ((rate * 1.0 * nn.out_err * -1.0) + (0.3 * (old_out_th - nn.out_prev_th)));
+    nn.out_prev_th = old_out_th;
+    // the hidden neurons: error from the (just updated) previous weights of their one outgoing synapse
+    each hidden in 0..10 {
+        var sum = 0.0;
+        sum = sum + nn.out_prev[hidden] * nn.out_err;
+        nn.hid_err[hidden] = sum * (nn.hid_out[hidden] * (1.0 - nn.hid_out[hidden]));
+        each input in 0..2 {
+            let slot = input * 10 + hidden;
+            let old_weight = nn.hidden_w[slot];
+            nn.hidden_w[slot] = old_weight + ((rate * 1.0 * nn.hid_err[hidden] * nn.in_out[input]) + (0.3 * (old_weight - nn.hidden_prev[slot])));
+            nn.hidden_prev[slot] = old_weight;
+        }
+        let old_th = nn.hid_th[hidden];
+        nn.hid_th[hidden] = old_th + ((rate * 1.0 * nn.hid_err[hidden] * -1.0) + (0.3 * (old_th - nn.hid_prev_th[hidden])));
+        nn.hid_prev_th[hidden] = old_th;
+    }
+}
+fn one_run() {
+    each pass in 0..1000 {
+        train(0.0, 0.0, 0.0);
+        train(1.0, 0.0, 1.0);
+        train(0.0, 1.0, 1.0);
+        train(1.0, 1.0, 0.0);
+    }
+}
+
+@post("/prepare")
+fn prepare() -> Response<{}> {
+    nn.last = 42;
+    // the reference's NeuralNetwork::new(2, 10, 1): thresholds of the input, hidden and output neurons, then the synapses input -> hidden, hidden -> output
+    each input in 0..2 { let threshold = next_float() * 2.0 - 1.0; }
+    each hidden in 0..10 {
+        let threshold = next_float() * 2.0 - 1.0;
+        nn.hid_th[hidden] = threshold;
+        nn.hid_prev_th[hidden] = threshold;
+    }
+    let threshold = next_float() * 2.0 - 1.0;
+    nn.out_th = threshold;
+    nn.out_prev_th = threshold;
+    each input in 0..2 {
+        each hidden in 0..10 {
+            let weight = next_float() * 2.0 - 1.0;
+            nn.hidden_w[input * 10 + hidden] = weight;
+            nn.hidden_prev[input * 10 + hidden] = weight;
+        }
+    }
+    each hidden in 0..10 {
+        let weight = next_float() * 2.0 - 1.0;
+        nn.out_w[hidden] = weight;
+        nn.out_prev[hidden] = weight;
+    }
+    return ok({});
+}
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/result")
+fn result() -> Response<{ result: f64 }> {
+    var sum = 0.0;
+    nn.in_out[0] = 0.0; nn.in_out[1] = 0.0; feed_forward(); sum = sum + nn.out_out;
+    nn.in_out[0] = 0.0; nn.in_out[1] = 1.0; feed_forward(); sum = sum + nn.out_out;
+    nn.in_out[0] = 1.0; nn.in_out[1] = 0.0; feed_forward(); sum = sum + nn.out_out;
+    nn.in_out[0] = 1.0; nn.in_out[1] = 1.0; feed_forward(); sum = sum + nn.out_out;
+    return ok({ "result": sum });
+}

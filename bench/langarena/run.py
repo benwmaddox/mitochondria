@@ -1,6 +1,6 @@
 """Mitochondria ports of LangArena tests against LangArena's own Rust implementation, same machine, same core, alternating rounds.
 
-usage: python -I run.py [--mode run|test] [--rounds N] [test_dir ...]      e.g.  python -I run.py --rounds 3 etc_sieve sort_quick
+usage: python -I run.py [--mode run|test] [--rounds N] [--mito-only] [--write-only] [test_dir ...]      e.g.  python -I run.py --rounds 3 etc_sieve sort_quick
 
 Methodology (LangArena's, kostya/LangArena, MIT):
   - the parameters are run.js (or test.js with --mode test), vendored with two test names shortened (BF::Array, BF::Recursion);
@@ -48,6 +48,8 @@ def reference_names():
     except OSError: return {}
     return dict(zip(ours, theirs)) if len(ours) == len(theirs) else {}
 ref_name = reference_names()
+if "--write-only" in args: args.remove("--write-only"); write_only = True
+else: write_only = False
 tests = args or sorted(d for d in os.listdir(here) if os.path.isfile(os.path.join(here, d, "main.mito")))
 if cflags: build_dir = os.path.join(here, "build", "flags-" + "_".join(f.strip("-").replace("=", "-") for f in cflags))
 if os.environ.get("MITO_BUILD_TAG"): build_dir = os.path.join(build_dir, os.environ["MITO_BUILD_TAG"])
@@ -77,10 +79,13 @@ def write_markdown():
          f"Machine: {platform.system()} {platform.release()}, {platform.processor() or platform.machine()}. Run parameters (`run.js`), best of the rounds of a run, "
          "every checksum verified against LangArena's. Rust is LangArena's implementation (max-perf profile: opt-level 3, fat LTO, overflow checks off; the "
          "checked column turns them on, as Mitochondria always checks); Crystal is LangArena's original implementation. Ratios are Mitochondria / the column's implementation.", "",
+         "Each table is sorted by its Mito/Rust ratio, best first.", "",
          "## Time (seconds for the timed iterations)", "",
          "| Workload | Mitochondria | Rust | Mito/Rust | Rust (checked) | Mito/Rust (checked) | Crystal | Mito/Crystal | audit |",
          "|---|---:|---:|---:|---:|---:|---:|---:|---|"]
-    for n in names:
+    # best Mitochondria / Rust ratio first (ports without both numbers last)
+    def by(field): return lambda n: (val(n, "m", field) / val(n, "r", field)) if val(n, "m", field) and val(n, "r", field) else float("inf")
+    for n in sorted(names, key=by("s")):
         m, r, c, y = (val(n, k, "s") for k in "mrcy")
         o.append(f"| {n} | {num(m)} | {num(r)} | {ratio(m, r)} | {num(c)} | {ratio(m, c)} | {num(y)} | {ratio(m, y)} | {audit_of(results[n]['test'])} |")
     gr = gmean([val(n, "m", "s") / val(n, "r", "s") for n in fair if val(n, "m", "s") and val(n, "r", "s")])
@@ -95,7 +100,7 @@ def write_markdown():
           "reserved address space that was never touched is not counted).", "",
           "| Workload | Mitochondria MB | Rust MB | Mito/Rust | Crystal MB | Mito/Crystal |",
           "|---|---:|---:|---:|---:|---:|"]
-    for n in names:
+    for n in sorted(names, key=by("mb")):
         m, r, y = val(n, "m", "mb"), val(n, "r", "mb"), val(n, "y", "mb")
         o.append(f"| {n} | {num(m, 1)} | {num(r, 1)} | {ratio(m, r)} | {num(y, 1)} | {ratio(m, y)} |")
     mr = gmean([val(n, "m", "mb") / val(n, "r", "mb") for n in names if val(n, "m", "mb") and val(n, "r", "mb")])
@@ -253,6 +258,7 @@ META = {
     "bf_recursion": ("program", False),
 }
 rows = []
+if write_only: write_markdown(); sys.exit(0) # --write-only: RESULTS.md from results.json, nothing measured
 for test in tests:
     name = open(os.path.join(here, test, "name")).read().strip()
     params, floaty = META[test]

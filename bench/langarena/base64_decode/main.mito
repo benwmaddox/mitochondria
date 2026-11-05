@@ -1,9 +1,11 @@
 // LangArena Base64::Decode (kostya/LangArena, MIT): decode the standard Base64 text of `size` bytes of "a" (with padding), `iterations` times, checking the text is valid; the
 // checksum adds the decoded length of every run (warmup included) and the benchmark's final message names the first four characters of the encoded and of the decoded text. This
-// port answers those characters and the sum (GET /result); the benchmark harness builds the message and hashes it exactly as the reference does. The reference calls the
+// port builds that message in a request field and answers its hash (GET /checksum), as the reference does. The reference calls the
 // base64-simd library (SIMD); this is a plain scalar loop over four input characters at a time with a 256-entry lookup table (255 = not a Base64 character).
 struct B64 { encoded: u8[666672]; decoded: u8[500000] unlogged; alphabet: u8[64]; table: u8[256]; size: i64; encoded_len: i64; decoded_len: i64; result: i64; bad: i64; }
 state b: B64;
+struct Work { message: ascii<128>; }
+request work: Work; // the final message, built to be hashed
 
 fn encode_input() {
     let full = b.size / 3;
@@ -97,7 +99,11 @@ fn prepare(size: i64 in 4..500000) -> Response<{}> {
 fn warmup(n: i64 in 0..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
 @post("/run/{n}")
 fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run(); } return ok({}); }
-@get("/result")
-fn result() -> Response<{ result: i64, encoded0: i64, encoded1: i64, encoded2: i64, encoded3: i64, decoded0: i64, decoded1: i64, decoded2: i64, decoded3: i64 }> {
-    return ok({ "result": b.result, "encoded0": b.encoded[0], "encoded1": b.encoded[1], "encoded2": b.encoded[2], "encoded3": b.encoded[3], "decoded0": b.decoded[0], "decoded1": b.decoded[1], "decoded2": b.decoded[2], "decoded3": b.decoded[3] });
+// the reference's message, "decode YWFh... to aaaa...: <sum>", and its hash
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> {
+    work.message = "decode " + text_from(b.encoded, 0, 4) + "... to " + text_from(b.decoded, 0, 4) + "...: " + b.result;
+    var hash = 5381;
+    foreach i in 0..len(work.message) - 1 { hash = (hash * 33 + work.message[i]) % 4294967296; }
+    return ok({ checksum: hash });
 }

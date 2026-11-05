@@ -179,7 +179,7 @@ signature there is nothing to guess.
 
 ## Phase 4: text
 
-### 4.1 `ascii<N>` and `utf8<N>`: fixed-size text you build in place
+### 4.1 `ascii<N>` and `utf8<N>`: fixed-size text you build in place (done 2026-11-05, except the items below)
 Today a `string<N>` field holds a value: text built in the request's text area (`"n=" + 5`, `substr`) is copied in whole when assigned
 (413 if longer than N), and text cannot be built in state piece by piece (the ports wrote bytes into `u8` arrays with helper functions,
 or had the benchmark harness generate the text). There are two text kinds, both with a fixed maximum of N bytes:
@@ -227,6 +227,11 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 - Done: `ascii<N>` holds bytes 0..127: storing, appending or copying a window with any other byte fails (400, "ascii text cannot
   hold byte 195 (at 3)"), a literal with one is a compile error; `s[i] = b` writes a byte (0..127, below the length) of ascii text,
   and is a compile error on `utf8<N>` / `string<N>` (`ascii.case`). Not yet: ascii inputs (`name: ascii<1..32>` checks lengths only).
+- Done: the Base64 ports build the reference's final message ("encode aaaa... to YWFh...: <sum>") in a request field and answer its
+  hash; the harness no longer formats it. With Calculator, CSV and Template above, the text ports build their text in fields.
+- Not yet: ascii inputs (lengths only are checked), reading a plain-field window for an answer or a general comparison without the
+  copy (`json_txt` after `plain_txt`), `utf8<N>` character-boundary rules (`truncate`, a character asked for at a byte that is not
+  a start), `s.clear()` / `s.truncate(n)`, and comparisons of built expressions refused.
 
 ## Phase 5: later
 

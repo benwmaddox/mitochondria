@@ -119,10 +119,6 @@ def run_mito(test, name, exe, cfg, params, float_result):
             got = (checksum_f64(res["result"]) * (warm + iters)) % 4294967296
         elif float_result == "nbody":     # (hash(energy before) << 5) & hash(energy after), in 32 bits
             got = ((checksum_f64(res["v1"]) << 5) & 0xFFFFFFFF) & checksum_f64(res["v2"])
-        elif float_result == "b64enc":    # the reference hashes "encode aaaa... to <first four encoded>...: <sum>"
-            got = checksum_bytes(f"encode aaaa... to {''.join(chr(res['encoded' + str(k)]) for k in range(4))}...: {res['result']}".encode())
-        elif float_result == "b64dec":    # "decode <first four encoded>... to aaaa...: <sum>"
-            got = checksum_bytes(f"decode {''.join(chr(res['encoded' + str(k)]) for k in range(4))}... to {''.join(chr(res['decoded' + str(k)]) for k in range(4))}...: {res['result']}".encode())
         elif float_result == "csv":       # the three averages are the same every run: (hash(x) + hash(y) + hash(z)) per run, plus the hash of the text
             got = (((checksum_f64(res["x"]) + checksum_f64(res["y"]) + checksum_f64(res["z"])) * (warm + iters)) + res["hash"]) % 4294967296
         elif float_result == "sum":       # the answer is one float, hashed once
@@ -184,8 +180,8 @@ META = {
     "etc_words": ("words", False),
     "etc_cachesimulation": (["values", "size"], False),
     "calculator_ast": (["operations"], False),
-    "base64_encode": (["size"], "b64enc"),
-    "base64_decode": (["size"], "b64dec"),
+    "base64_encode": (["size"], False),
+    "base64_decode": (["size"], False),
     "bf_array": ("program", False),
     "bf_recursion": ("program", False),
 }

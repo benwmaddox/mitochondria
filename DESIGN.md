@@ -112,6 +112,8 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   `capacity`.
 
 **Every request is atomic.** The runtime records the old bytes of each write; a failed request writes them back.
+It saves whole 64-byte lines on their first write in a request; a 4 KB page still all zeros (state never written, as an array a request
+fills for the first time) is recorded as one "zeros" entry instead of a copy, so filling fresh state costs no undo-log memory.
 `remove` takes effect when the request succeeds, so a removed slot cannot be reused in the same request.
 
 **Loops.** `foreach x in c where cond limit n` visits the live items of a collection (`foreach x, i in c`: `i` counts the items

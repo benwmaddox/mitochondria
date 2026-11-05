@@ -74,8 +74,13 @@ def prepare_path(cfg, params):
 def run_mito(test, name, exe, cfg, params, float_result):
     iters = cfg["iterations"]
     warm = cfg.get("warmup_iterations", max(int(iters * 0.2), 1))
+    # a server left on the port by an earlier run would answer instead of this one: refuse to measure
+    try: socket.create_connection(("127.0.0.1", port), 0.2).close(); raise RuntimeError(f"port {port} is already in use: stop the process listening there first")
+    except OSError: pass
     p = subprocess.Popen([exe, "--port", str(port), "--timing"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); pin(p)
     try:
+        time.sleep(0.05)
+        if p.poll() is not None: raise RuntimeError(f"{exe} exited at start (port {port} in use?)")
         for _ in range(300):
             try: socket.create_connection(("127.0.0.1", port), 0.2).close(); break
             except OSError: time.sleep(0.05)

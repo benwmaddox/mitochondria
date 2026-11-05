@@ -506,7 +506,7 @@ impl P {
     fn ty(&mut self) -> Result<Ty, String> {
         let n = self.ident()?;
         let mut t = if let Some(s) = Scalar::parse(&n) { Ty::Scalar(s) }
-        else if n == "string" { self.eat("<")?; let k = self.count()?; self.eat(">")?; Ty::Str(k) }
+        else if n == "string" || n == "utf8" || n == "ascii" { self.eat("<")?; let k = self.count()?; self.eat(">")?; Ty::Str(k) }
         else if n == "ref" { return Err("`ref<...>` was removed: keep the item's slot (`slot(item)`) in an integer field and read it back with `pool[slot]` (inside `or(...)` for a fallback when it is gone)".into()); }
         else if n == "list" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let f = if self.word("drop_oldest") { Full::DropOldest } else { Full::Fail }; Ty::List(Box::new(e), k, f) }
         else if n == "pool" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let c = self.word("checked"); Ty::Pool(Box::new(e), k, c) }

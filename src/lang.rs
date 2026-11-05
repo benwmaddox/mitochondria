@@ -327,7 +327,7 @@ impl P {
             "u64" => { let (a, b) = range(self, 0, i64::MAX)?; InTy::Int(a, b) }
             "f32" | "f64" => InTy::Flt,
             "bool" => InTy::Bool,
-            "string" => {
+            "string" | "utf8" | "ascii" => {
                 self.eat("<")?;
                 let a = self.int()?;
                 let (lo, hi) = if self.sym("..") { (a, self.int()?) } else { (0, a) };

@@ -17,5 +17,19 @@ fn a() -> Response<{ before: string, after: string, kept: string, note: string, 
     n.text += "y";
     return ok({ before: str(before), after: t, kept: copy, note: w, same: w == n.text });
 }
+@post("/sub")
+fn sub() -> Response<{ piece: string, len: i64, byte: i64, copied: string, appended: string, inner: string }> {
+    app.title = "hello world";
+    let w = substr(app.title, 6, 5);
+    let n = app.notes.add();
+    n.text = substr(app.title, 0, 5);
+    n.text += substr(w, 0, 3);
+    return ok({ piece: w, len: len(w), byte: w[0], copied: substr(app.title, 0, 5), appended: n.text, inner: substr(w, 1, 2) });
+}
+@post("/sub/{a}/{b}")
+fn sub_bad(a: i64, b: i64) -> Response<{ piece: string }> { app.title = "hello"; return ok({ piece: substr(app.title, a, b) }); }
 --- requests
 POST /a
+POST /sub
+POST /sub/3/3
+POST /sub/-1/2

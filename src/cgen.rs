@@ -79,6 +79,7 @@ struct H {
     int (*rq_send)(Ctx *, int, const Txt *, i64 *, Txt *);       /* a test's request: send it (method, path); its status and body */
     int (*json_field)(Ctx *, const Txt *, const char *, u32, Txt *); /* a top-level field of a JSON object text, as text (null: absent) */
     int (*str_app)(Ctx *, int, u64, u64, u32, const Val *);      /* append a value to a string field in place (kind: plain/column, and empty it first) */
+    int (*str_app_at)(Ctx *, int, u64, u64, u32, u64, u32);      /* the same from n bytes of state at an offset (a window onto a text field): one copy */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -232,7 +233,7 @@ impl Shape {
     fn of(v: &CV) -> Shape {
         match v {
             CV::Int(_) => Shape::Int, CV::Flt(_) => Shape::Flt, CV::Bool(_) => Shape::Bool,
-            CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) => Shape::Str, CV::Null => Shape::Null,
+            CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => Shape::Str, CV::Null => Shape::Null,
             CV::Item(c, _) => Shape::Id(*c, String::new()), CV::Ref(c, ..) => Shape::Opt(Box::new(Shape::Id(*c, String::new()))),
             _ => Shape::Any,
         }
@@ -301,7 +302,7 @@ fn fits_shape(prog: &Program, shape: &Shape, want: &RType, at: &str) -> Result<(
                 "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => *shape == Shape::Int,
                 "f32" | "f64" => matches!(shape, Shape::Flt | Shape::Int),
                 "bool" => *shape == Shape::Bool,
-                "string" => *shape == Shape::Str,
+                "string" | "utf8" | "ascii" => *shape == Shape::Str,
                 "null" => *shape == Shape::Nothing, // no body
                 // an enum: written as its value's name
                 n if prog.enums.iter().any(|e| e.name == n) => *shape == Shape::Int,
@@ -345,6 +346,7 @@ enum CV {
     Coll(usize, String),            // collection, C expression for the instance
     StateStr(usize, String, usize), // a string column of an item: collection, item index, column (read where it is used: a window)
     PlainStr(usize),                // a plain string at an offset (read where it is used: a window)
+    Sub(Box<CV>, String, String),   // a piece of a text field (`substr`): the field (StateStr or PlainStr), the start and the count; a window
     Plain(usize, usize),            // a plain struct: struct id, offset
     Part(usize, String, String),    // a struct-valued field of an item: collection, item index, path of the field
     ArrCol(usize, String, usize),   // a fixed-array field of an item: collection, item index, column
@@ -403,7 +405,7 @@ fn type_text(prog: &Program, v: &CV) -> String {
     let item = |c: usize| prog.colls[c].item.map_or(format!("?{}", prog.colls[c].name), |s| { let n = &prog.structs[s].name; let others = prog.colls.iter().filter(|x| x.item == Some(s)).count(); if others > 1 { format!("{} in {}", n, prog.colls[c].name) } else { n.clone() } });
     match v {
         CV::Int(_) => "i64".into(), CV::Flt(_) => "f64".into(), CV::Bool(_) => "bool".into(),
-        CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) => "string".into(), CV::Null => "null".into(), CV::Any(_) => "any".into(),
+        CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => "string".into(), CV::Null => "null".into(), CV::Any(_) => "any".into(),
         CV::Item(c, _) => item(*c), CV::Ref(c, ..) => format!("{}?", item(*c)),
         CV::Coll(c, _) => format!("coll {}", prog.colls[*c].name),
         CV::Plain(sd, o) => format!("plain {}@{}", prog.structs[*sd].name, o),
@@ -949,7 +951,7 @@ fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
 /// The kind of a value that a variable or result can hold; None for places (collections, structs, arrays).
 fn kind(v: &CV) -> Option<K> {
     Some(match v {
-        CV::Int(_) => K::Int, CV::Flt(_) => K::Flt, CV::Bool(_) => K::Bool, CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) => K::Txt,
+        CV::Int(_) => K::Int, CV::Flt(_) => K::Flt, CV::Bool(_) => K::Bool, CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => K::Txt,
         CV::Any(_) => K::Any, CV::Item(c, _) => K::Item(*c), CV::Ref(c, ..) => K::Ref(*c), CV::Null => K::Null,
         CV::Coll(c, _) => K::Coll(*c), CV::Plain(s, o) => K::Plain(*s, *o),
         CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..) => return None,
@@ -1082,7 +1084,7 @@ impl<'p> G<'p> {
         for v in vals {
             match v {
                 CV::Coll(c, inst) => { pks.push(PK::Coll(c)); cargs.push(format!("(u32)({})", inst)); }
-                v @ (CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Txt(_)) => { let t = self.txt_of(v)?; pks.push(PK::V(K::Txt)); cargs.push(t); }
+                v @ (CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) | CV::Txt(_)) => { let t = self.txt_of(v)?; pks.push(PK::V(K::Txt)); cargs.push(t); }
                 CV::Int(e) => { pks.push(PK::V(K::Int)); cargs.push(e); }
                 CV::Flt(e) => { pks.push(PK::V(K::Flt)); cargs.push(e); }
                 CV::Bool(e) => { pks.push(PK::V(K::Bool)); cargs.push(e); }
@@ -1842,7 +1844,7 @@ impl<'p> G<'p> {
                 let v = match e { Some(e) => self.expr(e, env, None)?, None => CV::Bool("1".into()) };
                 match v {
                     CV::Bool(b) => { self.open(&format!("if (!({})) {{", b)); let t = self.txt_of(CV::Lit("returned false".into()))?; self.line(&format!("TEST_FAIL_({});", t)); self.close("}"); }
-                    v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..)) => { let t = self.txt_of(v)?; self.line(&format!("if ({}.present && {}.len > 0) TEST_FAIL_({});", t, t, t)); }
+                    v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)) => { let t = self.txt_of(v)?; self.line(&format!("if ({}.present && {}.len > 0) TEST_FAIL_({});", t, t, t)); }
                     _ => return no("a test returns `true` or `false`, or a text (empty when it passed, otherwise what went wrong)"),
                 }
                 self.line("return 0;");
@@ -1943,7 +1945,7 @@ impl<'p> G<'p> {
         Ok(match (k, v) {
             (K::Any, v) => { let x = self.val(v)?; if mutable || self.var_names.contains(&x) { let t = self.tmp("v"); self.line(&format!("Val {} = {};", t, x)); CV::Any(t) } else { CV::Any(x) } }
             (K::Txt, CV::Null) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ 0, 0, 0 }};", t)); CV::Txt(t) }
-            (K::Txt, v @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..))) => { let x = self.txt_of(v)?; if mutable || self.var_names.contains(&x) { let t = self.tmp("t"); self.line(&format!("Txt {} = {};", t, x)); CV::Txt(t) } else { CV::Txt(x) } }
+            (K::Txt, v @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..))) => { let x = self.txt_of(v)?; if mutable || self.var_names.contains(&x) { let t = self.tmp("t"); self.line(&format!("Txt {} = {};", t, x)); CV::Txt(t) } else { CV::Txt(x) } }
             (K::Ref(c), CV::Null) => { let (s, i) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = 0, {} = 0;", s, i)); CV::Ref(c, s, i) }
             (K::Ref(c), CV::Item(_, e)) => { let (s, i) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = 1, {} = {};", s, i, e)); CV::Ref(c, s, i) }
             (K::Ref(_), v @ CV::Ref(..)) => self.hold(v, mutable)?,
@@ -1966,7 +1968,8 @@ impl<'p> G<'p> {
             // a `let` of a text field is a window onto it (no copy: each use reads the field as it is then); a `var` holds a copy
             CV::StateStr(c, idx, ci) if !mutable => { let idx = if self.var_names.contains(&idx) { let t = self.tmp("i"); self.line(&format!("u32 {} = {};", t, idx)); t } else { idx }; CV::StateStr(c, idx, ci) }
             CV::PlainStr(off) if !mutable => CV::PlainStr(off),
-            CV::StateStr(..) | CV::PlainStr(..) => { let t = self.txt_of(v)?; self.var_names.insert(t.clone()); CV::Txt(t) }
+            v @ CV::Sub(..) if !mutable => v,
+            CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => { let t = self.txt_of(v)?; self.var_names.insert(t.clone()); CV::Txt(t) }
             CV::Null if mutable => { let t = self.tmp("v"); self.line(&format!("Val {} = {{ 0, 0, 0, 0, 0 }};", t)); self.var_names.insert(t.clone()); CV::Any(t) }
             CV::Ref(c, s, k) if mutable || self.var_names.contains(&s) || self.var_names.contains(&k) => { let (s2, k2) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}, {} = {};", s2, s, k2, k)); if mutable { self.var_names.insert(s2.clone()); self.var_names.insert(k2.clone()); } CV::Ref(c, s2, k2) }
             o => o,
@@ -1987,7 +1990,7 @@ impl<'p> G<'p> {
         match (cur, v) {
             (CV::Int(t), CV::Int(e)) | (CV::Bool(t), CV::Bool(e)) | (CV::Flt(t), CV::Flt(e)) => self.line(&format!("{} = {};", t, e)),
             (CV::Item(a, t), CV::Item(b, e)) if *a == b => self.line(&format!("{} = {};", t, e)),
-            (CV::Txt(t), v @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..))) => { let s = self.txt_of(v)?; self.line(&format!("{} = {};", t, s)); }
+            (CV::Txt(t), v @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..))) => { let s = self.txt_of(v)?; self.line(&format!("{} = {};", t, s)); }
             (CV::Any(t), v) => { let s = self.val(v)?; self.line(&format!("{} = {};", t, s)); }
             (CV::Txt(t), CV::Null) => self.line(&format!("{} = (Txt){{ 0, 0, 0 }};", t)),
             (CV::Ref(a, s, k), CV::Ref(b, s2, k2)) if *a == b => self.line(&format!("{} = {}; {} = {};", s, s2, k, k2)),
@@ -2004,11 +2007,36 @@ impl<'p> G<'p> {
         for (i, p) in pieces.iter().enumerate() {
             let v = self.expr(p, env, None)?;
             if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("only text, numbers and bools can be added to a string"); }
-            let vv = self.val(v)?;
             let k = kind | if clear && i == 0 { 2 } else { 0 };
+            // a text field or a window onto one: copied from where it is, field to field
+            let window = match v.clone() { CV::Sub(base, from, count) => Some((*base, from, count)), b @ (CV::PlainStr(_) | CV::StateStr(..)) => { let l = self.field_len(&b); Some((b, "0".to_string(), l)) } _ => None };
+            if let Some((base, from, count)) = window {
+                let n = self.hold_int(count);
+                let at = self.sub_bytes_at(&base, &from);
+                self.call(&format!("c->h->str_app_at(c, {}, {}, {}, {}, {}, (u32)({}))", k, a, b, cc, at, n));
+                continue;
+            }
+            let vv = self.val(v)?;
             self.call(&format!("c->h->str_app(c, {}, {}, {}, {}, &{})", k, a, b, cc, vv));
         }
         Ok(())
+    }
+
+    /// The byte offset in state of byte `from` of a text field (a window's base).
+    fn sub_bytes_at(&self, base: &CV, from: &str) -> String {
+        match base {
+            CV::PlainStr(off) => format!("{}ULL + (u64)({})", off + 4, from),
+            CV::StateStr(c, idx, ci) => { let b = &self.prog.colls[*c].cols[*ci + 1]; let CKind::StrBytes(m) = b.kind else { unreachable!() }; format!("{}ULL + (u64)({}) * {}ULL + (u64)({})", b.off, idx, m, from) }
+            _ => unreachable!("a window's base is a text field"),
+        }
+    }
+    /// A text field's length now (a C expression).
+    fn field_len(&self, base: &CV) -> String {
+        match base {
+            CV::PlainStr(off) => format!("(i64)LD_U32({}, 0)", off),
+            CV::StateStr(c, idx, ci) => format!("(i64)LD_U32({}, {})", self.prog.colls[*c].cols[*ci].off, idx),
+            _ => unreachable!("a text field"),
+        }
     }
 
     /// The value as a `Val` variable, for helpers that take any kind of value.
@@ -2022,7 +2050,7 @@ impl<'p> G<'p> {
             CV::Null => self.line(&format!("Val {} = {{ 0, 0, 0, 0, 0 }};", t)),
             CV::Item(c, e) => self.line(&format!("Val {} = {{ 5, {}, {}, 0, 0 }};", t, c, e)),
             CV::Ref(c, s, k) => self.line(&format!("Val {} = {{ {} == 0 ? 0 : 5, {}, {}, 0, 0 }};", t, s, c, k)),
-            v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..)) => { let x = self.txt_of(v)?; self.line(&format!("Val {} = {{ {}.present ? 4 : 0, {}.off, {}.len, 0, 0 }};", t, x, x, x)); }
+            v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)) => { let x = self.txt_of(v)?; self.line(&format!("Val {} = {{ {}.present ? 4 : 0, {}.off, {}.len, 0, 0 }};", t, x, x, x)); }
             CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => return no("a collection, struct or array used as a value is not compiled yet"),
             CV::Resp(..) => return no("an answer is read through `.status` and `.body`"),
         }
@@ -2034,6 +2062,13 @@ impl<'p> G<'p> {
             CV::Txt(t) => Ok(t),
             CV::Lit(s) => { let t = self.tmp("t"); let off = intern_lit(s.as_bytes()); self.line(&format!("Txt {} = {{ {}, {}, 1 }};", t, off, s.len())); Ok(t) }
             CV::PlainStr(off) => { let t = self.tmp("t"); self.line(&format!("Txt {};", t)); self.call(&format!("c->h->plain_txt(c, {}, &{})", off, t)); Ok(t) }
+            CV::Sub(base, from, count) => {
+                let at = self.sub_bytes_at(&base, &from);
+                let t = self.tmp("t");
+                self.line(&format!("Txt {};", t));
+                self.call(&format!("c->h->arr_txt(c, {}, (u32)({}), &{})", at, count, t));
+                Ok(t)
+            }
             CV::StateStr(c, idx, ci) => { let t = self.tmp("t"); self.line(&format!("Txt {};", t)); self.call(&format!("c->h->col_txt(c, {}, {}, {}, &{})", c, idx, ci, t)); Ok(t) }
             _ => no("expected a string"),
         }
@@ -2102,6 +2137,12 @@ impl<'p> G<'p> {
                         let boff = bytes.off;
                         self.line(&format!("if (RANGE_({k} < 0 || (u64){k} >= (u64)LD_U32({lenoff}, {idx}))) FAIL(400, \"string index out of range\", 25);"));
                         Ok(CV::Int(format!("(i64)LD_U8({}, (i64)({}) * {} + {})", boff, idx, m, k)))
+                    }
+                    CV::Sub(base, from, count) => {
+                        let k = self.hold_int(k);
+                        self.line(&format!("if (RANGE_({k} < 0 || {k} >= (i64)({count}))) FAIL(400, \"string index out of range\", 25);"));
+                        let at = self.sub_bytes_at(&base, &format!("{} + {}", from, k));
+                        Ok(CV::Int(format!("(i64)LD_U8({}, 0)", at)))
                     }
                     // a plain string: its length (u32) then its bytes, read where they are
                     CV::PlainStr(off) => {
@@ -2248,7 +2289,7 @@ impl<'p> G<'p> {
                 (CV::Null, CV::Txt(t)) | (CV::Txt(t), CV::Null) => Some(format!("(!{}.present)", t)),
                 (CV::Null, CV::Any(v)) | (CV::Any(v), CV::Null) => Some(format!("({}.tag == 0)", v)),
                 (CV::Null, CV::Ref(_, s, _)) | (CV::Ref(_, s, _), CV::Null) => Some(format!("({} == 0)", s)),
-                (CV::Null, CV::Int(_) | CV::Flt(_) | CV::Bool(_) | CV::Lit(_) | CV::Item(..) | CV::StateStr(..) | CV::PlainStr(..)) | (CV::Int(_) | CV::Flt(_) | CV::Bool(_) | CV::Lit(_) | CV::Item(..) | CV::StateStr(..) | CV::PlainStr(..), CV::Null) => Some("0".into()),
+                (CV::Null, CV::Int(_) | CV::Flt(_) | CV::Bool(_) | CV::Lit(_) | CV::Item(..) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)) | (CV::Int(_) | CV::Flt(_) | CV::Bool(_) | CV::Lit(_) | CV::Item(..) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..), CV::Null) => Some("0".into()),
                 _ => None,
             };
             if let Some(e) = inline { return Ok(CV::Bool(format!("{}{}", neg, e))); }
@@ -2339,7 +2380,7 @@ impl<'p> G<'p> {
             }
         }
         // strings (and a value joined to one): the runtime's operator, with the kind of its result known here
-        let kind = |v: &CV| match v { CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) => "string", CV::Int(_) => "i64", CV::Flt(_) => "f64", CV::Bool(_) => "bool", CV::Null => "null", CV::Any(_) => "?", _ => "an item or collection" };
+        let kind = |v: &CV| match v { CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => "string", CV::Int(_) => "i64", CV::Flt(_) => "f64", CV::Bool(_) => "bool", CV::Null => "null", CV::Any(_) => "?", _ => "an item or collection" };
         let (lk, rk) = (kind(&l), kind(&r));
         let joined = op == "+" && (lk == "string" || rk == "string") && [lk, rk].iter().all(|k| matches!(*k, "string" | "i64" | "f64" | "bool" | "null"));
         let compared = matches!(op, "<" | "<=" | ">" | ">=" | "==" | "!=") && lk == "string" && rk == "string";
@@ -2481,6 +2522,17 @@ impl<'p> G<'p> {
             self.checked.clear(); // the request may have changed anything a test before it proved
             return Ok(CV::Resp(st, bd));
         }
+        // `len` of a text field: its stored length, read where it is (no copy)
+        if bi == B::Len {
+            match a.first() {
+                Some(CV::StateStr(c, idx, ci)) => return Ok(CV::Int(format!("(i64)LD_U32({}, {})", self.prog.colls[*c].cols[*ci].off, idx))),
+                Some(CV::PlainStr(off)) => return Ok(CV::Int(format!("(i64)LD_U32({}, 0)", off))),
+                Some(CV::Sub(_, _, n)) => return Ok(CV::Int(format!("(i64)({})", n))),
+                Some(CV::Lit(s)) => return Ok(CV::Int(format!("{}LL", s.len()))),
+                Some(CV::Txt(t)) => return Ok(CV::Int(format!("(i64){}.len", t))),
+                _ => {}
+            }
+        }
         let generic = match bi {
             B::Min | B::Max => !matches!(a.as_slice(), [CV::Int(_), CV::Int(_)]),
             B::Slot => !matches!(a.first(), Some(CV::Item(..) | CV::Ref(..))),
@@ -2562,6 +2614,14 @@ impl<'p> G<'p> {
             B::Substr => {
                 // a piece of a string, `substr(text, from, count)`: it shares the text's bytes (no copy), the range is checked
                 let [text, from, count] = <[CV; 3]>::try_from(a).map_err(|_| "`substr` takes a string, a start and a count".to_string())?;
+                if matches!(text, CV::PlainStr(_) | CV::StateStr(..) | CV::Sub(..)) {
+                    let (from, count) = (self.int_or(from, 400, "a start and a count must be integers"), self.int_or(count, 400, "a start and a count must be integers"));
+                    let (from, count) = (self.hold_int(from), self.hold_int(count));
+                    let (base, start, have) = match text { CV::Sub(b, s0, n0) => (*b, s0, n0), b => { let l = self.field_len(&b); let l = self.hold_int(l); (b, "0".to_string(), l) } };
+                    self.line(&format!("if (UNLIKELY({from} < 0 || {count} < 0 || {from} + {count} > (i64)({have}))) FAIL(400, \"substring out of range\", 22);"));
+                    let s2 = if start == "0" { from.clone() } else { let t = self.tmp("v"); self.line(&format!("i64 {} = {} + {};", t, start, from)); t };
+                    return Ok(CV::Sub(Box::new(base), s2, count));
+                }
                 let t = self.txt_of(text)?;
                 let (from, count) = (self.int_or(from, 400, "a start and a count must be integers"), self.int_or(count, 400, "a start and a count must be integers"));
                 let (from, count) = (self.hold_int(from), self.hold_int(count));
@@ -2984,7 +3044,7 @@ impl<'p> G<'p> {
             CV::Bool(e) => self.line(&format!("CALL({} ? c->h->out(c, \"true\", 4) : c->h->out(c, \"false\", 5));", e)),
             CV::Lit(s) => { let j = json_lit(&s); self.out(&j); }
             CV::Txt(t) => self.line(&format!("CALL({}.present ? c->h->json_txt(c, &{}) : c->h->out(c, \"null\", 4));", t, t)),
-            v @ CV::PlainStr(_) => { let t = self.txt_of(v)?; self.call(&format!("c->h->json_txt(c, &{})", t)); }
+            v @ (CV::PlainStr(_) | CV::Sub(..)) => { let t = self.txt_of(v)?; self.call(&format!("c->h->json_txt(c, &{})", t)); }
             CV::Any(v) => self.call(&format!("c->h->json_val(c, &{})", v)),
             CV::StateStr(c, idx, ci) => self.call(&format!("c->h->json_col(c, {}, {}, {})", c, idx, ci)),
             CV::Null => self.out("null"),
@@ -3458,11 +3518,12 @@ fn str_pieces<'e>(target: &Expr, rhs: &'e Expr) -> Option<(bool, Vec<&'e Expr>)>
             o => out.push(o),
         }
     }
+    let t = format!("{:?}", target);
+    if let Expr::Call(n, _, _) = rhs { if n == "substr" && !format!("{:?}", rhs).contains(&t) { return Some((true, vec![rhs])); } }
     let Expr::Bin(op, _, _) = rhs else { return None };
     if op != "+" { return None; }
     let mut pieces = Vec::new();
     split(rhs, &mut pieces);
-    let t = format!("{:?}", target);
     if format!("{:?}", pieces[0]) == t { pieces.remove(0); return Some((false, pieces)); }
     if !texty(pieces[0]) || pieces.iter().any(|p| format!("{:?}", p).contains(&t)) { return None; }
     Some((true, pieces))

@@ -1,4 +1,7 @@
 POST /a -> 200 {"before":"true","after":"one+two","kept":"one","note":"xy","same":true}
+POST /sub -> 200 {"piece":"world","len":5,"byte":119,"copied":"hello","appended":"hellowor","inner":"or"}
+POST /sub/3/3 -> 400 {"error":"substring out of range","line":28}
+POST /sub/-1/2 -> 400 {"error":"substring out of range","line":28}
 state <plain values> 20
-state app.notes 30
-memory reserved=8192 committed=8192 live=50
+state app.notes 42
+memory reserved=8192 committed=8192 live=62

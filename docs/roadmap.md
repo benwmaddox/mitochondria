@@ -119,7 +119,7 @@ signature there is nothing to guess.
 ### 4.1 `ascii<N>` and `utf8<N>`: fixed-size text you build in place
 Today a `string<N>` field holds a value: text built in the request's text area (`"n=" + 5`, `substr`) is copied in whole when assigned
 (413 if longer than N), and text cannot be built in state piece by piece (the ports wrote bytes into `u8` arrays with helper functions,
-or had the benchmark harness generate the text). Two text kinds replace `string<N>`, both with a fixed maximum of N bytes:
+or had the benchmark harness generate the text). There are two text kinds, both with a fixed maximum of N bytes:
 
 - **`ascii<N>`**: one byte per character (values 0..127). Written by index (`s[i] = b`) and read by index; a builder.
 - **`utf8<N>`**: UTF-8 text. Read by byte index, never written by index (that could split a character); it changes only by whole text:
@@ -128,7 +128,7 @@ or had the benchmark harness generate the text). Two text kinds replace `string<
 - Both: `s.append(x)` (text, integers and floats formatted), `s.clear()`, `s.truncate(n)`, `len(s)`, `maxlen(s)`, `substr(s, from, count)`
   without copying, assignment from any text, comparison. Appending past N fails the request (413, naming the field), like a full collection.
   `ascii<N>` takes only ASCII: appending or assigning a byte above 127 is refused (400).
-- `string<N>` becomes `utf8<N>` (a one-time rewrite; for one release `string<N>` is accepted with a message).
+- `string<N>` is another name for `utf8<N>`, now and later: existing programs keep working unchanged, and either name may be used.
 - Inputs: `name: utf8<1..32>` / `ascii<1..32>` (the length range, both ends included as everywhere).
 - Done when: the ports that build text (Calculator, Template, CSV, Base64's message) use them instead of byte arrays and helpers.
 

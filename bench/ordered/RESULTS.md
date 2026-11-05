@@ -8,7 +8,7 @@ Machine: Windows 11, Intel64 Family 6 Model 170 Stepping 4, GenuineIntel. The sa
 
 Operations per lookup workload: 1,000,000.
 
-| Workload | btree | ordmap | Rust | btree/Rust | ordmap/Rust |
+| Workload | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |
 |---|---:|---:|---:|---:|---:|
 | Lookup: miss | 39.4 | 39.3 | 49.2 | 0.80x | 0.80x |
 | Lookup: hit | 41.9 | 39.0 | 48.5 | 0.87x | 0.80x |
@@ -22,7 +22,7 @@ Operations per lookup workload: 1,000,000.
 
 The most physical memory each process held at once (Windows' peak working set), over the whole run: insert, lookups, scans and deletes. Mitochondria's includes its server (connection threads, request areas); reserved address space never touched is not counted.
 
-| | btree | ordmap | Rust | btree/Rust | ordmap/Rust |
+| | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |
 |---|---:|---:|---:|---:|---:|
 | Peak memory | 6.4 | 6.0 | 4.4 | 1.47x | 1.38x |
 
@@ -30,7 +30,7 @@ The most physical memory each process held at once (Windows' peak working set), 
 
 Operations per lookup workload: 1,000,000.
 
-| Workload | btree | ordmap | Rust | btree/Rust | ordmap/Rust |
+| Workload | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |
 |---|---:|---:|---:|---:|---:|
 | Range scan, up to 100 entries | 1447.8 | 433.6 | 1791.1 | 0.81x | 0.24x |
 | Lookup: miss | 117.2 | 104.2 | 198.8 | 0.59x | 0.52x |
@@ -44,6 +44,6 @@ Operations per lookup workload: 1,000,000.
 
 The most physical memory each process held at once (Windows' peak working set), over the whole run: insert, lookups, scans and deletes. Mitochondria's includes its server (connection threads, request areas); reserved address space never touched is not counted.
 
-| | btree | ordmap | Rust | btree/Rust | ordmap/Rust |
+| | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |
 |---|---:|---:|---:|---:|---:|
 | Peak memory | 50.1 | 32.3 | 32.1 | 1.56x | 1.01x |

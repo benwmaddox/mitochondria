@@ -121,14 +121,14 @@ def write_markdown():
         def ns(k, w): return s[k]["ns"][w] if k in s else None
         o += [f"## {int(n):,} keys: time (ns per operation; a range scan is per scan)", "",
               f"Operations per lookup workload: {s['rust'].get('ops', ''):,}.", "",
-              "| Workload | btree | ordmap | Rust | btree/Rust | ordmap/Rust |", "|---|---:|---:|---:|---:|---:|"]
+              "| Workload | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |", "|---|---:|---:|---:|---:|---:|"]
         def best(w): return min(x for x in [(ns(k, w) / ns("rust", w)) if ns(k, w) else None for k in builds] + [float("inf")] if x is not None)
         for w in sorted(names, key=best):
             o.append(f"| {labels[w]} | {num(ns('btree', w))} | {num(ns('ordmap', w))} | {num(ns('rust', w))} | {ratio(ns('btree', w), ns('rust', w))} | {ratio(ns('ordmap', w), ns('rust', w))} |")
         o += ["", f"## {int(n):,} keys: memory (peak working set, MB)", "",
               "The most physical memory each process held at once (Windows' peak working set), over the whole run: insert, lookups, scans and deletes. "
               "Mitochondria's includes its server (connection threads, request areas); reserved address space never touched is not counted.", "",
-              "| | btree | ordmap | Rust | btree/Rust | ordmap/Rust |", "|---|---:|---:|---:|---:|---:|"]
+              "| | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |", "|---|---:|---:|---:|---:|---:|"]
         mb = lambda k: s[k]["mb"] if k in s else None
         o += [f"| Peak memory | {num(mb('btree'))} | {num(mb('ordmap'))} | {num(mb('rust'))} | {ratio(mb('btree'), mb('rust'))} | {ratio(mb('ordmap'), mb('rust'))} |", ""]
     with open(markdown_path, "w", encoding="utf-8") as f: f.write("\n".join(o))

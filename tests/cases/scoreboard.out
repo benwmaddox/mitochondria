@@ -22,7 +22,7 @@ GET /board -> 200 {"top":[{"name":"ada","points":400},{"name":"cy","points":90}]
 GET /recent -> 200 {"games":[{"name":"ada","points":50},{"name":"ada","points":400},{"name":"cy","points":90},{"name":"[left]","points":340},{"name":"ada","points":120}]}
 POST /players -> 201 {"id":"1.1"}
 POST /players/1.1/games -> 200 {"best":10}
-GET /recent -> 200 {"games":[{"name":"dee","points":10},{"name":"ada","points":50},{"name":"ada","points":400},{"name":"cy","points":90},{"name":"[left]","points":340},{"name":"ada","points":120}]}
+GET /recent -> 200 {"games":[{"name":"dee","points":10},{"name":"ada","points":50},{"name":"ada","points":400},{"name":"cy","points":90},{"name":"dee","points":340},{"name":"ada","points":120}]}
 POST /players/2.0/games -> 200 {"best":90}
 POST /players/2.0/games -> 200 {"best":90}
 POST /players/2.0/games -> 200 {"best":90}

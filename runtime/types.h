@@ -3,10 +3,10 @@
    The generator emits the program's layout and routes as constant tables of these types; runtime/mito.c reads them.
    Offsets are bytes from the start of the reservation. */
 typedef unsigned short u16; typedef signed char i8; typedef short i16; typedef int i32;
-/* One column of a collection. kind: 0 scalar, 1 fixed array of `n` scalars, 2 string length, 3 string bytes (`n` max),
-   4 reference to top-level pool `target`. scalar: 1 i8, 2 i16, 3 i32, 4 i64, 5 u8, 6 u16, 7 u32, 8 u64, 9 f32, 10 f64,
+/* One column of a collection. kind: 0 scalar, 1 fixed array of `n` scalars, 2 string length, 3 string bytes (`n` max).
+   scalar: 1 i8, 2 i16, 3 i32, 4 i64, 5 u8, 6 u16, 7 u32, 8 u64, 9 f32, 10 f64,
    11 bool. `size`: bytes per item. */
-typedef struct { const char *path; u32 kind, scalar, n; u64 off; u32 size, target; } MitoCol;
+typedef struct { const char *path; u32 kind, scalar, n; u64 off; u32 size; } MitoCol;
 /* A collection nested in each item of another, at field path `path` ("" for a collection of collections). */
 typedef struct { const char *path; u32 coll; } MitoKid;
 /* A list or pool. `mult` instances of `cap` items; `parent` is the collection whose items hold it (-1: top level).

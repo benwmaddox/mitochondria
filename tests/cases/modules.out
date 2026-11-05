@@ -13,7 +13,7 @@ DELETE /scores/1 -> 200 {"size":3}
 GET /fav -> 200 {"fav":"-"}
 GET /scores/1 -> 404 {"error":"slot 1 is not live"}
 POST /scores -> 201 {"slot":1,"size":3,"room":0}
-GET /fav -> 200 {"fav":"-"}
+GET /fav -> 200 {"fav":"eve"}
 GET /stats -> 200 {"added":4,"removed":1,"count":3,"others":0,"names":["ann","eve","cy"]}
 GET /walk -> 200 {"all":["ann","eve","cy"],"back":["cy","eve","ann"],"from1":["eve","cy"],"back_from1":["eve","ann"],"first":["ann"],"total":80}
 POST /others -> 201 {"size":1}

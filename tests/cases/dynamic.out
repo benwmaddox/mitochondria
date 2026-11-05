@@ -31,7 +31,6 @@ GET /ornotlive -> 200 {"a":-1,"b":false,"c":10}
 GET /coll -> 200 {"n":3,"x":[7,10,20]}
 GET /recor -> 200 {"a":7}
 GET /recor -> 200 {"a":-1}
-GET /slotnull -> 500 {"error":"slot(item)"}
 state <plain values> 8
 state app.ts 48
 memory reserved=8192 committed=8192 live=56

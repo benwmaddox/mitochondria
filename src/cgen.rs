@@ -31,7 +31,6 @@ struct H {
     int (*auth)(Ctx *, u32, u32 *);                            /* the item of pool `coll` named by the request's token, or 401 */
     int (*index)(Ctx *, u32, u32, i64, u32 *);                 /* item k of instance `inst` of `coll`, checked live, or 404 */
     int (*lit)(Ctx *, const char *, u32, Txt *);               /* copy bytes into the request's text area */
-    int (*deref)(Ctx *, u32, u32, u32, u32 *);                 /* follow a reference (pool, slot+1, generation): index, or 0 if gone */
     int (*fail)(Ctx *, int, const char *, u32);                /* fail the request with a status and message */
     int (*dead)(Ctx *);                                        /* fail: a reference that is no longer live was used */
     int (*col_txt)(Ctx *, u32, u32, u32, Txt *);               /* copy a string column of an item into the text area */
@@ -101,7 +100,6 @@ struct H {
 #define CALL_OR_DEAD(x, l) do { if ((st = (x)) != 0) { if (st < 0 && c->h->was_dead(c)) goto l; return st; } } while (0)
 #define TAIL(x) return (x)
 #define FAIL(code, msg, n) return c->h->fail(c, (code), (msg), (n))
-#define DEREF(t, s, g, out) c->h->deref(c, (t), (s), (g), (out))
 #define OVERFLOW_ FAIL(500, "integer overflow", 16)
 #ifdef __clang__
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -539,16 +537,15 @@ pub fn layout_c(prog: &Program, api: &Api) -> String {
     for (k, c) in prog.colls.iter().enumerate() {
         o += &format!("static const MitoCol mito_cols{}[] = {{\n", k);
         for col in &c.cols {
-            let (kind, sc, n, target) = match &col.kind {
-                CKind::Scalar(s) => (0, plain_code(&Ty::Scalar(*s)).unwrap().0, 0, 0),
-                CKind::Arr(s, n) => (1, plain_code(&Ty::Scalar(*s)).unwrap().0, *n as u32, 0),
-                CKind::StrLen => (2, 0, 0, 0),
-                CKind::StrBytes(m) => (3, 0, *m as u32, 0),
-                CKind::Ref(t) => (4, 0, 0, *t as u32),
+            let (kind, sc, n) = match &col.kind {
+                CKind::Scalar(s) => (0, plain_code(&Ty::Scalar(*s)).unwrap().0, 0),
+                CKind::Arr(s, n) => (1, plain_code(&Ty::Scalar(*s)).unwrap().0, *n as u32),
+                CKind::StrLen => (2, 0, 0),
+                CKind::StrBytes(m) => (3, 0, *m as u32),
             };
-            o += &format!("    {{ {}, {}, {}, {}, {}, {}, {} }},\n", c_lit(col.path.as_bytes()), kind, sc, n, col.off, col.kind.size(), target);
+            o += &format!("    {{ {}, {}, {}, {}, {}, {} }},\n", c_lit(col.path.as_bytes()), kind, sc, n, col.off, col.kind.size());
         }
-        o += "    { 0, 0, 0, 0, 0, 0, 0 }\n};\n";
+        o += "    { 0, 0, 0, 0, 0, 0 }\n};\n";
         o += &format!("static const MitoKid mito_kids{}[] = {{", k);
         for (path, kid) in &c.children { o += &format!(" {{ {}, {} }},", c_lit(path.as_bytes()), kid); }
         o += " { 0, 0 } };\n";
@@ -602,7 +599,7 @@ pub fn layout_table(prog: &Program) -> String {
         if c.checked() { o += &format!(", generations at {}", c.gen); }
         o += "\n";
         for (ci, col) in c.cols.iter().enumerate() {
-            let t = match &col.kind { CKind::Scalar(s) => format!("{:?}", s).to_lowercase(), CKind::Arr(s, n) => format!("{:?}[{}]", s, n).to_lowercase(), CKind::StrLen => "string length u32".into(), CKind::StrBytes(n) => format!("string bytes [{}]", n), CKind::Ref(t) => format!("ref to coll {} (slot+1 u32, generation u32)", t) };
+            let t = match &col.kind { CKind::Scalar(s) => format!("{:?}", s).to_lowercase(), CKind::Arr(s, n) => format!("{:?}[{}]", s, n).to_lowercase(), CKind::StrLen => "string length u32".into(), CKind::StrBytes(n) => format!("string bytes [{}]", n) };
             o += &format!("     col {:<2} {:<22} {:<40} at {} + idx * {}\n", ci, col.path, t, col.off, col.kind.size());
         }
     }
@@ -1429,7 +1426,7 @@ impl<'p> G<'p> {
                     CV::Plain(sid, off) => {
                         let sd = &self.prog.structs[sid];
                         let Some(k) = sd.fields.iter().position(|x| x.0 == *f) else { return no(format!("no field `{}`", f)) };
-                        let (code, cap) = match &sd.fields[k].1 { Ty::Ref(p) => (30, self.prog.ref_pool(p).ok_or("ref to an unknown pool")? as u32), t => plain_code(t).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))? };
+                        let (code, cap) = plain_code(&sd.fields[k].1).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))?;
                         let at = off + sd.offs[k];
                         let range = sd.ranges[k];
                         self.may_write_plain(at)?;
@@ -1900,7 +1897,6 @@ impl<'p> G<'p> {
             Ty::Scalar(s) => self.load(&off.to_string(), "0", *s)?,
             Ty::Str(_) => { let x = self.tmp("t"); self.line(&format!("Txt {};", x)); self.call(&format!("c->h->plain_txt(c, {}, &{})", off, x)); CV::Txt(x) }
             Ty::Arr(e, n) => CV::PlainArr(off, (**e).clone(), *n),
-            Ty::Ref(p) => { let t = self.prog.ref_pool(p).ok_or("ref to an unknown pool")?; self.load_ref(t, &off.to_string(), "0", dead)? }
             _ => return no("a plain value of this kind"),
         })
     }
@@ -1962,7 +1958,6 @@ impl<'p> G<'p> {
         Ok(match col.kind {
             CKind::Scalar(s) => { let v = self.load(&col.off.to_string(), &idx, s)?; self.with_field_range(v, col.range) }
             CKind::StrLen => CV::StateStr(c, idx, ci),
-            CKind::Ref(t) => self.load_ref(t, &col.off.to_string(), &idx, dead)?,
             CKind::Arr(..) => CV::ArrCol(c, idx, ci),
             CKind::StrBytes(_) => unreachable!(),
         })
@@ -1976,13 +1971,6 @@ impl<'p> G<'p> {
     }
 
     /// Follow a reference stored at `off` + item `idx` * 8 (slot+1, then generation) to pool `t`.
-    fn load_ref(&mut self, t: usize, off: &str, idx: &str, dead: Option<&str>) -> R<CV> {
-        let (s, gv, k) = (self.tmp("r"), self.tmp("g"), self.tmp("i"));
-        self.line(&format!("u32 {} = LD_U32({}, (i64)({}) * 2), {} = LD_U32({} + 4, (i64)({}) * 2), {} = 0;", s, off, idx, gv, off, idx, k));
-        let on_dead = match dead { Some(l) => format!("goto {};", l), None => "TAIL(c->h->dead(c));".into() };
-        self.line(&format!("if ({} != 0 && !DEREF({}, {} - 1, {}, &{})) {}", s, t, s, gv, k, on_dead));
-        Ok(CV::Ref(t, s, k))
-    }
 
     fn bin(&mut self, op: &str, a: &'p Expr, b: &'p Expr, env: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<CV> {
         if op == "&&" || op == "||" {
@@ -2647,7 +2635,7 @@ impl<'p> G<'p> {
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
     let t = ctoks(body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
@@ -2682,7 +2670,7 @@ pub fn check_profile(body: &str) -> Result<(), String> {
             let member = prev == "->";
             if member {
                 if !(i >= 4 && t[i - 4] == "c" && t[i - 3] == "->" && t[i - 2] == "h") { return err(i, "member call other than c->h->helper"); }
-                if !owners.iter().any(|o| ["CALL", "CALL_OR_DEAD", "TAIL", "DEREF"].contains(o)) { return err(i, "helper called without CALL, TAIL or DEREF"); }
+                if !owners.iter().any(|o| ["CALL", "CALL_OR_DEAD", "TAIL"].contains(o)) { return err(i, "helper called without CALL or TAIL"); }
             } else if tok.starts_with("fn_") {
                 if !matches!(owners.last(), Some(&"CALL") | Some(&"CALL_OR_DEAD")) { return err(i, "generated function called without CALL"); }
             } else if !CALLS.contains(&tok) && !MORE_CALLS.contains(&tok) && tok != "return" && !TYPES.contains(&tok) {
@@ -2810,10 +2798,10 @@ mod profile_tests {
     /// Collections are used through their functions; the old keywords, and operations in the wrong place, do not load.
     #[test]
     fn collection_functions_replace_the_old_keywords() {
-        let st = "struct I { n: i64; } struct E { who: ref<app.items>; n: i64; } struct App { items: pool<I, 4>; board: sorted<E, 4, n>; } state app: App;";
+        let st = "struct I { n: i64; } struct E { who: i64; n: i64; } struct App { items: pool<I, 4>; board: sorted<E, 4, n>; } state app: App;";
         let (st, _) = crate::modules::expand(st, "").unwrap();
         let load = |api: &str| -> String {
-            let (_, api) = crate::modules::expand("struct I { n: i64; } struct E { who: ref<app.items>; n: i64; } struct App { items: pool<I, 4>; board: sorted<E, 4, n>; } state app: App;", api).unwrap();
+            let (_, api) = crate::modules::expand("struct I { n: i64; } struct E { who: i64; n: i64; } struct App { items: pool<I, 4>; board: sorted<E, 4, n>; } state app: App;", api).unwrap();
             super::check(&Program::parse(&st).unwrap(), &api).err().unwrap_or_default()
         };
         for (api, want) in [

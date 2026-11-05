@@ -3,16 +3,16 @@
 --- program
 struct Tag { t: i64; }
 struct Item { v: i64; tags: list<Tag, 3> drop_oldest; }
-struct Holder { it: ref<app.items>; }
+struct Holder { it: i64; } // the held item's slot + 1; 0 for none
 struct App { items: pool<Item, 3> checked; holder: Holder; log: list<Tag, 3> drop_oldest; }
 state app: App;
 
 @post("/add/{v}")
 fn post_add(v: i64) -> Response<{ slot: i64 }> { let x = app.items.add(); x.v = v; x.tags.add { t: v * 10 }; return created({ "slot": slot(x) }); }
 @post("/hold/{s}")
-fn post_hold(s: i64) -> Response<{}> { app.holder.it = app.items[s]; return ok({}); }
+fn post_hold(s: i64) -> Response<{}> { app.holder.it = slot(app.items[s]) + 1; return ok({}); }
 @get("/held")
-fn get_held() -> Response<{ v: i64 }> { return ok({ "v": or(app.holder.it.v, -1) }); }
+fn get_held() -> Response<{ v: i64 }> { return ok({ "v": or(app.items[app.holder.it - 1].v, -1) }); }
 @post("/clear")
 fn post_clear() -> Response<{ count: i64 }> { app.items.clear(); return ok({ "count": app.items.count() }); }
 @post("/clear-then-add/{v}")

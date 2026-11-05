@@ -1,7 +1,7 @@
 // collection functions, initializers, compound assignment and unquoted keys (the syntax of docs/proposals/syntax.md)
 --- program
-struct Item { name: string<8>; n: i64; entry: ref<app.board>; }
-struct Entry { who: ref<app.items>; n: i64; }
+struct Item { name: string<8>; n: i64; entry: i64; } // entry: its slot in app.board
+struct Entry { who: i64; n: i64; } // who: the item's slot
 struct Log { what: string<16>; }
 struct App {
     total: i64;
@@ -11,13 +11,13 @@ struct App {
 }
 state app: App;
 
-fn items() -> ref<app.items> { return app.items; }
+fn items() { return app.items; }
 
 @post("/items")
 fn post_items(n: i64, name: string<4096>?) -> Response<{ id: i64, entry: i64, total: i64 }> {
     let it = app.items.add { name: name, n: n };
-    let e = app.board.add(it.n) { who: it };
-    it.entry = e;
+    let e = app.board.add(it.n) { who: slot(it) };
+    it.entry = slot(e);
     app.log.add { what: "added" };
     app.total += it.n;
     return created({ id: slot(it), entry: slot(e), total: app.total });
@@ -37,7 +37,7 @@ fn post_sub_k(k: i64) -> Response<{ total: i64 }> {
 @delete("/items/{k}")
 fn delete_items_k(k: i64) -> Response<{ left: i64 }> {
     let it = app.items[k];
-    app.board.remove(it.entry);
+    app.board.remove(app.board.get(it.entry));
     app.items.remove(it);
     app.log.add { what: "removed" };
     return ok({ left: app.items.count() });
@@ -46,7 +46,7 @@ fn delete_items_k(k: i64) -> Response<{ left: i64 }> {
 fn get_all() -> Response<{ items: [{ name: string, n: i64 }], board: [{ name: string, n: i64 }], log: [{ what: string }], "quoted key": i64 }> {
     return ok({
         items: [each it in app.items { name: it.name, n: it.n }],
-        board: [each e in app.board reverse { name: or(e.who.name, "[gone]"), n: e.n }],
+        board: [each e in app.board reverse { name: or(app.items[e.who].name, "[gone]"), n: e.n }],
         log: [each l in app.log { what: l.what }],
         "quoted key": app.total
     });

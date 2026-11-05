@@ -3,7 +3,7 @@
 --- program
 struct Score { name: string<8>; points: i64; }
 struct Word { w: string<12>; n: i64; }
-struct Fav { s: ref<app.board>; }
+struct Fav { s: i64; } // the favourite's slot + 1; 0 for none
 struct App {
     board: sorted<Score, 6, points>;
     words: sorted<Word, 8, w>;
@@ -28,9 +28,9 @@ fn get_ends() -> Response<{ first: string, last: string, room: i64 }> { return o
 @get("/sum")
 fn get_sum() -> Response<{ t: i64 }> { var t = 0; each s in app.board where s.points > 0 { t = t + s.points; } return ok({ "t": t }); }
 @post("/fav/{k}")
-fn post_fav_k(k: i64) -> Response<{}> { app.fav.s = app.board.get(k); return ok({}); }
+fn post_fav_k(k: i64) -> Response<{}> { app.fav.s = slot(app.board.get(k)) + 1; return ok({}); }
 @get("/fav")
-fn get_fav() -> Response<{ fav: string }> { return ok({ "fav": or(app.fav.s.name, "-") }); }
+fn get_fav() -> Response<{ fav: string }> { return ok({ "fav": or(app.board.get(app.fav.s - 1).name, "-") }); }
 @post("/churn/{n}")
 fn post_churn_n(n: i64) -> Response<{ size: i64 }> {
     each i in 0..n { let s = app.board.add(i % 4 - 1); s.name = "c"; app.board.remove(s); }

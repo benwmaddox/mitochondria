@@ -6,7 +6,7 @@ struct App {
     top: Top;
 }
 state app: App;
-struct Top { r: ref<app.ts>; }
+struct Top { r: i64; }
 
 @post("/t")
 fn post_t() -> Response<{}> { let t = app.ts.add(); t.n = slot(t) * 10; return created({}); }
@@ -30,8 +30,6 @@ fn find(k) { if k < 0 { return app.ts[99]; } if k == 0 { return app.ts[0]; } ret
 fn get_coll() -> Response<{ n: i64, x: [i64] }> { return ok({ "n": pool_of().count(), "x": [each t in pool_of() t.n] }); }
 @get("/recor")
 fn get_recor(k: i64 from body) -> Response<{ a: i64 }> { return ok({ "a": or(find(k).n, -1) }); }
-@get("/slotnull")
-fn get_slotnull() -> Response<{ s: i64 }> { return ok({ "s": slot(app.top.r) }); }
 @get("/divmin")
 fn get_divmin(d: i64 from body) -> Response<{ d: i64 }> { return ok({ "d": (0 - 9223372036854775807 - 1) / d }); }
 @get("/modmin")
@@ -73,4 +71,3 @@ GET /ornotlive {"k": 1}
 GET /coll
 GET /recor {"k": 3}
 GET /recor {"k": -1}
-GET /slotnull

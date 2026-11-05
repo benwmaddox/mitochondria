@@ -1,7 +1,7 @@
 // a module instance (lib/bag.mito): its functions, its state read from outside, and references to its items
 --- program
 struct Score { name: string<16>; points: i64; }
-struct Fav { s: ref<app.scores>; }
+struct Fav { s: i64; } // the favourite's slot + 1; 0 for none
 struct App {
     scores: bag<Score, 3>;
     others: bag<Score, 2>;
@@ -21,9 +21,9 @@ fn get_scores_k(k: i64) -> Response<{ name: string, points: i64 }> { let s = app
 @delete("/scores/{k}")
 fn delete_scores_k(k: i64) -> Response<{ size: i64 }> { app.scores.remove(app.scores.get(k)); return ok({ "size": app.scores.size() }); }
 @post("/fav/{k}")
-fn post_fav_k(k: i64) -> Response<{}> { app.fav.s = app.scores.get(k); return ok({}); }
+fn post_fav_k(k: i64) -> Response<{}> { app.fav.s = slot(app.scores.get(k)) + 1; return ok({}); }
 @get("/fav")
-fn get_fav() -> Response<{ fav: string }> { return ok({ "fav": or(app.fav.s.name, "-") }); }
+fn get_fav() -> Response<{ fav: string }> { return ok({ "fav": or(app.scores.get(app.fav.s - 1).name, "-") }); }
 @get("/stats")
 fn get_stats() -> Response<{ added: i64, removed: i64, count: i64, others: i64, names: [string] }> {
     return ok({

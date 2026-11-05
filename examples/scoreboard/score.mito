@@ -1,8 +1,8 @@
 // A game scoreboard: players, each player's best score kept in order, and the last 20 games played.
 // (The tutorial, docs/tutorial.md, builds this program step by step.)
-struct Player { name: string<24>; best: i64; entry: ref<game.board>; }
-struct Entry  { who: ref<game.players>; points: i64; }
-struct Played { who: ref<game.players>; points: i64; at: i64; }
+struct Player { name: string<24>; best: i64; entry: i64; } // entry: its slot in game.board
+struct Entry  { who: i64; points: i64; }                 // who: the player's slot
+struct Played { who: i64; points: i64; at: i64; }
 struct Row    { name: string<24>; points: i64; }
 
 struct Game {
@@ -16,15 +16,16 @@ state game: Game;
 @post("/players")
 fn add_player(name: string<1..24>) -> Response<{ id: Player }> {
     let p = game.players.add { name: name };
-    p.entry = game.board.add(0) { who: p };
+    let e = game.board.add(0) { who: slot(p) };
+    p.entry = slot(e);
     return created({ id: p });
 }
 
 @post("/players/{p}/games")
 fn record(p: Player, points: i64) -> Response<{ best: i64 }> {
     game.games += 1;
-    game.recent.add { who: p, points: points, at: now() };
-    if points > p.best { p.best = points; game.board.set_key(p.entry, points); }
+    game.recent.add { who: slot(p), points: points, at: now() };
+    if points > p.best { p.best = points; game.board.set_key(game.board.get(p.entry), points); }
     // checked last on purpose: everything above is undone when this fails
     if points > 1000000 { fail 422 "not a believable score"; }
     return ok({ best: p.best });
@@ -32,17 +33,17 @@ fn record(p: Player, points: i64) -> Response<{ best: i64 }> {
 
 @get("/board")
 fn board(top: i64 in 1..100 = 10) -> Response<{ top: [Row] }> {
-    return ok({ top: [each e in game.board reverse limit top { name: e.who.name, points: e.points }] });
+    return ok({ top: [each e in game.board reverse limit top { name: game.players[e.who].name, points: e.points }] });
 }
 
 @get("/recent")
 fn recent() -> Response<{ games: [Row] }> {
-    return ok({ games: [each g in game.recent reverse { name: or(g.who.name, "[left]"), points: g.points }] });
+    return ok({ games: [each g in game.recent reverse { name: or(game.players[g.who].name, "[left]"), points: g.points }] });
 }
 
 @delete("/players/{p}")
 fn remove_player(p: Player) -> Response<none> {
-    game.board.remove(p.entry);
+    game.board.remove(game.board.get(p.entry));
     game.players.remove(p);
     return no_content();
 }

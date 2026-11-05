@@ -1,12 +1,12 @@
 // references held in vars and returned by functions (an item, or null when there is none)
 --- program
-struct Node { name: string<8>; next: ref<app.nodes>; }
+struct Node { name: string<8>; next: i64; } // the next node's slot + 1; 0 at the end
 struct App {
     nodes: pool<Node, 4> checked;
     top: Top;
 }
 state app: App;
-struct Top { head: ref<app.nodes>; }
+struct Top { head: i64; }
 
 fn find(name) { each n in app.nodes { if n.name == name { return n; } } return null; }
 @post("/nodes")
@@ -14,7 +14,7 @@ fn post_nodes(name: string<4096>?) -> Response<{ slot: i64 }> {
     let n = app.nodes.add();
     n.name = name;
     n.next = app.top.head;
-    app.top.head = n;
+    app.top.head = slot(n) + 1;
     return created({ "slot": slot(n) });
 }
 @delete("/nodes/{name}")
@@ -25,7 +25,7 @@ fn get_walk() -> Response<{ names: string, steps: i64 }> {
     var names = "";
     var steps = 0;
     each n in app.nodes {
-        if exists(cur) { names = names + cur.name + ","; cur = cur.next; steps = steps + 1; }
+        if cur != 0 && exists(app.nodes[cur - 1]) { let node = app.nodes[cur - 1]; names = names + node.name + ","; cur = node.next; steps = steps + 1; }
     }
     return ok({ "names": names, "steps": steps });
 }

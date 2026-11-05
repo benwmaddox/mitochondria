@@ -39,11 +39,14 @@ undo log: a failed request leaves what it wrote there (for scratch state rebuilt
 named by a key it carries, never referenced. Use it for messages, logs, recent events.
 
 **`pool<T, N>`** keeps items in slots that never move, with a live bit each; new items take the lowest free slot. When
-full, `add` fails. `checked` adds a generation per slot, so a reference to a reused slot is detected (`Stale`). Use it
+full, `add` fails. `checked` adds a generation per slot, so an id from a request or a session token that names a reused
+slot is detected (`Stale`). Use it
 for things that are referred to and come and go: sessions, users, rooms.
 
-**`ref<path>`** refers to a slot of a pool that exists once (reached from the state through plain structs): 4 bytes, 8
-with a generation. Reading through it checks the slot; `or(a, b)` gives `b` when `a` is dead or null.
+**Naming another item.** An item names another by its slot in an integer field (`who: i64`, set from `slot(p)`), read
+back with `pool[slot]`, which checks the slot is live (`or(pool[slot].name, "[gone]")` for a fallback). A slot stored
+in state carries no generation, so a reused slot is not detected there; a generation-checked id held in state is
+planned (`ref<path>` did this and was removed; a different design is wanted).
 
 **Nesting.** A collection can be a field of an item, with a maximum per parent: `Room.messages: list<Msg, 1000>`
 reserves 1000 per room. Each parent's items sit together, so a room's newest 50 messages are the last 50 of its list,
@@ -138,7 +141,7 @@ system {
 | `Full` | a collection or area is at its maximum | 503 |
 | `TooLong` | a value exceeds its maximum | 413 |
 | `NotLive` | a slot or position is not in use | 404 |
-| `Stale` | a checked reference to a reused slot | 401 for a session, else 404 |
+| `Stale` | an id or session token naming a reused slot | 401 for a session, else 404 |
 | input | a request input absent, of the wrong kind or out of range | 400 |
 | `fail CODE "msg"` | the program's own | as given |
 

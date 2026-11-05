@@ -20,7 +20,7 @@ messages costs memory for 3. There is no heap allocator and no garbage collector
 **Access is a lookup.** Because every collection's place is fixed when the program is built, reading data is
 arithmetic on an address, not a search: an id is a slot, so `game.players[id]` goes straight to that player, and a
 room's messages sit together where the room's slot says. There are no pointers to follow, no hash maps and no queries
-to run; a reference is checked for liveness on the way.
+to run; an index is checked for liveness on the way.
 
 **What that changes when you design.** You decide limits early, per thing: how many sessions, how long a name, how
 many messages a room keeps. Reaching a limit is an ordinary error the program answers (full, too long), never a crash or

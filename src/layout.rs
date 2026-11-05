@@ -1,6 +1,6 @@
 //! Parse state declarations and compute their exact byte layout.
 //!
-//! Plain values (scalars, strings, fixed arrays, structs, refs outside any collection) are laid out record-style at fixed
+//! Plain values (scalars, strings, fixed arrays, structs outside any collection) are laid out record-style at fixed
 //! offsets, as in Stasis. Every `list` and `pool` is laid out as columns: one array per leaf field, holding `mult * cap`
 //! items, where `mult` is how many instances of the collection exist (the product of the capacities of the collections it
 //! is nested in). Instance `i` owns items `i*cap .. (i+1)*cap` of every column, so one parent's items are adjacent.
@@ -32,7 +32,6 @@ pub enum Ty {
     Arr(Box<Ty>, usize),        // T[N]: exactly N elements
     List(Box<Ty>, usize, Full), // list<T, N> [drop_oldest]
     Pool(Box<Ty>, usize, bool), // pool<T, N> [checked]
-    Ref(String),                // ref<path>: a slot of a pool that exists once (`ref<game.players>`)
     Struct(usize),
     Named(String),              // only before resolution
 }
@@ -48,9 +47,9 @@ pub enum Kind { List(Full), Pool(bool) }
 
 /// One column of a collection. Strings take two (length, bytes).
 #[derive(Clone, Debug)]
-pub enum CKind { Scalar(Scalar), Arr(Scalar, usize), StrLen, StrBytes(usize), Ref(usize) }
+pub enum CKind { Scalar(Scalar), Arr(Scalar, usize), StrLen, StrBytes(usize) }
 impl CKind {
-    pub fn size(&self) -> usize { match self { CKind::Scalar(s) => s.size(), CKind::Arr(s, k) => s.size() * k, CKind::StrLen => 4, CKind::StrBytes(m) => *m, CKind::Ref(_) => 8 } }
+    pub fn size(&self) -> usize { match self { CKind::Scalar(s) => s.size(), CKind::Arr(s, k) => s.size() * k, CKind::StrLen => 4, CKind::StrBytes(m) => *m } }
     fn align(&self) -> usize { match self { CKind::Scalar(s) | CKind::Arr(s, _) => s.size(), CKind::StrBytes(_) => 1, _ => 4 } }
 }
 #[derive(Clone, Debug)]
@@ -109,7 +108,6 @@ impl Program {
             Ty::Scalar(s) => (s.size(), s.size()),
             Ty::Str(n) => (up(4 + n, 4), 4),
             Ty::Arr(e, n) => { let (s, a) = self.plain_size(e); (s * n, a) }
-            Ty::Ref(_) => (8, 4),
             Ty::Struct(i) => (self.structs[*i].size, self.structs[*i].align),
             Ty::List(..) | Ty::Pool(..) => (0, 1),
             Ty::Named(_) => unreachable!(),
@@ -122,19 +120,11 @@ impl Program {
             Ty::Arr(e, n) => format!("{}[{}]", self.show(e), n),
             Ty::List(e, n, f) => format!("list<{}, {}>{}", self.show(e), n, if *f == Full::DropOldest { " drop_oldest" } else { "" }),
             Ty::Pool(e, n, c) => format!("pool<{}, {}>{}", self.show(e), n, if *c { " checked" } else { "" }),
-            Ty::Ref(p) => format!("ref<{}>", p),
             Ty::Struct(i) => self.structs[*i].name.clone(),
             Ty::Named(n) => n.clone(),
         }
     }
     pub fn global(&self, name: &str) -> Option<usize> { self.globals.iter().position(|g| g.name == name) }
-    /// The pool `ref<path>` points into: a pool that exists once (reached from the state through plain structs, not
-    /// inside another collection's items), or a module instance's items.
-    pub fn ref_pool(&self, path: &str) -> Option<usize> {
-        let once = |n: &str| self.colls.iter().position(|c| c.name == n && c.parent.is_none());
-        let c = once(path).or_else(|| self.instances.iter().find(|m| m.name == path).and_then(|m| once(&format!("{}.items", m.name))));
-        c.filter(|c| matches!(self.colls[*c].kind, Kind::Pool(_)))
-    }
     /// Where a path of plain structs from the state starts and how many bytes it covers (`game.board`, a module
     /// instance's state).
     pub fn plain_path(&self, path: &str) -> Option<(usize, usize)> {
@@ -221,16 +211,15 @@ impl Program {
         prog.plain_end = off;
         // then every collection, each starting on a page so it can be trimmed on its own
         let mut cur = up(off, PAGE);
-        let mut refs: Vec<(usize, usize, String)> = Vec::new();
         for g in 0..prog.globals.len() {
             let ty = prog.globals[g].ty.clone();
             let name = prog.globals[g].name.clone();
             if ty.is_coll() {
-                let cid = prog.build_coll(&name, &ty, 1, None, false, &mut cur, &mut refs, 0)?;
+                let cid = prog.build_coll(&name, &ty, 1, None, false, &mut cur, 0)?;
                 prog.globals[g].coll = Some(cid);
             } else if let Ty::Struct(s) = ty {
                 let base = prog.globals[g].off;
-                prog.plain_struct_colls(s, base, &name, &mut cur, &mut refs)?;
+                prog.plain_struct_colls(s, base, &name, &mut cur)?;
             } else if contains_coll(&prog, &ty) {
                 return Err(format!("`{}`: collections inside fixed arrays are not supported; use a nested list", name));
             }
@@ -238,11 +227,6 @@ impl Program {
         for g in 0..prog.globals.len() { if let Ty::Struct(st) = prog.globals[g].ty.clone() { let base = prog.globals[g].off; prog.plain_unlogged(st, base, false); } }
         for c in 0..prog.colls.len() { if prog.colls[c].unlogged && prog.colls[c].parent.is_none() { let (a, b) = (prog.colls[c].start, prog.colls[c].end); prog.unlogged.push((a, up(b, 64))); } }
         }
-        for (cid, ci, name) in refs {
-            let Some(t) = prog.ref_pool(&name) else { return Err(not_a_target(&name)) };
-            prog.colls[cid].cols[ci].kind = CKind::Ref(t);
-        }
-        for g in &prog.globals { check_plain_refs(&prog, &g.ty)?; }
         prog.total = cur;
         Ok(prog)
     }
@@ -286,16 +270,16 @@ impl Program {
             if unl { let (sz, _) = self.plain_size(t); self.unlogged.push((o, o + up(sz, 64))); }
         }
     }
-    fn plain_struct_colls(&mut self, s: usize, base: usize, path: &str, cur: &mut usize, refs: &mut Vec<(usize, usize, String)>) -> Result<(), String> {
+    fn plain_struct_colls(&mut self, s: usize, base: usize, path: &str, cur: &mut usize) -> Result<(), String> {
         let fields = self.structs[s].fields.clone();
         for (k, (n, t)) in fields.iter().enumerate() {
             let p = format!("{}.{}", path, n);
             if t.is_coll() {
-                let cid = self.build_coll(&p, t, 1, None, self.structs[s].unlogged[k], cur, refs, 0)?;
+                let cid = self.build_coll(&p, t, 1, None, self.structs[s].unlogged[k], cur, 0)?;
                 self.plain_colls.push((base, s, n.clone(), cid));
             } else if let Ty::Struct(c) = t {
                 let o = base + self.structs[s].offs[k];
-                self.plain_struct_colls(*c, o, &p, cur, refs)?;
+                self.plain_struct_colls(*c, o, &p, cur)?;
             } else if contains_coll(self, t) {
                 return Err(format!("`{}`: collections inside fixed arrays are not supported; use a nested list", p));
             }
@@ -303,7 +287,7 @@ impl Program {
         Ok(())
     }
 
-    fn build_coll(&mut self, name: &str, ty: &Ty, mult: usize, parent: Option<usize>, unlogged: bool, cur: &mut usize, refs: &mut Vec<(usize, usize, String)>, depth: usize) -> Result<usize, String> {
+    fn build_coll(&mut self, name: &str, ty: &Ty, mult: usize, parent: Option<usize>, unlogged: bool, cur: &mut usize, depth: usize) -> Result<usize, String> {
         if depth > 8 { return Err(format!("`{}`: collections nested more than 8 deep (a struct that contains itself?)", name)); }
         let (elem, cap, kind) = match ty { Ty::List(e, n, f) => ((**e).clone(), *n, Kind::List(*f)), Ty::Pool(e, n, c) => ((**e).clone(), *n, Kind::Pool(*c)), _ => unreachable!() };
         if cap == 0 { return Err(format!("`{}`: capacity must be at least 1", name)); }
@@ -327,14 +311,13 @@ impl Program {
                 Ty::Scalar(s) => { let mut col = place(CKind::Scalar(s), &mut o); col.range = range; c.cols.push(col); }
                 Ty::Arr(e, k) => { let Ty::Scalar(s) = *e else { unreachable!() }; let col = place(CKind::Arr(s, k), &mut o); c.cols.push(col); }
                 Ty::Str(m) => { let a = place(CKind::StrLen, &mut o); c.cols.push(a); let b = place(CKind::StrBytes(m), &mut o); c.cols.push(b); }
-                Ty::Ref(p) => { refs.push((cid, c.cols.len(), p)); let col = place(CKind::Ref(usize::MAX), &mut o); c.cols.push(col); }
                 _ => unreachable!(),
             }
         }
         self.colls.push(c);
         *cur = o;
         for (path, t) in kids {
-            let k = self.build_coll(&format!("{}.{}", name, path), &t, items, Some(cid), unlogged, cur, refs, depth + 1)?;
+            let k = self.build_coll(&format!("{}.{}", name, path), &t, items, Some(cid), unlogged, cur, depth + 1)?;
             self.colls[cid].children.push((path, k));
         }
         self.colls[cid].end = *cur;
@@ -348,7 +331,7 @@ impl Program {
                 if self.structs[*i].unlogged[k] { return Err(format!("`{}`: `{}` is declared unlogged, but items of a collection are logged or not as a whole: declare the collection `unlogged`", name, join(f))); }
                 self.flatten(ft, &join(f), self.structs[*i].ranges[k], leaves, kids, name)?;
             },
-            Ty::Scalar(_) | Ty::Str(_) | Ty::Ref(_) => leaves.push((prefix.to_string(), t.clone(), range)),
+            Ty::Scalar(_) | Ty::Str(_) => leaves.push((prefix.to_string(), t.clone(), range)),
             Ty::Arr(e, _) if matches!(**e, Ty::Scalar(_)) => leaves.push((prefix.to_string(), t.clone(), None)),
             Ty::List(..) | Ty::Pool(..) => kids.push((prefix.to_string(), t.clone())),
             _ => return Err(format!("`{}`: items cannot hold `{}` at `{}`; use a nested list instead of a fixed array of structs", name, self.show(t), prefix)),
@@ -359,15 +342,6 @@ impl Program {
 
 fn contains_coll(p: &Program, t: &Ty) -> bool {
     match t { Ty::List(..) | Ty::Pool(..) => true, Ty::Arr(e, _) => contains_coll(p, e), Ty::Struct(i) => p.structs[*i].fields.iter().any(|f| contains_coll(p, &f.1)), _ => false }
-}
-fn not_a_target(n: &str) -> String { format!("ref<{}>: `{}` is not a pool that exists once (one reached from the state through plain structs, not inside another collection's items)", n, n) }
-fn check_plain_refs(p: &Program, t: &Ty) -> Result<(), String> {
-    match t {
-        Ty::Ref(n) => if p.ref_pool(n).is_some() { Ok(()) } else { Err(not_a_target(n)) },
-        Ty::Arr(e, _) => check_plain_refs(p, e),
-        Ty::Struct(i) => { for f in &p.structs[*i].fields { if !f.1.is_coll() { check_plain_refs(p, &f.1)?; } } Ok(()) }
-        _ => Ok(()),
-    }
 }
 
 fn resolve(t: Ty, names: &HashMap<String, usize>) -> Result<Ty, String> {
@@ -427,7 +401,7 @@ impl P {
         let n = self.ident()?;
         let mut t = if let Some(s) = Scalar::parse(&n) { Ty::Scalar(s) }
         else if n == "string" { self.eat("<")?; let k = self.count()?; self.eat(">")?; Ty::Str(k) }
-        else if n == "ref" { self.eat("<")?; let p = self.path()?; self.eat(">")?; Ty::Ref(p) }
+        else if n == "ref" { return Err("`ref<...>` was removed: keep the item's slot (`slot(item)`) in an integer field and read it back with `pool[slot]` (inside `or(...)` for a fallback when it is gone)".into()); }
         else if n == "list" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let f = if self.word("drop_oldest") { Full::DropOldest } else { Full::Fail }; Ty::List(Box::new(e), k, f) }
         else if n == "pool" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let c = self.word("checked"); Ty::Pool(Box::new(e), k, c) }
         else { Ty::Named(n) };
@@ -445,15 +419,12 @@ mod tests {
         assert!(Program::parse("struct A { b: B; } struct B { a: A; } state g: A;").is_err());
         assert!(Program::parse("struct N { kids: list<N, 2>; } state g: pool<N, 2>;").is_err()); // nests forever
         assert!(Program::parse("struct M { t: list<i32, 2>; } state g: list<M, 2> drop_oldest;").is_err());
-        assert!(Program::parse("struct M { who: ref<nope>; } state g: list<M, 2>;").is_err());
+        assert!(Program::parse("struct M { who: ref<nope>; } state g: list<M, 2>;").err().unwrap_or_default().contains("was removed"));
         let p = Program::parse("struct M { t: i32; } struct R { m: list<M, 1000>; } state rooms: pool<R, 64>;").unwrap();
         assert_eq!(p.colls[1].mult, 64);
         // one state: none, two, or the old `global`, do not load
         assert!(Program::parse("struct M { t: i32; }").err().unwrap_or_default().contains("has none"));
         assert!(Program::parse("struct M { t: i32; } state a: M; state b: M;").err().unwrap_or_default().contains("one state"));
         assert!(Program::parse("struct M { t: i32; } global a: M;").err().unwrap_or_default().contains("replaced by `state`"));
-        // a reference reaches a pool that exists once, through plain structs, not one inside another collection's items
-        assert!(Program::parse("struct P { n: i32; } struct Q { who: ref<g.ps>; } struct G { ps: pool<P, 4>; qs: list<Q, 4>; } state g: G;").is_ok());
-        assert!(Program::parse("struct P { n: i32; } struct R { ps: pool<P, 4>; } struct Q { who: ref<g.rs.ps>; } struct G { rs: pool<R, 2>; qs: list<Q, 4>; } state g: G;").err().unwrap_or_default().contains("exists once"));
     }
 }

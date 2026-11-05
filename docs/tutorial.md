@@ -25,9 +25,9 @@ clang if you install LLVM.
 ## 1. The state
 
 ```
-struct Player { name: string<24>; best: i64; entry: ref<game.board>; }
-struct Entry  { who: ref<game.players>; points: i64; }
-struct Played { who: ref<game.players>; points: i64; at: i64; }
+struct Player { name: string<24>; best: i64; entry: i64; } // entry: its slot in game.board
+struct Entry  { who: i64; points: i64; }                 // who: the player's slot
+struct Played { who: i64; points: i64; at: i64; }
 struct Row    { name: string<24>; points: i64; }
 
 struct Game {
@@ -41,11 +41,12 @@ state game: Game;
 
 A program has one state, a struct holding everything; every path starts at its name (`game.players`).
 
-- `pool<Player, 1000>`: up to 1000 players in slots that never move. `checked` adds a generation per slot, so an old
-  reference to a reused slot is detected.
+- `pool<Player, 1000>`: up to 1000 players in slots that never move. `checked` adds a generation per slot, so an id
+  from outside (`"1.0"`: slot 1, generation 0) that names a reused slot is refused.
 - `list<Played, 20> drop_oldest`: the last 20 games, in order; the 21st overwrites the oldest.
 - `sorted<Entry, 1000, points>`: entries kept in order of `points` (a library module, `lib/sorted.mito`).
-- `ref<game.players>`: a reference to a player; reading through it checks the player is still there.
+- `who: i64`: one item names another by its slot (`slot(p)`), read back with `game.players[e.who]`; that read checks the
+  slot is live, and `or(..., fallback)` answers the fallback when it is not.
 - `string<24>`: at most 24 bytes.
 
 That is the whole memory of the program: 172 KB reserved, decided here.
@@ -56,7 +57,8 @@ That is the whole memory of the program: 172 KB reserved, decided here.
 @post("/players")
 fn add_player(name: string<1..24>) -> Response<{ id: Player }> {
     let p = game.players.add { name: name };
-    p.entry = game.board.add(0) { who: p };
+    let e = game.board.add(0) { who: slot(p) };
+    p.entry = slot(e);
     return created({ id: p });
 }
 ```
@@ -89,15 +91,15 @@ curl.exe -X POST http://127.0.0.1:8080/players -d '{"name": "ada"}'
 @post("/players/{p}/games")
 fn record(p: Player, points: i64) -> Response<{ best: i64 }> {
     game.games += 1;
-    game.recent.add { who: p, points: points, at: now() };
-    if points > p.best { p.best = points; game.board.set_key(p.entry, points); }
+    game.recent.add { who: slot(p), points: points, at: now() };
+    if points > p.best { p.best = points; game.board.set_key(game.board.get(p.entry), points); }
     if points > 1000000 { fail 422 "not a believable score"; }
     return ok({ best: p.best });
 }
 
 @get("/board")
 fn board(top: i64 in 1..100 = 10) -> Response<{ top: [Row] }> {
-    return ok({ top: [each e in game.board reverse limit top { name: e.who.name, points: e.points }] });
+    return ok({ top: [each e in game.board reverse limit top { name: game.players[e.who].name, points: e.points }] });
 }
 ```
 
@@ -133,12 +135,12 @@ POST /players/7.0/games {"points": 1}                      404 {"error":"`p`: no
 
 A full pool answers 503. Nothing grows past what was declared, so nothing runs out unexpectedly.
 
-## 7. Leaving, and stale references
+## 7. Leaving, and reused slots
 
 ```
 @delete("/players/{p}")
 fn remove_player(p: Player) -> Response<none> {
-    game.board.remove(p.entry);
+    game.board.remove(game.board.get(p.entry));
     game.players.remove(p);
     return no_content();
 }
@@ -148,11 +150,13 @@ fn remove_player(p: Player) -> Response<none> {
 DELETE /players/1.0                      204
 POST /players {"name": "dee"}            201 {"id":"1.1"}
 POST /players/1.1/games {"points": 10}   200 {"best":10}
-GET /recent                              {"games":[{"name":"dee","points":10},...,{"name":"[left]","points":340},...]}
+GET /recent                              {"games":[{"name":"dee","points":10},...,{"name":"dee","points":340},...]}
 ```
 
-Dee reuses bo's slot 1 with a new generation (`"1.1"`). Bo's old game still says `[left]`, and the old id `1.0` gets a
-404: the generation tells them apart.
+Dee reuses bo's slot 1 with a new generation (`"1.1"`), so the old id `1.0` gets a 404: the generation tells them apart.
+But a slot stored in state carries no generation, so bo's old game now shows dee's name. Until the language has a way to
+hold a generation-checked id in state (planned, not designed yet), copy what must survive the item (the name) into the
+record, or clear stored slots when their item goes.
 
 ## 8. Memory you can see
 

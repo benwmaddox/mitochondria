@@ -6,7 +6,7 @@ GET /walk -> 200 {"names":"c,b,a,","steps":3}
 GET /find/b -> 200 {"found":true,"name":"b"}
 GET /find/z -> 200 {"found":false,"name":"-"}
 DELETE /nodes/b -> 200 {}
-GET /walk -> 404 {"error":"reference is not live"}
+GET /walk -> 200 {"names":"c,","steps":1}
 GET /find/b -> 200 {"found":false,"name":"-"}
 DELETE /nodes/zz -> 404 {"error":"no such node"}
 state <plain values> 8

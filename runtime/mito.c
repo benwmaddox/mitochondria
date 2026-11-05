@@ -675,11 +675,6 @@ static int deref_quiet(Mito *m, u32 t, u64 slot, u32 g, u64 *out) {
 static int store_col(Mito *m, u32 c, u64 idx, u32 ci, i64 j, const Val *v) {
     const MitoCol *col = &coll(&m->mem, c)->cols[ci];
     u64 a = caddr(m, c, idx, ci);
-    if (col->kind == 4) {
-        if (v->tag == 0) { wr(&m->mem, a, 8, 0); return 0; }
-        if (v->tag == 5 && v->a == col->target) { wr(&m->mem, a, 4, (u64)v->b + 1); wr(&m->mem, a + 4, 4, gen_of(&m->mem, v->a, v->b)); return 0; }
-        return fail(m, 500, "this field holds a reference to a different pool");
-    }
     if (v->tag == 4) {
         if (col->kind != 2 || j >= 0) return bad_type(m);
         const MitoCol *bc = &coll(&m->mem, c)->cols[ci + 1];
@@ -1037,7 +1032,6 @@ static int h_index(Ctx *c, u32 cid, u32 inst, i64 k, u32 *out) {
     *out = (u32)((u64)inst * col->cap + (u64)k); return 0;
 }
 static int h_lit(Ctx *c, const char *p, u32 n, Txt *out) { Mito *m = M_(c); T t; if (t_push(m, p, n, &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
-static int h_deref(Ctx *c, u32 t, u32 slot, u32 g, u32 *out) { Mito *m = M_(c); u64 i; if (!deref_quiet(m, t, slot, g, &i)) return 0; *out = (u32)i; return 1; }
 static int h_fail(Ctx *c, int code, const char *p, u32 n) { Mito *m = M_(c); err(m, E_FAIL, code); a_put(&m->emsg, p, n); return -1; }
 static int h_dead(Ctx *c) { return err(M_(c), E_DEAD, 404); }
 static int h_col_txt(Ctx *c, u32 cid, u32 idx, u32 ci, Txt *out) { Mito *m = M_(c); T t; if (col_txt(m, cid, idx, ci, &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
@@ -1178,11 +1172,6 @@ static int h_store_elem(Ctx *c, u32 cid, u32 idx, u32 ci, i64 k, const Val *v) {
 /* A plain value at `off`: code 1..11 a scalar, 20 a string<cap>, 30 a reference to top-level pool `cap`. */
 static int h_store_plain(Ctx *c, u32 off, u32 code, u32 cap, const Val *v) {
     Mito *m = M_(c);
-    if (code == 30) {
-        if (v->tag == 0) { wr(&m->mem, off, 8, 0); return 0; }
-        if (v->tag == 5 && v->a == cap) { wr(&m->mem, off, 4, (u64)v->b + 1); wr(&m->mem, off + 4, 4, gen_of(&m->mem, v->a, v->b)); return 0; }
-        return fail(m, 500, "this field holds a reference to a different pool");
-    }
     if (v->tag == 4) { if (code != 20) return bad_type(m); return store_bytes_at(m, off, off + 4, cap, t_ptr(m, (T){ v->a, v->b }), v->b); }
     if (v->tag != 1 && v->tag != 2 && v->tag != 3) return fail(m, 500, "cannot store this value in state");
     if (code == 20) { err(m, E_BAD, 400); a_str(&m->emsg, "expected a string"); return -1; }
@@ -1259,12 +1248,6 @@ static int h_field_val(Ctx *c, const Val *base, const char *p, u32 n, Val *out) 
     const MitoCol *col = &coll(&m->mem, cid)->cols[ci];
     if (col->kind == 1) return fail(m, 500, "a collection, struct or array field of an item held as a value cannot be read here; name the item's collection");
     if (col->kind == 2) { T t; if (col_txt(m, cid, idx, (u32)ci, &t)) return -1; *out = v_str(t); return 0; }
-    if (col->kind == 4) {
-        u64 a = caddr(m, cid, idx, (u32)ci); u32 s1 = (u32)rd(&m->mem, a, 4), g = (u32)rd(&m->mem, a + 4, 4); u64 k;
-        if (!s1) { *out = v_null(); return 0; }
-        if (!deref_quiet(m, col->target, s1 - 1, g, &k)) return err(m, E_DEAD, 404);
-        *out = v_item(col->target, (u32)k); return 0;
-    }
     *out = scalar_val(m, caddr(m, cid, idx, (u32)ci), col->scalar); return 0;
 }
 static int h_store_field(Ctx *c, const Val *base, const char *p, u32 n, const Val *v) {
@@ -1374,7 +1357,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
 }
 
 static const H mito_h = {
-    h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
+    h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
 };

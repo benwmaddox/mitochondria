@@ -933,3 +933,26 @@ Full run after all of it (3 rounds, 41 ports, 2026-11-05 evening): 0.97x of Rust
 ## Round 28: no ref<>, and T? (2026-11-05)
 
 With `ref<>` removed, Binarytrees::Obj names a node's children by slot + 1 and follows them by a checked index instead of a generation-checked reference: 2.78 s to 2.04 s (0.68x of Rust; audit now rewritten-to-match).
+
+## Round 29: general savings, every port (2026-11-05)
+
+Small changes aimed at all ports rather than one outlier, measured as a whole-suite A/B against the previous compiler (3 rounds each, one pinned core):
+
+- the undo log records a 4 KB page that is still all zeros as one "zeros" entry instead of copying it (a request filling fresh state, as every `prepare` does);
+- a bounds test of a plain C variable stays good into later statements until a line writes that variable (it was dropped at every statement);
+- a value loaded from a narrow field (`u8`, `i32`, ...) and a `let` holding it keep that range, so arithmetic and stores on them lose overflow and fit tests;
+- a function enters the loop-selection mark only when one of its loops collects items (it was any loop);
+- `int(x)` of a float is truncated in line (it was a boxed call to the generic builtin; 16 ports use it in the LangArena random-number helper);
+- clang gets `-fno-math-errno` (sqrt is one instruction) and `-falign-loops=32`.
+
+The last flag matters more than it looks: before it, Compress::HuffEncode and HuffDecode were 24% and 11% slower with strictly leaner C, and the same
+inner loop compiled to the same instructions either way; only where clang placed it differed. Aligning loop heads removed that swing.
+
+| | before | after |
+|---|---:|---|
+| time, geometric mean of Mito/Rust over all 41 | 0.928x | 0.909x |
+| peak memory, geometric mean of Mito/Rust over all 41 | 1.13x | 0.94x |
+
+Largest time gains: BF::Recursion -17%, BF::Array -14%, Etc::NeuralNet and Etc::GameOfLife -15%, Maze::Generator -10%; geometric mean -2.8% against the
+previous compiler. Memory: Maze ports -45% to -49%, Template::Parse, GameOfLife, BWTDecode -42% to -45%, Graph ports -37% (the undo log no longer copies
+the zero pages `prepare` fills).

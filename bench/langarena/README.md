@@ -14,21 +14,29 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 - Each port has an `audit` file with its verdict: `like-for-like`, `rewritten-to-match` (same algorithm, small mechanical rewrites the language forces, listed) or `closest-possible` (a difference in data-structure shape, listed). The headline geometric mean covers only the first two.
 - "Original" in LangArena means the Crystal implementation. Crystal is not installed here; its sources are in `<LangArena>/crystal` and the ports follow the same algorithms (the Rust implementation is a faithful port of them).
 
-## Results (2026-11-04; run parameters, 3 rounds, best of rounds; ratio = Mitochondria / Rust)
+## Results (2026-11-04; run parameters, 3 rounds, best of rounds; ratio = Mitochondria / the column's implementation)
 
-| Workload | Mitochondria s | Rust (reference) s | Mito/Rust | Rust with overflow checks s | Mito/Rust (checked) | audit |
-|---|---|---|---|---|---|---|
-| Etc::Sieve | 6.639 | 1.346 | 4.93x | 1.797 | 3.69x | rewritten-to-match |
-| CLBG::Fannkuchredux | 2.566 | 0.902 | 2.84x | 0.922 | 2.78x | like-for-like |
-| Sort::Quick | 1.796 | 1.113 | 1.61x | 1.152 | 1.56x | rewritten-to-match |
-| Sort::Merge | 3.284 | 1.294 | 2.54x | 1.284 | 2.56x | rewritten-to-match |
-| CLBG::Spectralnorm | 0.749 | 1.066 | 0.70x | 1.080 | 0.69x | rewritten-to-match |
-| CLBG::Mandelbrot | 0.703 | 0.706 | 1.00x | 0.714 | 0.98x | rewritten-to-match |
-| Matmul::Single | 4.056 | 3.249 | 1.25x | 3.238 | 1.25x | closest-possible |
+| Workload | Mitochondria s | Rust (reference) s | Mito/Rust | Rust with overflow checks s | Mito/Rust (checked) | Crystal (original) s | Mito/Crystal | audit |
+|---|---|---|---|---|---|---|---|---|
+| Etc::Sieve | 2.252 | 1.326 | 1.70x | 1.807 | 1.25x | 2.000 | 1.13x | rewritten-to-match |
+| CLBG::Fannkuchredux | 1.368 | 0.933 | 1.47x | 0.942 | 1.45x | 1.011 | 1.35x | like-for-like |
+| Sort::Quick | 1.351 | 1.106 | 1.22x | 1.148 | 1.18x | 1.558 | 0.87x | rewritten-to-match |
+| Sort::Merge | 1.806 | 1.311 | 1.38x | 1.311 | 1.38x | 2.173 | 0.83x | rewritten-to-match |
+| CLBG::Spectralnorm | 0.746 | 1.068 | 0.70x | 1.075 | 0.69x | 0.743 | 1.00x | rewritten-to-match |
+| CLBG::Mandelbrot | 0.692 | 0.709 | 0.98x | 0.716 | 0.97x | 0.687 | 1.01x | rewritten-to-match |
+| Matmul::Single | 4.038 | 3.278 | 1.23x | 3.226 | 1.25x | 3.063 | 1.32x | closest-possible |
 
-Headline geometric mean (the six like-for-like and rewritten-to-match ports): 1.85x. With Matmul::Single: 1.75x. Medians agree with best-of within 2%.
+Geometric mean of the six like-for-like and rewritten-to-match ports: 1.19x of Rust (1.02x of Crystal). Medians agree with best-of within 2%. Crystal is
+LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
+comparable, replaced by the standard library's), run with the same runner on the same core.
 
-What the numbers say: a loop dominated by float arithmetic or reads is at parity or faster (Mandelbrot, Spectralnorm); a loop of many small array *stores* is several times slower (Sieve 4.9x, Fannkuchredux 2.8x, Merge 2.5x), because every store in a Mitochondria request is range-checked, committed and undo-logged so that a failed request leaves nothing behind. The checked-overflow Rust column shows that overflow checking alone is not the explanation (Sieve: 1.35 s -> 1.80 s).
+How it got here (Mitochondria / Rust, best of 3; each step merged): the first run had Sieve 4.93x, Fannkuchredux 2.84x, Sort::Quick 1.61x, Sort::Merge 2.54x. Stores to plain
+state skip the page-commit check (state is committed at start): 1.97x, 1.90x, 1.30x, 1.71x. A bulk `array.fill` for the sieve's per-run array. Stores of aligned scalars inline, with
+the undo-log and commit tests against per-request locals: 1.66x, 1.52x, 1.21x, 1.44x. Value-range analysis for names that never change: no measurable change on these ports
+(their indices are mutable variables, or sizes read from state).
+
+Where the time was, for the sieve, per run (measuring-only builds with parts switched off): 24.7 ms as built; 19.6 ms without the undo log; 13.3 ms without the commit check; 7.8 ms
+without both; Rust 5.0 ms. A loop of many small array stores pays for atomicity (every store is range-checked, committed and undo-logged so that a failed request leaves nothing behind).
 
 ## Triage of all 50 tests
 
@@ -71,4 +79,9 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 41-48 | Compress::BWT / Huff / Arith / LZW (encode and decode) | blocked: bit operators, hash maps, byte buffers |
 | 49-50 | Distance::Jaro / NGram | blocked: strings, hash map |
 
-Counts: 7 ported, 7 more portable now (GameOfLife, the three graph tests, the three maze tests), 9 not comparable (the three threaded matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 27 blocked by a missing language feature. The features that would unlock the most tests: bit operators (Base64 x2, SHA256, CRC32, the eight Compress tests), reading the bytes of a string (Brainfuck x2, Base64 x2, Calculator x2, CSV, Words, Template::Parse, Distance x2, CacheSimulation, the Compress tests), `sqrt` and `exp` (Nbody, TextRaytracer, NeuralNet) and a one-step reset of a pool (Binarytrees x2). Adding any of them is a language decision.
+Counts when the table was made: 7 ported, 7 portable, 9 not comparable, 27 blocked. Language features added since for this suite (each tested, all merged):
+bit operators and hex literals (`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only),
+`coll.clear()`, `array.fill`, `array.move` and `array.count_below`. They remove the stated blocker of: Binarytrees::Obj and ::Arena (pool reset), Brainfuck::Array and
+::Recursion (string bytes; recursion is still limited to 64 deep), Etc::NeuralNet (exp), CLBG::Nbody (sqrt), Etc::TextRaytracer (sqrt, floor), Hash::CRC32 and Hash::SHA256 (bit
+operators, string bytes), and the bit-operator part of Base64, the compression tests and Calculator. Not yet ported. Still blocked by something else: building text (Base64
+output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.

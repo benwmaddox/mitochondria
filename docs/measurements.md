@@ -792,3 +792,14 @@ same pinned core, alternating rounds, the checksum verified on both sides in eve
 extra column (it moves Sieve 1.35 -> 1.80 s, so checked arithmetic alone does not explain the gap): loops of many small array stores are the
 slow case, because every store is range-checked, committed and undo-logged. Seven more tests are portable with the language as it is;
 27 need a language feature (bit operators, string bytes, sqrt/exp, a pool reset) and 9 are not comparable (threads, library).
+
+## Round 21 (2026-11-04): making stores cheap, language additions, and the Crystal original
+LangArena (bench/langarena) now compares Mitochondria with the Rust reference and the original Crystal implementation (Crystal 1.22.2 installed from its release, built with
+`--release`), same core, alternating rounds, all checksums verified on all three sides. Mitochondria / Rust, best of 3, from the first run to now: Sieve 4.93x -> 1.70x, Fannkuchredux
+2.84x -> 1.47x, Sort::Quick 1.61x -> 1.22x, Sort::Merge 2.54x -> 1.38x, Spectralnorm 0.70x, Mandelbrot 0.98x, Matmul::Single 1.23x; geometric mean of the six like-for-like and
+rewritten-to-match ports 1.19x of Rust, 1.02x of Crystal; faster than Crystal on both sorts (0.87x, 0.83x).
+What did it (each merged): plain-state stores skip the page-commit check (plain state is committed at start and never trimmed); a bulk array.fill; stores of aligned scalars are inline with
+the undo-log and commit tests against per-request locals (jons, dirty map and commit flags are fixed for a request); value-range analysis for names that never change (sound, tested, no
+measurable effect on these ports). Attribution on the sieve per run: 24.7 ms as built, 19.6 without the undo log, 13.3 without the commit check, 7.8 without both, Rust 5.0.
+Language added: bit operators and hex literals, sqrt exp floor abs, string byte reads, coll.clear(), array.fill/move/count_below. They unblock Binarytrees, Brainfuck, NeuralNet, Nbody,
+TextRaytracer, CRC32 and SHA256 for porting (not yet ported).

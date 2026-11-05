@@ -1088,8 +1088,9 @@ impl<'p> G<'p> {
         self.line("}");
     }
     /// One store of `size` bytes (the bits `bits`) at byte offset `addr`. A naturally aligned one (`aligned`: it cannot cross a 64-byte line or a
-    /// page) is inline: the commit test (pool items only; plain state is committed at start), the undo-log test, the store. Any other goes to
-    /// the runtime's helper, which does the same checks for any alignment.
+    /// page) is inline: the undo-log test and the store. No commit test: plain state is committed at start, and a store to an item is to a live
+    /// item (from `add`, a checked index or a checked reference), whose memory `add` committed and which trimming (only between requests, only
+    /// outside the live ranges) never gives back. Any other store goes to the runtime's helper, which does the checks for any alignment.
     fn emit_wr(&mut self, plain: bool, aligned: bool, addr: &str, size: u64, bits: &str) {
         if !aligned {
             let wr = if plain { "wr_plain" } else { "wr_int" };
@@ -1099,7 +1100,6 @@ impl<'p> G<'p> {
         let a = self.tmp("a");
         self.open("{");
         self.line(&format!("u64 {} = (u64)({});", a, addr));
-        if !plain { self.line(&format!("COMMIT_({}, {});", a, size)); }
         self.line(&format!("SAVE_({}, {});", a, size));
         self.line(&format!("ST{}_({}, {});", size, a, bits));
         self.close("}");

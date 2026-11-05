@@ -36,6 +36,8 @@ Start with the [tutorial](docs/tutorial.md). The design is in [DESIGN.md](DESIGN
 **Benchmarks.** 41 [LangArena](https://github.com/kostya/LangArena) tests ported and measured against LangArena's Rust and Crystal
 implementations, time and peak memory per test: [bench/langarena/RESULTS.md](bench/langarena/RESULTS.md) (written by the benchmark script;
 how the comparison is made, and each port's audit, in [bench/langarena/README.md](bench/langarena/README.md)).
+Ordered maps (`lib/btree.mito`, `lib/ordmap.mito`) against Rust's `BTreeMap`, per workload at 10,000 and 1,000,000 keys:
+[bench/ordered/RESULTS.md](bench/ordered/RESULTS.md) (written by `bench/ordered/results.py`).
 
 ## License
 

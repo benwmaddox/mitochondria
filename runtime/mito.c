@@ -1090,6 +1090,8 @@ static int h_truthy(Ctx *c, const Val *v, int *out) { if (v->tag == 3) { *out = 
 static int h_wr_int(Ctx *c, u64 off, u32 size, i64 v) { wr(&M_(c)->mem, off, size, (u64)v); return 0; }
 /* The same for plain state: ensure(0, plain_end) committed it at start and the live-page marking keeps trim from decommitting it, so the page is
    known committed and only the undo log needs a look. */
+static int h_save_line(Ctx *c, u64 a, u32 size) { save(&M_(c)->mem, a, size); return 0; }
+static int h_commit_range(Ctx *c, u64 a, u32 size) { ensure(&M_(c)->mem, a, a + size); return 0; }
 static int h_wr_plain(Ctx *c, u64 off, u32 size, i64 v) { Mem *m = &M_(c)->mem; save(m, off, size); u64 x = (u64)v; memcpy(m->base + off, &x, size); return 0; }
 /* `count` elements of `esize` bytes of an array at byte offset `base`, from position `from`, are set to the value whose bits are `bits`: one commit
    (not for plain state, committed at start), one undo-log pass over the range, one fill (the generated code checked the range and that the value fits). */
@@ -1319,7 +1321,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_count_below, h_str_cmp_lit, h_str_cmp_col,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */
@@ -1417,7 +1419,7 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     m->now = m->fixed_clock ? m->clock : os_now_ms();
     begin(&m->mem);
     m->frees.len = 0; m->sel.len = 0;
-    Ctx ctx = { m->mem.base, m, &mito_h };
+    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon };
     int res = mito_eps[ei](&ctx);
     if (res < 0 && m->ekind == E_FORWARD) { m->out.len = 0; m->pending = 1; return 0; } /* committed or rolled back by MITO(finish_forward) */
     int code, ok;

@@ -18,7 +18,7 @@ typedef struct { u32 off, len; int present; } Txt;
 /* tag: 0 null, 1 int (i), 2 float (f), 3 bool (i), 4 string (a = offset, b = length), 5 item (a = collection, b = index) */
 typedef struct { int tag; u32 a, b; i64 i; double f; } Val;
 typedef struct H H;
-typedef struct { u8 *base; void *run; const H *h; } Ctx;
+typedef struct { u8 *base; void *run; const H *h; u8 *dirty; u8 *committed; int jon; } Ctx; /* dirty, committed, jon: the undo log's line map, the page commit flags, whether the request journals: fixed for the request */
 /* The runtime's helpers. Every one returns 0, or a non-zero status after recording the error (the generated code then
    returns that status at once and the runtime rolls the request back). Collections, columns and items are numbered as
    in the layout table at the top of an emitted file; `idx` is an item's index across all instances of its collection. */
@@ -69,6 +69,8 @@ struct H {
     int (*count_below)(Ctx *, u64, u32, i64, i64, int, i64 *);      /* how many of the first n elements of an array (kind code, at a byte offset) are below a target (at most it when inclusive) */
     int (*str_cmp_lit)(Ctx *, int, u32, u32, u32, u32, u32, int *); /* a string column against a literal (op in OPS order), compared where they are: no copy */
     int (*str_cmp_col)(Ctx *, int, u32, u32, u32, u32, u32, u32, int *); /* a string column against another */
+    int (*save_line)(Ctx *, u64, u32);                         /* the first write of the request to a line: the undo log saves it (the inline test found its bit clear) */
+    int (*commit_range)(Ctx *, u64, u32);                      /* commit the page of a store the inline test found uncommitted */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -102,6 +104,22 @@ struct H {
 #else
 #define UNLIKELY(x) (x)
 #define BITS_F64(x) (*(i64 *)&(double){ (x) })
+#endif
+/* The undo log and the page commit flags do not change for the length of a request, so a generated function keeps them in locals (jn_, dr_,
+   cm_) and a store of a naturally aligned scalar (never across a 64-byte line or a page) is: commit test (pool items only), undo-log bit test,
+   the store; the runtime is called only the first time a line is written or a page is touched. */
+#define SAVE_(a, size) do { if (UNLIKELY(jn_ && !((dr_[(a) >> 9] >> (((a) >> 6) & 7)) & 1))) { CALL(c->h->save_line(c, (a), (size))); } } while (0)
+#define COMMIT_(a, size) do { if (UNLIKELY(!cm_[(a) >> 12])) { CALL(c->h->commit_range(c, (a), (size))); } } while (0)
+#ifdef __clang__
+#define ST1_(a, v) do { u8 v_ = (u8)(v); __builtin_memcpy(b + (a), &v_, 1); } while (0)
+#define ST2_(a, v) do { u16 v_ = (u16)(v); __builtin_memcpy(b + (a), &v_, 2); } while (0)
+#define ST4_(a, v) do { u32 v_ = (u32)(v); __builtin_memcpy(b + (a), &v_, 4); } while (0)
+#define ST8_(a, v) do { u64 v_ = (u64)(v); __builtin_memcpy(b + (a), &v_, 8); } while (0)
+#else
+#define ST1_(a, v) (*(u8 *)(b + (a)) = (u8)(v))
+#define ST2_(a, v) (*(u16 *)(b + (a)) = (u16)(v))
+#define ST4_(a, v) (*(u32 *)(b + (a)) = (u32)(v))
+#define ST8_(a, v) (*(u64 *)(b + (a)) = (u64)(v))
 #endif
 #ifdef __clang__
 #define ADD(r, x, y) i64 r; if (UNLIKELY(__builtin_add_overflow((x), (y), &r))) OVERFLOW_
@@ -675,10 +693,10 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 if !new.is_empty() {
                     src += &format!("\n// functions for recursive calls, first used by {}, one per combination of argument kinds\n", ep.text);
                     for sp in new { src += &format!("{}int {}{};\n", linkage, sp.name, sp.proto); }
-                    for sp in new { src += &format!("{}int {}{} {{\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep;\n{}    return 0;\n}}\n", linkage, sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
+                    for sp in new { src += &format!("{}int {}{} {{\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; (void)dr_; (void)cm_; (void)jn_;\n{}    return 0;\n}}\n", linkage, sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
                 }
                 done = specs;
-                src += &format!("{}{}int {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b;\n{}    return 0;\n}}\n", head, linkage, name, body);
+                src += &format!("{}{}int {}(Ctx *c) {{\n    int st; u8 *b = c->base; (void)st; (void)b; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; (void)dr_; (void)cm_; (void)jn_;\n{}    return 0;\n}}\n", head, linkage, name, body);
             }
             Err(why) => {
                 if let Some(sf) = source { src += &source_comment(ep, sf); src += &format!("// not compiled: {}\n", why); }
@@ -1018,6 +1036,23 @@ impl<'p> G<'p> {
         self.depth -= 1;
         self.line("}");
     }
+    /// One store of `size` bytes (the bits `bits`) at byte offset `addr`. A naturally aligned one (`aligned`: it cannot cross a 64-byte line or a
+    /// page) is inline: the commit test (pool items only; plain state is committed at start), the undo-log test, the store. Any other goes to
+    /// the runtime's helper, which does the same checks for any alignment.
+    fn emit_wr(&mut self, plain: bool, aligned: bool, addr: &str, size: u64, bits: &str) {
+        if !aligned {
+            let wr = if plain { "wr_plain" } else { "wr_int" };
+            self.call(&format!("c->h->{}(c, {}, {}, {})", wr, addr, size, bits));
+            return;
+        }
+        let a = self.tmp("a");
+        self.open("{");
+        self.line(&format!("u64 {} = (u64)({});", a, addr));
+        if !plain { self.line(&format!("COMMIT_({}, {});", a, size)); }
+        self.line(&format!("SAVE_({}, {});", a, size));
+        self.line(&format!("ST{}_({}, {});", size, a, bits));
+        self.close("}");
+    }
     /// Store `v` in a scalar column of item `idx` (element `k` of an array column when `k` is given) as a typed store in
     /// line, when its kind is known here: see `scalar_store`. Returns false when it does not apply.
     fn int_store(&mut self, c: usize, idx: &str, ci: usize, k: Option<&str>, v: &CV, slow: &str) -> R<bool> {
@@ -1027,13 +1062,13 @@ impl<'p> G<'p> {
         let (off, whole) = (col.off, col.kind.size());
         let size = scalar_bytes(code);
         let addr = match k { Some(k) => format!("{}ULL + (u64)({}) * {}ULL + (u64)({}) * {}ULL", off, idx, whole, k, size), None => format!("{}ULL + (u64)({}) * {}ULL", off, idx, whole) };
-        self.scalar_store(code, addr, v, slow, false)
+        let aligned = off % size as usize == 0 && whole % size as usize == 0;
+        self.scalar_store(code, addr, v, slow, false, aligned)
     }
     /// A typed store in line of an integer, bool or f64 `v` into a scalar of kind `code` (see `plain_code`) at byte
     /// offset `addr`: the generated code checks the value fits (an integer in a narrower column), and the generic helper
     /// (`slow`, with `@VAL` for the value) runs only for one that does not, to make the error. False if it does not apply.
-    fn scalar_store(&mut self, code: u32, addr: String, v: &CV, slow: &str, plain: bool) -> R<bool> {
-        let wr = if plain { "wr_plain" } else { "wr_int" };
+    fn scalar_store(&mut self, code: u32, addr: String, v: &CV, slow: &str, plain: bool, aligned: bool) -> R<bool> {
         let w = self.tmp("w");
         let size = scalar_bytes(code);
         match (code, v) {
@@ -1058,16 +1093,16 @@ impl<'p> G<'p> {
                         self.depth -= 1;
                         self.line("} else {");
                         self.depth += 1;
-                        self.call(&format!("c->h->{}(c, {}, {}, {})", wr, addr, size, w));
+                        self.emit_wr(plain, aligned, &addr, size, &w);
                         self.depth -= 1;
                         self.line("}");
                     }
-                    None => self.call(&format!("c->h->{}(c, {}, {}, {})", wr, addr, size, w)),
+                    None => self.emit_wr(plain, aligned, &addr, size, &w),
                 }
                 self.close("}");
             }
-            (11, CV::Bool(e)) => self.call(&format!("c->h->{}(c, {}, 1, ({}) ? 1 : 0)", wr, addr, e)),
-            (10, CV::Flt(e)) => self.call(&format!("c->h->{}(c, {}, 8, BITS_F64({}))", wr, addr, e)),
+            (11, CV::Bool(e)) => self.emit_wr(plain, aligned, &addr, 1, &format!("(({}) ? 1 : 0)", e)),
+            (10, CV::Flt(e)) => self.emit_wr(plain, aligned, &addr, 8, &format!("BITS_F64({})", e)),
             _ => return Ok(false),
         }
         Ok(true)
@@ -1141,7 +1176,7 @@ impl<'p> G<'p> {
                         let at = off + sd.offs[k];
                         self.may_write_plain(at)?;
                         let v = self.expr(rhs, env, None)?;
-                        if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap), true)? { return Ok(()); }
+                        if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap), true, at % scalar_bytes(code) as usize == 0)? { return Ok(()); }
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, {}, {}, {}, &{})", at, code, cap, vv));
                         return Ok(());
@@ -1192,7 +1227,7 @@ impl<'p> G<'p> {
                         self.elem_check(&k, n as u64);
                         let v = self.expr(rhs, env, None)?;
                         let esz = self.prog.plain_size(&e).0;
-                        if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap), true)? { return Ok(()); }
+                        if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap), true, off % esz as usize == 0)? { return Ok(()); }
                         let vv = self.val(v)?;
                         self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, esz, code, cap, vv));
                     }
@@ -2161,7 +2196,7 @@ impl<'p> G<'p> {
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
 pub fn check_profile(body: &str) -> Result<(), String> {
     let t = ctoks(body);
-    const CALLS: [&str; 23] = ["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "DEREF", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "SAVE_", "COMMIT_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];

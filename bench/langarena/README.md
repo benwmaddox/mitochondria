@@ -15,53 +15,58 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 - Each port has an `audit` file with its verdict: `like-for-like`, `rewritten-to-match` (same algorithm, small mechanical rewrites the language forces, listed) or `closest-possible` (a difference in data-structure shape, listed). The headline geometric mean covers only the first two.
 - "Original" in LangArena means the Crystal implementation. Crystal is not installed here; its sources are in `<LangArena>/crystal` and the ports follow the same algorithms (the Rust implementation is a faithful port of them).
 
-## Results (2026-11-04; run parameters, 3 rounds, best of rounds, all 41 ports in one run; ratio = Mitochondria / the column's implementation)
+## Results (Mitochondria 2026-11-05, Rust and Crystal 2026-11-04; run parameters, 3 rounds, best of rounds, all 41 ports in one run; ratio = Mitochondria / the column's implementation)
 
 | Workload | Mitochondria s | Rust (reference) s | Mito/Rust | Rust with overflow checks s | Mito/Rust (checked) | Crystal (original) s | Mito/Crystal | audit |
 |---|---|---|---|---|---|---|---|---|
-| Base64::Decode | 1.066 | 0.186 | 5.73x | 0.191 | 5.58x | 1.144 | 0.93x | closest-possible |
-| Base64::Encode | 1.179 | 0.167 | 7.06x | 0.167 | 7.06x | 1.116 | 1.06x | closest-possible |
-| Binarytrees::Arena | 0.983 | 0.541 | 1.82x | 0.520 | 1.89x | 0.544 | 1.81x | like-for-like |
-| Binarytrees::Obj | 2.836 | 3.009 | 0.94x | 2.970 | 0.95x | 1.511 | 1.88x | like-for-like |
-| BF::Array | 1.544 | 0.943 | 1.64x | 1.346 | 1.15x | 2.133 | 0.72x | rewritten-to-match |
-| BF::Recursion | 1.836 | 1.370 | 1.34x | 1.473 | 1.25x | 1.491 | 1.23x | closest-possible |
-| Calculator::Ast | 0.209 | 0.686 | 0.30x | 0.688 | 0.30x | 0.415 | 0.50x | closest-possible |
-| Calculator::Interpreter | 0.529 | 0.885 | 0.60x | 0.891 | 0.59x | 0.513 | 1.03x | closest-possible |
-| CLBG::Fannkuchredux | 0.921 | 0.905 | 1.02x | 0.926 | 0.99x | 1.011 | 0.91x | like-for-like |
-| CLBG::Mandelbrot | 0.702 | 0.726 | 0.97x | 0.738 | 0.95x | 0.701 | 1.00x | rewritten-to-match |
-| CLBG::Nbody | 0.938 | 0.712 | 1.32x | 0.698 | 1.34x | 0.813 | 1.15x | closest-possible |
-| CLBG::Spectralnorm | 0.769 | 1.095 | 0.70x | 1.108 | 0.69x | 0.766 | 1.00x | rewritten-to-match |
-| Compress::ArithDecode | 0.972 | 1.254 | 0.78x | 1.242 | 0.78x | 0.918 | 1.06x | rewritten-to-match |
-| Compress::ArithEncode | 1.074 | 0.913 | 1.18x | 0.969 | 1.11x | 1.128 | 0.95x | like-for-like |
-| Compress::BWTDecode | 0.867 | 1.040 | 0.83x | 1.026 | 0.85x | 0.939 | 0.92x | rewritten-to-match |
-| Compress::BWTEncode | 0.532 | 0.433 | 1.23x | 0.424 | 1.25x | 1.129 | 0.47x | closest-possible |
-| Compress::HuffDecode | 0.918 | 0.629 | 1.46x | 0.618 | 1.49x | 0.918 | 1.00x | rewritten-to-match |
-| Compress::HuffEncode | 0.607 | 0.595 | 1.02x | 0.609 | 1.00x | 0.930 | 0.65x | rewritten-to-match |
-| Compress::LZWDecode | 0.181 | 1.133 | 0.16x | 1.136 | 0.16x | 0.529 | 0.34x | closest-possible |
-| Compress::LZWEncode | 0.091 | 0.530 | 0.17x | 0.519 | 0.18x | 0.874 | 0.10x | closest-possible |
-| CSV::Parse | 0.597 | 0.616 | 0.97x | 0.588 | 1.01x | 3.152 | 0.19x | closest-possible |
-| Distance::Jaro | 0.911 | 1.062 | 0.86x | 0.986 | 0.92x | 1.151 | 0.79x | rewritten-to-match |
-| Distance::NGram | 0.418 | 0.351 | 1.19x | 0.364 | 1.15x | 0.639 | 0.65x | rewritten-to-match |
-| Etc::CacheSimulation | 0.466 | 0.813 | 0.57x | 0.800 | 0.58x | 1.887 | 0.25x | rewritten-to-match |
-| Etc::GameOfLife | 1.541 | 1.964 | 0.78x | 1.979 | 0.78x | 1.853 | 0.83x | like-for-like |
-| Etc::NeuralNet | 0.872 | 0.864 | 1.01x | 0.864 | 1.01x | 0.926 | 0.94x | closest-possible |
-| Etc::Sieve | 1.692 | 1.320 | 1.28x | 1.795 | 0.94x | 2.027 | 0.83x | rewritten-to-match |
-| Etc::TextRaytracer | 0.749 | 0.627 | 1.19x | 0.629 | 1.19x | 0.799 | 0.94x | rewritten-to-match |
-| Etc::Words | 0.598 | 0.800 | 0.75x | 0.785 | 0.76x | 0.804 | 0.74x | closest-possible |
-| Graph::AStar | 0.645 | 1.313 | 0.49x | 1.331 | 0.48x | 2.162 | 0.30x | rewritten-to-match |
-| Graph::BFS | 0.976 | 0.840 | 1.16x | 0.853 | 1.14x | 1.239 | 0.79x | rewritten-to-match |
-| Graph::DFS | 0.901 | 0.729 | 1.24x | 0.746 | 1.21x | 1.066 | 0.85x | rewritten-to-match |
-| Hash::CRC32 | 0.813 | 0.846 | 0.96x | 0.838 | 0.97x | 0.813 | 1.00x | like-for-like |
-| Hash::SHA256 | 0.644 | 0.671 | 0.96x | 0.676 | 0.95x | 0.661 | 0.97x | like-for-like |
-| Matmul::Single | 3.271 | 3.303 | 0.99x | 3.298 | 0.99x | 3.172 | 1.03x | closest-possible |
-| Maze::AStar | 0.936 | 1.151 | 0.81x | 1.159 | 0.81x | 4.144 | 0.23x | rewritten-to-match |
-| Maze::BFS | 0.472 | 0.796 | 0.59x | 0.786 | 0.60x | 1.561 | 0.30x | rewritten-to-match |
-| Maze::Generator | 0.502 | 0.751 | 0.67x | 0.753 | 0.67x | 1.464 | 0.34x | rewritten-to-match |
-| Sort::Merge | 1.469 | 1.319 | 1.11x | 1.321 | 1.11x | 2.207 | 0.67x | rewritten-to-match |
-| Sort::Quick | 1.285 | 1.126 | 1.14x | 1.181 | 1.09x | 1.580 | 0.81x | rewritten-to-match |
-| Template::Parse | 0.624 | 0.981 | 0.64x | 1.050 | 0.59x | 1.938 | 0.32x | closest-possible |
+| Base64::Decode | 1.085 | 0.186 | 5.83x | 0.191 | 5.68x | 1.144 | 0.95x | closest-possible |
+| Base64::Encode | 1.123 | 0.167 | 6.72x | 0.167 | 6.72x | 1.116 | 1.01x | closest-possible |
+| Binarytrees::Arena | 1.029 | 0.541 | 1.90x | 0.520 | 1.98x | 0.544 | 1.89x | like-for-like |
+| Binarytrees::Obj | 2.042 | 3.009 | 0.68x | 2.970 | 0.69x | 1.511 | 1.35x | like-for-like |
+| BF::Array | 1.397 | 0.943 | 1.48x | 1.346 | 1.04x | 2.133 | 0.65x | rewritten-to-match |
+| BF::Recursion | 1.950 | 1.370 | 1.42x | 1.473 | 1.32x | 1.491 | 1.31x | closest-possible |
+| Calculator::Ast | 0.189 | 0.686 | 0.28x | 0.688 | 0.27x | 0.415 | 0.46x | closest-possible |
+| Calculator::Interpreter | 0.343 | 0.885 | 0.39x | 0.891 | 0.38x | 0.513 | 0.67x | closest-possible |
+| CLBG::Fannkuchredux | 0.962 | 0.905 | 1.06x | 0.926 | 1.04x | 1.011 | 0.95x | like-for-like |
+| CLBG::Mandelbrot | 0.701 | 0.726 | 0.97x | 0.738 | 0.95x | 0.701 | 1.00x | rewritten-to-match |
+| CLBG::Nbody | 0.967 | 0.712 | 1.36x | 0.698 | 1.39x | 0.813 | 1.19x | closest-possible |
+| CLBG::Spectralnorm | 0.755 | 1.095 | 0.69x | 1.108 | 0.68x | 0.766 | 0.99x | rewritten-to-match |
+| Compress::ArithDecode | 1.020 | 1.254 | 0.81x | 1.242 | 0.82x | 0.918 | 1.11x | rewritten-to-match |
+| Compress::ArithEncode | 1.010 | 0.913 | 1.11x | 0.969 | 1.04x | 1.128 | 0.90x | like-for-like |
+| Compress::BWTDecode | 0.904 | 1.040 | 0.87x | 1.026 | 0.88x | 0.939 | 0.96x | rewritten-to-match |
+| Compress::BWTEncode | 0.495 | 0.433 | 1.14x | 0.424 | 1.17x | 1.129 | 0.44x | closest-possible |
+| Compress::HuffDecode | 1.057 | 0.629 | 1.68x | 0.618 | 1.71x | 0.918 | 1.15x | rewritten-to-match |
+| Compress::HuffEncode | 0.664 | 0.595 | 1.12x | 0.609 | 1.09x | 0.930 | 0.71x | rewritten-to-match |
+| Compress::LZWDecode | 0.180 | 1.133 | 0.16x | 1.136 | 0.16x | 0.529 | 0.34x | closest-possible |
+| Compress::LZWEncode | 0.095 | 0.530 | 0.18x | 0.519 | 0.18x | 0.874 | 0.11x | closest-possible |
+| CSV::Parse | 0.575 | 0.616 | 0.93x | 0.588 | 0.98x | 3.152 | 0.18x | closest-possible |
+| Distance::Jaro | 0.949 | 1.062 | 0.89x | 0.986 | 0.96x | 1.151 | 0.82x | rewritten-to-match |
+| Distance::NGram | 0.436 | 0.351 | 1.24x | 0.364 | 1.20x | 0.639 | 0.68x | rewritten-to-match |
+| Etc::CacheSimulation | 0.447 | 0.813 | 0.55x | 0.800 | 0.56x | 1.887 | 0.24x | rewritten-to-match |
+| Etc::GameOfLife | 1.593 | 1.964 | 0.81x | 1.979 | 0.80x | 1.853 | 0.86x | like-for-like |
+| Etc::NeuralNet | 0.901 | 0.864 | 1.04x | 0.864 | 1.04x | 0.926 | 0.97x | closest-possible |
+| Etc::Sieve | 1.742 | 1.320 | 1.32x | 1.795 | 0.97x | 2.027 | 0.86x | rewritten-to-match |
+| Etc::TextRaytracer | 0.748 | 0.627 | 1.19x | 0.629 | 1.19x | 0.799 | 0.94x | rewritten-to-match |
+| Etc::Words | 0.558 | 0.800 | 0.70x | 0.785 | 0.71x | 0.804 | 0.69x | closest-possible |
+| Graph::AStar | 0.636 | 1.313 | 0.48x | 1.331 | 0.48x | 2.162 | 0.29x | rewritten-to-match |
+| Graph::BFS | 0.965 | 0.840 | 1.15x | 0.853 | 1.13x | 1.239 | 0.78x | rewritten-to-match |
+| Graph::DFS | 0.880 | 0.729 | 1.21x | 0.746 | 1.18x | 1.066 | 0.83x | rewritten-to-match |
+| Hash::CRC32 | 0.808 | 0.846 | 0.96x | 0.838 | 0.96x | 0.813 | 0.99x | like-for-like |
+| Hash::SHA256 | 0.650 | 0.671 | 0.97x | 0.676 | 0.96x | 0.661 | 0.98x | like-for-like |
+| Matmul::Single | 3.334 | 3.303 | 1.01x | 3.298 | 1.01x | 3.172 | 1.05x | closest-possible |
+| Maze::AStar | 0.941 | 1.151 | 0.82x | 1.159 | 0.81x | 4.144 | 0.23x | rewritten-to-match |
+| Maze::BFS | 0.452 | 0.796 | 0.57x | 0.786 | 0.58x | 1.561 | 0.29x | rewritten-to-match |
+| Maze::Generator | 0.466 | 0.751 | 0.62x | 0.753 | 0.62x | 1.464 | 0.32x | rewritten-to-match |
+| Sort::Merge | 1.507 | 1.319 | 1.14x | 1.321 | 1.14x | 2.207 | 0.68x | rewritten-to-match |
+| Sort::Quick | 1.369 | 1.126 | 1.22x | 1.181 | 1.16x | 1.580 | 0.87x | rewritten-to-match |
+| Template::Parse | 0.603 | 0.981 | 0.61x | 1.050 | 0.57x | 1.938 | 0.31x | closest-possible |
 
-Geometric mean of the 27 like-for-like and rewritten-to-match ports: 0.97x of Rust and 0.74x of Crystal (the 14 closest-possible ports are left out; over all 41 it is 0.94x of Rust). All 41 ports were measured together in one run (3 rounds, best of rounds, 2026-11-05, after keep-alive, range-typed fields, wider loop versioning and `unlogged` scratch state). Crystal is LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
+Geometric mean of the 27 like-for-like and rewritten-to-match ports: 0.965x of Rust (0.939x of Rust with overflow checks) and 0.737x of Crystal (the 14 closest-possible ports are left out; over all 41 it is 0.926x of Rust). The Mitochondria column was measured again on 2026-11-05 (all 41 in one run, 3 rounds, best of rounds) after the language work of that day: loops (`foreach`, `while`, `for`), typed
+signatures, enums and `match`, and text built in fields (`ascii<N>` with `+=`, `substr` windows, `request` structs); the Rust and Crystal columns are the 2026-11-04 run, unchanged.
+Against the previous Mitochondria column: Calculator::Interpreter -35% and Calculator::Ast -10% (their text is an ascii field, names are windows onto it), BF::Array -10% (`match`),
+Binarytrees::Obj -28% (that row was stale); Compress::HuffDecode +15% and HuffEncode +9% against the old column, +4% against the compiler before that day's work measured side by
+side, with the same generated code for its endpoints (the runtime gained functions; the difference is the binary's layout, not the program's code). Earlier, all 41 were measured
+together on 2026-11-05 after keep-alive, range-typed fields, wider loop versioning and `unlogged` scratch state. Crystal is LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
 comparable, replaced by the standard library's), run with the same runner on the same core.
 
 How it got here (Mitochondria / Rust, best of 3; each step merged): the first run had Sieve 4.93x, Fannkuchredux 2.84x, Sort::Quick 1.61x, Sort::Merge 2.54x. Stores to plain
@@ -118,8 +123,8 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 
 Counts now: 41 ported (the 7 in the first batch, both BF tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
 matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 0 still to do or blocked. Passing a string literal to a function (`put("text")`, reading its bytes) and mutually recursive functions already work, which is what made the text generator and the parser expressible. Language features added along the way (each tested, all merged): bit operators and hex literals
-(`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only), `coll.clear()`, `array.fill`, `array.move` and `array.count_below`.
-Still blocked by something else: building text (Base64 output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.
+(`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`), `coll.clear()`, `array.fill`, `array.move` and `array.count_below`.
+Since then (2026-11-05) the ports that build text build it in fields: Calculator, CSV and Template keep their text in an `ascii<N>` field built with `+=` (the old byte-array `put` helpers are gone), names cut from it are `substr` windows (no copy), and the Base64 ports and CacheSimulation build their message or key in a `request` struct. Hash maps are lib/strmap.mito and lib/intmap.mito.
 Where the time goes in what is slower than the reference: Binarytrees::Arena (was 3.98x of Rust, now 2.16x) is pool `add` (now about 12 ns, was 28; a `Vec` push is a few); the sieve, Fannkuchredux and
 the merge sort are loops of many small array stores, which pay for atomic requests.
 

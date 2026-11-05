@@ -22,6 +22,10 @@ arithmetic on an address, not a search: an id is a slot, so `game.players[id]` g
 room's messages sit together where the room's slot says. There are no pointers to follow, no hash maps and no queries
 to run; an index is checked for liveness on the way.
 
+**No hidden storage.** Text a program builds has a declared place too: a field of the state, or of a `request` struct that
+is emptied before each request and never kept. `s += x` appends in place, and running past a field's maximum is an error
+naming that field. A local holds numbers, items and windows onto text, never text of its own.
+
 **What that changes when you design.** You decide limits early, per thing: how many sessions, how long a name, how
 many messages a room keeps. Reaching a limit is an ordinary error the program answers (full, too long), never a crash or
 an out-of-memory kill, and peak memory is known before the program runs. In return, data whose size you cannot bound

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mitochondria",
+  "scopeName": "source.mitochondria",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#attribute" },
+    { "include": "#declaration" },
+    { "include": "#test" },
+    { "include": "#keyword" },
+    { "include": "#type" },
+    { "include": "#constant" },
+    { "include": "#number" },
+    { "include": "#call" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": { "name": "comment.line.double-slash.mitochondria", "match": "//.*$" },
+    "string": {
+      "name": "string.quoted.double.mitochondria",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "name": "constant.character.escape.mitochondria", "match": "\\\\." }]
+    },
+    "attribute": {
+      "match": "(@)(get|post|put|patch|delete)\\b",
+      "captures": { "1": { "name": "punctuation.definition.annotation.mitochondria" }, "2": { "name": "entity.name.function.decorator.mitochondria" } }
+    },
+    "declaration": {
+      "patterns": [
+        { "match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)", "captures": { "1": { "name": "storage.type.mitochondria" }, "2": { "name": "entity.name.type.mitochondria" } } },
+        { "match": "\\b(module)\\s+([A-Za-z_][A-Za-z0-9_]*)", "captures": { "1": { "name": "storage.type.mitochondria" }, "2": { "name": "entity.name.type.module.mitochondria" } } },
+        { "match": "\\b(state|request)\\s+([A-Za-z_][A-Za-z0-9_]*)", "captures": { "1": { "name": "storage.type.mitochondria" }, "2": { "name": "variable.other.global.mitochondria" } } },
+        { "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_.]*)", "captures": { "1": { "name": "storage.type.function.mitochondria" }, "2": { "name": "entity.name.function.mitochondria" } } },
+        { "match": "\\b(let|var)\\s+([A-Za-z_][A-Za-z0-9_]*)", "captures": { "1": { "name": "storage.type.mitochondria" }, "2": { "name": "variable.other.mitochondria" } } }
+      ]
+    },
+    "test": {
+      "match": "\\b(test)\\s+(?=\")",
+      "captures": { "1": { "name": "keyword.other.test.mitochondria" } }
+    },
+    "keyword": {
+      "patterns": [
+        { "name": "keyword.control.mitochondria", "match": "\\b(if|else|foreach|for|while|break|continue|match|return|fail|forward|in|from|reverse|where|limit)\\b" },
+        { "name": "storage.modifier.mitochondria", "match": "\\b(pub|unlogged|checked|drop_oldest|instance|of|key|system|use)\\b" }
+      ]
+    },
+    "type": {
+      "patterns": [
+        { "name": "support.type.primitive.mitochondria", "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|string|utf8|ascii)\\b" },
+        { "name": "support.type.collection.mitochondria", "match": "\\b(pool|list|Response)\\b" },
+        { "name": "entity.name.type.mitochondria", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" }
+      ]
+    },
+    "constant": { "name": "constant.language.mitochondria", "match": "\\b(true|false|null)\\b" },
+    "number": { "name": "constant.numeric.mitochondria", "match": "\\b(0x[0-9A-Fa-f]+|[0-9]+(\\.[0-9]+)?)\\b" },
+    "call": {
+      "patterns": [
+        { "name": "support.function.builtin.mitochondria", "match": "\\b(ok|created|no_content|status|exists|or|len|maxlen|substr|text_from|str|int|now|random|min|max|slot|stat|token|sqrt|exp|floor|abs|wrapping_add|wrapping_sub|wrapping_mul|field|get|post|put|patch|delete)(?=\\s*\\()" },
+        { "name": "entity.name.function.call.mitochondria", "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\()" }
+      ]
+    },
+    "operator": { "name": "keyword.operator.mitochondria", "match": "(=>|->|\\.\\.|==|!=|<=|>=|&&|\\|\\||\\+=|-=|\\*=|/=|<<|>>|[-+*/%=<>!&|^?])" }
+  }
+}

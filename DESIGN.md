@@ -28,8 +28,8 @@ struct Chat { sessions: pool<Session, 2000> checked; rooms: pool<Room, 64> check
 state chat: Chat;
 ```
 
-**Values.** Scalars (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `bool`), `string<N>` (at most N bytes) and `T[N]`
-(exactly N). Code reads maxima rather than repeating them (`x.capacity()`, `maxlen(s)`). An integer field may declare a range,
+**Values.** Scalars (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `bool`), enums (`enum Op { Plus, Minus }`, stored in the smallest
+integer), text of at most N bytes (`utf8<N>`, also written `string<N>`, or `ascii<N>` for bytes 0..127) and `T[N]` (exactly N). Code reads maxima rather than repeating them (`x.capacity()`, `maxlen(s)`). An integer field may declare a range,
 `limit: i64 in 0..3000000` (both ends included, 0 inside, since state starts zeroed): every write is tested (400 outside), and reads let the
 compiler drop overflow and index tests on what is computed from them. `unlogged` after a plain field or a collection keeps it out of the
 undo log: a failed request leaves what it wrote there (for scratch state rebuilt by every request); removals still wait for success.
@@ -61,9 +61,11 @@ with no index. A parent that does not exist costs nothing; removing it empties w
 
 **Access is a lookup.** An id is a slot; every column's place is known, so reading is address arithmetic.
 
-**Epochs.** Each request gets a text area (every string it reads or builds is copied there) and a response area, both
-reset when it ends. Running out fails that request (507, or 413 if the request itself does not fit). There is no heap
-allocator anywhere.
+**Epochs.** Each request gets a text area for its input (path, query, headers and body fields, decoded) and the program's
+literals, and a response area, both reset when it ends. Text a request builds goes in declared fields, not there: the state's,
+or those of the `request` struct, a struct of plain fields declared beside the state (`request work: Work;`), zeroed before each
+request, kept out of the undo log and never kept. Running out of an area fails that request (413 if the request itself does not
+fit, 507 otherwise). There is no heap allocator anywhere.
 
 **Commit and trim.** Without `--soft`/`--hard`, state up to 1 GiB (`COMMIT_ALL_MAX`) is committed whole at start: committing reserves
 the system's commit charge, not physical memory (a page is backed when first written), and nothing is ever trimmed, so no store, add or
@@ -80,8 +82,11 @@ A collection whose trim released nothing is skipped until 256 of its items have 
 
 ## Code
 
-**Functions.** `fn name(params) -> type { ... }`; `let` and `var`; `+=` and friends. No closures. A `var` keeps the
-kind of its first value and a function returns one kind; a program needing a kind known only at run time does not load.
+**Functions.** `fn name(p: Player, n: i64) -> f64 { ... }`: every parameter and the result are typed (`-> T?` when it may be
+null, no arrow when it gives nothing), and checked at every call and `return`. `let` and `var`; `+=` and friends. No closures. A
+`var` keeps the kind of its first value. A local holds numbers, bools, items and windows onto text (a field, an input, a literal,
+a `substr` of one), never text of its own: `var t = ""` and a function returning text are errors that say to build the text in a
+field (a function takes the item or struct to write into).
 
 **Endpoints** are functions with an attribute and typed inputs:
 
@@ -127,6 +132,13 @@ enum type is stored in the smallest integer that holds them and a write outside 
 declared with an enum type is written as the value's name. `Op.Plus` is its integer in code. `match x { Op.Plus => { } Op.Minus,
 Op.Out => { } 0..9 => { } else => { } }` tests constants, lists and ranges in order, without fall-through; on an enum every value
 must be handled or an `else` given, and no value may be covered twice. It runs as an `if` chain (clang turns it into a jump table).
+
+**Tests.** `test "name" { ... }` in the program file is a function the test runner calls: inside, `get`, `post`, `put`, `patch`
+and `delete` make requests (`post("/players", { name: "ann" }, { "X-Session": token })`) answering `.status` and `.body`,
+`field(text, "name")` reads a field of a JSON answer, and the state is read directly (changed only through requests). It returns
+`true`, `false` or a text saying what went wrong. `mito test app.mito` runs each test on a fresh state with the clock and
+randomness fixed, and prints the line of the `return` that failed one, or of the statement whose error ended it. Tests are never
+part of a built or served program.
 
 ## Modules
 A module is a `.mito` file in `lib/`: parameters, structs, a `state { ... }` block (what an instance holds) and
@@ -174,17 +186,23 @@ Good: game and simulation state, servers' hot state (sessions, queues, rate limi
 anything whose peak memory must be known before it runs. Poor: unbounded or heavy-tailed sizes (documents, editors,
 crawlers), irregular graphs, exploratory scripting. Durable data belongs in a database; this is the layer above it.
 
-## Status (2026-11-04)
+## Status (2026-11-05)
 Everything above is built. A program or system compiles to one C program (runtime/mito.c, system.c, http.c), built by
-clang -O3 or, in milliseconds, the bundled TinyCC; Rust is only the compiler. The 24 cases in `tests/cases` and
+clang -O3 or, in milliseconds, the bundled TinyCC; Rust is only the compiler. The command is `mito` (`check`, `build`,
+`serve [--watch]`, `test`, `emit-c`; `mitochondria` is the same program): `serve --watch` rebuilds and restarts on save, keeping
+the last good build when a change does not compile. Errors name `file:line:col` with the line and a caret, suggest the nearest
+name for a misspelt one, list every independent error of a file, and say what to write for a habit from other languages (`i++`,
+`each`); `tests/errors` holds a program per mistake with its expected message. The 51 cases in `tests/cases` and
 `tests/http.record` must give the same answers on the TinyCC build, the clang build and a clang build with
-undefined-behaviour checks. Windows only so far.
+undefined-behaviour checks. VS Code highlighting is in `editors/vscode`. Windows only so far.
 
 Limits:
 - Functions have full signatures (`fn f(p: Player, n: i64) -> f64`, `-> T?` for a result that may be null, no arrow for none;
   `pool<T>`, `list<T>`, and in modules `T.key`, the type of a field), checked at every call and return. Calls are still
   inlined (a recursive function is one C function per combination of argument places); recursion is limited to 64 nested calls.
-- Only a string input can be optional; a number takes a default. An item input cannot be optional yet.
+- Only a string input can be optional; a number takes a default. An item input cannot be optional yet, nor an enum input
+  read by name.
+- An item is named by its slot in an integer field; a field holding an id that comes back as `T?` is designed (roadmap, Phase 5).
 - A real fault in the C code ends the whole process, every worker with it.
 - Pressure marks are absolute megabytes; no idle trim yet.
 - `string<N>` reserves N bytes per slot: 2000-byte chat bodies averaging 120 bytes left 39.5 MB committed for 3.1 MB

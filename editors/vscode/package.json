@@ -1,0 +1,27 @@
+{
+  "name": "mitochondria",
+  "displayName": "Mitochondria",
+  "description": "Syntax highlighting for Mitochondria (.mito) programs",
+  "version": "0.0.1",
+  "publisher": "maddox-labs",
+  "license": "Apache-2.0",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "mitochondria",
+        "aliases": ["Mitochondria", "mito"],
+        "extensions": [".mito"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "mitochondria",
+        "scopeName": "source.mitochondria",
+        "path": "./syntaxes/mitochondria.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -237,7 +237,15 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 ## Phase 5: later
 
 - **Stored ids that come back as `T?`:** a field holding an item's slot and generation (the role `ref<>` had), read back as `T?` so a
-  reused slot is `null` and must be handled. Design to come.
+  reused slot is `null` and must be handled. Design (2026-11-05):
+  - Written with the type syntax that already exists: `best: Player?` in a struct (`Player in game.players?` when several
+    collections hold Player). No new keyword; a plain `Player` field stays what it is (a nested struct is not an item).
+  - Stored in 8 bytes: the slot + 1 (0 for null) and the item's generation. Only a `checked` pool has generations, so the field
+    must name one (an error says to add `checked`): without them a reused slot cannot be told from the item that was there.
+  - Reading gives a `T?`: null when the field is null, the slot is no longer live, or its generation moved on (the item was removed
+    and the slot reused). The existing rules apply unchanged: `if exists(x)` or `or(...)` before use, never a run-time surprise.
+  - Writing takes an item, a `T?` or `null`; an answer writes it as the item's id or `null`, as a `T?` already is.
+  - Not stored: ids of items of nested collections (their slot is per instance), until a design for them.
 - **`log(...)`:** a builtin that writes to the server's standard error (not part of the answer), for debugging.
 - **Editor support:** syntax highlighting for VS Code, then errors on save through `mito check`, then hover for inferred kinds.
 - **Seeing inferred kinds:** `mito check --kinds` printing each local's and function's kind.

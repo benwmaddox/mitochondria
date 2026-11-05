@@ -47,7 +47,9 @@ A program has one state, a struct holding everything; every path starts at its n
 - `sorted<Entry, 1000, points>`: entries kept in order of `points` (a library module, `lib/sorted.mito`).
 - `who: i64`: one item names another by its slot (`slot(p)`), read back with `game.players[e.who]`; that read checks the
   slot is live, and `or(..., fallback)` answers the fallback when it is not.
-- `string<24>`: at most 24 bytes.
+- `string<24>`: at most 24 bytes of UTF-8 text (`utf8<24>` is the same; `ascii<24>` holds bytes 0..127 and can be written by
+  index). Text a program builds goes in fields like this one, appended in place with `+=`; text needed only while a request runs
+  goes in a `request` struct (`request work: Work;`), emptied before each request.
 
 That is the whole memory of the program: 172 KB reserved, decided here.
 

@@ -810,3 +810,11 @@ Etc::GameOfLife 0.83x, Graph::BFS 1.19x, Graph::DFS 1.33x, Graph::AStar 0.74x, M
 Against the original Crystal: 0.87x, 1.55x, 1.18x, 0.87x, 0.81x, 0.90x, 0.44x, 0.36x, 0.30x, 0.24x, 2.14x, 4.02x. Geometric mean of the 17 like-for-like and rewritten-to-match ports: 1.11x of Rust,
 0.87x of Crystal. The graph and maze ports use the reference's data shapes (pools of objects with their own neighbour lists or arrays), with array capacities set by simulating the reference's algorithms
 (which also reproduced the expected checksums exactly). Slowest: Binarytrees::Arena, bound by pool add (about 28 ns per node against a Vec push of a few).
+
+## Round 23: all 41 LangArena ports (2026-11-04)
+
+41 of LangArena's 50 tests are ported (see bench/langarena/README.md for the table, audit verdicts and the 9 that are not comparable). One run of all of them, 3 rounds, pinned to one core, in-server timing:
+geometric mean 1.11x of Rust over the 28 like-for-like and rewritten-to-match ports (0.88x of Crystal), 1.13x over all 41. Slowest: Base64 (scalar loop against Rust's SIMD crate, 15x and 9x), Binarytrees::Arena (3.8x, pool add), Hash::SHA256 (1.7x), Etc::Sieve (1.8x), Compress::HuffDecode (2.1x);
+fastest: Compress::LZWEncode (0.18x, a different dictionary structure than the reference), Calculator::Ast (0.35x, bump nodes), Etc::CacheSimulation (0.59x).
+
+A mistake found on the way: a first version of the per-iteration text-area release called into the runtime on every iteration of every loop and made the store-heavy loops 8-14% slower (Sieve 2.26 s to 2.48 s, SHA256 1.01 s to 1.16 s); it now emits the call only for loop bodies whose code can build a string, and the timings are back (A/B against the earlier compiler on the same core: Sieve 2.27 / 2.29, SHA256 1.01 / 1.00).

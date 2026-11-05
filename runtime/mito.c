@@ -278,6 +278,7 @@ static void save(Mem *m, u64 a, u64 n) {
     if (!m->jon || !n) return;
     for (u64 l = a / LINE, last = (a + n - 1) / LINE; l <= last; l++) {
         u8 bit = (u8)(1u << (l & 7));
+        if (!(l & 63) && l + 63 <= last) { u64 w; memcpy(&w, m->dirty + (l >> 3), 8); if (w == ~0ULL) { l += 63; continue; } } /* 64 lines already saved */
         if (m->dirty[l >> 3] & bit) continue;
         m->dirty[l >> 3] |= bit;
         u64 pos = m->jb.len, end = pos + 8 + LINE;
@@ -1127,6 +1128,8 @@ static int h_commit_range(Ctx *c, u64 a, u32 size) { ensure(&M_(c)->mem, a, a + 
 /* the text area's length now, and cutting it back to an earlier length: a loop body that keeps none of its strings past the iteration gives their space back */
 /* `count` bytes of a state array of bytes at a byte offset, copied into the text area as a string */
 static int h_arr_txt(Ctx *c, u64 off, u32 count, Txt *out) { Mito *m = M_(c); T t; if (t_push(m, m->mem.base + off, count, &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
+/* save a range to the undo log before a loop stores into it (save skips the lines already saved) */
+static int h_save_range(Ctx *c, u64 a, u64 n) { save(&M_(c)->mem, a, n); return 0; }
 static int h_text_len(Ctx *c, u32 *len) { *len = M_(c)->text.len; return 0; }
 static int h_text_cut(Ctx *c, u32 len) { M_(c)->text.len = len; return 0; }
 static int h_wr_plain(Ctx *c, u64 off, u32 size, i64 v) { Mem *m = &M_(c)->mem; save(m, off, size); u64 x = (u64)v; memcpy(m->base + off, &x, size); return 0; }
@@ -1359,7 +1362,7 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_deref, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_text_len, h_arr_txt, h_text_cut,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

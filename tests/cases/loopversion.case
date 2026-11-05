@@ -1,0 +1,64 @@
+// versioned loops: a loop of 32 or more steps whose array indexes are the counter (or a stepped variable) plus or minus a fixed value runs without per-store
+// range and undo-log tests when a test before the loop shows every index in range; otherwise (or for a short loop) the checked loop runs. Same results either
+// way, the same error at the same point, and the stores undone when the request fails
+--- program
+struct App { cells: i64[64]; bytes: u8[64]; total: i64; }
+state app: App;
+
+fn sum_cells() { var total = 0; each i in 0..64 { total = total + app.cells[i] * (i + 1); } return total; }
+fn sum_bytes() { var total = 0; each i in 0..64 { total = total + app.bytes[i] * (i + 1); } return total; }
+@post("/fill/{from}/{to}")
+fn post_fill(from: i64, to: i64) -> Response<{ sum: i64, last: i64 }> {
+    each i in from..to { app.cells[i] = i * 10; }
+    return ok({ "sum": sum_cells(), "last": app.cells[63] });
+}
+@post("/shift/{offset}")
+fn post_shift(offset: i64) -> Response<{ sum: i64 }> {
+    each i in 0..40 { app.cells[i + offset] = app.cells[i] + 1; }
+    return ok({ "sum": sum_cells() });
+}
+@post("/mirror")
+fn post_mirror() -> Response<{ first: i64, last: i64, sum: i64 }> {
+    each i in 0..64 { app.cells[63 - i] = i; }
+    return ok({ "first": app.cells[0], "last": app.cells[63], "sum": sum_cells() });
+}
+@post("/step/{start}/{step}/{limit}")
+fn post_step(start: i64, step: i64, limit: i64) -> Response<{ sum: i64 }> {
+    each i in 0..64 { app.bytes[i] = 1; }
+    var at = start;
+    each guard in 0..1000 while at <= limit { app.bytes[at] = 0; at = at + step; }
+    return ok({ "sum": sum_bytes() });
+}
+@post("/fill-then-fail")
+fn post_fill_then_fail() -> Response<{}> {
+    each i in 0..64 { app.cells[i] = 999; }
+    fail 409 "undone";
+}
+@post("/branch/{to}")
+fn post_branch(to: i64) -> Response<{ sum: i64 }> {
+    each i in 0..to { if i < 64 { app.cells[i] = -i; } }
+    return ok({ "sum": sum_cells() });
+}
+@get("/sum/{from}/{to}")
+fn get_sum(from: i64, to: i64) -> Response<{ total: i64 }> {
+    var total = 0;
+    each i in from..to { total = total + app.cells[i]; }
+    return ok({ "total": total });
+}
+--- requests
+POST /fill/0/64
+POST /fill/2/4
+POST /fill/20/65
+GET /sum/0/64
+POST /shift/24
+POST /shift/25
+POST /mirror
+POST /step/2/3/63
+POST /step/0/5/70
+POST /step/3/0/50
+POST /fill-then-fail
+GET /sum/0/64
+POST /branch/100
+GET /sum/0/64
+GET /sum/-1/40
+POST /fill/40/40

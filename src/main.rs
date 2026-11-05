@@ -96,9 +96,9 @@ fn compile(f: &str, text: &str, system: bool) -> Result<(Vec<String>, String), S
         return Ok((cgen::system_exe(&spec)?, name));
     }
     let file = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-    let (s, code) = source::load(text).map_err(|e| report(&file, text, &e))?;
-    let prog = layout::Program::parse(&s).map_err(|e| report(&file, text, &e))?;
-    let a = cgen::check(&prog, &code).map_err(|e| report(&file, text, &e))?;
+    let (s, code) = source::load(text).map_err(|e| report(f, text, &e))?;
+    let prog = layout::Program::parse(&s).map_err(|e| report(f, text, &e))?;
+    let a = cgen::check(&prog, &code).map_err(|e| report(f, text, &e))?;
     Ok((cgen::program_exe(&prog, &a, Some((&file, &code)))?, name))
 }
 

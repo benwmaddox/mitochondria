@@ -1,0 +1,2 @@
+like-for-like
+Same recursion and the same arena: nodes in one pool, linked by index (the reference's Vec of nodes with left and right as i32), added in the order the reference pushes them; starting a fresh arena each run is coll.clear() (the reference makes a new Vec, which grows as it fills). The language's pool add is much more expensive than a Vec push (about 28 ns against a few), which is the whole difference. Stores are checked and undo-logged.

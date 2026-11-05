@@ -803,3 +803,10 @@ the undo-log and commit tests against per-request locals (jons, dirty map and co
 measurable effect on these ports). Attribution on the sieve per run: 24.7 ms as built, 19.6 without the undo log, 13.3 without the commit check, 7.8 without both, Rust 5.0.
 Language added: bit operators and hex literals, sqrt exp floor abs, string byte reads, coll.clear(), array.fill/move/count_below. They unblock Binarytrees, Brainfuck, NeuralNet, Nbody,
 TextRaytracer, CRC32 and SHA256 for porting (not yet ported).
+
+## Round 22 (2026-11-04): 19 LangArena tests ported
+Added since round 21 (Mitochondria / Rust, best of 3; all verified against LangArena's checksums on all three sides): Hash::CRC32 0.83x, Hash::SHA256 1.53x, CLBG::Nbody 1.36x (closest-possible),
+Etc::GameOfLife 0.83x, Graph::BFS 1.19x, Graph::DFS 1.33x, Graph::AStar 0.74x, Maze::Generator 0.70x, Maze::BFS 0.60x, Maze::AStar 0.88x, Binarytrees::Obj 1.09x, Binarytrees::Arena 3.98x.
+Against the original Crystal: 0.87x, 1.55x, 1.18x, 0.87x, 0.81x, 0.90x, 0.44x, 0.36x, 0.30x, 0.24x, 2.14x, 4.02x. Geometric mean of the 17 like-for-like and rewritten-to-match ports: 1.11x of Rust,
+0.87x of Crystal. The graph and maze ports use the reference's data shapes (pools of objects with their own neighbour lists or arrays), with array capacities set by simulating the reference's algorithms
+(which also reproduced the expected checksums exactly). Slowest: Binarytrees::Arena, bound by pool add (about 28 ns per node against a Vec push of a few).

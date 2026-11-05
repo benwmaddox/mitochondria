@@ -1,0 +1,2 @@
+like-for-like
+Same recursion and the same tree. Each node is a pool item with two references (the reference's Option<Box<TreeNode>>); dropping the tree at the end of a run is coll.clear() (the reference drops the Box tree). The pool is checked, so a reference to a node is validated when it is followed. Stores are checked and undo-logged.

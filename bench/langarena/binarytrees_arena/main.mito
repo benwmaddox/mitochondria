@@ -1,0 +1,45 @@
+// LangArena Binarytrees::Arena (kostya/LangArena, MIT): the same complete binary tree of depth 20, but its nodes live in one arena and refer to each other by index
+// (the reference's Vec<TreeNodeArena> with left/right as i32, -1 for none), built and summed `iterations` times; each run starts a fresh arena. The arena is a pool of
+// nodes, a node's index is its slot (nodes are added in the order the reference pushes them), and starting a fresh arena is coll.clear(). The checksum adds each
+// run's sum, warmup runs included, modulo 2^32.
+struct Node { item: i32; left: i32; right: i32; }
+struct T { arena: pool<Node, 2097151>; depth: i64; result: i64; }
+state tree: T;
+
+fn build(item, depth) {
+    let node = tree.arena.add();
+    let idx = slot(node);
+    node.item = item;
+    node.left = -1;
+    node.right = -1;
+    if depth == 0 { return idx; }
+    let half = 1 << (depth - 1);
+    let left_idx = build(item - half, depth - 1);
+    let right_idx = build(item + half, depth - 1);
+    let again = tree.arena[idx];
+    again.left = left_idx;
+    again.right = right_idx;
+    return idx;
+}
+fn sum(idx) {
+    let node = tree.arena[idx];
+    var total = (node.item + 4294967297) % 4294967296;
+    if node.left < 0 && node.right < 0 { return total; }
+    if node.left >= 0 { total = (total + sum(node.left)) % 4294967296; }
+    if node.right >= 0 { total = (total + sum(node.right)) % 4294967296; }
+    return total;
+}
+fn one_run() {
+    tree.arena.clear();
+    build(0, tree.depth);
+    tree.result = (tree.result + sum(0)) % 4294967296;
+}
+
+@post("/prepare/{depth}")
+fn prepare(depth: i64 in 0..20) -> Response<{}> { tree.depth = depth; tree.result = 0; return ok({}); }
+@post("/warmup/{n}")
+fn warmup(n: i64 in 0..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@post("/run/{n}")
+fn run(n: i64 in 1..100000) -> Response<{}> { each i in 0..n { one_run(); } return ok({}); }
+@get("/checksum")
+fn checksum() -> Response<{ checksum: i64 }> { return ok({ "checksum": tree.result }); }

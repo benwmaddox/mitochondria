@@ -24,9 +24,21 @@ Run: build the Rust reference once (`CARGO_TARGET_DIR=bench/langarena/target-rus
 | Sort::Merge | 1.806 | 1.311 | 1.38x | 1.311 | 1.38x | 2.173 | 0.83x | rewritten-to-match |
 | CLBG::Spectralnorm | 0.746 | 1.068 | 0.70x | 1.075 | 0.69x | 0.743 | 1.00x | rewritten-to-match |
 | CLBG::Mandelbrot | 0.692 | 0.709 | 0.98x | 0.716 | 0.97x | 0.687 | 1.01x | rewritten-to-match |
+| Hash::CRC32 | 0.694 | 0.834 | 0.83x | 0.829 | 0.84x | 0.796 | 0.87x | like-for-like |
+| Hash::SHA256 | 1.010 | 0.660 | 1.53x | 0.659 | 1.53x | 0.652 | 1.55x | like-for-like |
+| Etc::GameOfLife | 1.602 | 1.935 | 0.83x | 1.944 | 0.82x | 1.847 | 0.87x | like-for-like |
+| Graph::BFS | 0.989 | 0.833 | 1.19x | 0.849 | 1.16x | 1.221 | 0.81x | rewritten-to-match |
+| Graph::DFS | 0.945 | 0.711 | 1.33x | 0.737 | 1.28x | 1.053 | 0.90x | rewritten-to-match |
+| Graph::AStar | 0.929 | 1.263 | 0.74x | 1.284 | 0.72x | 2.103 | 0.44x | rewritten-to-match |
+| Maze::Generator | 0.515 | 0.740 | 0.70x | 0.735 | 0.70x | 1.442 | 0.36x | rewritten-to-match |
+| Maze::BFS | 0.457 | 0.768 | 0.60x | 0.758 | 0.60x | 1.507 | 0.30x | rewritten-to-match |
+| Maze::AStar | 0.967 | 1.096 | 0.88x | 1.123 | 0.86x | 4.019 | 0.24x | rewritten-to-match |
+| Binarytrees::Obj | 3.191 | 2.926 | 1.09x | 2.910 | 1.10x | 1.489 | 2.14x | like-for-like |
+| Binarytrees::Arena | 2.132 | 0.536 | 3.98x | 0.519 | 4.11x | 0.530 | 4.02x | like-for-like |
 | Matmul::Single | 4.038 | 3.278 | 1.23x | 3.226 | 1.25x | 3.063 | 1.32x | closest-possible |
+| CLBG::Nbody | 0.938 | 0.690 | 1.36x | 0.709 | 1.32x | 0.796 | 1.18x | closest-possible |
 
-Geometric mean of the six like-for-like and rewritten-to-match ports: 1.19x of Rust (1.02x of Crystal). Medians agree with best-of within 2%. Crystal is
+Geometric mean of the 17 like-for-like and rewritten-to-match ports: 1.11x of Rust and 0.87x of Crystal (Matmul::Single and Nbody are closest-possible and left out). Medians agree with best-of within a few percent. Rows for the later ports (from Hash::CRC32 down) were measured in the same way, 3 rounds, after the store speed-ups. Crystal is
 LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
 comparable, replaced by the standard library's), run with the same runner on the same core.
 
@@ -44,8 +56,8 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 
 | # | Test | Status |
 |---|---|---|
-| 1 | Binarytrees::Obj | blocked: no way to free or reset a whole pool in one step (about a million frees per iteration; a request may free 65,536) |
-| 2 | Binarytrees::Arena | blocked: pool reset |
+| 1 | Binarytrees::Obj | ported |
+| 2 | Binarytrees::Arena | ported |
 | 3 | Brainfuck::Array | blocked: bytes of a string (the program text) |
 | 4 | Brainfuck::Recursion | blocked: bytes of a string; recursion depth limit of 64 |
 | 5 | Matmul::Single | ported |
@@ -58,7 +70,7 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 16 | Etc::TextRaytracer | blocked: sqrt |
 | 17 | Etc::NeuralNet | blocked: exp / tanh |
 | 18 | Etc::CacheSimulation | blocked: hash map with string keys |
-| 19 | Etc::GameOfLife | portable: its hash has one xor with a 0/1 value (arithmetic parity) |
+| 19 | Etc::GameOfLife | ported |
 | 20 | Etc::Words | blocked: strings, hash map |
 | 21 | Etc::LogParser | not comparable: regular expressions |
 | 22 | Template::Regex | not comparable: regular expressions |
@@ -66,22 +78,23 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 24 | Sort::Quick | ported |
 | 25 | Sort::Merge | ported |
 | 26 | Sort::Self | not comparable: the reference calls its library sort |
-| 27-29 | Graph::BFS / DFS / AStar | portable: per-vertex neighbour lists, a queue / stack / heap in arrays |
-| 30 | Hash::SHA256 | blocked: bit operators, bytes of a string |
-| 31 | Hash::CRC32 | blocked: bit operators |
+| 27-29 | Graph::BFS / DFS / AStar | ported |
+| 30 | Hash::SHA256 | ported |
+| 31 | Hash::CRC32 | ported |
 | 32 | Calculator::Ast | blocked: bytes of a string; node trees |
 | 33 | Calculator::Interpreter | blocked: bytes of a string, hash map |
-| 34-36 | Maze::Generator / BFS / AStar | portable: one xor in the hash (a small value) and abs, both arithmetic |
+| 34-36 | Maze::Generator / BFS / AStar | ported |
 | 37 | CLBG::Fannkuchredux | ported |
 | 38 | CLBG::Mandelbrot | ported (bit packing as arithmetic) |
-| 39 | CLBG::Nbody | blocked: sqrt in the inner loop |
+| 39 | CLBG::Nbody | ported |
 | 40 | CLBG::Spectralnorm | ported (the one sqrt is taken by the harness) |
 | 41-48 | Compress::BWT / Huff / Arith / LZW (encode and decode) | blocked: bit operators, hash maps, byte buffers |
 | 49-50 | Distance::Jaro / NGram | blocked: strings, hash map |
 
-Counts when the table was made: 7 ported, 7 portable, 9 not comparable, 27 blocked. Language features added since for this suite (each tested, all merged):
-bit operators and hex literals (`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only),
-`coll.clear()`, `array.fill`, `array.move` and `array.count_below`. They remove the stated blocker of: Binarytrees::Obj and ::Arena (pool reset), Brainfuck::Array and
-::Recursion (string bytes; recursion is still limited to 64 deep), Etc::NeuralNet (exp), CLBG::Nbody (sqrt), Etc::TextRaytracer (sqrt, floor), Hash::CRC32 and Hash::SHA256 (bit
-operators, string bytes), and the bit-operator part of Base64, the compression tests and Calculator. Not yet ported. Still blocked by something else: building text (Base64
-output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.
+Counts now: 19 ported (the 7 in the first batch, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded
+matmuls, the three JSON tests, LogParser, Template::Regex, Sort::Self) and 22 still to do or blocked. Language features added along the way (each tested, all merged): bit operators and hex literals
+(`& | ^ << >>`, Rust's precedence), `sqrt` `exp` `floor` `abs`, reading a string's bytes by index (`s[i]`; strings stay read-only), `coll.clear()`, `array.fill`, `array.move` and `array.count_below`.
+Their stated blocker is gone for Brainfuck::Array and ::Recursion (string bytes; recursion is limited to 64 deep), Etc::NeuralNet (exp) and Etc::TextRaytracer (sqrt, floor); these are the next to port.
+Still blocked by something else: building text (Base64 output, the parsers' string results), hash maps (CacheSimulation, Words, Template::Parse, Distance, Calculator::Interpreter, parts of Compress) and CSV.
+Where the time goes in what is slower than the reference: Binarytrees::Arena (3.98x of Rust) is pool `add` at about 28 ns against a `Vec` push at a few (75 million adds); the sieve, Fannkuchredux and
+the merge sort are loops of many small array stores, which pay for atomic requests.

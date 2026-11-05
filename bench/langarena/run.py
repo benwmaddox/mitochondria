@@ -119,6 +119,8 @@ META = {
     "maze_generator": (["w", "h"], False),
     "maze_bfs": (["w", "h"], False),
     "maze_astar": (["w", "h"], False),
+    "binarytrees_obj": (["depth"], False),
+    "binarytrees_arena": (["depth"], False),
 }
 rows = []
 for test in tests:

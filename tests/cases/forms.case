@@ -1,0 +1,30 @@
+// form bodies (Content-Type: application/x-www-form-urlencoded) bind to an endpoint's inputs as JSON bodies do, their values read as
+// text the way query values are: integers and ranges checked, text decoded (+ and %XX, invalid UTF-8 read as U+FFFD), a ticked
+// checkbox's `on` is true and an unticked one (absent) takes the default; a field the endpoint does not take is refused; JSON still works
+--- program
+struct Todo { title: utf8<40>; done: bool; rank: i64; }
+struct App { todos: pool<Todo, 4>; }
+state app: App;
+
+@post("/todos")
+fn add(title: utf8<40>, rank: i64 in 0..9 = 5, done: bool = false) -> Response<{ title: string, rank: i64, done: bool }> {
+    let t = app.todos.add();
+    t.title = title; t.rank = rank; t.done = done;
+    return ok({ title: t.title, rank: t.rank, done: t.done });
+}
+--- requests
+@Content-Type: application/x-www-form-urlencoded
+POST /todos title=buy+milk&rank=3&done=on
+@Content-Type: application/x-www-form-urlencoded
+POST /todos title=caf%C3%A9+%26+tea
+@content-type: Application/X-WWW-Form-Urlencoded; charset=UTF-8
+POST /todos title=bad%FFbyte&rank=0
+@Content-Type: application/x-www-form-urlencoded
+POST /todos title=x&rank=12
+@Content-Type: application/x-www-form-urlencoded
+POST /todos title=x&rank=two
+@Content-Type: application/x-www-form-urlencoded
+POST /todos rank=1
+@Content-Type: application/x-www-form-urlencoded
+POST /todos title=x&extra=1
+POST /todos {"title": "json still", "done": true}

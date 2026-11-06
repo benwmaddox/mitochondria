@@ -1,0 +1,11 @@
+POST /todos -> 200 {"title":"buy milk","rank":3,"done":true}
+POST /todos -> 200 {"title":"café & tea","rank":5,"done":false}
+POST /todos -> 200 {"title":"bad�byte","rank":0,"done":false}
+POST /todos -> 400 {"error":"`rank`: 12 is outside 0..9"}
+POST /todos -> 400 {"error":"`rank`: expected an integer"}
+POST /todos -> 400 {"error":"`title` is required"}
+POST /todos -> 400 {"error":"unknown field `extra`"}
+POST /todos -> 200 {"title":"json still","rank":5,"done":true}
+state <plain values> 0
+state app.todos 115
+memory reserved=4096 committed=4096 live=115

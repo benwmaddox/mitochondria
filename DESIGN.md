@@ -102,7 +102,9 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
 }
 ```
 
-- Inputs come from the path (`{room}`: an id gives the item), the JSON body (POST, PUT, PATCH) or the query (GET,
+- Inputs come from the path (`{room}`: an id gives the item), the body (POST, PUT, PATCH: JSON, or an HTML form's
+  `application/x-www-form-urlencoded`, whose values are read as text the way query values are; a ticked checkbox's `on` is
+  true, an unticked one is absent and takes the default; a name given twice keeps its first value) or the query (GET,
   DELETE), a header (`from header("X-Session")`: a session token gives the session), or another worker
   (`forwarded`). They are checked before the body runs: absent, wrong kind or out of range 400, too long 413, no such
   item 404, a body field not taken 400.

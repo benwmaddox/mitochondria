@@ -593,7 +593,7 @@ typedef struct Mito {
     u32 ei; const MitoPair *hdrs; u32 nhdrs; const MitoPair *fwd; u32 nfwd; i64 now;
     u32 nparams; struct { u32 seg; T t; } params[MAX_PARAMS];
     u32 nquery; struct { T k, v; } query[MAX_QUERY];
-    u32 njson; JField json[MAX_JSON];
+    u32 njson; JField json[MAX_JSON]; int form; /* form: the body was a form (application/x-www-form-urlencoded), its values text */
     int ekind; int ecode; Area emsg; u8 ebuf[4096];
     /* the answer's head: its content type (0 JSON, 1 HTML, 2 plain text) and header lines after it (`Location: ...\r\n`) */
     u32 ctype; Area head; u8 hbuf[4096]; u8 hout[4096 + 64];
@@ -871,14 +871,24 @@ static int parse_body(Mito *m, const u8 *s, u64 n) {
     if (p.i != n) return j_bad(m, "invalid JSON body");
     return 0;
 }
-/* Copy a path segment or query part into the text area, decoding %XX (and + as a space in a query). */
+/* Copy a path segment, query or form part into the text area, decoding %XX (and + as a space in a query or form). Bytes that
+   decode to invalid UTF-8 (`%FF`) are read as U+FFFD, as invalid UTF-8 anywhere in a request is. */
 static int push_decoded(Mito *m, const u8 *s, u64 n, int plus, T *out) {
-    u32 start = m->text.len;
+    u32 start = m->text.len; int high = 0;
     for (u64 i = 0; i < n; i++) {
         u8 c = s[i];
         if (c == '%' && i + 2 < n && hexv(s[i + 1]) >= 0 && hexv(s[i + 2]) >= 0) { c = (u8)(hexv(s[i + 1]) * 16 + hexv(s[i + 2])); i += 2; }
         else if (c == '+' && plus) c = ' ';
+        high |= c >= 0x80;
         if (!a_put(&m->text, &c, 1)) return 0;
+    }
+    if (high) {
+        /* a checked copy after the decoded bytes, then moved down over them */
+        u32 dn = m->text.len - start;
+        if (!a_lossy(&m->text, m->text.p + start, dn)) return 0;
+        u32 ln = m->text.len - start - dn;
+        memmove(m->text.p + start, m->text.p + start + dn, ln);
+        m->text.len = start + ln;
     }
     *out = t_since(m, start); return 1;
 }
@@ -893,6 +903,31 @@ static int find_pair(const MitoPair *ps, u32 n, const u8 *name, u64 nn, const u8
     return 0;
 }
 static int header(Mito *m, const u8 *name, u64 nn, const u8 **v, u64 *vn) { return find_pair(m->hdrs, m->nhdrs, name, nn, v, vn); }
+/* Is the request's Content-Type a form (application/x-www-form-urlencoded, any case, parameters after it allowed)? */
+static int is_form(Mito *m) {
+    const u8 *v; u64 n; static const char f[] = "application/x-www-form-urlencoded"; const u64 fn = sizeof f - 1;
+    if (!header(m, (const u8 *)"content-type", 12, &v, &n)) return 0;
+    while (n && (*v == ' ' || *v == '\t')) { v++; n--; }
+    if (n < fn) return 0;
+    for (u64 i = 0; i < fn; i++) if (lower(v[i]) != f[i]) return 0;
+    return n == fn || v[fn] == ';' || v[fn] == ' ';
+}
+/* A form body, name=value pairs joined by &, %XX and + decoded: the same fields as a JSON body's, each value text. A name given twice
+   keeps its first value (as an input finds the first). Returns as parse_body: -2 the text area is full, -3 too many fields. */
+static int parse_form(Mito *m, const u8 *s, u64 n) {
+    m->njson = 0;
+    for (u64 i = 0; i < n; ) {
+        u64 b = i; while (i < n && s[i] != '&') i++;
+        u64 e = i; i++;
+        if (e == b) continue;
+        u64 eq = b; while (eq < e && s[eq] != '=') eq++;
+        T k, v;
+        if (m->njson == MAX_JSON) return -3;
+        if (!push_decoded(m, s + b, eq - b, 1, &k) || !push_decoded(m, s + (eq < e ? eq + 1 : e), eq < e ? e - eq - 1 : 0, 1, &v)) return -2;
+        m->json[m->njson].k = k; m->json[m->njson].v = v_str(v); m->njson++;
+    }
+    return 0;
+}
 
 /* ---------------------------------------------------------------- the helpers generated code calls */
 static int h_out(Ctx *c, const char *p, u32 n) { Mito *m = M_(c); return a_put(&m->out, p, n) ? 0 : resp_full(m); }
@@ -961,6 +996,7 @@ static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, 
         text = 0;
         for (u32 i = 0; i < m->njson; i++) if (b_eq(t_ptr(m, m->json[i].k), m->json[i].k.len, (const u8 *)name, nn)) { v = m->json[i].v; break; }
         if (v.tag == 0) return 0;
+        if (m->form) { text = 1; tp = t_ptr(m, (T){ v.a, v.b }); tn = v.b; } /* a form's values are text, read as a query's are */
     } else if (src == 1) {
         const MitoRoute *rt = &mito_prog.routes[m->ei]; int found = 0;
         for (u32 sg = 0; sg < rt->nsegs && !found; sg++) if (rt->segs[sg].param && c_eq(rt->segs[sg].text, (const u8 *)name, nn))
@@ -990,7 +1026,9 @@ static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, 
             *out = v_flt(f); return 0;
         }
         case 3:
-            if (text) { if (b_eq(tp, tn, (const u8 *)"true", 4)) *out = v_bool(1); else if (b_eq(tp, tn, (const u8 *)"false", 5)) *out = v_bool(0); else return in_bad(m, 400, name, nn, ": expected true or false"); }
+            /* a form's ticked checkbox sends `on` (an unticked one sends nothing: the input's default) */
+            if (text && src == 0 && b_eq(tp, tn, (const u8 *)"on", 2)) *out = v_bool(1);
+            else if (text) { if (b_eq(tp, tn, (const u8 *)"true", 4)) *out = v_bool(1); else if (b_eq(tp, tn, (const u8 *)"false", 5)) *out = v_bool(0); else return in_bad(m, 400, name, nn, ": expected true or false"); }
             else { if (v.tag != 3) return in_bad(m, 400, name, nn, ": expected true or false"); *out = v; }
             return 0;
         case 4: case 7: {
@@ -1695,7 +1733,8 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
         else fits = 0;
     }
     if (fits) {
-        int pr = parse_body(m, (const u8 *)body, bn);
+        m->form = is_form(m);
+        int pr = m->form ? parse_form(m, (const u8 *)body, bn) : parse_body(m, (const u8 *)body, bn);
         if (pr == -2) fits = 0;
         else if (pr == -3) { out_err_c(m, "request body has more than 256 fields"); return 413; }
         else if (pr) { out_err(m, m->ebuf, m->emsg.len); return 400; }

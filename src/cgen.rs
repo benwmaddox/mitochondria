@@ -226,7 +226,12 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 17] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot];
+pub const BUILTINS: [B; 35] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+    // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
+    B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
+    B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode];
+/// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
+const CRYPTO_BUILTINS: [B; 10] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck];
 
 /// Operator codes for the `binop` helper (the interpreter's operator names, in this order).
 pub const OPS: [&str; 11] = ["==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"];
@@ -632,6 +637,8 @@ pub const RUNTIME: &str = include_str!("../runtime/mito.c");
 pub const OS: &str = include_str!("../runtime/os.c");
 /// Stored data (runtime/store.c): tables in SQLite, for a program that has one.
 pub const STORE: &str = include_str!("../runtime/store.c");
+/// Cryptography from the system's library (runtime/crypto.c), for a program that uses a crypto built-in.
+pub const CRYPTO: &str = include_str!("../runtime/crypto.c");
 /// The runtime's types for the layout tables, ahead of them.
 pub const RUNTIME_TYPES: &str = include_str!("../runtime/types.h");
 
@@ -681,6 +688,11 @@ static const unsigned char mito_lits[] = {{ {} }};
         o += "#define MITO_USES_SQLITE 1\n";
         o += STORE;
         o += &store_tables_c(prog);
+    }
+    if g.src.contains("/*crypto*/") {
+        // a crypto built-in: the system library's primitives (the build sees this line and links libcrypto and crypt_blowfish)
+        o += "#define MITO_USES_CRYPTO 1\n";
+        o += CRYPTO;
     }
     o += RUNTIME;
     o += &direct(&g.src[PRELUDE.len()..]);
@@ -3501,8 +3513,25 @@ impl<'p> G<'p> {
         let generic = match bi {
             B::Min | B::Max => !matches!(a.as_slice(), [CV::Int(_), CV::Int(_)]),
             B::Slot => !matches!(a.first(), Some(CV::Item(..) | CV::Ref(..))),
-            _ => BUILTINS[..14].contains(&bi),
+            _ => BUILTINS[..14].contains(&bi) || BUILTINS[17..].contains(&bi),
         };
+        // arity of the byte and crypto built-ins, checked when compiling
+        let want = match bi {
+            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode => Some((1, "one argument")),
+            B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck => Some((2, "two arguments")),
+            B::GcmSeal | B::GcmOpen => Some((3, "the key, the 12-byte nonce and the text")),
+            B::Pbkdf2Sha256 => Some((4, "the password, the salt, the iterations and the length")),
+            _ => None,
+        };
+        if let Some((k, what)) = want {
+            if a.len() != k {
+                let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
+                    B::RandomBytes => "random_bytes", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
+                    B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check",
+                    B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
+                return no(format!("`{}` takes {}", name, what));
+            }
+        }
         if let (true, Some(code)) = (generic, BUILTINS.iter().position(|x| *x == bi)) {
             // arguments as one Val array; the interpreter's builtin computes the result
             let mut names = Vec::new();
@@ -3511,13 +3540,18 @@ impl<'p> G<'p> {
             if names.is_empty() { self.line(&format!("Val {}[1];", argv)); } else { self.line(&format!("Val {}[{}] = {{ {} }};", argv, names.len(), names.join(", "))); }
             let r = self.tmp("v");
             self.line(&format!("Val {};", r));
-            self.call(&format!("c->h->builtin(c, {}, {}, {}, &{})", code, argv, names.len(), r));
+            // a crypto built-in is marked, so the unit gets runtime/crypto.c and its library (program_c_full)
+            let mark = if CRYPTO_BUILTINS.contains(&bi) { "/*crypto*/" } else { "" };
+            self.call(&format!("c->h->builtin(c, {}, {}, {}, &{}){}", code, argv, names.len(), r, mark));
             let _ = n;
             let _ = int_out;
             return Ok(match bi {
                 B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot => CV::Int(format!("{}.i", r)),
-                B::Str | B::Token => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
-                B::Param | B::Query | B::Header => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
+                B::SecretEqual | B::BcryptCheck => CV::Bool(format!("({}.i != 0)", r)),
+                B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
+                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
+                // a text, or null: decoding or opening that failed
+                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
                 _ => CV::Any(r),
             });
         }

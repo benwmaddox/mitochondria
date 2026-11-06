@@ -1,0 +1,6 @@
+GET /encodings -> 200 {"b64":"aGVsbG8=","url":"-_8","back":"hello","bad":null,"odd":null,"hex":"fbff","form":"a+b%2Bc%2Fd%3D%C3%A9*-._%7E","unform":"a b+c/d","badform":null,"xor":"202020","same":true,"differ":false,"shorter":false}
+GET /digests -> 200 {"sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","hmac1":"de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9","hmac256":"f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8","pbkdf2":"55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783","random":24}
+GET /gcm -> 200 {"tag":"530f8afbc74536b9a963b4f1c4cb738b","back":"attack at dawn","tampered":null,"short":null}
+GET /bcrypt -> 200 {"known":true,"wrong":false,"fresh":true,"prefix":"$2a$04$","size":60,"junk":false}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

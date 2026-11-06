@@ -87,8 +87,9 @@ pub fn clang_dll_units(srcs: &[&str], name: &str, extra: &[&str]) -> Result<*mut
     let dll = dir.join(format!("{}.{}", stem, std::env::consts::DLL_EXTENSION));
     let mut cs = Vec::new();
     for (k, src) in srcs.iter().enumerate() { let c = dir.join(format!("{}-{}.c", stem, k)); std::fs::write(&c, src).map_err(|e| e.to_string())?; cs.push(c); }
-    if srcs.iter().any(|x| x.contains("#define MITO_USES_SQLITE")) { cs.push(crate::build::sqlite_object(false, "-O2")?); } // SQLite, from its cache
-    let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(if cfg!(windows) { &[][..] } else { &["-fPIC"][..] }).args(extra).arg("-o").arg(&dll).args(&cs).args(if cfg!(windows) { &["-lkernel32"][..] } else { &[][..] }).args(crate::tcc::LIBS.iter().map(|l| format!("-l{}", l)))
+    let (objs, libs) = crate::build::extra_links(srcs, false, "-O2")?; // SQLite, crypt_blowfish and the like, from the cache
+    cs.extend(objs);
+    let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(if cfg!(windows) { &[][..] } else { &["-fPIC"][..] }).args(extra).arg("-o").arg(&dll).args(&cs).args(if cfg!(windows) { &["-lkernel32"][..] } else { &[][..] }).args(crate::tcc::LIBS.iter().chain(libs.iter()).map(|l| format!("-l{}", l)))
         .output().map_err(|e| e.to_string())?;
     if !out.status.success() { return Err(format!("clang failed:\n{}", String::from_utf8_lossy(&out.stderr))); }
     let h = dl_open(&dll.to_string_lossy());

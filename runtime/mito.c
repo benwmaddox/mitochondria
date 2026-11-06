@@ -1405,9 +1405,150 @@ static int h_sel_end(Ctx *c, u32 h) { M_(c)->sel.len = h; return 0; }
 
 /* ---- builtins (cgen BUILTINS order) ---- */
 static int arg_txt(Mito *m, const Val *a, u32 n, u32 i, T *out) { if (i >= n || a[i].tag != 4) return fail(m, 500, "expected a string argument"); out->off = a[i].a; out->len = a[i].b; return 0; }
+/* ---- bytes, encodings and cryptography: builtins 17 to 34 (the primitives in runtime/crypto.c) ----
+   Texts here are bytes (any bytes; a utf8 field holds them as they are). Results go in the text area. */
+/* room for `need` more bytes at the end of the text area, or 0 (the request fails: 507) */
+static u8 *t_room(Mito *m, u64 need) { if ((u64)m->text.len + need > m->text.cap) { text_full(m); return 0; } return m->text.p + m->text.len; }
+static int t_done(Mito *m, u32 start, u64 wrote, Val *out) { m->text.len = (u32)(start + wrote); *out = v_str(t_since(m, start)); return 0; }
+static int b64_val(u8 ch) { return ch >= 'A' && ch <= 'Z' ? ch - 'A' : ch >= 'a' && ch <= 'z' ? ch - 'a' + 26 : ch >= '0' && ch <= '9' ? ch - '0' + 52 : ch == '+' || ch == '-' ? 62 : ch == '/' || ch == '_' ? 63 : -1; }
+static int hex_val(u8 ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; }
+static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
+    T x, y, z; u32 start = m->text.len; u8 *w;
+    switch (code) {
+    case 17: case 18: { /* base64 (standard, padded), base64_url (URL alphabet, no padding) */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x); const char *al = code == 17 ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        if (!(w = t_room(m, ((u64)x.len + 2) / 3 * 4))) return -1;
+        u64 o = 0, i = 0;
+        for (; i + 3 <= x.len; i += 3) { u32 v = (u32)s[i] << 16 | (u32)s[i + 1] << 8 | s[i + 2]; w[o++] = (u8)al[v >> 18]; w[o++] = (u8)al[v >> 12 & 63]; w[o++] = (u8)al[v >> 6 & 63]; w[o++] = (u8)al[v & 63]; }
+        if (x.len - i == 1) { u32 v = (u32)s[i] << 16; w[o++] = (u8)al[v >> 18]; w[o++] = (u8)al[v >> 12 & 63]; if (code == 17) { w[o++] = '='; w[o++] = '='; } }
+        else if (x.len - i == 2) { u32 v = (u32)s[i] << 16 | (u32)s[i + 1] << 8; w[o++] = (u8)al[v >> 18]; w[o++] = (u8)al[v >> 12 & 63]; w[o++] = (u8)al[v >> 6 & 63]; if (code == 17) w[o++] = '='; }
+        return t_done(m, start, o, out); }
+    case 19: { /* unbase64: either alphabet, padding optional; null if it is not base64 */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x); u32 len = x.len;
+        while (len && s[len - 1] == '=' && x.len - len < 2) len--;
+        if (len % 4 == 1 || (x.len != len && (len + (x.len - len)) % 4)) { *out = v_null(); return 0; }
+        if (!(w = t_room(m, (u64)len / 4 * 3 + 3))) return -1;
+        u64 o = 0; u32 acc = 0, bits = 0;
+        for (u32 i = 0; i < len; i++) {
+            int v = b64_val(s[i]); if (v < 0) { *out = v_null(); return 0; }
+            acc = acc << 6 | (u32)v; bits += 6;
+            if (bits >= 8) { bits -= 8; w[o++] = (u8)(acc >> bits); }
+        }
+        if (acc & ((1u << bits) - 1)) { *out = v_null(); return 0; } /* bits left over must be zero (canonical) */
+        return t_done(m, start, o, out); }
+    case 20: { /* hex, lowercase */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x);
+        if (!(w = t_room(m, (u64)x.len * 2))) return -1;
+        for (u32 i = 0; i < x.len; i++) { w[2 * i] = (u8)"0123456789abcdef"[s[i] >> 4]; w[2 * i + 1] = (u8)"0123456789abcdef"[s[i] & 15]; }
+        return t_done(m, start, (u64)x.len * 2, out); }
+    case 27: { /* xor_bytes: two texts of the same length, byte by byte */
+        if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y)) return -1;
+        if (x.len != y.len) return fail(m, 500, "xor_bytes: the texts differ in length");
+        if (!(w = t_room(m, x.len))) return -1;
+        const u8 *p = t_ptr(m, x), *q = t_ptr(m, y);
+        for (u32 i = 0; i < x.len; i++) w[i] = p[i] ^ q[i];
+        return t_done(m, start, x.len, out); }
+    case 28: { /* secret_equal: the same bytes, in time that depends only on the lengths */
+        if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y)) return -1;
+        const u8 *p = t_ptr(m, x), *q = t_ptr(m, y); u8 d = x.len != y.len;
+        u32 k = x.len < y.len ? x.len : y.len;
+        for (u32 i = 0; i < k; i++) d |= p[i] ^ q[i];
+        *out = v_int(d == 0); return 0; }
+    case 33: { /* form_encode: URI.encode_www_form_component (letters, digits and *-._ as they are, space as +, the rest %XX) */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x);
+        if (!(w = t_room(m, (u64)x.len * 3))) return -1;
+        u64 o = 0;
+        for (u32 i = 0; i < x.len; i++) {
+            u8 ch = s[i];
+            if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '*' || ch == '-' || ch == '.' || ch == '_') w[o++] = ch;
+            else if (ch == ' ') w[o++] = '+';
+            else { w[o++] = '%'; w[o++] = (u8)"0123456789ABCDEF"[ch >> 4]; w[o++] = (u8)"0123456789ABCDEF"[ch & 15]; }
+        }
+        return t_done(m, start, o, out); }
+    case 34: { /* form_decode: + as space, %XX as its byte; null if a % is not followed by two hex digits */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x);
+        if (!(w = t_room(m, x.len))) return -1;
+        u64 o = 0;
+        for (u32 i = 0; i < x.len; i++) {
+            if (s[i] == '+') w[o++] = ' ';
+            else if (s[i] == '%') {
+                int hi = i + 2 < x.len ? hex_val(s[i + 1]) : -1, lo = i + 2 < x.len ? hex_val(s[i + 2]) : -1;
+                if (hi < 0 || lo < 0) { *out = v_null(); return 0; }
+                w[o++] = (u8)(hi << 4 | lo); i += 2;
+            }
+            else w[o++] = s[i];
+        }
+        return t_done(m, start, o, out); }
+#ifdef MITO_USES_CRYPTO
+    case 21: case 22: { /* sha1, sha256: the digest's bytes */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        u8 d[32]; u32 dn = code == 21 ? 20 : 32;
+        if (!cr_sha(code == 21 ? 1 : 256, t_ptr(m, x), x.len, d)) return fail(m, 500, "the system's hash failed");
+        if (!(w = t_room(m, dn))) return -1;
+        memcpy(w, d, dn); return t_done(m, start, dn, out); }
+    case 23: case 24: { /* hmac_sha1(key, text), hmac_sha256(key, text): the MAC's bytes */
+        if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y)) return -1;
+        u8 d[32]; u32 dn = code == 23 ? 20 : 32;
+        if (!cr_hmac(code == 23 ? 1 : 256, t_ptr(m, x), x.len, t_ptr(m, y), y.len, d)) return fail(m, 500, "the system's HMAC failed");
+        if (!(w = t_room(m, dn))) return -1;
+        memcpy(w, d, dn); return t_done(m, start, dn, out); }
+    case 25: { /* pbkdf2_sha256(password, salt, iterations, length) */
+        if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y)) return -1;
+        if (n < 4 || a[2].tag != 1 || a[3].tag != 1 || a[2].i < 1 || a[2].i > 10000000 || a[3].i < 1 || a[3].i > 1024) return fail(m, 500, "pbkdf2_sha256: 1 to 10000000 iterations, a length of 1 to 1024 bytes");
+        if (!(w = t_room(m, (u64)a[3].i))) return -1;
+        if (!cr_pbkdf2_sha256(t_ptr(m, x), x.len, t_ptr(m, y), y.len, (u32)a[2].i, w, (u32)a[3].i)) return fail(m, 500, "the system's PBKDF2 failed");
+        return t_done(m, start, (u64)a[3].i, out); }
+    case 26: { /* random_bytes(n): from the operating system's generator, never the program's seeded one */
+        if (n < 1 || a[0].tag != 1 || a[0].i < 1 || a[0].i > 65536) return fail(m, 500, "random_bytes: 1 to 65536 bytes");
+        if (!(w = t_room(m, (u64)a[0].i))) return -1;
+        if (!cr_random(w, (u32)a[0].i)) return fail(m, 500, "the system's random generator failed");
+        return t_done(m, start, (u64)a[0].i, out); }
+    case 29: case 30: { /* aes256gcm_seal(key, nonce, text): ciphertext and 16-byte tag; aes256gcm_open(key, nonce, sealed): the text, or null */
+        if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y) || arg_txt(m, a, n, 2, &z)) return -1;
+        if (x.len != 32 || y.len != 12) return fail(m, 500, "aes256gcm: a 32-byte key and a 12-byte nonce");
+        if (code == 29) {
+            if (!(w = t_room(m, (u64)z.len + 16))) return -1;
+            if (!cr_gcm(0, t_ptr(m, x), t_ptr(m, y), t_ptr(m, z), z.len, w, w + z.len)) return fail(m, 500, "the system's AES-GCM failed");
+            return t_done(m, start, (u64)z.len + 16, out);
+        }
+        if (z.len < 16) { *out = v_null(); return 0; }
+        u8 tag[16]; memcpy(tag, t_ptr(m, z) + z.len - 16, 16);
+        if (!(w = t_room(m, z.len - 16))) return -1;
+        if (!cr_gcm(1, t_ptr(m, x), t_ptr(m, y), t_ptr(m, z), z.len - 16, w, tag)) { *out = v_null(); return 0; }
+        return t_done(m, start, z.len - 16, out); }
+    case 31: case 32: { /* bcrypt_hash(password, cost): a `$2a$` digest; bcrypt_check(password, digest): whether it matches */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        char pw[73]; u32 pn = 0; const u8 *p = t_ptr(m, x);
+        while (pn < x.len && pn < 72 && p[pn]) { pw[pn] = (char)p[pn]; pn++; } /* as bcrypt-ruby: the first 72 bytes, up to a zero byte */
+        pw[pn] = 0;
+        char dg[61];
+        if (code == 31) {
+            if (n < 2 || a[1].tag != 1 || a[1].i < 4 || a[1].i > 31) return fail(m, 500, "bcrypt_hash: a cost of 4 to 31");
+            u8 r[16]; char setting[30];
+            if (!cr_random(r, 16) || !mito_bcrypt_setting(r, (int)a[1].i, setting) || !mito_bcrypt(pw, setting, dg)) return fail(m, 500, "bcrypt failed");
+            if (!(w = t_room(m, 60))) return -1;
+            memcpy(w, dg, 60); return t_done(m, start, 60, out);
+        }
+        if (arg_txt(m, a, n, 1, &y)) return -1;
+        char setting[61]; const u8 *d = t_ptr(m, y);
+        if (y.len != 60 || d[0] != '$' || d[1] != '2') { *out = v_int(0); return 0; }
+        memcpy(setting, d, 60); setting[60] = 0;
+        if (!mito_bcrypt(pw, setting, dg)) { *out = v_int(0); return 0; }
+        u8 diff = 0; for (int i = 0; i < 60; i++) diff |= (u8)dg[i] ^ d[i];
+        *out = v_int(diff == 0); return 0; }
+#endif
+    }
+    return fail(m, 500, "unknown builtin code");
+}
 static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
     Mito *m = M_(c); T k;
     Val a0 = n > 0 ? a[0] : v_null();
+    if (code >= 17) return bytes_builtin(m, code, a, n, out);
     switch (code) {
         case 0: /* body */ if (arg_txt(m, a, n, 0, &k)) return -1;
             for (u32 i = 0; i < m->njson; i++) if (b_eq(t_ptr(m, m->json[i].k), m->json[i].k.len, t_ptr(m, k), k.len)) { *out = m->json[i].v; return 0; }

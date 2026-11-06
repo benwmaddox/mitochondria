@@ -138,9 +138,9 @@ impl Unit {
                 let c = CString::new(*src).map_err(|_| "source contains a NUL byte".to_string())?;
                 if (l.compile)(s, c.as_ptr()) != 0 { return Err(format!("C compile failed:\n{}", u.errors)); }
             }
-            // a program with tables: SQLite, compiled by TinyCC once (src/build.rs), added as its object
-            if srcs.iter().any(|x| x.contains("#define MITO_USES_SQLITE")) {
-                let o = crate::build::sqlite_object(true, "")?;
+            // SQLite (tables), crypt_blowfish (crypto) and the like, compiled by TinyCC once (src/build.rs), added as objects
+            let (objs, _) = crate::build::extra_links(srcs, true, "")?;
+            for o in objs {
                 let c = CString::new(o.to_string_lossy().into_owned()).unwrap();
                 if (l.add_file)(s, c.as_ptr()) != 0 { return Err(format!("tcc: could not add {}:\n{}", o.display(), u.errors)); }
             }
@@ -158,8 +158,9 @@ impl Unit {
         let lib = dir.join(format!("{}.{}", stem, std::env::consts::DLL_EXTENSION));
         let mut cs = Vec::new();
         for (k, src) in srcs.iter().enumerate() { let c = dir.join(format!("{}-{}.c", stem, k)); std::fs::write(&c, src).map_err(|e| e.to_string())?; cs.push(c); }
-        if srcs.iter().any(|x| x.contains("#define MITO_USES_SQLITE")) { cs.push(crate::build::sqlite_object(false, "-O2")?); }
-        let out = std::process::Command::new(cc).args(["-O1", "-shared", "-fPIC", "-fno-strict-aliasing", "-w", "-o"]).arg(&lib).args(&cs).args(LIBS.iter().map(|l| format!("-l{}", l)))
+        let (objs, libs) = crate::build::extra_links(srcs, false, "-O2")?;
+        cs.extend(objs);
+        let out = std::process::Command::new(cc).args(["-O1", "-shared", "-fPIC", "-fno-strict-aliasing", "-w", "-o"]).arg(&lib).args(&cs).args(LIBS.iter().chain(libs.iter()).map(|l| format!("-l{}", l)))
             .output().map_err(|e| e.to_string())?;
         if !out.status.success() { return Err(format!("C compile failed:
 {}", String::from_utf8_lossy(&out.stderr))); }

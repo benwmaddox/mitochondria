@@ -74,6 +74,27 @@ pub fn zlib_object(tcc: bool, opt: &str) -> Result<std::path::PathBuf, String> {
     cached_object("zlib", "zlib-1.4", ZLIB_FILES, "#include \"adler32.c\"\n#include \"crc32.c\"\n#include \"deflate.c\"\n#include \"trees.c\"\n#include \"zutil.c\"\n#include \"gzip.c\"\n", &[], tcc, opt)
 }
 
+/// crypt_blowfish (third_party/crypt_blowfish) and runtime/bcrypt.c, for programs that use a crypto built-in.
+const BCRYPT_FILES: &[(&str, &str)] = &[
+    ("crypt_blowfish.c", include_str!("../third_party/crypt_blowfish/crypt_blowfish.c")), ("crypt_blowfish.h", include_str!("../third_party/crypt_blowfish/crypt_blowfish.h")),
+    ("bcrypt.c", include_str!("../runtime/bcrypt.c")),
+];
+pub fn bcrypt_object(tcc: bool, opt: &str) -> Result<std::path::PathBuf, String> {
+    cached_object("crypt_blowfish", "crypt_blowfish-1.3", BCRYPT_FILES, "#include \"crypt_blowfish.c\"\n#include \"bcrypt.c\"\n", &[], tcc, opt)
+}
+
+/// What units need linked beside them, by the lines they define: objects (SQLite for tables, zlib for `gzip;`, crypt_blowfish for
+/// crypto) built by the same compiler from the cache, and system libraries (libcrypto on Linux for crypto; Windows' BCrypt is always
+/// linked).
+pub fn extra_links(srcs: &[&str], tcc: bool, opt: &str) -> Result<(Vec<std::path::PathBuf>, Vec<&'static str>), String> {
+    let has = |d: &str| srcs.iter().any(|u| u.contains(d));
+    let (mut objs, mut libs) = (Vec::new(), Vec::new());
+    if has("#define MITO_USES_SQLITE") { objs.push(sqlite_object(tcc, opt)?); }
+    if has("#define MITO_USES_ZLIB") { objs.push(zlib_object(tcc, opt)?); }
+    if has("#define MITO_USES_CRYPTO") { objs.push(bcrypt_object(tcc, opt)?); if !cfg!(windows) { libs.push("crypto"); } }
+    Ok((objs, libs))
+}
+
 /// C sources (`files`, written beside `unit`, the file compiled) compiled to one object by the compiler building the program
 /// (TinyCC or clang), once per compiler and flags, then kept in a cache in the temp directory; the name carries a hash of what it was
 /// built from.
@@ -136,10 +157,13 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
         c
     };
     cmd.arg("-o").arg(out).args(&cs);
-    if sqlite { cmd.arg(sqlite_object(tcc, "-O2")?); } // SQLite, compiled by the same compiler, from its cache
-    if units.iter().any(|u| u.contains("#define MITO_USES_ZLIB")) { cmd.arg(zlib_object(tcc, "-O2")?); } // zlib for `gzip;`, likewise
+    // SQLite, zlib, crypt_blowfish as the program needs them, compiled by the same compiler, from the cache
+    let refs: Vec<&str> = units.iter().map(|u| u.as_str()).collect();
+    let (objs, libs) = extra_links(&refs, tcc, "-O2")?;
+    let _ = sqlite;
+    cmd.args(&objs);
     if !tcc && cfg!(windows) { cmd.arg("-lkernel32"); }
-    for l in crate::tcc::LIBS { cmd.arg(format!("-l{}", l)); } // after the sources: system DLLs imported normally
+    for l in crate::tcc::LIBS.iter().chain(libs.iter()) { cmd.arg(format!("-l{}", l)); } // after the sources: system libraries imported normally
     let r = cmd.output().map_err(|e| e.to_string())?;
     for c in &cs { let _ = std::fs::remove_file(c); }
     let _ = std::fs::remove_dir(&dir);

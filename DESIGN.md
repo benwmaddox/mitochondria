@@ -147,6 +147,16 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   deletes it). The value must be cookie characters (printable ASCII without spaces, quotes, commas, semicolons, backslashes).
   `set_header("Link", value)` adds a header line (the name a literal token, checked when compiling, and not one the server writes
   itself such as Content-Length; the value printable ASCII, checked when running).
+- **Bytes, encodings and cryptography.** A text holds any bytes, so these work on texts and give texts (in the request's text area):
+  `base64(t)` (padded), `base64_url(t)` (URL alphabet, no padding), `unbase64(t)` (either alphabet, padding optional; null if not
+  base64), `hex(t)`, `form_encode(t)` / `form_decode(t)` (as `URI.encode_www_form_component`; null for a bad `%`), `xor_bytes(a, b)`
+  and `secret_equal(a, b)` (in time that depends only on the lengths). The primitives come from the operating system's library and
+  are never written here (runtime/crypto.c: BCrypt on Windows, libcrypto on Linux, linked only into a program that uses them):
+  `sha1(t)`, `sha256(t)`, `hmac_sha1(key, t)`, `hmac_sha256(key, t)`, `pbkdf2_sha256(password, salt, iterations, length)`,
+  `random_bytes(n)` (the system's generator, never the seeded one tests use), `aes256gcm_seal(key, nonce, t)` (ciphertext then the
+  16-byte tag) and `aes256gcm_open(key, nonce, sealed)` (null when the tag does not match). Passwords: `bcrypt_hash(password, cost)`
+  and `bcrypt_check(password, digest)` from crypt_blowfish (third_party/crypt_blowfish, the reference implementation), counting the
+  first 72 bytes as bcrypt does. tests/cases/crypto.case checks each against its published test vector.
 - **The `web` block** (src/web.rs) says how a program's answers look on the wire, for a program that must answer as another
   server does (a port of an existing app):
   ```

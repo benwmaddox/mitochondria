@@ -1,0 +1,46 @@
+// bytes, encodings and cryptography: base64 (padded, URL without padding, decoding either; null when not base64), hex, form
+// encoding as URI.encode_www_form_component, xor and a comparison in constant time; and from the system's library SHA-1, SHA-256,
+// HMAC, PBKDF2, AES-256-GCM (sealed text = ciphertext + tag; opening a changed one gives null) and bcrypt (crypt_blowfish). Each value
+// is checked against its published test vector: FIPS 180 ("abc"), RFC 4231 / Wikipedia (HMAC), RFC 7914 (PBKDF2-SHA256), the GCM
+// spec's test case 1 (zero key and nonce, no text), crypt_blowfish's own vectors.
+--- program
+struct A { n: i64; }
+state a: A;
+
+@get("/encodings")
+fn encodings() -> Response<{ b64: string; url: string; back: string; bad: string?; odd: string?; hex: string; form: string; unform: string; badform: string?; xor: string; same: bool; differ: bool; shorter: bool }> {
+    let raw = unbase64("+/8=");
+    return ok({ b64: base64("hello"), url: base64_url(raw), back: unbase64("aGVsbG8"), bad: unbase64("a*b="), odd: unbase64("aGVsbG8=="),
+        hex: hex(raw), form: form_encode("a b+c/d=é*-._~"), unform: form_decode("a+b%2Bc%2fd"), badform: form_decode("100%"),
+        xor: hex(xor_bytes("abc", "ABC")), same: secret_equal("token", "token"), differ: secret_equal("token", "tokem"), shorter: secret_equal("tok", "token") });
+}
+
+@get("/digests")
+fn digests() -> Response<{ sha1: string; sha256: string; hmac1: string; hmac256: string; pbkdf2: string; random: i64 }> {
+    let fox = "The quick brown fox jumps over the lazy dog";
+    return ok({ sha1: hex(sha1("abc")), sha256: hex(sha256("abc")), hmac1: hex(hmac_sha1("key", fox)), hmac256: hex(hmac_sha256("key", fox)),
+        pbkdf2: hex(pbkdf2_sha256("passwd", "salt", 1, 64)), random: len(random_bytes(24)) });
+}
+
+@get("/gcm")
+fn gcm() -> Response<{ tag: string; back: string; tampered: string?; short: string? }> {
+    let key = unbase64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+    let iv = unbase64("AAAAAAAAAAAAAAAA");
+    let sealed = aes256gcm_seal(key, iv, "attack at dawn");
+    let other = aes256gcm_seal(key, iv, "attack at dusk");
+    return ok({ tag: hex(aes256gcm_seal(key, iv, "")), back: aes256gcm_open(key, iv, sealed),
+        tampered: aes256gcm_open(key, iv, substr(sealed, 0, 14) + substr(other, 14, 16)), short: aes256gcm_open(key, iv, "tiny") });
+}
+
+@get("/bcrypt")
+fn bcrypt() -> Response<{ known: bool; wrong: bool; fresh: bool; prefix: string; size: i64; junk: bool }> {
+    let d = bcrypt_hash("secret", 4);
+    return ok({ known: bcrypt_check("U*U", "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW"),
+        wrong: bcrypt_check("U*U*", "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW"),
+        fresh: bcrypt_check("secret", d), prefix: substr(d, 0, 7), size: len(d), junk: bcrypt_check("secret", "not a digest") });
+}
+--- requests
+GET /encodings
+GET /digests
+GET /gcm
+GET /bcrypt

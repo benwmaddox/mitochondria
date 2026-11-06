@@ -1,0 +1,6 @@
+GET / -> 200 {"key":"8254c329a92850f6d539dd376f4816ee2764517da5e0235514af433164480d7a","runs":1,"path":true,"missing":true}
+START / -> 404 {"error":"no such endpoint"}
+POST /cookie -> 200 <Set-Cookie: last_room=7; Path=/; Max-Age=60; SameSite=Lax | Set-Cookie: session=x; Path=/; Max-Age=60; HttpOnly; SameSite=Lax> {}
+GET / -> 200 {"key":"8254c329a92850f6d539dd376f4816ee2764517da5e0235514af433164480d7a","runs":1,"path":true,"missing":true}
+state <plain values> 88
+memory reserved=4096 committed=4096 live=88

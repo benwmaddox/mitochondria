@@ -146,8 +146,12 @@ impl CBackend {
                 Some(d)
             } else { None };
             let (open, data_error) = (std::mem::transmute(sym("mito_open_data")), std::mem::transmute(sym("mito_data_error")));
+            let begin: unsafe extern "C" fn(*mut std::ffi::c_void) -> i32 = std::mem::transmute(sym("mito_begin"));
             let mut be = CBackend { _code: code, m, f, pairs: Vec::with_capacity(64), start, open, data_error, data };
             if let Err(e) = be.open_data() { panic!("{}: {}", case.name, e); }
+            // the program's `@start` function, as a server runs it
+            let sc = begin(be.m);
+            if sc != 0 { let mut n = 0u32; let p = (be.f.response)(be.m, &mut n); panic!("{}: @start failed ({}): {}", case.name, sc, String::from_utf8_lossy(std::slice::from_raw_parts(p as *const u8, n as usize))); }
             be
         }
     }

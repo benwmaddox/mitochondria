@@ -1,0 +1,23 @@
+// `@start`: run once before any request (after the tables open), its writes kept; never reachable as a request (a request with the
+// method START is 404). `env` reads the process's environment (null when unset). `set_cookie`'s fourth argument: false leaves out HttpOnly.
+--- program
+struct A { key: utf8<64>; runs: i64; path: bool; missing: bool; }
+state a: A;
+
+@start
+fn init() {
+    a.key = hex(sha256("k"));
+    a.runs += 1;
+    a.path = exists(env("PATH"));
+    a.missing = !exists(env("MITO_SURELY_NOT_SET_31415"));
+}
+
+@get("/")
+fn home() -> Response<{ key: string; runs: i64; path: bool; missing: bool }> { return ok({ key: a.key, runs: a.runs, path: a.path, missing: a.missing }); }
+@post("/cookie")
+fn cookie() -> Response<{}> { set_cookie("last_room", "7", 60, false); set_cookie("session", "x", 60, true); return ok({}); }
+--- requests
+GET /
+START /
+POST /cookie
+GET /

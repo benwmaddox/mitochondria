@@ -91,7 +91,7 @@ struct H {
     int (*raw_at)(Ctx *, u64, u32);                              /* n bytes of state at an offset added to the answer as they are */
     int (*raw_col)(Ctx *, u32, u32, u32);                        /* a text column added to the answer as it is */
     int (*see_other)(Ctx *, const Txt *);                        /* a 303 answer to a path on this server (checked) */
-    int (*set_cookie)(Ctx *, const char *, u32, const Txt *, i64); /* a Set-Cookie line on the answer: name, value (checked), max age */
+    int (*set_cookie)(Ctx *, const char *, u32, const Txt *, i64, int); /* a Set-Cookie line on the answer: name, value (checked), max age, HttpOnly */
     int (*html_txt)(Ctx *, const Txt *, u32);                    /* text of the text area into markup, escaped (1: inside an attribute) */
     int (*html_at)(Ctx *, u64, u32, u32);                        /* n bytes of state into markup, escaped */
     int (*html_col)(Ctx *, u32, u32, u32, u32);                  /* a text column into markup, escaped */
@@ -226,10 +226,12 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 35] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 36] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
-    B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode];
+    B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
+    // the process's environment: code 35
+    B::Env];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
 const CRYPTO_BUILTINS: [B; 10] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck];
 
@@ -689,6 +691,7 @@ static const unsigned char mito_lits[] = {{ {} }};
         o += STORE;
         o += &store_tables_c(prog);
     }
+    o += &format!("#define MITO_HAS_START {}\n", api.eps.iter().any(|e| e.method == "START") as u8); // a `@start` function (MITO(begin))
     if g.src.contains("/*crypto*/") {
         // a crypto built-in: the system library's primitives (the build sees this line and links libcrypto and crypt_blowfish)
         o += "#define MITO_USES_CRYPTO 1\n";
@@ -3422,12 +3425,15 @@ impl<'p> G<'p> {
         }
         if bi == B::SetCookie {
             // `set_cookie("name", value, max_age_seconds)`: a Set-Cookie line on the answer (Path=/, HttpOnly, SameSite=Lax); 0 deletes it
-            let [name, value, age] = <[CV; 3]>::try_from(a).map_err(|_| "`set_cookie` takes the name, the value and how long it lasts in seconds: `set_cookie(\"list\", token(b), 31536000)`".to_string())?;
+            // an optional fourth argument: whether the cookie is HttpOnly (true unless given)
+            let mut a = a;
+            let http_only = if a.len() == 4 { let h = a.pop().unwrap(); match h { CV::Bool(b) => b, _ => return no("`set_cookie`'s fourth argument says whether the cookie is HttpOnly: true or false") } } else { "1".to_string() };
+            let [name, value, age] = <[CV; 3]>::try_from(a).map_err(|_| "`set_cookie` takes the name, the value, how long it lasts in seconds and (optionally) whether it is HttpOnly: `set_cookie(\"list\", token(b), 31536000)`".to_string())?;
             let CV::Lit(name) = name else { return no("`set_cookie`: the name is a literal, as in `set_cookie(\"list\", ...)`") };
             if !crate::lang::cookie_name_ok(&name) { return no(format!("`set_cookie`: `{}` is not a cookie name (letters, digits and !#$%&'*+-.^_`|~)", name)); }
             let t = self.txt_of(value).map_err(|_| "`set_cookie` takes the value as text".to_string())?;
             let age = self.int_or(age, 500, "`set_cookie` takes the number of seconds as an integer");
-            self.call(&format!("c->h->set_cookie(c, {}, {}, &{}, {})", c_lit(name.as_bytes()), name.len(), t, age));
+            self.call(&format!("c->h->set_cookie(c, {}, {}, &{}, {}, {})", c_lit(name.as_bytes()), name.len(), t, age, http_only));
             return Ok(CV::Null);
         }
         if bi == B::SetHeader {
@@ -3517,7 +3523,7 @@ impl<'p> G<'p> {
         };
         // arity of the byte and crypto built-ins, checked when compiling
         let want = match bi {
-            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode => Some((1, "one argument")),
+            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env => Some((1, "one argument")),
             B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck => Some((2, "two arguments")),
             B::GcmSeal | B::GcmOpen => Some((3, "the key, the 12-byte nonce and the text")),
             B::Pbkdf2Sha256 => Some((4, "the password, the salt, the iterations and the length")),
@@ -3526,7 +3532,7 @@ impl<'p> G<'p> {
         if let Some((k, what)) = want {
             if a.len() != k {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
-                    B::RandomBytes => "random_bytes", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
+                    B::RandomBytes => "random_bytes", B::Env => "env", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
                     B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check",
                     B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));
@@ -3551,7 +3557,7 @@ impl<'p> G<'p> {
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
                     | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
-                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
+                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
                 _ => CV::Any(r),
             });
         }

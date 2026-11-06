@@ -61,7 +61,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, Trim,
-    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode }
+    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -72,7 +72,7 @@ impl B {
             "base64" => Base64, "base64_url" => Base64Url, "unbase64" => Unbase64, "hex" => Hex, "sha1" => Sha1, "sha256" => Sha256,
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
-            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode,
+            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env,
             _ => return None,
         })
     }
@@ -419,6 +419,24 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
         let first = p.lines.get(p.i).map_or(0, |x| x.0);
         p.eat("@")?;
         let verb = p.id()?;
+        // `@start fn name() { ... }`: run once when the program starts (after its tables open, before any request; in tests, before
+        // each test), as a request with no inputs whose writes are kept; for what the program derives from its environment
+        if verb == "start" {
+            if api.eps.iter().any(|e| e.method == "START") { return Err("a program has one `@start` function".into()); }
+            p.kw("fn")?;
+            let name = p.id()?;
+            p.eat("(")?;
+            if !p.sym(")") { return Err(format!("`@start fn {}()` takes no inputs", name)); }
+            if p.sym("->") { return Err(format!("`@start fn {}()` returns nothing: it is not an answer to a request", name)); }
+            p.in_endpoint = true;
+            let body = p.block();
+            p.in_endpoint = false;
+            let mut body = body?;
+            body.push(Stmt::Respond(204, Json::Empty));
+            let last = p.lines.get(p.i.saturating_sub(1)).map_or(first, |x| x.0);
+            api.eps.push(Endpoint { method: "START".into(), segs: Vec::new(), body, text: "START".into(), slots: 0, lines: (first, last), name, resp: RType::Name("null".into()), inputs: Vec::new() });
+            continue;
+        }
         let method = match verb.as_str() { "get" | "post" | "put" | "patch" | "delete" => verb.to_uppercase(), v => return Err(format!("`@{}`: an endpoint is `@get`, `@post`, `@put`, `@patch` or `@delete`", v)) };
         p.eat("(")?;
         let path = match p.t.get(p.i) { Some(Tok::Str(s)) => { p.i += 1; s.clone() } _ => return Err(format!("`@{}(...)` takes the path as a string, as in `@{}(\"/players/{{p}}\")`", verb, verb)) };

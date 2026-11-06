@@ -18,6 +18,7 @@ void mito_set_clock(void *m, i64 ms, int fixed);
 void mito_set_loop_budget(void *m, i64 n);
 void mito_set_marks(void *m, u64 soft, u64 hard);
 void mito_set_web_etag(void *m, int on);
+int mito_begin(void *m);
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 const char *mito_response_head(void *m, u32 *len);
@@ -632,6 +633,9 @@ int main(int argc, char **argv) {
         if (!mito_open_data(app, dir, "data.db", dbmem, full)) { printf("error: %s\n", mito_data_error(app)); mito_stop(app); return 1; }
         printf("tables in %s/data.db\n", dir);
     }
+    /* the program's `@start` function, once, before any request: a failure stops the server, saying why */
+    { int sc = mito_begin(app);
+      if (sc) { u32 en; const char *e = mito_response(app, &en); printf("error: the @start function failed (%d): %.*s\n", sc, (int)en, e); mito_stop(app); return 1; } }
     u32 nt = conns > 256 ? 256 : conns < 1 ? 1 : (u32)conns;
     printf("listening on http://127.0.0.1:%u (one request at a time in the program, %u connection threads; Ctrl-C to stop)\n", (u32)port, nt); fflush(0);
     if (!start_threads(app, l, nt)) return 1;

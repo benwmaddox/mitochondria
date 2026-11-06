@@ -145,8 +145,13 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   its errors as a small page (the message escaped) instead of JSON.
 - `set_cookie("list", token(b), 31536000)` adds a Set-Cookie line to the answer (`Path=/; HttpOnly; SameSite=Lax`; max age 0
   deletes it). The value must be cookie characters (printable ASCII without spaces, quotes, commas, semicolons, backslashes).
+  A fourth argument `false` leaves out HttpOnly (`set_cookie("last_room", str(id), 631152000, false)`).
   `set_header("Link", value)` adds a header line (the name a literal token, checked when compiling, and not one the server writes
   itself such as Content-Length; the value printable ASCII, checked when running).
+- **`@start fn init() { ... }`** runs once when the program starts: after its tables open, before any request (in `mito test`,
+  before each test), as a request without inputs whose writes are kept; a failure stops the server, saying why. It is never
+  reachable as a request. It is where a program reads its environment (`env("SECRET_KEY_BASE")`, the variable's text or null) and
+  keeps what it derives from it (a key from 1000 rounds of PBKDF2 is computed once, not per request).
 - **Bytes, encodings and cryptography.** A text holds any bytes, so these work on texts and give texts (in the request's text area):
   `base64(t)` (padded), `base64_url(t)` (URL alphabet, no padding), `unbase64(t)` (either alphabet, padding optional; null if not
   base64), `hex(t)`, `form_encode(t)` / `form_decode(t)` (as `URI.encode_www_form_component`; null for a bad `%`), `xor_bytes(a, b)`

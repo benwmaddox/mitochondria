@@ -131,12 +131,12 @@ fn cached_object(what: &str, tag: &str, files: &[(&str, &str)], unit: &str, flag
 
 /// Build C translation units into the executable `out`: with TinyCC (`tcc`), or else clang with `flags` (default -O3, the optimisation level of Rust's release profile, which the benchmarks compare with).
 pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -> Result<(), String> {
-    let sqlite = units.iter().any(|u| u.contains("#define MITO_USES_SQLITE")); // a program with tables links SQLite
     let tcc_wanted = tcc;
-    let dir = std::env::temp_dir().join(format!("mito-build-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+    // a directory of its own per build: builds in one process (parallel tests) would otherwise remove each other's
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("mito-build-{}-{}", std::process::id(), seq));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     let mut cs = Vec::new();
     for (k, u) in units.iter().enumerate() {
         let c = dir.join(format!("{}-{}.c", seq, k));
@@ -160,7 +160,6 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
     // SQLite, zlib, crypt_blowfish as the program needs them, compiled by the same compiler, from the cache
     let refs: Vec<&str> = units.iter().map(|u| u.as_str()).collect();
     let (objs, libs) = extra_links(&refs, tcc, "-O2")?;
-    let _ = sqlite;
     cmd.args(&objs);
     if !tcc && cfg!(windows) { cmd.arg("-lkernel32"); }
     for l in crate::tcc::LIBS.iter().chain(libs.iter()) { cmd.arg(format!("-l{}", l)); } // after the sources: system libraries imported normally

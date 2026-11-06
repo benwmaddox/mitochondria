@@ -584,6 +584,7 @@ typedef struct Mito {
     u8 *areas;
     i64 clock; int fixed_clock; u64 rng;
     int web_etag; /* the web block says `etag;`: the front end tags every answer, so a literal answer adds no ETag of its own */
+    int starting; /* MITO(begin) is running the program's `@start` function */
     i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
     u64 small;       /* bytes of the block holding the page flags (released with the instance) */
     u32 text_base;   /* where a request's text starts: after the literals, or after a running test's own text */
@@ -1001,13 +1002,13 @@ static int cookie(Mito *m, const u8 *name, u64 nn, const u8 **v, u64 *vn) {
     return 0;
 }
 /* `set_cookie(name, value, max_age)`: the value must be cookie octets (printable ASCII but space, " , ; \), at most 4000 bytes */
-static int h_set_cookie(Ctx *c, const char *name, u32 nn, const Txt *t, i64 age) {
+static int h_set_cookie(Ctx *c, const char *name, u32 nn, const Txt *t, i64 age, int http_only) {
     Mito *m = M_(c); const u8 *p = m->text.p + t->off; u32 n = t->present ? t->len : 0;
     if (n > 4000) return fail(m, 500, "set_cookie: a value is at most 4000 bytes");
     for (u32 i = 0; i < n; i++) if (p[i] <= 0x20 || p[i] >= 0x7F || p[i] == '"' || p[i] == ',' || p[i] == ';' || p[i] == '\\') return fail(m, 500, "set_cookie: a value is printable ASCII without spaces, quotes, commas, semicolons or backslashes");
     if (age < 0) return fail(m, 500, "set_cookie: max age is 0 (delete) or more seconds");
     if (!(a_str(&m->head, "Set-Cookie: ") && a_put(&m->head, name, nn) && a_str(&m->head, "=") && a_put(&m->head, p, n) &&
-          a_str(&m->head, "; Path=/; Max-Age=") && a_i64(&m->head, age) && a_str(&m->head, "; HttpOnly; SameSite=Lax\r\n"))) return fail(m, 500, "too many header lines on the answer");
+          a_str(&m->head, "; Path=/; Max-Age=") && a_i64(&m->head, age) && a_str(&m->head, http_only ? "; HttpOnly; SameSite=Lax\r\n" : "; SameSite=Lax\r\n"))) return fail(m, 500, "too many header lines on the answer");
     return 0;
 }
 /* `set_header(name, value)`: the value is printable ASCII (tabs allowed), at most 8000 bytes, so it can add no header line of its own */
@@ -1484,6 +1485,15 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
             else w[o++] = s[i];
         }
         return t_done(m, start, o, out); }
+    case 35: { /* env("NAME"): the process's environment variable, or null when it is not set */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        char name[256]; if (x.len == 0 || x.len > 255) return fail(m, 500, "env: a name of 1 to 255 bytes");
+        memcpy(name, t_ptr(m, x), x.len); name[x.len] = 0;
+        const char *v = getenv(name);
+        if (!v) { *out = v_null(); return 0; }
+        u64 vn = 0; while (v[vn]) vn++;
+        if (!(w = t_room(m, vn))) return -1;
+        memcpy(w, v, vn); return t_done(m, start, vn, out); }
 #ifdef MITO_USES_CRYPTO
     case 21: case 22: { /* sha1, sha256: the digest's bytes */
         if (arg_txt(m, a, n, 0, &x)) return -1;
@@ -2095,6 +2105,17 @@ MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return;
 MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n; }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
 MITO_API void MITO(set_web_etag)(void *mp_, int on) { ((Mito *)mp_)->web_etag = on; }
+MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn);
+/* Run the program's `@start` function (if it has one): after its tables are open, before any request. 0, or the failure's status
+   (its message then in MITO(response)). */
+MITO_API int MITO(begin)(void *mp_) {
+    Mito *m = (Mito *)mp_;
+    if (!MITO_HAS_START) return 0;
+    m->starting = 1;
+    int code = MITO(handle)(m, "START", 5, "/", 1, 0, 0, 0, 0, "", 0);
+    m->starting = 0;
+    return code < 300 ? 0 : code;
+}
 MITO_API void MITO(set_marks)(void *mp_, u64 soft, u64 hard) { Mito *m = (Mito *)mp_;
     m->pr.on = 1; m->pr.soft = soft; m->pr.hard = hard; m->pr.refusing = 0; m->pr.trims = m->pr.full_trims = m->pr.freed = 0;
     if (m->mem.all) { m->mem.all = 0; trim_all(&m->mem); } /* pressure needs exact accounting: give back what is not live, commit on demand from here */
@@ -2132,7 +2153,8 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
-    u32 ei = route(m, (const u8 *)method, mn, t, q);
+    /* the `@start` function only through MITO(begin), never as a request */
+    u32 ei = c_eq("START", (const u8 *)method, mn) && !m->starting ? 0xFFFFFFFFu : route(m, (const u8 *)method, mn, t, q);
     m->html_err = 0;
     if (ei == 0xFFFFFFFFu) { out_err_c(m, "no such endpoint"); return 404; }
     m->html_err = (int)mito_prog.routes[ei].html;

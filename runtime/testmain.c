@@ -11,6 +11,8 @@ int main(int argc, char **argv) {
         void *m = mito_start(1024ULL << 20, 1);
         if (!m) { printf("error: the program did not start (over budget or out of address space)\n"); return 2; }
         mito_set_clock(m, 1767225600000LL, 1); /* 2026-01-01 */
+        { int sc = mito_begin(m); /* the program's `@start` function, as on a server */
+          if (sc) { u32 en; const char *e = mito_response(m, &en); printf("error: the @start function failed (%d): %.*s\n", sc, (int)en, e); return 2; } }
         u32 line = 0;
         int r = mito_run_test(m, k, msg, sizeof msg, &line);
         if (r == 0) printf("ok    %s\n", mito_test_name(k));

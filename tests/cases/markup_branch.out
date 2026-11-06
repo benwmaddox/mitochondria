@@ -1,7 +1,7 @@
-GET / -> 200 <Content-Type: text/html; charset=utf-8> <main><div><h2>none</h2><ol><li>&lt;zero&gt;</li></ol></div></main>
+GET / -> 200 <Content-Type: text/html; charset=utf-8> <main><div><h2>none</h2><ol><li>&lt;zero&gt;</li></ol></div><a href="/n/0/edit">edit</a></main>
 POST /n/1 -> 200 {}
-GET / -> 200 <Content-Type: text/html; charset=utf-8> <main><div><h2>one</h2>1</div></main>
+GET / -> 200 <Content-Type: text/html; charset=utf-8> <main><div><h2>one</h2>1</div><a href="/n/1/edit">edit</a></main>
 POST /n/2 -> 200 {}
-GET / -> 200 <Content-Type: text/html; charset=utf-8> <main><div><h2>many</h2></div></main>
+GET / -> 200 <Content-Type: text/html; charset=utf-8> <main><div><h2>many</h2></div><a href="/many/2/edit">edit</a></main>
 state <plain values> 8
 memory reserved=4096 committed=4096 live=8

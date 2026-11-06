@@ -1,10 +1,12 @@
 // `{...}` between elements inside a `{if ...}` branch: the same as in the markup (a piece's call, an escaped value), in `else if` too;
-// the branch is code, so the space between `</h2>` and `{app.n}` is not text
+// the branch is code, so the space between `</h2>` and `{app.n}` is not text; bare strings in a `-> html` function's code write
+// themselves (here into an attribute)
 --- program
 struct App { n: i64; }
 state app: App;
 
 fn steps(name: utf8<16>) -> html { <ol><li>{name}</li></ol> }
+fn path(n: i64) -> html { if n > 1 { "/many/"; } else { "/n/"; } html_text(n); "/edit"; }
 fn help() -> html {
     <div>{if app.n == 0 {
         <h2>none</h2>
@@ -18,7 +20,7 @@ fn help() -> html {
 @post("/n/{n}")
 fn set(n: i64) -> Response<{}> { app.n = n; return ok({}); }
 @get("/")
-fn home() -> Response<html> { return ok(<main>{help();}</main>); }
+fn home() -> Response<html> { return ok(<main>{help();}<a href="{path(app.n);}">edit</a></main>); }
 --- requests
 GET /
 POST /n/1

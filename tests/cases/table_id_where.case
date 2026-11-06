@@ -1,0 +1,18 @@
+// `where r.id == x` over a whole table: the primary key leads the search (a row that may not be there, unlike `rooms[x]`, which is a
+// 404 when it is not)
+--- program
+struct Room { name: utf8<16>; }
+struct App { rooms: table<Room>; }
+state app: App;
+@post("/rooms")
+fn add(name: utf8<16>) -> Response<{ id: i64 }> { let r = app.rooms.add { name: name }; return created({ id: r.id }); }
+@get("/find/{id}")
+fn find(id: i64) -> Response<{ found: bool; name: string? }> {
+    let r = first r in app.rooms where r.id == id;
+    if exists(r) { return ok({ found: true, name: r.name }); }
+    return ok({ found: false, name: null });
+}
+--- requests
+POST /rooms {"name": "quiet"}
+GET /find/1
+GET /find/2

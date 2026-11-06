@@ -3114,7 +3114,8 @@ impl<'p> G<'p> {
         let col = |e: &Expr| -> Option<String> {
             let Expr::Field(b, f) = e else { return None };
             let Expr::Var(_, VarRes::Local(s)) = &**b else { return None };
-            if *s != slot || !self.prog.tables[t].cols.iter().any(|c| c.path == *f && !matches!(c.kind, crate::layout::TKind::Blob(..))) { return None; }
+            // a column, or the row's id (the primary key)
+            if *s != slot || (f != "id" && !self.prog.tables[t].cols.iter().any(|c| c.path == *f && !matches!(c.kind, crate::layout::TKind::Blob(..)))) { return None; }
             Some(f.clone())
         };
         match e {
@@ -3155,7 +3156,8 @@ impl<'p> G<'p> {
             if self.sql_where(w, it.slot, t, conds.len(), &mut wconds, &mut wvals, &mut wcols) {
                 // over a whole table, an index must lead the search: one whose first column the `where` constrains (SQLite then uses it,
                 // and the other conditions narrow what it finds)
-                let led = wcols.iter().any(|f| tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)));
+                // (the id, the primary key, is one)
+                let led = wcols.iter().any(|f| f == "id" || tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)));
                 if !nested && !it.scan && !led {
                     for f in wcols.iter().take(1) {
                         if !tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)) {

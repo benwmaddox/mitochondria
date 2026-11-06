@@ -1,0 +1,5 @@
+POST /rooms -> 201 {"id":1}
+GET /find/1 -> 200 {"found":true,"name":"quiet"}
+GET /find/2 -> 200 {"found":false,"name":null}
+state <plain values> 1
+memory reserved=4096 committed=4096 live=1

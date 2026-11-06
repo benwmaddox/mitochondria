@@ -773,10 +773,12 @@ impl P {
             }
             return Err("`include_html` takes the file's path as a literal: `include_html(\"fragments/head.html\");`".into());
         }
-        // in code inside markup, a bare string writes itself: `{if left == 1 { "item" } else { "items" }}`
-        if let (Some(attr), Some(Tok::Str(s))) = (self.markup, self.peek().cloned()) {
-            if matches!(self.t.get(self.i + 1), Some(Tok::Sym(x)) if x == ";" || x == "}") {
+        // a bare string writes itself, in code inside markup (`{if left == 1 { "item" } else { "items" }}`) and in a `-> html`
+        // function's code (`"/rooms/"; html_text(r.id);`); anywhere else it is an error, as markup is (it would do nothing)
+        if let Some(Tok::Str(s)) = self.peek().cloned() {
+            if matches!(self.t.get(self.i + 1), Some(Tok::Sym(x)) if x == ";" || (x == "}" && self.markup.is_some())) {
                 self.i += 1; self.sym(";");
+                let attr = self.markup == Some(true);
                 return Ok(Stmt::Do(Expr::Call(if attr { "__html_esc_attr" } else { "__html_esc" }.into(), vec![Expr::Str(s)], CallRes::Unbound)));
             }
         }

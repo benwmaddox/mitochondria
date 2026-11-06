@@ -7,6 +7,6 @@ POST /notes -> 201 {"text":"[0123456789]"}
 GET /notes -> 200 {"all":"[a][quote\"d][0123456789]","first":"[a]","eq":true,"lt":true,"hdr":"none","q":null}
 GET /notes?q=hi -> 200 {"all":"[a][quote\"d][0123456789]","first":"[a]","eq":true,"lt":true,"hdr":"zed","q":"hi"}
 GET /concat -> 200 {"a":"n=5","b":"t=true","c":"xnull","d":"12false"}
-state <plain values> 192
+state <plain values> 8192
 state app.notes 44
-memory reserved=8192 committed=8192 live=236
+memory reserved=12288 committed=12288 live=8236

@@ -577,7 +577,7 @@ static void relieve(Mem *m, Pressure *p) {
 #define MAX_SEL (1 << 24)
 
 /* What went wrong in a request: the error kinds of the Rust runtime. */
-enum { E_NONE, E_FAIL, E_FULL, E_TOOLONG, E_NOTLIVE, E_STALE, E_BAD, E_DEAD, E_FORWARD };
+enum { E_NONE, E_FAIL, E_FULL, E_TOOLONG, E_NOTLIVE, E_STALE, E_BAD, E_DEAD, E_FORWARD, E_WRITES };
 #define MAX_FWD 64 /* fields of one forward */
 typedef struct { u32 off, len; } T; /* a string in the text area */
 typedef struct { T k; Val v; } JField;
@@ -617,6 +617,15 @@ typedef struct Mito {
     int insys; u32 nkinds, me_kind, me_index; const char *const *kind_names; const u32 *kind_counts;
     u32 nfwd_out; struct { T k, v; } fwd_out[MAX_FWD]; /* the fields of the forward being made */
     int pending; u32 fwd_kind; i64 fwd_key;         /* a forward waiting for MITO(finish_forward) */
+    /* a reader (MITO(reader)): an instance that runs requests alongside other readers, the state shared with the primary instance and
+       mapped read-only, its own request struct, text, answer and database connection. A request that would change anything else stops
+       (wants_write) and runs again alone on the primary. */
+    int reader, wants_write;
+    /* the state's shared memory (MITO(share_state) before MITO(start)): the handle readers map */
+    i64 shared_fd;
+#ifdef MITO_USES_SQLITE
+    char db_dir[600], db_file[600]; u64 db_pool; int db_flags; /* how the tables were opened, for readers' connections */
+#endif
 } Mito;
 
 #define MITO_TBASE (1u << 24) /* a table is collection MITO_TBASE + its index in generated code */
@@ -641,6 +650,11 @@ static Val v_bool(int b) { Val v = { 3, 0, 0, b ? 1 : 0, 0 }; return v; }
 static Val v_str(T t) { Val v = { 4, t.off, t.len, 0, 0 }; return v; }
 static Val v_item(u32 c, u32 i) { Val v = { 5, c, i, 0, 0 }; return v; }
 static Mito *M_(Ctx *c) { return (Mito *)c->run; }
+/* A reader changes only its own request struct: anything else stops the request (it runs again alone, on the primary instance). */
+static int rd_writes(Mito *m) { m->wants_write = 1; err(m, E_WRITES, 503); a_str(&m->emsg, "a reader cannot change the state"); return -1; }
+static int in_request(u64 a, u64 n) { return mito_prog.req_size && a >= mito_prog.req_off && a + n <= mito_prog.req_off + mito_prog.req_size; }
+#define RD_ANY(m) do { if (UNLIKELY((m)->reader)) return rd_writes(m); } while (0)
+#define RD_AT(m, a, n) do { if (UNLIKELY((m)->reader) && !in_request((a), (n))) return rd_writes(m); } while (0)
 
 /* ---- columns ---- */
 static i64 col_by_path(Mito *m, u32 c, const u8 *p, u64 n) { const MitoColl *k = coll(&m->mem, c); for (u32 i = 0; i < k->ncols; i++) if (k->cols[i].kind != 3 && c_eq(k->cols[i].path, p, n)) return i; return -1; }
@@ -1279,23 +1293,23 @@ static int h_binop(Ctx *c, int op, const Val *l, const Val *r, Val *out) {
 }
 static int h_truthy(Ctx *c, const Val *v, int *out) { if (v->tag == 3) { *out = v->i != 0; return 0; } if (v->tag == 0) { *out = 0; return 0; } return fail(M_(c), 500, "condition is not a boolean"); }
 /* An integer of `size` bytes (the generated code has checked it fits the column) at byte offset `off`. */
-static int h_wr_int(Ctx *c, u64 off, u32 size, i64 v) { wr(&M_(c)->mem, off, size, (u64)v); return 0; }
+static int h_wr_int(Ctx *c, u64 off, u32 size, i64 v) { RD_AT(M_(c), off, size); wr(&M_(c)->mem, off, size, (u64)v); return 0; }
 /* The same for plain state: ensure(0, plain_end) committed it at start and the live-page marking keeps trim from decommitting it, so the page is
    known committed and only the undo log needs a look. */
-static int h_clear_coll(Ctx *c, u32 cid, u32 inst) { reset_instance(&M_(c)->mem, cid, inst); return 0; }
-static int h_save_line(Ctx *c, u64 a, u32 size) { save(&M_(c)->mem, a, size); return 0; }
+static int h_clear_coll(Ctx *c, u32 cid, u32 inst) { RD_ANY(M_(c)); reset_instance(&M_(c)->mem, cid, inst); return 0; }
+static int h_save_line(Ctx *c, u64 a, u32 size) { if (M_(c)->reader) { RD_AT(M_(c), a, size); return 0; } save(&M_(c)->mem, a, size); return 0; }
 static int h_commit_range(Ctx *c, u64 a, u32 size) { ensure(&M_(c)->mem, a, a + size); return 0; }
 /* the text area's length now, and cutting it back to an earlier length: a loop body that keeps none of its strings past the iteration gives their space back */
 /* `count` bytes of a state array of bytes at a byte offset, copied into the text area as a string */
 static int h_arr_txt(Ctx *c, u64 off, u32 count, Txt *out) { Mito *m = M_(c); T t; if (t_push(m, m->mem.base + off, count, &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
 /* save a range to the undo log before a loop stores into it (save skips the lines already saved) */
-static int h_save_range(Ctx *c, u64 a, u64 n) { save(&M_(c)->mem, a, n); return 0; }
+static int h_save_range(Ctx *c, u64 a, u64 n) { if (M_(c)->reader) { RD_AT(M_(c), a, n); return 0; } save(&M_(c)->mem, a, n); return 0; }
 static int h_text_len(Ctx *c, u32 *len) { *len = M_(c)->text.len; return 0; }
 static int h_text_cut(Ctx *c, u32 len) { M_(c)->text.len = len; return 0; }
-static int h_wr_plain(Ctx *c, u64 off, u32 size, i64 v) { Mem *m = &M_(c)->mem; save(m, off, size); u64 x = (u64)v; memcpy(m->base + off, &x, size); return 0; }
+static int h_wr_plain(Ctx *c, u64 off, u32 size, i64 v) { RD_AT(M_(c), off, size); Mem *m = &M_(c)->mem; save(m, off, size); u64 x = (u64)v; memcpy(m->base + off, &x, size); return 0; }
 /* `count` elements of `esize` bytes of an array at byte offset `base`, from position `from`, are set to the value whose bits are `bits`: one commit
    (not for plain state, committed at start), one undo-log pass over the range, one fill (the generated code checked the range and that the value fits). */
-static int h_fill_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 count, i64 bits, int plain) {
+static int h_fill_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 count, i64 bits, int plain) { if (count > 0) RD_AT(M_(c), base + (u64)from * esize, (u64)count * esize);
     if (count <= 0) return 0;
     Mem *m = &M_(c)->mem;
     u64 lo = base + (u64)from * esize, n = (u64)count;
@@ -1310,7 +1324,7 @@ static int h_fill_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 count, i64 bi
 }
 /* `count` elements of `esize` bytes move within an array at byte offset `base`, from position `from` to `to`: one commit, one
    undo-log pass over the range they write, one memmove (the generated code checked the range). */
-static int h_move_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 to, i64 count) {
+static int h_move_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 to, i64 count) { if (count > 0) RD_AT(M_(c), base + (u64)(from < to ? from : to) * esize, (u64)(count + (from < to ? to - from : from - to)) * esize);
     if (count <= 0 || from == to) return 0;
     Mem *m = &M_(c)->mem;
     /* only the destination is written: commit and save just that range (a move between far apart ranges does not pay for what lies between them) */
@@ -1319,17 +1333,17 @@ static int h_move_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 to, i64 count
     memmove(m->base + base + (u64)to * esize, m->base + base + (u64)from * esize, (u64)count * esize);
     return 0;
 }
-static int h_store(Ctx *c, u32 cid, u32 idx, u32 ci, const Val *v) { return store_col(M_(c), cid, idx, ci, -1, v); }
-static int h_store_elem(Ctx *c, u32 cid, u32 idx, u32 ci, i64 k, const Val *v) { return store_col(M_(c), cid, idx, ci, k, v); }
+static int h_store(Ctx *c, u32 cid, u32 idx, u32 ci, const Val *v) { RD_ANY(M_(c)); return store_col(M_(c), cid, idx, ci, -1, v); }
+static int h_store_elem(Ctx *c, u32 cid, u32 idx, u32 ci, i64 k, const Val *v) { RD_ANY(M_(c)); return store_col(M_(c), cid, idx, ci, k, v); }
 /* A plain value at `off`: code 1..11 a scalar, 20 a string<cap>, 30 a reference to top-level pool `cap`. */
-static int h_store_plain(Ctx *c, u32 off, u32 code, u32 cap, const Val *v) {
+static int h_store_plain(Ctx *c, u32 off, u32 code, u32 cap, const Val *v) { RD_AT(M_(c), off, 4);
     Mito *m = M_(c);
     if (v->tag == 4) { if (code != 20 && code != 21) return bad_type(m); if (code == 21 && not_ascii(m, t_ptr(m, (T){ v->a, v->b }), v->b)) return -1; return store_bytes_at(m, off, off + 4, cap, t_ptr(m, (T){ v->a, v->b }), v->b); }
     if (v->tag != 1 && v->tag != 2 && v->tag != 3) return fail(m, 500, "cannot store this value in state");
     if (code == 20 || code == 21) { err(m, E_BAD, 400); a_str(&m->emsg, "expected a string"); return -1; }
     return store_scalar(m, off, code, v);
 }
-static int h_alloc(Ctx *c, u32 cid, u32 inst, int try_, u32 *out) {
+static int h_alloc(Ctx *c, u32 cid, u32 inst, int try_, u32 *out) { RD_ANY(M_(c));
     Mito *m = M_(c);
     if (try_ && is_full(&m->mem, cid, inst)) { *out = 0xFFFFFFFFu; return 0; }
     u64 idx = push_item(&m->mem, cid, inst);
@@ -1346,12 +1360,12 @@ static int add_free(Mito *m, u32 cid, u32 idx) {
     if (m->frees.len / 2 >= MAX_FREES || !grow_to(&m->frees, (m->frees.len + 2) * 4)) return fail(m, 507, "too many frees in one request");
     u32 *f = (u32 *)m->frees.p; f[m->frees.len] = cid; f[m->frees.len + 1] = idx; m->frees.len += 2; return 0;
 }
-static int h_free(Ctx *c, u32 cid, u32 idx) {
+static int h_free(Ctx *c, u32 cid, u32 idx) { RD_ANY(M_(c));
     Mito *m = M_(c);
     if (coll(&m->mem, cid)->list) return fail(m, 500, "list items are not freed; lists drop their oldest or pop their newest");
     return add_free(m, cid, idx);
 }
-static int h_free_val(Ctx *c, const Val *v) {
+static int h_free_val(Ctx *c, const Val *v) { RD_ANY(M_(c));
     Mito *m = M_(c);
     if (v->tag == 0) return 0;
     if (v->tag != 5) return fail(m, 500, "free needs an item");
@@ -1402,7 +1416,7 @@ static int h_field_val(Ctx *c, const Val *base, const char *p, u32 n, Val *out) 
     if (col->kind == 2) { T t; if (col_txt(m, cid, idx, (u32)ci, &t)) return -1; *out = v_str(t); return 0; }
     *out = scalar_val(m, caddr(m, cid, idx, (u32)ci), col->scalar); return 0;
 }
-static int h_store_field(Ctx *c, const Val *base, const char *p, u32 n, const Val *v) {
+static int h_store_field(Ctx *c, const Val *base, const char *p, u32 n, const Val *v) { RD_ANY(M_(c));
     Mito *m = M_(c);
     if (base->tag != 5) return fail(m, 500, "assignment target is not an item or a state struct");
     i64 ci = col_by_path(m, base->a, (const u8 *)p, n);
@@ -1963,7 +1977,7 @@ static int h_json_field(Ctx *c, const Txt *j, const char *name, u32 nn, Txt *out
 /* Append a value, formatted as `+` would, to a string field in place: kind bit 0 clear: a plain string (a: its offset, b: its
    capacity); set: an item's string column (a: collection, b: item, cc: its length column). Bit 1: empty it first (an assignment
    written as pieces). Only the appended bytes and the length are written (and saved to the undo log). */
-static int h_str_app(Ctx *c, int kind, u64 a, u64 b, u32 cc, const Val *v) {
+static int h_str_app(Ctx *c, int kind, u64 a, u64 b, u32 cc, const Val *v) { if (kind & 1) RD_ANY(M_(c)); else RD_AT(M_(c), a, 4 + b);
     Mito *m = M_(c);
     u64 len_at, bytes_at, cap;
     if (kind & 1) { const MitoColl *k = coll(&m->mem, (u32)a); len_at = caddr(m, (u32)a, b, cc); bytes_at = caddr(m, (u32)a, b, cc + 1); cap = k->cols[cc + 1].n; }
@@ -1983,7 +1997,7 @@ static int h_str_app(Ctx *c, int kind, u64 a, u64 b, u32 cc, const Val *v) {
 
 /* Append `n` bytes of state at `src` (a window onto a text field) to a string field in place, as h_str_app (kind, a, b, cc the
    same): one copy from field to field. Overlapping bytes go through the text area first. */
-static int h_str_app_at(Ctx *c, int kind, u64 a, u64 b, u32 cc, u64 src, u32 n) {
+static int h_str_app_at(Ctx *c, int kind, u64 a, u64 b, u32 cc, u64 src, u32 n) { if (kind & 1) RD_ANY(M_(c)); else RD_AT(M_(c), a, 4 + b);
     Mito *m = M_(c);
     u64 len_at, bytes_at, cap;
     if (kind & 1) { const MitoColl *k = coll(&m->mem, (u32)a); len_at = caddr(m, (u32)a, b, cc); bytes_at = caddr(m, (u32)a, b, cc + 1); cap = k->cols[cc + 1].n; }
@@ -2005,7 +2019,7 @@ static int h_str_app_at(Ctx *c, int kind, u64 a, u64 b, u32 cc, u64 src, u32 n) 
 /* Write pieces (text, integers, floats, bools, formatted as `+` would) to a string field in one call: appended after what it holds,
    or from the start when `clear` (an assignment). kind, a, b, cc as h_str_app. The length is read and written once, the destination
    saved piece by piece; integers are formatted straight into the field. */
-static int h_str_set(Ctx *c, int kind, u64 a, u64 b, u32 cc, int clear, const Val *v, u32 nv) {
+static int h_str_set(Ctx *c, int kind, u64 a, u64 b, u32 cc, int clear, const Val *v, u32 nv) { if (kind & 1) RD_ANY(M_(c)); else RD_AT(M_(c), a, 4 + b);
     Mito *m = M_(c);
     u64 len_at, bytes_at, cap;
     if (kind & 1) { const MitoColl *k = coll(&m->mem, (u32)a); len_at = caddr(m, (u32)a, b, cc); bytes_at = caddr(m, (u32)a, b, cc + 1); cap = k->cols[cc + 1].n; }
@@ -2112,7 +2126,7 @@ static int t_run(Mito *m, sqlite3_stmt *s) { int r = sqlite3_step(s); sqlite3_re
 #ifdef MITO_USES_SQLITE
 #define T_ST(c) (&M_(c)->store)
 static int h_tget(Ctx *c, u32 t, u32 rowid, u32 col, Val *out) { return t_get(M_(c), t, rowid, col, out); }
-static int h_tset(Ctx *c, u32 t, u32 rowid, u32 col, const Val *v) {
+static int h_tset(Ctx *c, u32 t, u32 rowid, u32 col, const Val *v) { RD_ANY(M_(c));
     Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
     if (v->tag == 4 && st->tabs[t].cols[col].ascii && not_ascii(m, t_ptr(m, (T){ v->a, v->b }), v->b)) return -1; /* an ascii<N> column */
     sqlite3_stmt *s = st->ts[t].upd[col];
@@ -2120,7 +2134,7 @@ static int h_tset(Ctx *c, u32 t, u32 rowid, u32 col, const Val *v) {
     else t_bind(m, s, 1, v);
     sqlite3_bind_int64(s, 2, (i64)rowid); return t_run(m, s);
 }
-static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) {
+static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) { RD_ANY(M_(c));
     Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
     if (st->noadd[t]) { err(m, E_FAIL, 500); a_str(&m->emsg, "cannot add a row: "); a_str(&m->emsg, st->noadd_msg[t]); return -1; }
     sqlite3_stmt *s = st->ts[t].ins; if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent);
@@ -2129,8 +2143,8 @@ static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) {
     if (id <= 0 || id > 0xFFFFFFFFLL) return fail(m, 507, "a table's row ids reached 2^32");
     *out = (u32)id; return 0;
 }
-static int h_tdel(Ctx *c, u32 t, u32 rowid) { Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].del; sqlite3_bind_int64(s, 1, (i64)rowid); return t_run(m, s); }
-static int h_tclear(Ctx *c, u32 t, u32 parent) { Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].clr; if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent); return t_run(m, s); }
+static int h_tdel(Ctx *c, u32 t, u32 rowid) { RD_ANY(M_(c)); Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].del; sqlite3_bind_int64(s, 1, (i64)rowid); return t_run(m, s); }
+static int h_tclear(Ctx *c, u32 t, u32 parent) { RD_ANY(M_(c)); Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].clr; if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent); return t_run(m, s); }
 static int h_texists(Ctx *c, u32 t, u32 rowid, u32 *out) {
     Mito *m = M_(c); Store *st = T_ST(c); sqlite3_stmt *s = st->ts[t].has; sqlite3_bind_int64(s, 1, (i64)rowid);
     int r = sqlite3_step(s); sqlite3_reset(s); *out = r == SQ_ROW; return r == SQ_ROW || r == SQ_DONE ? 0 : t_dbfail(m);
@@ -2153,7 +2167,7 @@ static int h_tfind(Ctx *c, u32 t, u32 rowid, u32 parent) {
 /* `coll.add { field: value, ... }` on a table: one INSERT naming those columns (the owner's id first for a nested table), so another
    program's NOT NULL columns get their values at once; each value bound as its column is kept (a time as text). Its statement (`sql`, a
    literal of the program) is prepared once. */
-static int h_tinsert(Ctx *c, u32 t, u32 parent, const char *sql, const u32 *cols, const Val *vals, u32 n, u32 *out) {
+static int h_tinsert(Ctx *c, u32 t, u32 parent, const char *sql, const u32 *cols, const Val *vals, u32 n, u32 *out) { RD_ANY(M_(c));
     Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
     SqCached *k = 0;
     for (u32 i = 0; i < st->ncached && !k; i++) if (st->cached[i].sql == sql) k = &st->cached[i];
@@ -2341,6 +2355,9 @@ static const H mito_h = {
 /* ---------------------------------------------------------------- the interface: mito_* */
 /* Start the program: reserve its layout (refusing if over `budget` bytes), commit plain values and top-level headers.
    `seed` 0 takes random numbers from the OS. Returns 0 if over budget or out of address space. */
+static int g_share_state;
+/* Before MITO(start): keep the state in memory readers can map too (MITO(reader)). 0 when this system cannot. */
+MITO_API int MITO(share_state)(int on) { if (on && !os_can_share()) return 0; g_share_state = on; return 1; }
 MITO_API void *MITO(start)(u64 budget, u64 seed) {
     const MitoProg *pg = &mito_prog;
     if (pg->total > budget) return 0;
@@ -2349,7 +2366,11 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     Mem *mem = &m->mem;
     mem->prog = pg;
     mem->reserved = up(pg->total ? pg->total : 1, PAGE);
-    mem->base = (u8 *)os_reserve(mem->reserved);
+    m->shared_fd = -1;
+#ifdef MITO_USES_CRYPTO
+    cr_prepare(); /* the algorithms looked up once, before any request (requests may run at once) */
+#endif
+    mem->base = (u8 *)(g_share_state ? os_reserve_shared(mem->reserved, &m->shared_fd) : os_reserve(mem->reserved));
     mem->npages = mem->reserved / PAGE;
     mem->dirty = (u8 *)os_reserve(up(mem->npages * (PAGE / 64 / 8), PAGE));
     if (!mem->dirty) return 0;
@@ -2396,6 +2417,48 @@ MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return;
     store_close(&m->store);
 #endif
     os_release(m->mem.base, m->mem.reserved); os_release(m->mem.committed, m->small); os_release(m->mem.dirty, up(m->mem.npages * (PAGE / 64 / 8), PAGE)); os_release(m->mem.jb.p, m->mem.jb.reserved); os_release(m->mem.ja.p, m->mem.ja.reserved); os_release(m->frees.p, m->frees.reserved); os_release(m->sel.p, m->sel.reserved); os_release(m->areas, TEXT_CAP + RESPONSE_CAP); os_release(m, sizeof(Mito)); }
+/* A reader of the primary instance `mp_` (after its tables are open and its `@start` ran): requests that only read run on readers at
+   once, each on its own thread, while no request runs on the primary (runtime/http.c holds a readers-writer lock). The state is the
+   primary's, mapped read-only; the request struct, text, answer and database connection are the reader's own. 0 with the reason in
+   `why` when the program cannot have readers. */
+MITO_API void *MITO(reader)(void *mp_, u32 k, char *why, u32 cap) {
+    Mito *p = (Mito *)mp_;
+    const char *no = 0;
+    u32 own_unlogged = 0; for (u32 r = 0; r < mito_prog.nunlogged; r++) if (!(mito_prog.req_size && mito_prog.unlogged[2 * r] == mito_prog.req_off)) own_unlogged++;
+    if (p->shared_fd < 0) no = "the state is not in shared memory (this system cannot share it, or MITO(share_state) was not called)";
+    else if (!p->mem.all) no = "readers need all of the state committed at start (no --soft/--hard marks, state of at most 1 GiB)";
+    else if (own_unlogged) no = "the program has unlogged state, whose changes skip the undo log a reader is stopped by";
+    else if (mito_prog.req_size && (mito_prog.req_off % PAGE || mito_prog.req_size % PAGE)) no = "the request struct is not on whole pages";
+    if (no) { u32 n = 0; while (no[n] && n + 1 < cap) { why[n] = no[n]; n++; } if (cap) why[n] = 0; return 0; }
+    Mito *m = (Mito *)os_alloc(sizeof(Mito));
+    if (!m) return 0;
+    m->mem = p->mem;
+    Mem *mem = &m->mem;
+    mem->base = (u8 *)os_map_shared_ro(p->shared_fd, mem->reserved);
+    if (!mem->base) return 0;
+    if (mito_prog.req_size && !os_map_private_at(mem->base + mito_prog.req_off, mito_prog.req_size)) return 0;
+    /* its own line map, all clear (every write outside its request struct reaches save_line, which stops the request) and no undo log */
+    mem->dirty = (u8 *)os_alloc(up(mem->npages * (PAGE / 64 / 8), PAGE));
+    if (!mem->dirty) return 0;
+    Grow none = { 0, 0, 0, 0 }; mem->jb = none; mem->ja = none; mem->jon = 0;
+    if (!grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
+    m->areas = (u8 *)os_alloc(TEXT_CAP + RESPONSE_CAP);
+    m->ops.p = (u8 *)os_alloc(1 << 20); m->ops.cap = 1 << 20; m->ops.len = 0;
+    if (!m->areas || !m->ops.p) return 0;
+    m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
+    m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf; m->head.p = m->hbuf; m->head.cap = sizeof m->hbuf;
+    m->rng = p->rng ? p->rng + 0x9E3779B97F4A7C15ULL * (k + 1) : 0;
+    m->loop_budget = p->loop_budget; m->text_base = MITO_LITS_LEN; m->web_etag = p->web_etag; m->clock = p->clock; m->fixed_clock = p->fixed_clock;
+    m->shared_fd = -1; m->reader = 1;
+#ifdef MITO_USES_SQLITE
+    if (p->store.open && !store_open(&m->store, mito_tables, MITO_NTABLES, p->db_dir, p->db_file, p->db_pool, p->db_flags | 4)) {
+        u32 n = 0; while (m->store.err[n] && n + 1 < cap) { why[n] = m->store.err[n]; n++; } if (cap) why[n] = 0; return 0;
+    }
+#endif
+    return m;
+}
+/* the last request on a reader wanted to change the state (or a socket): it must run again on the primary */
+MITO_API int MITO(wants_write)(void *mp_) { return ((Mito *)mp_)->wants_write; }
 MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n; }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
 MITO_API void MITO(set_web_etag)(void *mp_, int on) { ((Mito *)mp_)->web_etag = on; }
@@ -2445,7 +2508,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
     m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0; m->bare = 0;
-    m->target = (const u8 *)target; m->target_n = tn; m->ops.len = 0;
+    m->target = (const u8 *)target; m->target_n = tn; m->ops.len = 0; m->wants_write = 0;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     /* the `@start` function only through MITO(begin), never as a request */
@@ -2494,15 +2557,24 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     }
     if (!fits) { out_err_c(m, "request too large for the request text area"); return 413; }
     m->now = m->fixed_clock ? m->clock : os_now_ms();
-    begin(&m->mem);
+    if (!m->reader) begin(&m->mem);
     m->frees.len = 0; m->sel.len = 0;
     if (mito_prog.req_size) memset(m->mem.base + mito_prog.req_off, 0, mito_prog.req_size); /* the request struct starts empty */
-    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p, 0, m->loop_budget };
+    /* a reader journals nothing, but its writes go through the journal's test (its line map is clear), so each reaches save_line */
+    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->reader ? 1 : m->mem.jon, m->text.p, 0, m->loop_budget };
 #ifdef MITO_USES_SQLITE
     if (!store_begin(&m->store)) { rollback(&m->mem); out_err_c(m, "the database could not start a transaction"); return 500; }
 #endif
     int res = mito_eps[ei](&ctx);
     if (res < 0 && m->ekind == E_FORWARD) { m->out.len = 0; m->pending = 1; return 0; } /* committed or rolled back by MITO(finish_forward) */
+    /* a reader's request that would change the state, or asks something of sockets: nothing of it stays, it runs again alone */
+    if (m->reader && (m->wants_write || m->ops.len)) {
+        m->wants_write = 1;
+#ifdef MITO_USES_SQLITE
+        store_rollback(&m->store);
+#endif
+        return 503;
+    }
     int code, ok;
     if (res == 0) { m->out.len = 0; code = 204; ok = 1; }
     else if (res > 0) { code = res; ok = 1; }
@@ -2553,12 +2625,21 @@ MITO_API int MITO(run_test)(void *mp_, u32 k, char *msg, u32 cap, u32 *line) { M
 MITO_API u32 MITO(test_count)(void) { return MITO_NTESTS; }
 MITO_API const char *MITO(test_name)(u32 k) { return mito_test_names[k]; }
 #endif
+/* Before MITO(open_data): SQLite takes its memory from the system's allocator rather than one pool (for readers: see store.c) */
+#ifdef MITO_USES_SQLITE
+MITO_API void MITO(db_system_alloc)(int on) { sq_system_alloc = on; }
+#else
+MITO_API void MITO(db_system_alloc)(int on) { (void)on; }
+#endif
 /* Open the program's tables in `dir` (the database file `file`, SQLite's memory pool `pool_mb` MB, `full`: every commit synced to disk
    before its answer; flags: 1 that, 2 drop what does not fit instead of refusing): 1, or 0 with MITO(data_error) saying why. A program
    without tables has nothing to open. */
 MITO_API int MITO(open_data)(void *mp_, const char *dir, const char *file, u64 pool_mb, int flags) {
 #ifdef MITO_USES_SQLITE
-    Mito *m = (Mito *)mp_; return store_open(&m->store, mito_tables, MITO_NTABLES, dir, file, pool_mb, flags);
+    Mito *m = (Mito *)mp_;
+    { u32 n = 0; while (dir[n] && n + 1 < sizeof m->db_dir) { m->db_dir[n] = dir[n]; n++; } m->db_dir[n] = 0; n = 0; while (file[n] && n + 1 < sizeof m->db_file) { m->db_file[n] = file[n]; n++; } m->db_file[n] = 0; }
+    m->db_pool = pool_mb; m->db_flags = flags;
+    return store_open(&m->store, mito_tables, MITO_NTABLES, dir, file, pool_mb, flags);
 #else
     (void)mp_; (void)dir; (void)file; (void)pool_mb; (void)flags; return 1;
 #endif

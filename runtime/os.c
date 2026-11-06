@@ -45,6 +45,12 @@ static int os_commit(void *p, u64 n) { return VirtualAlloc(p, n, 0x1000, 4) != 0
 static void os_decommit(void *p, u64 n) { VirtualFree(p, n, 0x4000); }                   /* MEM_DECOMMIT */
 static void os_release(void *p, u64 n) { (void)n; if (p) VirtualFree(p, 0, 0x8000); }    /* MEM_RELEASE */
 static void *os_alloc(u64 n) { return VirtualAlloc(0, n, 0x3000, 4); }                   /* reserved and committed, zeroed */
+/* shared state for readers (os_reserve_shared, os_map_shared_ro, os_map_private_at): Linux only for now */
+static int os_can_share(void) { return 0; }
+static u32 os_cpu_count(void) { return 1; } /* readers are Linux only for now: one */
+static void *os_reserve_shared(u64 n, i64 *fd) { (void)n; *fd = -1; return 0; }
+static void *os_map_shared_ro(i64 fd, u64 n) { (void)fd; (void)n; return 0; }
+static int os_map_private_at(void *p, u64 n) { (void)p; (void)n; return 0; }
 static i64 os_now_ms(void) { u64 ft = 0; GetSystemTimeAsFileTime(&ft); return (i64)((ft - 116444736000000000ULL) / 10000ULL); }
 static u64 os_ticks_ms(void) { return GetTickCount64(); }
 static u64 os_perf_ns(void) { i64 t = 0, f = 1; QueryPerformanceCounter(&t); QueryPerformanceFrequency(&f); return (u64)((double)t * 1e9 / (double)f); }
@@ -163,6 +169,26 @@ static int os_commit(void *p, u64 n) { return mprotect(p, n, 3) == 0; }         
 static void os_decommit(void *p, u64 n) { madvise(p, n, 4); mprotect(p, n, 0); }                                     /* MADV_DONTNEED: the pages go, and read as zero when committed again */
 static void os_release(void *p, u64 n) { if (p) munmap(p, n); }
 static void *os_alloc(u64 n) { void *p = mmap(0, n, 3, OS_MAP, -1, 0); return p == (void *)-1 ? 0 : p; }
+int memfd_create(const char *name, unsigned flags);
+int ftruncate(int fd, i64 n);
+static int os_can_share(void) { return 1; }
+int sched_getaffinity(int pid, u64 size, void *mask);
+/* the CPUs this process may run on (its affinity mask: a server pinned with taskset counts those) */
+static u32 os_cpu_count(void) { u64 m[16] = { 0 }; if (sched_getaffinity(0, sizeof m, m) != 0) return 1; u32 n = 0; for (u32 i = 0; i < 16; i++) for (u64 v = m[i]; v; v &= v - 1) n++; return n ? n : 1; }
+/* State that readers map too: an anonymous shared memory file (memfd), reserved like os_reserve (no access until committed) */
+static void *os_reserve_shared(u64 n, i64 *fd) {
+    int f = memfd_create("mito-state", 1); /* MFD_CLOEXEC */
+    *fd = -1;
+    if (f < 0) return 0;
+    if (ftruncate(f, (i64)n) != 0) { close(f); return 0; }
+    void *p = mmap(0, n, 0, 0x01 | 0x4000, f, 0); /* PROT_NONE, MAP_SHARED | MAP_NORESERVE */
+    if (p == (void *)-1) { close(f); return 0; }
+    *fd = f; return p;
+}
+/* a reader's view of the shared state: the same pages, read-only (a change it should not make faults instead of landing) */
+static void *os_map_shared_ro(i64 fd, u64 n) { void *p = mmap(0, n, 1, 0x01 | 0x4000, (int)fd, 0); return p == (void *)-1 ? 0 : p; } /* PROT_READ, MAP_SHARED | MAP_NORESERVE */
+/* the reader's own pages over [p, p + n) of that view (its request struct): private, zeroed, writable */
+static int os_map_private_at(void *p, u64 n) { void *q = mmap(p, n, 3, OS_MAP | 0x10, -1, 0); return q == p; } /* MAP_FIXED */
 static i64 os_now_ms(void) { OsTime t; clock_gettime(0, &t); return t.sec * 1000 + t.nsec / 1000000; }               /* CLOCK_REALTIME */
 static u64 os_ticks_ms(void) { OsTime t; clock_gettime(1, &t); return (u64)t.sec * 1000 + (u64)t.nsec / 1000000; }   /* CLOCK_MONOTONIC */
 static u64 os_perf_ns(void) { OsTime t; clock_gettime(1, &t); return (u64)t.sec * 1000000000ULL + (u64)t.nsec; }

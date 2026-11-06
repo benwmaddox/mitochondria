@@ -86,6 +86,10 @@ static void sq_bare(const char *q, char *out, u32 cap) { u32 n = 0; for (q++; *q
 
 static u32 c_strlen_sq(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
 static int sq_configured;
+/* SQLite's memory: one fixed pool for the process (--db-memory), or, when connections run at once (readers), the system's allocator,
+   whose threads do not queue on one lock for every allocation the way they do on the pool's; each connection's page cache still has
+   its bound (cache_size). */
+static int sq_system_alloc;
 /* Open (create) the database and bring its tables to the program's declarations. 1, or 0 with the reason in st->err. */
 /* What does not fit, dropped deliberately (`--db-fit drop`): said on standard error, one line each. */
 static void st_dropped(const char *what) { os_err("dropped: ", 9); u32 n = 0; while (what[n]) n++; os_err(what, n); os_err("\n", 1); }
@@ -147,7 +151,7 @@ static int st_check_ext(Store *st, const StoreTable *tb, u32 t) {
 }
 
 static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *dir, const char *file, u64 pool_mb, int flags) {
-    int full = flags & 1, dropmis = (flags & 2) != 0;
+    int full = flags & 1, dropmis = (flags & 2) != 0, reader = (flags & 4) != 0; /* 4: a reader's connection (the primary checked and opened the database) */
     int ext = ntabs && tabs[0].ext; /* another program's database: `file` is its path, opened as it is */
     char path[1200]; SqBuf p = { path, sizeof path, 0 };
     if (ext) sb_s(&p, file);
@@ -156,6 +160,7 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         if (!os_mkdir(path)) return st_fail(st, "cannot make the data directory", path);
         sb_s(&p, "/"); sb_s(&p, file);
     }
+    if (!sq_configured && sq_system_alloc) sq_configured = 1;
     if (!sq_configured) {
         /* SQLite's memory: one fixed pool for the process, given before anything opens */
         u64 n = (pool_mb ? pool_mb : 64) << 20;
@@ -164,8 +169,10 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         sq_configured = 1;
     }
     if (ntabs > SQ_TABLES) return st_fail(st, "a program has at most 64 tables", 0);
-    /* READWRITE, and CREATE for the program's own database (another program's must be there) */
-    if (sqlite3_open_v2(path, &st->db, ext ? 0x2 : 0x2 | 0x4, 0) != SQ_OK) return st_fail(st, path, st->db ? sqlite3_errmsg(st->db) : "cannot open");
+    /* READWRITE, and CREATE for the program's own database (another program's must be there); a reader's: READONLY, so a change it
+       should not make fails in SQLite too */
+    if (sqlite3_open_v2(path, &st->db, reader ? 0x1 : ext ? 0x2 : 0x2 | 0x4, 0) != SQ_OK) return st_fail(st, path, st->db ? sqlite3_errmsg(st->db) : "cannot open");
+    if (reader) goto statements;
     if (!st_exec(st, full ? "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=OFF;" : "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;") || !st_exec(st, "BEGIN IMMEDIATE")) return 0;
     char sqlb[4096], msg[1024], bare[300];
     if (ext) { for (u32 t = 0; t < ntabs; t++) if (!st_check_ext(st, &tabs[t], t)) return 0; goto prepared; }
@@ -275,6 +282,7 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
     for (u32 t = 0; t < ntabs; t++) if (tabs[t].indexes[0] && !st_exec(st, tabs[t].indexes)) return 0;
 prepared:
     if (!st_exec(st, "COMMIT") || !st_exec(st, "PRAGMA foreign_keys=ON")) return 0;
+statements:
     if (sqlite3_prepare_v2(st->db, "BEGIN", -1, &st->begin, 0) != SQ_OK || sqlite3_prepare_v2(st->db, "COMMIT", -1, &st->commit, 0) != SQ_OK ||
         sqlite3_prepare_v2(st->db, "ROLLBACK", -1, &st->rollback, 0) != SQ_OK) return st_fail(st, "cannot prepare", sqlite3_errmsg(st->db));
     /* each table's statements */

@@ -292,6 +292,20 @@ system {
 - Not possible by design, for now: references across workers (data is copied by value), fan-out, and distributed
   transactions (a later worker's failure does not undo an earlier one's writes).
 
+## Readers
+A program's GET and HEAD requests run at once on readers (`--workers N`, default the CPUs the process may use; Linux only for
+now): each reader is an instance with its own request struct, text, answer and database connection, over the primary instance's
+state mapped read-only (the state lives in a shared memory file; the request struct is on whole pages, which each reader covers
+with pages of its own). Readers hold a readers-writer lock in shared mode; every other request, `@start`, `@every`, and socket
+events hold it alone, and a waiting writer holds back new readers. A reader's line map is clear, so its first write to any line
+outside its request struct reaches `save_line`, which stops the request; so does a store to a table, an `add`, a socket
+operation. Such a request runs again, alone, on the primary: nothing of the first run stays (a Rails app's `last_active_at`
+refresh once an hour is such a GET). A write the runtime missed would fault on the read-only mapping rather than land. A program
+with unlogged state (whose writes skip the undo log, and so `save_line`), or with memory-pressure marks (state not committed
+whole at start), has no readers: asked for with `--workers`, the server refuses to start, saying why. With readers, SQLite takes
+its memory from the system's allocator (one pool's lock, taken for every allocation, held readers back), each connection's page
+cache keeping its bound; `--db-memory` then does not apply.
+
 ## Failures
 | Failure | Meaning | HTTP |
 |---|---|---|
@@ -332,7 +346,8 @@ Limits:
 - `string<N>` reserves N bytes per slot: 2000-byte chat bodies averaging 120 bytes left 39.5 MB committed for 3.1 MB
   live. Packed text is planned (Next, 3).
 - HTTP keeps connections open with a fixed pool of connection threads and one poller (WSAPoll, up to 4,096 idle connections);
-  an event loop on IOCP would serve more connections with fewer threads. One program handles one request at a time.
+  an event loop on IOCP would serve more connections with fewer threads. A program's reads run at once on Linux (Readers);
+  elsewhere, and for writes, one request at a time.
 
 ## Next
 1. Linux: done (2026-11-05), see Status. The LangArena runner still pins processes with Windows calls.

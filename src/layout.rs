@@ -333,14 +333,15 @@ impl Program {
             prog.globals.push(Global { name: n, ty, off, coll: None });
             off += s;
         }
-        // the request struct: its own 64-byte lines after the state's plain values
+        // the request struct: its own pages after the state's plain values
         if let Some((n, ty)) = request {
             let ty = resolve(ty, &names)?;
             if prog.globals.iter().any(|g| g.name == n) { return Err(format!("`{}` names both the state and the request struct", n)); }
             if contains_coll(&prog, &ty) { return Err(format!("request `{}`: the request struct holds plain fields (text, numbers, arrays, structs); keep collections in the state", n)); }
+            // on whole pages of its own: a reader (runtime MITO(reader)) maps its own pages over it
             let (s, _) = prog.plain_size(&ty);
-            off = up(off, 64);
-            let size = up(s.max(1), 64);
+            off = up(off, PAGE);
+            let size = up(s.max(1), PAGE);
             prog.globals.push(Global { name: n, ty, off, coll: None });
             prog.request = Some((off, size));
             off += size;

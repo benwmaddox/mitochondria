@@ -557,4 +557,63 @@ int main(int argc, char **argv) { sqlite3 *db; sqlite3_config(SQLITE_CONFIG_HEAP
         assert!(run(&build("v8", "title: utf8<5>; done: f64;")).starts_with("tables in")); // nothing left that does not fit
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn readers_run_reads_at_once_and_rerun_writes() {
+        use std::io::{BufRead, Read, Write};
+        if super::clang().is_none() { return; }
+        let dir = std::env::temp_dir().join(format!("mito-readers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // items numbered 1..c as they are added, so a read that is not torn sums to c(c+1)/2; /hit writes from a GET (a reader runs it
+        // again alone); the request struct is the reader's own
+        let src = r#"struct Item { n: i64; }
+struct Work { k: i64; }
+request work: Work;
+struct A { hits: i64; items: pool<Item, 4096>; }
+state a: A;
+@post("/add") fn add() -> Response<{ n: i64 }> { let c = a.items.count(); let i = a.items.add(); i.n = c + 1; return ok({ n: i.n }); }
+@get("/sum") fn sum() -> Response<{ s: i64; c: i64 }> { foreach i in a.items { work.k += i.n; } return ok({ s: work.k, c: a.items.count() }); }
+@get("/hit") fn hit() -> Response<{ h: i64 }> { a.hits += 1; return ok({ h: a.hits }); }
+"#;
+        let (st, code) = crate::source::load(src).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap();
+        let exe = dir.join(format!("readers{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O1"]).unwrap();
+        let port = 17000 + (std::process::id() % 1000) as u16;
+        let mut srv = std::process::Command::new(&exe).args(["--port", &port.to_string(), "--workers", "4"]).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut first = String::new();
+        std::io::BufReader::new(srv.stdout.take().unwrap()).read_line(&mut first).unwrap();
+        if !cfg!(target_os = "linux") {
+            // readers are Linux only for now: asking for them elsewhere is refused, saying why
+            assert!(first.contains("--workers above 1") && first.contains("Linux only"), "{}", first);
+            let _ = srv.wait();
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(first.contains("reads on 4 readers"), "{}", first);
+        let call = move |method: &str, path: &str| -> String {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(format!("{} {} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", method, path).as_bytes()).unwrap();
+            let mut r = String::new(); s.read_to_string(&mut r).unwrap();
+            r.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+        };
+        let num = |body: &str, k: &str| -> i64 { let at = body.find(&format!("\"{}\":", k)).unwrap() + k.len() + 3; body[at..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap() };
+        // writes from GETs: each runs again alone, in order
+        for h in 1..=5 { assert_eq!(num(&call("GET", "/hit"), "h"), h); }
+        // reads at once with writes going on: never torn, and every write seen once it is answered
+        let writer = std::thread::spawn(move || { for _ in 0..300 { call("POST", "/add"); } });
+        let readers: Vec<_> = (0..6).map(|_| std::thread::spawn(move || {
+            let mut seen = 0;
+            for _ in 0..300 { let b = call("GET", "/sum"); let (s, c) = (num(&b, "s"), num(&b, "c")); assert_eq!(s, c * (c + 1) / 2, "{}", b); assert!(c >= seen); seen = c; }
+        })).collect();
+        writer.join().unwrap();
+        for r in readers { r.join().unwrap(); }
+        let b = call("GET", "/sum");
+        assert_eq!((num(&b, "s"), num(&b, "c")), (300 * 301 / 2, 300));
+        assert_eq!(num(&call("GET", "/hit"), "h"), 6);
+        let _ = srv.kill(); let _ = srv.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

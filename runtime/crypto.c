@@ -34,6 +34,7 @@ static int cr_init(void) {
     return cr_ready > 0;
 }
 static int cr_random(u8 *out, u32 n) { return BCryptGenRandom(0, out, n, 2) == 0; } /* the system's preferred generator */
+static void cr_prepare(void) { (void)cr_init(); }
 static int cr_sha(int bits, const u8 *in, u32 n, u8 *out) { return cr_init() && BCryptHash(bits == 1 ? cr_sha1_ : cr_sha256_, 0, 0, (u8 *)in, n, out, bits == 1 ? 20 : 32) == 0; }
 static int cr_hmac(int bits, const u8 *key, u32 kn, const u8 *in, u32 n, u8 *out) {
     static u8 empty[1];
@@ -74,20 +75,54 @@ int EVP_DecryptInit_ex(void *c, const void *cipher, void *impl, const u8 *key, c
 int EVP_DecryptUpdate(void *c, u8 *out, int *outn, const u8 *in, int n);
 int EVP_DecryptFinal_ex(void *c, u8 *out, int *outn);
 static int cr_random(u8 *out, u32 n) { return RAND_bytes(out, (int)n) == 1; }
-static int cr_sha(int bits, const u8 *in, u32 n, u8 *out) { u32 k = 0; return EVP_Digest(in, n, out, &k, bits == 1 ? EVP_sha1() : EVP_sha256(), 0) == 1; }
+/* OpenSSL 3 looks an algorithm up by name (under a lock every thread shares) each time one is named; HMAC() names two per call. So the
+   algorithms are fetched once, at start (cr_prepare), and each HMAC is a copy of a prepared one (a copy takes no lock). */
+typedef struct { const char *key; u32 type; void *data; u64 size; u64 ret; } CrParam; /* OSSL_PARAM */
+void *EVP_MD_fetch(void *libctx, const char *alg, const char *props);
+void *EVP_CIPHER_fetch(void *libctx, const char *alg, const char *props);
+void *EVP_MAC_fetch(void *libctx, const char *alg, const char *props);
+void *EVP_MAC_CTX_new(void *mac);
+void *EVP_MAC_CTX_dup(const void *ctx);
+void EVP_MAC_CTX_free(void *ctx);
+int EVP_MAC_CTX_set_params(void *ctx, const CrParam *p);
+int EVP_MAC_init(void *ctx, const u8 *key, u64 keylen, const CrParam *p);
+int EVP_MAC_update(void *ctx, const u8 *d, u64 n);
+int EVP_MAC_final(void *ctx, u8 *out, u64 *outl, u64 outsize);
+static const void *cr_md[2]; static void *cr_mac[2]; static const void *cr_aes;
+static void cr_prepare(void) {
+    static char sha1[] = "SHA1", sha256[] = "SHA256";
+    cr_md[0] = EVP_MD_fetch(0, "SHA1", 0); cr_md[1] = EVP_MD_fetch(0, "SHA256", 0);
+    cr_aes = EVP_CIPHER_fetch(0, "AES-256-GCM", 0);
+    void *mac = EVP_MAC_fetch(0, "HMAC", 0);
+    for (int k = 0; mac && k < 2; k++) {
+        void *c = EVP_MAC_CTX_new(mac);
+        CrParam p[2] = { { "digest", 4, k ? sha256 : sha1, k ? 6 : 4, ~0ULL }, { 0, 0, 0, 0, 0 } }; /* OSSL_PARAM_UTF8_STRING */
+        if (c && EVP_MAC_CTX_set_params(c, p) == 1) cr_mac[k] = c; else if (c) EVP_MAC_CTX_free(c);
+    }
+}
+static int cr_sha(int bits, const u8 *in, u32 n, u8 *out) { u32 k = 0; const void *md = cr_md[bits != 1]; return EVP_Digest(in, n, out, &k, md ? md : bits == 1 ? EVP_sha1() : EVP_sha256(), 0) == 1; }
 static int cr_hmac(int bits, const u8 *key, u32 kn, const u8 *in, u32 n, u8 *out) {
     u32 k = 0; static const u8 empty[1];
+    void *t = cr_mac[bits != 1];
+    if (t && kn) {
+        void *c = EVP_MAC_CTX_dup(t); u64 got = 0;
+        if (!c) return 0;
+        int ok = EVP_MAC_init(c, key, kn, 0) == 1 && EVP_MAC_update(c, n ? in : empty, n) == 1 && EVP_MAC_final(c, out, &got, 32) == 1 && got == (bits == 1 ? 20u : 32u);
+        EVP_MAC_CTX_free(c);
+        return ok;
+    }
     return HMAC(bits == 1 ? EVP_sha1() : EVP_sha256(), kn ? key : empty, (int)kn, n ? in : empty, n, out, &k) != 0;
 }
 static int cr_pbkdf2_sha256(const u8 *pw, u32 pwn, const u8 *salt, u32 sn, u32 iters, u8 *out, u32 outn) {
-    return PKCS5_PBKDF2_HMAC((const char *)pw, (int)pwn, salt, (int)sn, (int)iters, EVP_sha256(), (int)outn, out) == 1;
+    return PKCS5_PBKDF2_HMAC((const char *)pw, (int)pwn, salt, (int)sn, (int)iters, cr_md[1] ? cr_md[1] : EVP_sha256(), (int)outn, out) == 1;
 }
 static int cr_gcm(int dec, const u8 *key, const u8 *iv, const u8 *in, u32 n, u8 *out, u8 *tag) {
     void *c = EVP_CIPHER_CTX_new(); int k = 0, f = 0, ok;
     if (!c) return 0;
-    if (dec) ok = EVP_DecryptInit_ex(c, EVP_aes_256_gcm(), 0, key, iv) == 1 && (n == 0 || EVP_DecryptUpdate(c, out, &k, in, (int)n) == 1) &&
+    const void *aes = cr_aes ? cr_aes : EVP_aes_256_gcm();
+    if (dec) ok = EVP_DecryptInit_ex(c, aes, 0, key, iv) == 1 && (n == 0 || EVP_DecryptUpdate(c, out, &k, in, (int)n) == 1) &&
                   EVP_CIPHER_CTX_ctrl(c, 0x11, 16, tag) == 1 && EVP_DecryptFinal_ex(c, out + k, &f) == 1; /* 0x11: EVP_CTRL_GCM_SET_TAG */
-    else ok = EVP_EncryptInit_ex(c, EVP_aes_256_gcm(), 0, key, iv) == 1 && (n == 0 || EVP_EncryptUpdate(c, out, &k, in, (int)n) == 1) &&
+    else ok = EVP_EncryptInit_ex(c, aes, 0, key, iv) == 1 && (n == 0 || EVP_EncryptUpdate(c, out, &k, in, (int)n) == 1) &&
               EVP_EncryptFinal_ex(c, out + k, &f) == 1 && EVP_CIPHER_CTX_ctrl(c, 0x10, 16, tag) == 1; /* 0x10: EVP_CTRL_GCM_GET_TAG */
     EVP_CIPHER_CTX_free(c);
     return ok && (u32)(k + f) == n;

@@ -9,6 +9,6 @@ DELETE /nodes/b -> 200 {}
 GET /walk -> 200 {"names":"c,","steps":1}
 GET /find/b -> 200 {"found":false,"name":"-"}
 DELETE /nodes/zz -> 404 {"error":"no such node","line":21}
-state <plain values> 192
+state <plain values> 8192
 state app.nodes 74
-memory reserved=8192 committed=8192 live=266
+memory reserved=12288 committed=12288 live=8266

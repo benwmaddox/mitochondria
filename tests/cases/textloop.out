@@ -5,5 +5,5 @@ POST /keep/10 -> 200 {"last":"keep_9_padding_padding_padding_padding","len":38}
 POST /keep/100000 -> 200 {"last":"keep_99999_padding_padding_padding_padding","len":42}
 POST /accumulate/1000 -> 200 {"len":2000}
 POST /accumulate/3000 -> 413 {"error":"string of 4098 bytes does not fit string<4096>","line":36}
-state <plain values> 4352
-memory reserved=8192 committed=8192 live=4352
+state <plain values> 12288
+memory reserved=12288 committed=12288 live=12288

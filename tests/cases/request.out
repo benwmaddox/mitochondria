@@ -3,5 +3,5 @@ GET /look -> 200 {"line":"","n":0,"part":0,"saved":"a=7;b=14;","count":1}
 POST /fail -> 409 {"error":"stopped","line":22}
 GET /look -> 200 {"line":"","n":0,"part":0,"saved":"a=7;b=14;","count":1}
 POST /build/1 -> 200 {"line":"a=1;b=2;","n":2,"before":0}
-state <plain values> 256
-memory reserved=4096 committed=4096 live=256
+state <plain values> 8192
+memory reserved=8192 committed=8192 live=8192

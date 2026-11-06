@@ -22,6 +22,7 @@ int mito_begin(void *m);
 int mito_response_binary(void *m);
 int mito_response_bare(void *m);
 void mito_set_files(const char *dir);
+void *mito_reader(void *m, u32 k, char *why, u32 cap); int mito_wants_write(void *m); int mito_share_state(int on); void mito_db_system_alloc(int on);
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 const char *mito_response_head(void *m, u32 *len);
@@ -242,7 +243,21 @@ static int none_match(const MitoPair *p, u32 np, const char *tag) {
 #endif
 
 /* the lock around one program's handler (HTTP_SINGLE): several connection threads, one request in the program at a time */
-static Lock g_app_lock;
+/* The program's lock, a readers-writer one: requests that only read run at once, each on a reader instance (MITO(reader)); anything
+   else runs alone on the primary instance. A writer waiting holds back new readers, so writes are not starved. */
+static Lock g_rw; static Cond g_rw_cv; static u32 g_rw_readers, g_rw_writer, g_rw_waiting;
+static void app_lock(void) { lk_on(&g_rw); g_rw_waiting++; while (g_rw_writer || g_rw_readers) cv_wait(&g_rw_cv, &g_rw, OS_FOREVER); g_rw_waiting--; g_rw_writer = 1; lk_off(&g_rw); }
+static void app_unlock(void) { lk_on(&g_rw); g_rw_writer = 0; cv_all(&g_rw_cv); lk_off(&g_rw); }
+static void read_lock(void) { lk_on(&g_rw); while (g_rw_writer || g_rw_waiting) cv_wait(&g_rw_cv, &g_rw, OS_FOREVER); g_rw_readers++; lk_off(&g_rw); }
+static void read_unlock(void) { lk_on(&g_rw); if (--g_rw_readers == 0 && g_rw_waiting) cv_all(&g_rw_cv); lk_off(&g_rw); }
+/* the readers, and which are free: a thread takes one for a request (waiting when all are busy) */
+#define READERS_CAP 256
+static void *g_readers[READERS_CAP]; static u32 g_nreaders, g_free_readers[READERS_CAP], g_nfree; static Lock g_rd_lk; static Cond g_rd_cv;
+static u64 g_reruns; /* reader requests that wanted to write and ran again alone (counted under g_rd_lk) */
+static void *reader_take(void) { lk_on(&g_rd_lk); while (!g_nfree) cv_wait(&g_rd_cv, &g_rd_lk, OS_FOREVER); void *r = g_readers[g_free_readers[--g_nfree]]; lk_off(&g_rd_lk); return r; }
+static void reader_give(void *r, int rerun) {
+    lk_on(&g_rd_lk); u32 k = 0; while (g_readers[k] != r) k++; g_free_readers[g_nfree++] = k; if (rerun) g_reruns++; cv_one(&g_rd_cv); lk_off(&g_rd_lk);
+}
 
 #ifdef MITO_SOCKETS
 #ifndef HTTP_SINGLE
@@ -336,10 +351,10 @@ static int ws_call(void *app, const char *method, u32 slot, const char *path, u3
     pairs[np + 1].k = ":tag"; pairs[np + 1].kn = 4; pairs[np + 1].v = tags; pairs[np + 1].vn = tagn;
     pairs[np + 2].k = ":message"; pairs[np + 2].kn = 8; pairs[np + 2].v = (const char *)msg; pairs[np + 2].vn = msgn;
     u32 mn = 0; while (method[mn]) mn++;
-    lk_on(&g_app_lock);
+    app_lock();
     int code = mito_handle(app, method, mn, path, pathn, pairs, np + 3, 0, 0, "", 0);
     if (code < 300) ws_apply(app);
-    lk_off(&g_app_lock);
+    app_unlock();
     return code;
 }
 static const char ws_b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -380,12 +395,12 @@ static int ws_upgrade(Conn *x, Sock c, const char *target, u32 tn, u32 np, const
     WPUT("\r\n");
     #undef WPUT
     /* live before what the endpoint asked is applied (its welcome goes out after the 101) */
-    lk_on(&g_app_lock);
+    app_lock();
     g_ws[slot].fd = c; g_ws[slot].pathn = pn; g_ws[slot].inlen = 0; g_ws[slot].msgn = 0;
     send_all(c, hd, n);
     g_ws[slot].live = 1;
     ws_apply(x->app);
-    lk_off(&g_app_lock);
+    app_unlock();
     return 2;
 }
 /* A socket the poller found readable: its bytes read, each whole frame handled (a text message to the program, a ping answered, a close
@@ -421,7 +436,7 @@ static int ws_read(Conn *x, u32 slot) {
     if (at) { memmove(w->in.p, w->in.p + at, w->inlen - at); w->inlen -= at; }
     if (ended) {
         ws_call(x->app, "SOCKETCLOSE", slot, w->path, w->pathn, (MitoPair *)x->pairs.p, 0, (const u8 *)"", 0);
-        lk_on(&g_app_lock); os_close(w->fd); ws_release(slot); lk_off(&g_app_lock);
+        app_lock(); os_close(w->fd); ws_release(slot); app_unlock();
         return 0;
     }
     return 1;
@@ -433,13 +448,13 @@ static u32 every_loop(void *app) {
     Lock lk; Cond cv; lk_init(&lk); cv_init(&cv);
     for (;;) {
         lk_on(&lk); cv_wait(&cv, &lk, MITO_EVERY_MS); lk_off(&lk);
-        lk_on(&g_app_lock);
+        app_lock();
         int code = mito_handle(app, "EVERY", 5, "/", 1, 0, 0, 0, 0, "", 0);
 #ifdef MITO_SOCKETS
         if (code < 300 && g_ws_ready) ws_apply(app);
 #endif
         (void)code;
-        lk_off(&g_app_lock);
+        app_unlock();
     }
     return 0;
 }
@@ -447,6 +462,19 @@ static u32 every_loop(void *app) {
 
 /* Read one request from connection c and answer it. `first`: the connection's first request (an empty one is answered 400;
    later, the client closing the connection between requests ends it quietly). Returns 1 when the connection stays open. */
+#ifdef HTTP_SINGLE
+/* the answer an instance has just made, copied to the connection (the instance's response area is reused by the next request, which
+   may run while this one is sent): its body (a text body that is not UTF-8 is sent empty; Response<bytes> as it is) and head lines */
+static int take_answer(Conn *x, void *app, u32 *rn) {
+    const char *resp = mito_response(app, rn);
+    int bare = mito_response_bare(app);
+    if (!mito_response_binary(app) && !utf8_valid((const u8 *)resp, *rn)) *rn = 0;
+    if (*rn > OUT_CAP) *rn = 0;
+    memcpy(x->out, resp, *rn);
+    { const char *h = mito_response_head(app, &x->rhn); if (x->rhn > sizeof x->rh) x->rhn = 0; memcpy(x->rh, h, x->rhn); }
+    return bare;
+}
+#endif
 static int serve_one(Conn *x, Sock c, int first) {
     os_sock_setup(c); /* a read waits at most 5 s; an answer goes out as soon as it is written */
     u32 len = x->carry, he = 0xFFFFFFFFu, from = 0, eof = 0;
@@ -579,15 +607,22 @@ static int serve_one(Conn *x, Sock c, int first) {
 #endif
     if (g_timing) t_start = os_perf_ns();
 #ifdef HTTP_SINGLE
-    lk_on(&g_app_lock);
-    code = mito_handle(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, 0, 0, (const char *)body.p, body.len);
-    resp = mito_response(x->app, &rn);
-    int bare = mito_response_bare(x->app);
-    if (!mito_response_binary(x->app) && !utf8_valid((const u8 *)resp, rn)) rn = 0; /* a text body that is not UTF-8 is sent empty (Response<bytes> is sent as it is) */
-    if (rn > OUT_CAP) rn = 0;
-    memcpy(x->out, resp, rn); /* the program's response area is reused by the next request, which may run while this one is sent */
-    { const char *h = mito_response_head(x->app, &x->rhn); if (x->rhn > sizeof x->rh) x->rhn = 0; memcpy(x->rh, h, x->rhn); }
-    lk_off(&g_app_lock);
+    int bare = 0, done = 0;
+    if (g_nreaders && ((mn == 3 && method[0] == 'G' && method[1] == 'E' && method[2] == 'T') || (mn == 4 && method[0] == 'H' && method[1] == 'E' && method[2] == 'A' && method[3] == 'D'))) {
+        void *rd = reader_take();
+        read_lock();
+        code = mito_handle(rd, method, mn, target, tn, (MitoPair *)x->pairs.p, np, 0, 0, (const char *)body.p, body.len);
+        int rerun = mito_wants_write(rd);
+        if (!rerun) { bare = take_answer(x, rd, &rn); done = 1; }
+        read_unlock();
+        reader_give(rd, rerun);
+    }
+    if (!done) {
+        app_lock();
+        code = mito_handle(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, 0, 0, (const char *)body.p, body.len);
+        bare = take_answer(x, x->app, &rn);
+        app_unlock();
+    }
     resp = (const char *)x->out;
 #else
     code = mito_system_request(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, (const char *)body.p, body.len, 10000, (char *)x->out, OUT_CAP, &rn, x->rh, &x->rhn);
@@ -793,7 +828,7 @@ static u32 poll_loop(void *arg) {
 }
 static OsThread g_threads[257]; static Sock g_listener;
 static int start_threads(void *app, Sock listener, u32 nt) {
-    lk_init(&g_q_lock); cv_init(&g_q_cv); lk_init(&g_app_lock);
+    lk_init(&g_q_lock); cv_init(&g_q_cv); lk_init(&g_rw); cv_init(&g_rw_cv); lk_init(&g_rd_lk); cv_init(&g_rd_cv);
     g_wake = os_wake_open();
     if (g_wake == OS_BAD_SOCK) return 0;
     g_listener = listener;
@@ -840,6 +875,12 @@ int main(int argc, char **argv) {
     Sock l = os_listen((u32)port);
     if (l == OS_BAD_SOCK) { printf("error: cannot listen on port %u\n", (u32)port); return 1; }
 #ifdef HTTP_SINGLE
+    /* --workers N: requests that only read run on N readers at once (default: the CPUs this process may use); 1, one request at a time */
+    u64 workers = 0; int asked = flag(argc, argv, "--workers", &workers);
+    if (!asked) workers = os_cpu_count();
+    if (workers > READERS_CAP) workers = READERS_CAP;
+    if (workers > 1 && marks) { if (asked) { printf("error: --workers above 1 needs all of the state committed at start, which --soft/--hard marks turn off\n"); return 1; } workers = 1; }
+    if (workers > 1 && !mito_share_state(1)) { if (asked) { printf("error: --workers above 1: this system cannot share the state with readers (Linux only for now)\n"); return 1; } workers = 1; }
     void *app = mito_start(budget << 20, seeded ? seed : 0);
     if (!app) { printf("error: over budget (%u MB) or out of address space\n", (u32)budget); return 1; }
     if (marks) mito_set_marks(app, soft << 20, hard << 20);
@@ -869,6 +910,7 @@ int main(int argc, char **argv) {
        the program stops the server here, saying why */
     if (mito_has_tables()) {
         u64 dbmem = 64; flag(argc, argv, "--db-memory", &dbmem);
+        if (workers > 1) mito_db_system_alloc(1); /* connections at once: see store.c (--db-memory then does not apply) */
         const char *dir = sflag(argc, argv, "--data", "data");
         int full = db_sync(argc, argv);
         if (full < 0) { printf("error: --db-sync is full or normal, --db-fit refuse or drop\n"); mito_stop(app); return 1; }
@@ -887,7 +929,20 @@ int main(int argc, char **argv) {
     { int sc = mito_begin(app);
       if (sc) { u32 en; const char *e = mito_response(app, &en); printf("error: the @start function failed (%d): %.*s\n", sc, (int)en, e); mito_stop(app); return 1; } }
     u32 nt = conns > 256 ? 256 : conns < 1 ? 1 : (u32)conns;
-    printf("listening on http://127.0.0.1:%u (one request at a time in the program, %u connection threads; Ctrl-C to stop)\n", (u32)port, nt); fflush(0);
+    if (workers > 1) {
+        char why[512] = { 0 };
+        for (u32 k = 0; k < (u32)workers; k++) {
+            void *r = mito_reader(app, k, why, sizeof why);
+            if (!r) {
+                if (asked || k > 0) { printf("error: reader %u: %s\n", k, why[0] ? why : "out of memory"); mito_stop(app); return 1; }
+                printf("note: requests run one at a time (%s)\n", why); g_nreaders = 0; break;
+            }
+            g_readers[k] = r; g_free_readers[k] = k; g_nreaders = g_nfree = k + 1;
+        }
+    }
+    if (g_nreaders) printf("listening on http://127.0.0.1:%u (reads on %u readers at once, other requests one at a time; %u connection threads; Ctrl-C to stop)\n", (u32)port, g_nreaders, nt);
+    else printf("listening on http://127.0.0.1:%u (one request at a time in the program, %u connection threads; Ctrl-C to stop)\n", (u32)port, nt);
+    fflush(0);
     if (!start_threads(app, l, nt)) return 1;
 #else
     (void)marks; (void)budget;

@@ -1,5 +1,5 @@
-GET / -> 200 <Content-Type: text/html; charset=utf-8> <!doctype html><title>Home</title><p>hello</p>
-GET /plain -> 200 <Content-Type: text/plain; charset=utf-8> just text
+GET / -> 200 <Content-Type: text/html; charset=utf-8 | ETag: "a93b7a325d265348" | Cache-Control: no-cache> <!doctype html><title>Home</title><p>hello</p>
+GET /plain -> 200 <Content-Type: text/plain; charset=utf-8 | ETag: "531633b6512f5ef4" | Cache-Control: no-cache> just text
 
 POST /title/caf%C3%A9 -> 303 <Location: /title> 
 GET /title -> 200 <Content-Type: text/html; charset=utf-8> café

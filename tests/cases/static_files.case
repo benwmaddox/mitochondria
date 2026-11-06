@@ -1,0 +1,21 @@
+// static files: file("...") is the file's text, read when compiling (here a --- file section); Response<css> and <js> set the content
+// type; an answer that is a literal gets an ETag, and a request with If-None-Match naming it is answered 304 with no body
+--- program
+struct S { n: i64; }
+state s: S;
+
+@get("/app.css")
+fn css() -> Response<css> { return ok(file("assets/app.css")); }
+@get("/app.js")
+fn js() -> Response<js> { return ok(file("assets/app.js")); }
+--- file assets/app.css
+body { color: #333; }
+--- file assets/app.js
+document.querySelector("input").focus();
+--- requests
+GET /app.css
+@If-None-Match: "0816fcf59024ffb1"
+GET /app.css
+GET /app.js
+@If-None-Match: W/"0000000000000000", *
+GET /app.js

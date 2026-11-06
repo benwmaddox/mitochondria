@@ -112,6 +112,7 @@ impl CBackend {
     pub fn start_with(case: &Case, use_clang: bool) -> CBackend { Self::start_flags(case, use_clang, &[]) }
     pub fn start_flags(case: &Case, use_clang: bool, flags: &[&str]) -> CBackend {
         let prog = Program::parse(&case.state).unwrap_or_else(|e| panic!("{}: state: {}", case.name, e));
+        crate::lang::set_files(case.files.clone()); // `file("...")` finds a case's `--- file` sections
         let mut api = crate::lang::parse(&case.api).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
         crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table()).unwrap_or_else(|e| panic!("{}: api: {}", case.name, e));
         let src = crate::cgen::program_c(&prog, &api, None).unwrap_or_else(|e| panic!("{}: {}", case.name, e));

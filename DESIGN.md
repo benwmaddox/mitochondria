@@ -123,7 +123,10 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
 - `Response<T>` declares the answer's JSON shape, checked against every answer when compiling. `ok` 200, `created`
   201, `no_content` 204, `status(code, x)`; `fail CODE "message"` ends a request with an error from any function. An
   item is written as its id (`"slot.generation"` for a checked pool).
-- `Response<html>` and `Response<text>` answer text as it is (`text/html` or `text/plain`, UTF-8). `return see_other("/path")`
+- `Response<html>`, `<text>`, `<css>`, `<js>` and `<svg>` answer text as it is with that content type (UTF-8). `file("assets/app.css")`
+  is a file's text, read when compiling (relative to the program) and kept in the program, so a stylesheet is served as
+  `@get("/app.css") fn css() -> Response<css> { return ok(file("assets/app.css")); }`. An answer that is a literal is the same
+  every time: it gets an `ETag` (`Cache-Control: no-cache`), and a request whose `If-None-Match` names it is answered 304. `return see_other("/path")`
   answers 303 from any endpoint; the address must be a path on this server (one leading `/`, printable ASCII), checked when
   compiling for a literal and when running otherwise, so a redirect can neither leave the site nor add header lines. Errors are
   answered in JSON.

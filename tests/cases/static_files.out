@@ -1,0 +1,8 @@
+GET /app.css -> 200 <Content-Type: text/css; charset=utf-8 | ETag: "0816fcf59024ffb1" | Cache-Control: no-cache> body { color: #333; }
+
+GET /app.css -> 304 <Content-Type: text/css; charset=utf-8 | ETag: "0816fcf59024ffb1" | Cache-Control: no-cache> 
+GET /app.js -> 200 <Content-Type: text/javascript; charset=utf-8 | ETag: "e4f4a468f66496fe" | Cache-Control: no-cache> document.querySelector("input").focus();
+
+GET /app.js -> 304 <Content-Type: text/javascript; charset=utf-8 | ETag: "e4f4a468f66496fe" | Cache-Control: no-cache> 
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

@@ -29,7 +29,7 @@ int mito_system_request(void *s, const char *m, u32 mn, const char *t, u32 tn, c
 
 static const char *reason(int code) {
     switch (code) {
-        case 200: return "OK"; case 201: return "Created"; case 204: return "No Content"; case 303: return "See Other"; case 400: return "Bad Request"; case 401: return "Unauthorized";
+        case 200: return "OK"; case 201: return "Created"; case 204: return "No Content"; case 303: return "See Other"; case 304: return "Not Modified"; case 400: return "Bad Request"; case 401: return "Unauthorized";
         case 403: return "Forbidden"; case 404: return "Not Found"; case 409: return "Conflict"; case 413: return "Payload Too Large"; case 429: return "Too Many Requests";
         case 500: return "Internal Server Error"; case 503: return "Service Unavailable"; case 504: return "Gateway Timeout"; case 507: return "Insufficient Storage";
     }

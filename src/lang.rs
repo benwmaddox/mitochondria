@@ -29,6 +29,27 @@ enum Mode { Code { depth: u32, html: bool }, Content { depth: u32 }, Tag(String)
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
 
+thread_local! {
+    /// Where `file("...")` reads: the program's directory, and files given by name first (a test case's `--- file` sections).
+    static FILES: std::cell::RefCell<(Option<std::path::PathBuf>, Vec<(String, String)>)> = std::cell::RefCell::new((None, Vec::new()));
+}
+/// `file("...")` reads relative to `dir` (the program's directory).
+pub fn set_file_dir(dir: &std::path::Path) { FILES.with(|f| f.borrow_mut().0 = Some(dir.to_path_buf())); }
+/// `file("...")` finds these by name before looking on disk.
+pub fn set_files(files: Vec<(String, String)>) { FILES.with(|f| f.borrow_mut().1 = files); }
+/// The text of a file named in the program (`file("assets/app.css")`), read when compiling: relative to the program's directory, UTF-8.
+fn read_file(name: &str) -> R<String> {
+    if std::path::Path::new(name).is_absolute() || name.is_empty() { return Err(format!("`file(\"{}\")`: a path relative to the program's directory", name)); }
+    FILES.with(|f| {
+        let f = f.borrow();
+        if let Some(x) = f.1.iter().find(|x| x.0 == name) { return Ok(x.1.clone()); }
+        let Some(dir) = &f.0 else { return Err(format!("`file(\"{}\")`: no program directory to read from", name)) };
+        let p = dir.join(name);
+        let b = std::fs::read(&p).map_err(|e| format!("`file(\"{}\")`: {}", name, e))?;
+        String::from_utf8(b).map_err(|_| format!("`file(\"{}\")`: not UTF-8 text (only text files are embedded)", name))
+    })
+}
+
 /// Markup's fixed text so far, as one statement that writes it.
 fn flush_lit(out: &mut Vec<Stmt>, lit: &mut String) {
     if !lit.is_empty() { out.push(Stmt::Do(Expr::Call("__html_lit".into(), vec![Expr::Str(std::mem::take(lit))], CallRes::Unbound))); }
@@ -923,6 +944,13 @@ impl P {
             Some(Tok::Id(n)) => {
                 self.i += 1;
                 match n.as_str() { "true" => return Ok(Expr::Bool(true)), "false" => return Ok(Expr::Bool(false)), "null" => return Ok(Expr::Null), _ => {} }
+                // `file("assets/app.css")`: the file's text, read when compiling, as a literal
+                if n == "file" && matches!(self.peek(), Some(Tok::Sym(s)) if s == "(") {
+                    if let (Some(Tok::Str(name)), Some(Tok::Sym(close))) = (self.t.get(self.i + 1).cloned(), self.t.get(self.i + 2).cloned()) {
+                        if close == ")" { self.i += 3; return Ok(Expr::Str(read_file(&name)?)); }
+                    }
+                    return Err("`file` takes the path as a literal: `file(\"assets/app.css\")`".into());
+                }
                 if self.in_test && matches!(n.as_str(), "get" | "post" | "put" | "patch" | "delete") && self.sym("(") {
                     // arguments: the path, how many body fields, the body's (name, value) pairs, then the headers'
                     let path = self.expr()?;

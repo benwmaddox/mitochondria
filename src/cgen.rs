@@ -95,6 +95,7 @@ struct H {
     int (*html_txt)(Ctx *, const Txt *, u32);                    /* text of the text area into markup, escaped (1: inside an attribute) */
     int (*html_at)(Ctx *, u64, u32, u32);                        /* n bytes of state into markup, escaped */
     int (*html_col)(Ctx *, u32, u32, u32, u32);                  /* a text column into markup, escaped */
+    int (*etag)(Ctx *, const char *, u32, int *);                /* a static answer's ETag: set, and *1 when the browser already has it (304) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -505,6 +506,13 @@ struct G<'p> {
 type R<T> = Result<T, String>;
 fn no<T>(what: impl Into<String>) -> R<T> { Err(what.into()) }
 fn is_name(e: &str) -> bool { e.chars().all(|c| c.is_alphanumeric() || c == '_') }
+
+/// `Response<html>`, `<text>`, `<css>`, `<js>`, `<svg>`: answers of text, with the runtime's content type code.
+fn text_answer(t: &crate::lang::RType) -> Option<(u32, &'static str)> {
+    match t { crate::lang::RType::Name(n) => match n.as_str() { "html" => Some((1, "html")), "text" => Some((2, "text")), "css" => Some((3, "css")), "js" => Some((4, "js")), "svg" => Some((5, "svg")), _ => None }, _ => None }
+}
+/// FNV-1a, 64 bits: a static answer's ETag.
+fn fnv64(b: &[u8]) -> u64 { b.iter().fold(0xcbf29ce484222325u64, |h, x| (h ^ *x as u64).wrapping_mul(0x100000001b3)) }
 
 /// Text as markup: & < > as entities, and " inside an attribute's quotes.
 fn html_escape(s: &str, attr: bool) -> String {
@@ -2149,17 +2157,25 @@ impl<'p> G<'p> {
                 self.call("c->h->answer(c, 1)");
                 self.line(&format!("return {};", code));
             }
-            Stmt::Respond(code, Json::E(e)) if matches!(&self.ep.resp, crate::lang::RType::Name(n) if n == "html" || n == "text") => {
-                // an HTML or plain-text answer: the text sent as it is
-                let kind = if matches!(&self.ep.resp, crate::lang::RType::Name(n) if n == "html") { 1 } else { 2 };
+            Stmt::Respond(code, Json::E(e)) if text_answer(&self.ep.resp).is_some() => {
+                // an answer of text (HTML, plain text, CSS, JavaScript, SVG): the text sent as it is; one that is a literal (as
+                // `file("app.css")`) is the same every time, so it gets an ETag and a browser that has it is answered 304
+                let (kind, what) = text_answer(&self.ep.resp).unwrap();
                 let v = self.expr(e, env, None)?;
                 self.call(&format!("c->h->answer(c, {})", kind));
-                self.raw(v, if kind == 1 { "html" } else { "text" })?;
+                if let CV::Lit(s) = &v {
+                    let tag = format!("\"{:016x}\"", fnv64(s.as_bytes()));
+                    let nm = self.tmp("nm");
+                    self.line(&format!("int {} = 0;", nm));
+                    self.call(&format!("c->h->etag(c, {}, {}, &{})", c_lit(tag.as_bytes()), tag.len(), nm));
+                    self.line(&format!("if ({}) return 304;", nm));
+                }
+                self.raw(v, what)?;
                 self.line(&format!("return {};", code));
             }
             Stmt::Respond(code, j) => {
                 let resp = self.ep.resp.clone();
-                if matches!(&resp, crate::lang::RType::Name(n) if n == "html" || n == "text") { return no(format!("a Response<{}> answer is text: `ok(page.html)`, `ok(\"...\")`", show_rtype(&resp))); }
+                if text_answer(&resp).is_some() { return no(format!("a Response<{}> answer is text: `ok(page.html)`, `ok(\"...\")`, `ok(file(\"app.css\"))`", show_rtype(&resp))); }
                 let shape = self.json(j, env, Some(&resp))?;
                 if let Err(e) = fits_shape(self.prog, &shape, &self.ep.resp, "") { return no(format!("the answer is {}, not Response<{}>: {}", shape, show_rtype(&self.ep.resp), e)); }
                 self.line(&format!("return {};", code));

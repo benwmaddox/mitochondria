@@ -58,6 +58,8 @@ fn report(file: &str, text: &str, e: &str) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = args.get(1..).unwrap_or(&[]);
+    // `file("...")` in a program reads beside it
+    if let Some(f) = inputs(rest).first() { lang::set_file_dir(std::path::Path::new(f.as_str()).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))); }
     match args.first().map(|s| s.as_str()) {
         Some("check") if rest.iter().any(|a| a == "--kinds") => kinds(rest),
         Some("check") => { let (_, name) = program(&inputs(rest)); println!("{}: loads", name); }

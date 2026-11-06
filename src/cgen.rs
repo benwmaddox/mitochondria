@@ -106,6 +106,7 @@ struct H {
     int (*titer)(Ctx *, const char *, u32, const Val *, u32, u32 *); /* a loop over a table: its query, the table, parameters: a cursor */
     int (*tnext)(Ctx *, u32, u32 *, int *);                      /* the cursor's next row id, or none */
     int (*tclose)(Ctx *, u32);                                   /* the end of the loop: the cursor given back */
+    int (*tclear)(Ctx *, u32, u32);                              /* remove every row of a table (of one owner) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -780,9 +781,10 @@ fn store_tables_c(prog: &Program) -> String {
         for c in &tb.cols {
             let (has, lo, hi) = match c.range { Some((a, b)) if matches!(c.kind, crate::layout::TKind::Int(_)) => (1, a, b), _ => (0, 0, 0) };
             let max = match &c.kind { crate::layout::TKind::Text(m, _) => *m, crate::layout::TKind::Blob(sc, n) => sc.size() * n, _ => 0 };
-            o += &format!(" {{ {}, {}, {}, {}, {}, {} }},", c_lit(c.path.as_bytes()), c.kind.code(), has, i64_lit(lo), i64_lit(hi), max);
+            let ascii = matches!(c.kind, crate::layout::TKind::Text(_, true)) as u32;
+            o += &format!(" {{ {}, {}, {}, {}, {}, {}, {} }},", c_lit(c.path.as_bytes()), c.kind.code(), has, i64_lit(lo), i64_lit(hi), max, ascii);
         }
-        o += " { 0, 0, 0, 0, 0, 0 } };\n";
+        o += " { 0, 0, 0, 0, 0, 0, 0 } };\n";
     }
     o += "static const StoreTable mito_tables[] = {\n";
     for (t, tb) in prog.tables.iter().enumerate() {
@@ -2171,7 +2173,7 @@ impl<'p> G<'p> {
                     return Ok(());
                 }
                 let CV::Coll(c, inst) = v else { return no("`clear` is a function of a collection or text") };
-                if tab(c).is_some() { return no("`clear` of a table is not compiled yet: remove its rows in a loop"); }
+                if let Some(t) = tab(c) { self.call(&format!("c->h->tclear(c, {}, (u32)({}))", t, inst)); return Ok(()); } // every row (of this owner), and the rows they own
                 self.may_add_or_free(c, "clear")?;
                 self.call(&format!("c->h->clear_coll(c, {}, {})", c, inst));
             }
@@ -2883,7 +2885,18 @@ impl<'p> G<'p> {
             } else { in_c = Some(w); }
         }
         if !conds.is_empty() { sql += &format!(" WHERE {}", conds.join(" AND ")); }
-        sql += if it.reverse { " ORDER BY id DESC" } else { " ORDER BY id" };
+        // order: insertion (row ids), or `by` an indexed field (ties in insertion order)
+        match &it.by {
+            Some(f) => {
+                if !tb.cols.iter().any(|c| c.path == *f && !matches!(c.kind, crate::layout::TKind::Blob(..))) { return no(format!("`by {}`: not a field of a row of {}", f, tb.name)); }
+                if !tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)) {
+                    return no(format!("`by {}` walks an index, and {} has none on `{}`: declare one (`{}: table<{}> index({})`)", f, tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
+                }
+                let d = if it.reverse { " DESC" } else { "" };
+                sql += &format!(" ORDER BY {}{}, id{}", crate::layout::sql_ident(f), d, d);
+            }
+            None => sql += if it.reverse { " ORDER BY id DESC" } else { " ORDER BY id" },
+        }
         self.loop_enter();
         self.open("{");
         // the query's values: the owner, then the `where`'s
@@ -3593,6 +3606,7 @@ impl<'p> G<'p> {
         if let Some(hi) = &it.hi { return self.range_loop(it, hi, env, body); }
         let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
         if let Some(t) = tab(c) { return self.table_loop(it, t, inst, env, collect, body); }
+        if let Some(f) = &it.by { return no(format!("`by {}`: only a table is walked in a field's order (a list keeps insertion order; keep other orders in the data)", f)); }
         self.loop_enter();
         let coll = self.prog.colls[c].clone();
         let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };

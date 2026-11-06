@@ -32,13 +32,13 @@ const char *sqlite3_errmsg(sqlite3 *);
 
 /* A column as the program declares it: SQLite type (0 INTEGER, 1 REAL, 2 TEXT, 3 BLOB), a range to check (when has_range), the most
    bytes of text, or the exact bytes of a fixed array (a BLOB of 0 bytes is the array's zeros). */
-typedef struct { const char *name; u32 type; int has_range; i64 lo, hi; u32 max; } StoreCol;
+typedef struct { const char *name; u32 type; int has_range; i64 lo, hi; u32 max; int ascii; } StoreCol; /* ascii: text of bytes 0..127 only */
 /* A table: its quoted SQL name, its CREATE TABLE, its owner (-1 none), its columns, its indexes (CREATE INDEX statements) */
 typedef struct { const char *sql; const char *create; int parent; u32 ncols; const StoreCol *cols; const char *indexes; } StoreTable;
 
 /* A table's statements, prepared once after migration: its row's columns by id, insert (with the owner's id for a nested table), delete,
    count (of one owner's rows), find (a row of one owner), and one update per column. `secret`: the column a session token checks, or -1. */
-typedef struct { sqlite3_stmt *row, *ins, *del, *cnt, *find, **upd; int secret; } TStmts;
+typedef struct { sqlite3_stmt *row, *ins, *del, *cnt, *find, *clr, **upd; int secret; } TStmts;
 /* A loop's cursor: its statement (a cached one, or its own when the cached one is in use by an enclosing loop), the table of its rows. */
 typedef struct { sqlite3_stmt *s; int own, on; u32 t; } SqCursor;
 typedef struct { const char *sql; sqlite3_stmt *s; int busy; } SqCached;
@@ -141,14 +141,18 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         const StoreCol *c = &tabs[t].cols[k];
         SqBuf a = { sqlb, sizeof sqlb, 0 }; sb_s(&a, "SELECT count(*) FROM "); sb_s(&a, tabs[t].sql); sb_s(&a, " WHERE ");
         if (c->has_range) { sb_q(&a, c->name); sb_s(&a, " < "); sb_i(&a, c->lo); sb_s(&a, " OR "); sb_q(&a, c->name); sb_s(&a, " > "); sb_i(&a, c->hi); }
-        else if (c->type == 2) { sb_s(&a, "length(CAST("); sb_q(&a, c->name); sb_s(&a, " AS BLOB)) > "); sb_i(&a, c->max); }
+        else if (c->type == 2) {
+            sb_s(&a, "length(CAST("); sb_q(&a, c->name); sb_s(&a, " AS BLOB)) > "); sb_i(&a, c->max);
+            /* ascii: every character one byte (a text's byte length is its character length only when all are ASCII) */
+            if (c->ascii) { sb_s(&a, " OR length(CAST("); sb_q(&a, c->name); sb_s(&a, " AS BLOB)) != length("); sb_q(&a, c->name); sb_s(&a, ")"); }
+        }
         else if (c->type == 3) { sb_s(&a, "length("); sb_q(&a, c->name); sb_s(&a, ") NOT IN (0, "); sb_i(&a, c->max); sb_s(&a, ")"); }
         else continue;
         i64 bad = st_int(st, sqlb, 0);
         if (bad != 0) {
             SqBuf m = { msg, sizeof msg, 0 }; sb_i(&m, bad); sb_s(&m, bad == 1 ? " row of " : " rows of "); sb_s(&m, tabs[t].sql); sb_s(&m, bad == 1 ? " holds a " : " hold a "); sb_s(&m, c->name);
             if (c->has_range) { sb_s(&m, " outside "); sb_i(&m, c->lo); sb_s(&m, ".."); sb_i(&m, c->hi); }
-            else if (c->type == 2) { sb_s(&m, " longer than "); sb_i(&m, c->max); sb_s(&m, " bytes"); }
+            else if (c->type == 2) { sb_s(&m, " longer than "); sb_i(&m, c->max); sb_s(&m, c->ascii ? " bytes or not ASCII" : " bytes"); }
             else { sb_s(&m, " that is not "); sb_i(&m, c->max); sb_s(&m, " bytes"); }
             return st_fail(st, "the database does not fit the program", msg);
         }
@@ -178,6 +182,8 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->cnt, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
         a.n = 0; sb_s(&a, "SELECT 1 FROM "); sb_s(&a, tb->sql); sb_s(&a, " WHERE id = ?1"); if (tb->parent >= 0) sb_s(&a, " AND parent_id = ?2");
         if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->find, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
+        a.n = 0; sb_s(&a, "DELETE FROM "); sb_s(&a, tb->sql); if (tb->parent >= 0) sb_s(&a, " WHERE parent_id = ?1");
+        if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->clr, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
         for (u32 k = 0; k < tb->ncols; k++) {
             a.n = 0; sb_s(&a, "UPDATE "); sb_s(&a, tb->sql); sb_s(&a, " SET "); sb_q(&a, tb->cols[k].name); sb_s(&a, " = ?1 WHERE id = ?2");
             if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->upd[k], 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));

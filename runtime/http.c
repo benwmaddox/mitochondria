@@ -21,6 +21,7 @@ void mito_set_web_etag(void *m, int on);
 int mito_begin(void *m);
 int mito_response_binary(void *m);
 int mito_response_bare(void *m);
+void mito_set_files(const char *dir);
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 const char *mito_response_head(void *m, u32 *len);
@@ -615,6 +616,8 @@ int main(int argc, char **argv) {
     if (marks) mito_set_marks(app, soft << 20, hard << 20);
     if (clocked) mito_set_clock(app, (i64)clock, 1);
     if (flag(argc, argv, "--loop-budget", &loop_budget)) mito_set_loop_budget(app, (i64)loop_budget);
+    /* --files DIR: the directory read_stored reads (an app's stored files) */
+    { const char *fd = sflag(argc, argv, "--files", 0); if (fd) mito_set_files(fd); }
 #ifdef MITO_WEB
     /* the web block: static files dated when the server starts (by its clock), every answer tagged, static files compressed once */
     http_date(clocked ? (i64)clock : os_now_ms(), g_last_modified);

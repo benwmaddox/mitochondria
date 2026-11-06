@@ -218,7 +218,7 @@ int main(int argc, char **argv) {
         let bin: Vec<u8> = (0..=255u8).collect();
         std::fs::write(dir.join("pub/assets/b.png"), &bin).unwrap();
         std::fs::write(dir.join("pub/robots.txt"), "User-agent: *\n").unwrap();
-        let src = "struct A { n: i64; }\nstate a: A;\nweb {\n    headers { \"X-Frame-Options\": \"SAMEORIGIN\"; \"Vary\": \"Accept\"; \"Cache-Control\": \"no-cache\"; }\n    writes { \"Vary\": \"Accept-Encoding\"; }\n    etag \"max-age=0, private, must-revalidate\";\n    gzip;\n    static \"/\" from \"pub\" { \"Cache-Control\": \"public, max-age=60\"; }\n}\n@get(\"/p\") fn p() -> Response<html> { return ok(<p>{\"hello \" + str(a.n)}</p>); }\n@post(\"/p\") fn post_p() -> Response<html> { return ok(<p>posted</p>); }\n@get(\"/deny\") fn deny() -> Response<html> { set_header(\"X-Frame-Options\", \"DENY\"); return ok(<p>no frames</p>); }\n";
+        let src = "struct A { n: i64; }\nstate a: A;\nweb {\n    headers { \"X-Frame-Options\": \"SAMEORIGIN\"; \"Vary\": \"Accept\"; \"Cache-Control\": \"no-cache\"; }\n    writes { \"Vary\": \"Accept-Encoding\"; }\n    etag \"max-age=0, private, must-revalidate\";\n    gzip;\n    static \"/\" from \"pub\" { \"Cache-Control\": \"public, max-age=60\"; }\n}\n@get(\"/p\") fn p() -> Response<html> { return ok(<p>{\"hello \" + str(a.n)}</p>); }\n@post(\"/p\") fn post_p() -> Response<html> { return ok(<p>posted</p>); }\n@get(\"/stored/{name}\") fn stored(name: utf8<64>) -> Response<bytes> { let b = read_stored(name); if !exists(b) { fail 404 \"no such file\"; } set_header(\"X-Crc\", str(crc32(b))); return ok(b); }\n@get(\"/deny\") fn deny() -> Response<html> { set_header(\"X-Frame-Options\", \"DENY\"); return ok(<p>no frames</p>); }\n";
         let (st, code) = crate::source::load(src).unwrap();
         let prog = crate::layout::Program::parse(&st).unwrap();
         let api = crate::cgen::check(&prog, &code).unwrap();
@@ -228,7 +228,7 @@ int main(int argc, char **argv) {
         if super::clang().is_none() { return; }
         super::exe(&crate::cgen::program_exe(&prog, &api, None, &web).unwrap(), &exe, false, &["-O0"]).unwrap();
         let port = 18000 + (std::process::id() % 1000) as u16;
-        let mut srv = std::process::Command::new(&exe).args(["--port", &port.to_string(), "--clock", "1772467200000"]).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut srv = std::process::Command::new(&exe).args(["--port", &port.to_string(), "--clock", "1772467200000", "--files"]).arg(dir.join("pub")).stdout(std::process::Stdio::piped()).spawn().unwrap();
         { use std::io::BufRead; let mut l = String::new(); std::io::BufReader::new(srv.stdout.take().unwrap()).read_line(&mut l).unwrap(); }
         // one request on its own connection: (status line and headers, body)
         let ask = |req: &str| -> (String, Vec<u8>) {
@@ -280,6 +280,11 @@ int main(int argc, char **argv) {
         // HEAD: the same head, no body
         let (h, body) = ask("HEAD /robots.txt HTTP/1.1");
         assert!(h.starts_with("HTTP/1.1 200") && body.is_empty() && lines(&h, "content-length") == vec!["14"], "{}", h);
+        // read_stored: a file under --files, its bytes as they are (crc32 of them in a header); a missing one null; `..` refused
+        let (h, body) = ask("GET /stored/robots.txt HTTP/1.1");
+        assert!(body == b"User-agent: *\n" && lines(&h, "x-crc") == vec![crc32(b"User-agent: *\n").to_string()], "{}", h);
+        assert!(ask("GET /stored/none.txt HTTP/1.1").0.starts_with("HTTP/1.1 404"));
+        assert!(ask("GET /stored/..%2Fsecret HTTP/1.1").0.starts_with("HTTP/1.1 500"));
         let (h, _) = ask("GET /missing.txt HTTP/1.1");
         assert!(h.starts_with("HTTP/1.1 404"), "{}", h);
         let _ = srv.kill(); let _ = srv.wait();

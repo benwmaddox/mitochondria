@@ -197,7 +197,10 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   base64 (`unbase64` it once, in `@start`). `no_default_headers()` sends the answer without the `web` block's header lines (as a
   file Rails sends). `escape_html(t)` is text with `& < > " '` as entities (ERB's escaping, for JSON or markup built as text);
   `contains`, `starts_with` and `ends_with` compare bytes, `index_of` and `last_index_of` give where (or -1); `random_text(n, alphabet)` draws characters uniformly with the system's
-  generator (session tokens: base58); `json_field(text, "name")` reads a field of a JSON object (null if absent).
+  generator (session tokens: base58); `json_field(text, "name")` reads a field of a JSON object (null if absent). `json_quote(t)` writes a JSON string as
+  ActiveSupport does (`< > &` as `<` and so on), `json_unquote(t)` reads one back (null for a bad escape). `request_target()` is the
+  request's path and query as sent; `crc32(t)` is zlib's CRC-32. `read_stored("ab/cd/key")` reads a file under the server's `--files DIR`
+  (stored uploads), a relative path of letters, digits and `. _ - /` without `..`; null when it is not there.
   A loop's `scan where ...` accepts that a `where` over a whole table reads every row (a schema that cannot have the index).
 - `Response<html>`, `<text>`, `<css>`, `<js>` and `<svg>` answer text as it is with that content type (UTF-8). `file("assets/app.css")`
   is a file's text, read when compiling (relative to the program) and kept in the program, so a stylesheet is served as

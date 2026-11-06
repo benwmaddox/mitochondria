@@ -588,6 +588,7 @@ typedef struct Mito {
     int web_etag; /* the web block says `etag;`: the front end tags every answer, so a literal answer adds no ETag of its own */
     int starting; /* MITO(begin) is running the program's `@start` function */
     int bare; /* the answer leaves out the web block's header lines (`no_default_headers()`) */
+    const u8 *target; u32 target_n; /* the request's target (path and query) as sent */
     i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
     u64 small;       /* bytes of the block holding the page flags (released with the instance) */
     u32 text_base;   /* where a request's text starts: after the literals, or after a running test's own text */
@@ -1449,6 +1450,9 @@ static u32 time_text(i64 us, char *o) {
     if (frac) { o[n++] = '.'; for (i64 dv = 100000; dv; dv /= 10) o[n++] = (char)('0' + frac / dv % 10); }
     return n;
 }
+/* the directory read_stored reads (the server's --files DIR), empty when none */
+static char g_files_dir[600];
+MITO_API void MITO(set_files)(const char *dir) { u32 k = 0; while (dir[k] && k + 1 < sizeof g_files_dir) { g_files_dir[k] = dir[k]; k++; } g_files_dir[k] = 0; }
 /* ---- bytes, encodings and cryptography: builtins 17 to 34 (the primitives in runtime/crypto.c) ----
    Texts here are bytes (any bytes; a utf8 field holds them as they are). Results go in the text area. */
 /* room for `need` more bytes at the end of the text area, or 0 (the request fails: 507) */
@@ -1558,6 +1562,76 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
                 default: return fail(m, 500, "format_time: the pattern's directives are %Y %m %d %H %M %S %L %N %s and %%");
             }
             memcpy(w + o, src, len); o += len;
+        }
+        return t_done(m, start, o, out); }
+    case 49: { /* crc32(t): zlib's CRC-32 (IEEE) of the bytes, as Zlib.crc32 */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x); u32 c = 0xFFFFFFFFu;
+        for (u32 i = 0; i < x.len; i++) { c ^= s[i]; for (int k = 0; k < 8; k++) c = c & 1 ? (c >> 1) ^ 0xEDB88320u : c >> 1; }
+        *out = v_int((i64)(c ^ 0xFFFFFFFFu)); return 0; }
+    case 50: { /* read_stored("xy/zw/key"): a file's bytes under the server's --files directory, or null when it is not there; the path is
+                  relative, its parts letters, digits and . _ - (no `..`), at most the request's text area */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        if (!g_files_dir[0]) return fail(m, 500, "read_stored: the server was started without --files DIR");
+        const u8 *s = t_ptr(m, x); int ok = x.len > 0 && x.len < 512 && s[0] != '/';
+        for (u32 i = 0; ok && i < x.len; i++) { u8 ch = s[i]; ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-' || ch == '/'; if (ch == '.' && i + 1 < x.len && s[i + 1] == '.') ok = 0; }
+        if (!ok) return fail(m, 500, "read_stored: a relative path of letters, digits and . _ - / (no ..)");
+        char path[1200]; u32 pn = 0; for (const char *d = g_files_dir; *d && pn < 600; d++) path[pn++] = *d;
+        path[pn++] = '/'; memcpy(path + pn, s, x.len); pn += x.len; path[pn] = 0;
+        u64 cap = m->text.cap - m->text.len, got = 0;
+        int r = os_read_file(path, m->text.p + m->text.len, cap, &got);
+        if (r == 0) { *out = v_null(); return 0; }
+        if (r == 2) return text_full(m);
+        return t_done(m, start, got, out); }
+    case 48: { /* request_target(): the request's path and query as the client sent them (`/rooms/7?x=1`), for the address of the page */
+        if (!(w = t_room(m, m->target_n))) return -1;
+        memcpy(w, m->target, m->target_n); return t_done(m, start, m->target_n, out); }
+    case 46: { /* json_quote(t): t as a JSON string, quotes included, escaped as ActiveSupport::JSON does: \" \\ \b \f \n \r \t, other
+                  control characters, U+2028 and U+2029 as \uXXXX, and < > & as \u003c \u003e \u0026 (escape_html_entities_in_json) */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x);
+        if (!(w = t_room(m, (u64)x.len * 6 + 2))) return -1;
+        u64 o = 0; w[o++] = '"';
+        for (u32 i = 0; i < x.len; i++) {
+            u8 ch = s[i]; const char *e = 0; char u[7];
+            if (ch == '"') e = "\\\""; else if (ch == '\\') e = "\\\\"; else if (ch == '\b') e = "\\b"; else if (ch == '\f') e = "\\f";
+            else if (ch == '\n') e = "\\n"; else if (ch == '\r') e = "\\r"; else if (ch == '\t') e = "\\t";
+            else if (ch < 0x20 || ch == '<' || ch == '>' || ch == '&') { u[0] = '\\'; u[1] = 'u'; u[2] = '0'; u[3] = '0'; u[4] = "0123456789abcdef"[ch >> 4]; u[5] = "0123456789abcdef"[ch & 15]; u[6] = 0; e = u; }
+            else if (ch == 0xE2 && i + 2 < x.len && s[i + 1] == 0x80 && (s[i + 2] == 0xA8 || s[i + 2] == 0xA9)) { e = s[i + 2] == 0xA8 ? "\\u2028" : "\\u2029"; i += 2; }
+            if (e) { while (*e) w[o++] = (u8)*e++; } else w[o++] = ch;
+        }
+        w[o++] = '"';
+        return t_done(m, start, o, out); }
+    case 47: { /* json_unquote(t): the characters of a JSON string (its quotes optional), escapes decoded (\uXXXX to UTF-8, surrogate pairs
+                  joined); null when an escape is not one */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x); u32 b = 0, e = x.len;
+        if (e >= 2 && s[0] == '"' && s[e - 1] == '"') { b = 1; e--; }
+        if (!(w = t_room(m, (u64)(e - b) * 2))) return -1;
+        u64 o = 0;
+        for (u32 i = b; i < e; i++) {
+            if (s[i] != '\\') { w[o++] = s[i]; continue; }
+            if (++i >= e) { *out = v_null(); return 0; }
+            switch (s[i]) {
+                case '"': w[o++] = '"'; break; case '\\': w[o++] = '\\'; break; case '/': w[o++] = '/'; break; case 'b': w[o++] = '\b'; break;
+                case 'f': w[o++] = '\f'; break; case 'n': w[o++] = '\n'; break; case 'r': w[o++] = '\r'; break; case 't': w[o++] = '\t'; break;
+                case 'u': {
+                    u32 cp = 0;
+                    if (i + 4 >= e) { *out = v_null(); return 0; } /* four hex digits must follow */
+                    for (int k = 1; k <= 4; k++) { int h = hex_val(s[i + k]); if (h < 0) { *out = v_null(); return 0; } cp = cp << 4 | (u32)h; }
+                    i += 4;
+                    if (cp >= 0xD800 && cp < 0xDC00 && i + 6 < e && s[i + 1] == '\\' && s[i + 2] == 'u') {
+                        u32 lo = 0; int ok = 1; for (int k = 3; k <= 6; k++) { int h = hex_val(s[i + k]); if (h < 0) ok = 0; else lo = lo << 4 | (u32)h; }
+                        if (ok && lo >= 0xDC00 && lo < 0xE000) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i += 6; }
+                    }
+                    if (cp >= 0xD800 && cp < 0xE000) cp = 0xFFFD;
+                    if (cp < 0x80) w[o++] = (u8)cp;
+                    else if (cp < 0x800) { w[o++] = (u8)(0xC0 | cp >> 6); w[o++] = (u8)(0x80 | (cp & 63)); }
+                    else if (cp < 0x10000) { w[o++] = (u8)(0xE0 | cp >> 12); w[o++] = (u8)(0x80 | (cp >> 6 & 63)); w[o++] = (u8)(0x80 | (cp & 63)); }
+                    else { w[o++] = (u8)(0xF0 | cp >> 18); w[o++] = (u8)(0x80 | (cp >> 12 & 63)); w[o++] = (u8)(0x80 | (cp >> 6 & 63)); w[o++] = (u8)(0x80 | (cp & 63)); }
+                    break; }
+                default: *out = v_null(); return 0;
+            }
         }
         return t_done(m, start, o, out); }
     case 44: case 45: { /* index_of(t, part), last_index_of(t, part): the byte offset of the first (last) place part is in t, or -1 */
@@ -2323,6 +2397,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
     m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0; m->bare = 0;
+    m->target = (const u8 *)target; m->target_n = tn;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     /* the `@start` function only through MITO(begin), never as a request */

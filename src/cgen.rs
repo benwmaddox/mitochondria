@@ -228,7 +228,7 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 46] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 51] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
     B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
@@ -237,7 +237,11 @@ pub const BUILTINS: [B; 46] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B
     // the answer without the web block's header lines: 40; text escaped as markup: 41; random characters: 42
     B::NoDefaultHeaders, B::EscapeHtml, B::RandomText,
     // a time plus calendar years: 43; where a text is in a text: 44, 45
-    B::AddYears, B::IndexOf, B::LastIndexOf];
+    B::AddYears, B::IndexOf, B::LastIndexOf,
+    // a text as a JSON string and back: 46, 47
+    B::JsonQuote, B::JsonUnquote,
+    // the request's path and query as sent: 48; CRC-32: 49; a stored file's bytes: 50
+    B::RequestTarget, B::Crc32, B::ReadStored];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
 const CRYPTO_BUILTINS: [B; 11] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::RandomText];
 
@@ -2922,6 +2926,8 @@ impl<'p> G<'p> {
     fn table_field(&mut self, t: usize, idx: String, path: &str) -> R<CV> {
         use crate::layout::TKind;
         let tb = &self.prog.tables[t];
+        // `r.id`: the row's id (its table's own column; fields may not be named `id`)
+        if path == "id" { return Ok(CV::Int(format!("(i64)({})", idx))); }
         if let Some(k) = tb.children.iter().find(|x| x.0 == path) { return Ok(CV::Coll(TBASE + k.1, idx)); }
         if let Some(ci) = tb.cols.iter().position(|x| x.path == path) {
             let col = tb.cols[ci].clone();
@@ -3089,8 +3095,11 @@ impl<'p> G<'p> {
         let mut in_c = None; // the `where` tested here, when it is not SQL
         if let Some(w) = &it.wher {
             if self.sql_where(w, it.slot, t, conds.len(), &mut wconds, &mut wvals, &mut wcols) {
-                if !nested && !it.scan {
-                    for f in &wcols {
+                // over a whole table, an index must lead the search: one whose first column the `where` constrains (SQLite then uses it,
+                // and the other conditions narrow what it finds)
+                let led = wcols.iter().any(|f| tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)));
+                if !nested && !it.scan && !led {
+                    for f in wcols.iter().take(1) {
                         if !tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)) {
                             return no(format!("`where` over the whole table {} on `{}`, which has no index: every row would be read; declare one (`{}: table<{}> index({})`), or accept the scan (`scan where ...`) when the schema cannot have one", tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
                         }
@@ -3624,7 +3633,8 @@ impl<'p> G<'p> {
         };
         // arity of the byte and crypto built-ins, checked when compiling
         let want = match bi {
-            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml => Some((1, "one argument")),
+            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml | B::JsonQuote | B::JsonUnquote | B::Crc32 | B::ReadStored => Some((1, "one argument")),
+            B::RequestTarget => Some((0, "no arguments")),
             B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime | B::Contains | B::StartsWith | B::EndsWith | B::RandomText | B::AddYears | B::IndexOf | B::LastIndexOf => Some((2, "two arguments")),
             B::GcmSeal | B::GcmOpen => Some((3, "the key, the 12-byte nonce and the text")),
             B::Pbkdf2Sha256 => Some((4, "the password, the salt, the iterations and the length")),
@@ -3633,7 +3643,7 @@ impl<'p> G<'p> {
         if let Some((k, what)) = want {
             if a.len() != k {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
-                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
+                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::JsonQuote => "json_quote", B::JsonUnquote => "json_unquote", B::RequestTarget => "request_target", B::Crc32 => "crc32", B::ReadStored => "read_stored", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
                     B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time", B::Contains => "contains", B::StartsWith => "starts_with", B::EndsWith => "ends_with",
                     B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));
@@ -3653,12 +3663,12 @@ impl<'p> G<'p> {
             let _ = n;
             let _ = int_out;
             return Ok(match bi {
-                B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot | B::AddYears | B::IndexOf | B::LastIndexOf => CV::Int(format!("{}.i", r)),
+                B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot | B::AddYears | B::IndexOf | B::LastIndexOf | B::Crc32 => CV::Int(format!("{}.i", r)),
                 B::SecretEqual | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith => CV::Bool(format!("({}.i != 0)", r)),
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
-                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
+                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText | B::JsonQuote | B::RequestTarget => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
-                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
+                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env | B::JsonUnquote | B::ReadStored => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
                 _ => CV::Any(r),
             });
         }

@@ -51,6 +51,17 @@ static u64 os_random(void) { u64 v = 0; BCryptGenRandom(0, (u8 *)&v, 8, 2); retu
 static void os_err(const void *p, u32 n) { u32 done = 0; WriteFile(GetStdHandle((u32)-12), p, n, &done, 0); } /* STD_ERROR_HANDLE */
 /* make a directory (one level); 1 when it exists afterwards */
 static int os_mkdir(const char *path) { return CreateDirectoryA(path, 0) || GetLastError() == 183; } /* ERROR_ALREADY_EXISTS */
+void *CreateFileA(const char *path, u32 access, u32 share, void *sec, u32 disp, u32 flags, void *tmpl);
+int ReadFile(void *h, void *b, u32 n, u32 *done, void *ov);
+/* a whole file into buf (at most cap bytes): 1 and its length, 0 when it cannot be read, 2 when it is larger than cap */
+static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
+    void *h = CreateFileA(path, 0x80000000u, 1, 0, 3, 0, 0); /* GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING */
+    if (h == (void *)(i64)-1) return 0;
+    u64 n = 0; int r = 1;
+    for (;;) { u32 got = 0; u64 want = cap - n < (1u << 30) ? cap - n : (1u << 30); if (!want) { u8 x; if (ReadFile(h, &x, 1, &got, 0) && got) r = 2; break; }
+               if (!ReadFile(h, buf + n, (u32)want, &got, 0)) { r = 0; break; } if (!got) break; n += got; }
+    CloseHandle(h); *len = n; return r;
+}
 
 /* threads: a record that lives as long as the thread (the caller's) */
 typedef struct { void *h; } OsThread;
@@ -154,6 +165,14 @@ static u64 os_perf_ns(void) { OsTime t; clock_gettime(1, &t); return (u64)t.sec 
 static u64 os_random(void) { u64 v = 0; while (getrandom(&v, 8, 0) != 8) {} return v; }
 static void os_err(const void *p, u32 n) { while (n) { i64 k = write(2, p, n); if (k <= 0) return; p = (const u8 *)p + k; n -= (u32)k; } }
 static int os_mkdir(const char *path) { return mkdir(path, 0755) == 0 || *__errno_location() == 17; } /* EEXIST */
+int open(const char *path, int flags, ...);
+static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
+    int fd = open(path, 0x80000); /* O_RDONLY | O_CLOEXEC */
+    if (fd < 0) return 0;
+    u64 n = 0; int r = 1;
+    for (;;) { if (n == cap) { u8 x; if (read(fd, &x, 1) == 1) r = 2; break; } i64 k = read(fd, buf + n, cap - n); if (k < 0) { r = 0; break; } if (!k) break; n += (u64)k; }
+    close(fd); *len = n; return r;
+}
 
 /* threads, locks and condition variables (pthreads; the types are opaque blocks of glibc's sizes) */
 typedef struct { u64 id; u32 (*fn)(void *); void *arg; } OsThread; /* lives as long as the thread: the thread reads fn and arg from it */

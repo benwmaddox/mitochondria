@@ -1,6 +1,6 @@
 // `Response<bytes>`: any bytes, with the content type the endpoint sets (application/octet-stream otherwise); `file_base64` embeds a
 // file's bytes when compiling; `no_default_headers()` marks an answer to go without the web block's lines (the front end's business);
-// `escape_html`, `contains` / `starts_with` / `ends_with`, `index_of` / `last_index_of`, `json_field` outside tests, and an endpoint's own Content-Type on text
+// `escape_html`, `contains` / `starts_with` / `ends_with`, `index_of` / `last_index_of`, `json_quote` / `json_unquote`, `json_field` outside tests, and an endpoint's own Content-Type on text
 --- program
 struct A { icon: utf8<64>; }
 state a: A;
@@ -22,11 +22,17 @@ fn texts(t: utf8<64>) -> Response<{ has: bool; starts: bool; ends: bool; field: 
     return ok({ first: index_of(t, ","), last: last_index_of(t, ","), has: contains(t, "*/*"), starts: starts_with(t, "text/"), ends: ends_with(t, "q=0.8"),
         field: json_field("{\"_rails\":{\"pur\":\"cookie.x\"}}", "_rails"), missing: json_field("{\"a\":1}", "b") });
 }
+@get("/quote")
+fn quote(t: utf8<64>, b: utf8<64>) -> Response<{ quoted: string; back: string?; bad: string? }> {
+    let q = json_quote(t);
+    return ok({ quoted: q, back: json_unquote(q), bad: json_unquote(b) });
+}
 --- file icon.bin
 PNG
 --- requests
 GET /icon
 GET /raw
 GET /json?name=a%26b%3C%22%27
+GET /quote?t=%3Ca%20href%3D%22x%22%3E%26%5C%E2%80%A8%C3%A9&b=a%5Cq
 GET /texts?t=text%2Fhtml%2C*%2F*%3Bq%3D0.8
 GET /texts?t=application%2Fjson

@@ -82,7 +82,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
-    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf }
+    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -93,7 +93,7 @@ impl B {
             "base64" => Base64, "base64_url" => Base64Url, "unbase64" => Unbase64, "hex" => Hex, "sha1" => Sha1, "sha256" => Sha256,
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
-            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml, "random_text" => RandomText, "add_years" => AddYears, "index_of" => IndexOf, "last_index_of" => LastIndexOf,
+            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml, "random_text" => RandomText, "add_years" => AddYears, "index_of" => IndexOf, "last_index_of" => LastIndexOf, "json_quote" => JsonQuote, "json_unquote" => JsonUnquote, "request_target" => RequestTarget, "crc32" => Crc32, "read_stored" => ReadStored,
             _ => return None,
         })
     }

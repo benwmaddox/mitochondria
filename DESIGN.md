@@ -105,9 +105,13 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
 - Inputs come from the path (`{room}`: an id gives the item), the body (POST, PUT, PATCH: JSON, or an HTML form's
   `application/x-www-form-urlencoded`, whose values are read as text the way query values are; a ticked checkbox's `on` is
   true, an unticked one is absent and takes the default; a name given twice keeps its first value) or the query (GET,
-  DELETE), a header (`from header("X-Session")`: a session token gives the session), or another worker
+  DELETE), a header (`from header("X-Session")`: a session token gives the session), a cookie (`from cookie("list")`; an
+  item from a cookie is named by a session token, and `Board?` makes it null when the cookie is absent or names no live
+  item with that secret, as for a first visit), or another worker
   (`forwarded`). They are checked before the body runs: absent, wrong kind or out of range 400, too long 413, no such
   item 404, a body field not taken 400.
+- `set_cookie("list", token(b), 31536000)` adds a Set-Cookie line to the answer (`Path=/; HttpOnly; SameSite=Lax`; max age 0
+  deletes it). The value must be cookie characters (printable ASCII without spaces, quotes, commas, semicolons, backslashes).
 - `Response<T>` declares the answer's JSON shape, checked against every answer when compiling. `ok` 200, `created`
   201, `no_content` 204, `status(code, x)`; `fail CODE "message"` ends a request with an error from any function. An
   item is written as its id (`"slot.generation"` for a checked pool).

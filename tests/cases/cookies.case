@@ -1,0 +1,49 @@
+// cookies: an input `from cookie("name")` reads the Cookie header; an item from a cookie is named by a session token
+// (slot.generation.secret) checked as a session's is, and `Board?` makes it null when the cookie is absent or names no live item
+// with that secret; set_cookie adds a Set-Cookie line (Path=/, HttpOnly, SameSite=Lax), max age 0 deleting it
+--- program
+struct Board { secret: i64; n: i64; }
+struct App { boards: pool<Board, 2> checked; }
+state app: App;
+
+@post("/add")
+fn add(board: Board? from cookie("list")) -> Response<{ n: i64 }> {
+    if exists(board) { board.n += 1; return ok({ n: board.n }); }
+    let b = app.boards.add();
+    b.secret = 12345; b.n = 1;
+    set_cookie("list", token(b), 31536000);
+    return ok({ n: b.n });
+}
+@get("/n")
+fn n(board: Board from cookie("list")) -> Response<{ n: i64 }> { return ok({ n: board.n }); }
+@get("/theme")
+fn theme(t: ascii<16>? from cookie("theme")) -> Response<{ theme: string? }> { return ok({ theme: t }); }
+@post("/forget")
+fn forget(board: Board? from cookie("list")) -> Response<{}> {
+    if exists(board) { app.boards.remove(board); }
+    set_cookie("list", "", 0);
+    return ok({});
+}
+@post("/bad")
+fn bad() -> Response<{}> { set_cookie("x", "a b", 10); return ok({}); }
+--- requests
+POST /add
+@Cookie: list=0.0.3039
+POST /add
+@Cookie: theme=dark; list="0.0.3039"
+POST /add
+@Cookie: list=0.0.3039
+GET /n
+GET /n
+@Cookie: list=0.0.ffff
+GET /n
+@Cookie: list=garbage
+POST /add
+@Cookie: other=1;theme=light
+GET /theme
+GET /theme
+@Cookie: list=0.0.3039
+POST /forget
+@Cookie: list=0.0.3039
+POST /add
+POST /bad

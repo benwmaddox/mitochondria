@@ -1,0 +1,15 @@
+POST /add -> 200 <Set-Cookie: list=0.0.3039; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax> {"n":1}
+POST /add -> 200 {"n":2}
+POST /add -> 200 {"n":3}
+GET /n -> 200 {"n":3}
+GET /n -> 401 {"error":"no valid `list` cookie"}
+GET /n -> 401 {"error":"no valid `list` cookie"}
+POST /add -> 200 <Set-Cookie: list=1.0.3039; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax> {"n":1}
+GET /theme -> 200 {"theme":"light"}
+GET /theme -> 200 {"theme":null}
+POST /forget -> 200 <Set-Cookie: list=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax> {}
+POST /add -> 200 <Set-Cookie: list=0.1.3039; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax> {"n":1}
+POST /bad -> 500 {"error":"set_cookie: a value is printable ASCII without spaces, quotes, commas, semicolons or backslashes","line":24}
+state <plain values> 0
+state app.boards 64
+memory reserved=4096 committed=4096 live=64

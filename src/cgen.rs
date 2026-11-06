@@ -91,6 +91,7 @@ struct H {
     int (*raw_at)(Ctx *, u64, u32);                              /* n bytes of state at an offset added to the answer as they are */
     int (*raw_col)(Ctx *, u32, u32, u32);                        /* a text column added to the answer as it is */
     int (*see_other)(Ctx *, const Txt *);                        /* a 303 answer to a path on this server (checked) */
+    int (*set_cookie)(Ctx *, const char *, u32, const Txt *, i64); /* a Set-Cookie line on the answer: name, value (checked), max age */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -1117,14 +1118,14 @@ impl<'p> G<'p> {
             self.call(&format!("c->h->fields(c, {}, {})", c_lit(names.as_bytes()), names.len()));
         }
         for (k, inp) in ep.inputs.iter().enumerate() {
-            let src = match &inp.src { Src::Body => 0, Src::Path => 1, Src::Query => 2, Src::Header(_) => 3, Src::Fwd => 4 };
-            let name = match &inp.src { Src::Header(h) => h.clone(), _ => inp.name.clone() };
+            let src = match &inp.src { Src::Body => 0, Src::Path => 1, Src::Query => 2, Src::Header(_) => 3, Src::Fwd => 4, Src::Cookie(_) => 5 };
+            let name = match &inp.src { Src::Header(h) | Src::Cookie(h) => h.clone(), _ => inp.name.clone() };
             let (kind, lo, hi, pool) = match &inp.ty {
                 InTy::Int(a, b) => (1, *a, *b, 0),
                 InTy::Flt => (2, 0, 0, 0),
                 InTy::Bool => (3, 0, 0, 0),
                 InTy::Str(a, b, ascii) => (if *ascii { 7 } else { 4 }, *a, *b, 0),
-                InTy::Item(t, p) => { let c = self.item_pool(&inp.name, t, p.as_deref())?; (if matches!(inp.src, Src::Header(_)) { 5 } else { 6 }, c as i64, 0, c) }
+                InTy::Item(t, p) => { let c = self.item_pool(&inp.name, t, p.as_deref())?; (match inp.src { Src::Header(_) => 5, Src::Cookie(_) => 8, _ => 6 }, c as i64, 0, c) }
             };
             let v = self.tmp("in");
             self.line(&format!("Val {};", v));
@@ -1133,6 +1134,7 @@ impl<'p> G<'p> {
             match (&inp.default, inp.optional) {
                 (Some(d), _) => { let dv = self.expr(d, env, None)?; let dv = self.val(dv)?; self.line(&format!("if ({}.tag == 0) {} = {};", v, v, dv)); }
                 (None, true) => {}
+                (None, false) if matches!(inp.src, Src::Cookie(_)) && matches!(inp.ty, InTy::Item(..)) => { let msg = format!("no valid `{}` cookie", name); self.line(&format!("if ({}.tag == 0) FAIL(401, {}, {});", v, c_lit(msg.as_bytes()), msg.len())); }
                 (None, false) => { let msg = format!("`{}` is required", inp.name); self.line(&format!("if ({}.tag == 0) FAIL(400, {}, {});", v, c_lit(msg.as_bytes()), msg.len())); }
             }
             let cv = match &inp.ty {
@@ -1148,6 +1150,7 @@ impl<'p> G<'p> {
                 InTy::Flt => { let x = self.tmp("f"); self.line(&format!("double {} = {}.f;", x, v)); CV::Flt(x) }
                 InTy::Bool => { let x = self.tmp("b"); self.line(&format!("int {} = {}.i != 0;", x, v)); CV::Bool(x) }
                 InTy::Str(..) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, v, v, v)); CV::Txt(t) }
+                InTy::Item(..) if inp.optional => { let (s, x) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}.tag != 0, {} = {}.b;", s, v, x, v)); CV::Ref(pool, s, x) }
                 InTy::Item(..) => { let x = self.tmp("i"); self.line(&format!("u32 {} = {}.b;", x, v)); CV::Item(pool, x) }
             };
             env[k] = Some(cv);
@@ -2913,6 +2916,16 @@ impl<'p> G<'p> {
             let argv = self.tmp("argv");
             if names.is_empty() { self.line(&format!("Val {}[1];", argv)); } else { self.line(&format!("Val {}[{}] = {{ {} }};", argv, names.len(), names.join(", "))); }
             self.call(&format!("c->h->log(c, AT_, {}, {})", argv, names.len()));
+            return Ok(CV::Null);
+        }
+        if bi == B::SetCookie {
+            // `set_cookie("name", value, max_age_seconds)`: a Set-Cookie line on the answer (Path=/, HttpOnly, SameSite=Lax); 0 deletes it
+            let [name, value, age] = <[CV; 3]>::try_from(a).map_err(|_| "`set_cookie` takes the name, the value and how long it lasts in seconds: `set_cookie(\"list\", token(b), 31536000)`".to_string())?;
+            let CV::Lit(name) = name else { return no("`set_cookie`: the name is a literal, as in `set_cookie(\"list\", ...)`") };
+            if !crate::lang::cookie_name_ok(&name) { return no(format!("`set_cookie`: `{}` is not a cookie name (letters, digits and !#$%&'*+-.^_`|~)", name)); }
+            let t = self.txt_of(value).map_err(|_| "`set_cookie` takes the value as text".to_string())?;
+            let age = self.int_or(age, 500, "`set_cookie` takes the number of seconds as an integer");
+            self.call(&format!("c->h->set_cookie(c, {}, {}, &{}, {})", c_lit(name.as_bytes()), name.len(), t, age));
             return Ok(CV::Null);
         }
         if bi == B::Truncate {

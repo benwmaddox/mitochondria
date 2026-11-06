@@ -12,16 +12,19 @@ pub enum Tok { Id(String), Int(i64), Flt(f64), Str(String), Sym(String) }
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
 
+/// A cookie name: an HTTP token (RFC 6265 cookie-name).
+pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) }
+
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log }
+pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
         Some(match n {
             "body" => Body, "param" => Param, "query" => Query, "header" => Header, "fwd" => Fwd, "int" => Int, "str" => Str, "len" => Len, "now" => Now,
             "random" => Random, "min" => Min, "max" => Max, "count" => Count, "capacity" => Capacity, "slot" => Slot, "stat" => Stat, "token" => Token,
-            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log,
+            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie,
             _ => return None,
         })
     }
@@ -116,7 +119,7 @@ pub struct Input { pub name: String, pub src: Src, pub ty: InTy, pub default: Op
 /// Where an input comes from: a path segment, the JSON body, the query string, a header, or a field forwarded by
 /// another worker.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Src { Path, Body, Query, Header(String), Fwd }
+pub enum Src { Path, Body, Query, Header(String), Fwd, Cookie(String) }
 /// An input's type: an integer in lo..hi, a number, a bool, a string of lo..hi bytes, or an item (`Player`, or
 /// `Player in game.players`): from the path an id, from a header a session token.
 #[derive(Debug, Clone, PartialEq)]
@@ -345,17 +348,24 @@ impl P {
             self.i += 1;
             if self.is_kw("query") { self.i += 1; Src::Query }
             else if self.is_kw("body") { self.i += 1; Src::Body }
-            else { self.kw("header")?; self.eat("(")?; let h = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from header(\"Name\")`", name)) }; self.eat(")")?; Src::Header(h) }
+            else if self.is_kw("cookie") {
+                self.i += 1; self.eat("(")?;
+                let c = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from cookie(\"name\")`", name)) };
+                self.eat(")")?;
+                if !cookie_name_ok(&c) { return Err(format!("input `{}`: `{}` is not a cookie name (letters, digits and !#$%&'*+-.^_`|~)", name, c)); }
+                Src::Cookie(c)
+            }
+            else { self.kw("header")?; self.eat("(")?; let h = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from header(\"Name\")`, `from cookie(\"name\")`, `from query` or `from body`", name)) }; self.eat(")")?; Src::Header(h) }
         } else if forwarded { Src::Fwd } else if in_path { Src::Path } else if matches!(method, "GET" | "DELETE") { Src::Query } else { Src::Body };
         if in_path && src != Src::Path { return Err(format!("input `{}` is named in the path, so it comes from the path", name)); }
-        if let InTy::Item(..) = ty { if optional || default.is_some() { return Err(format!("input `{}`: an item cannot be optional or have a default yet", name)); } }
-        if optional && !matches!(ty, InTy::Str(..)) { return Err(format!("input `{}`: only a string can be optional (null when absent); give it a default instead", name)); }
+        if let InTy::Item(..) = ty { if default.is_some() || (optional && !matches!(src, Src::Cookie(_))) { return Err(format!("input `{}`: an item cannot have a default, and only one from a cookie can be optional (null when absent or not valid)", name)); } }
+        if optional && !matches!(ty, InTy::Str(..) | InTy::Item(..)) { return Err(format!("input `{}`: only a string can be optional (null when absent); give it a default instead", name)); }
         match (&ty, &default) {
             (_, None) | (InTy::Int(..), Some(Expr::Int(_))) | (InTy::Flt, Some(Expr::Float(_) | Expr::Int(_))) | (InTy::Bool, Some(Expr::Bool(_))) | (InTy::Str(..), Some(Expr::Str(_))) => {}
             _ => return Err(format!("input `{}`: the default is not of its type", name)),
         }
         if let (InTy::Int(lo, hi), Some(Expr::Int(d))) = (&ty, &default) { if d < lo || d > hi { return Err(format!("input `{}`: the default {} is outside {}..{}", name, d, lo, hi)); } }
-        if matches!(ty, InTy::Item(..)) && !matches!(src, Src::Path | Src::Header(_)) { return Err(format!("input `{}`: an item comes from the path (an id) or a header (a session token)", name)); }
+        if matches!(ty, InTy::Item(..)) && !matches!(src, Src::Path | Src::Header(_) | Src::Cookie(_)) { return Err(format!("input `{}`: an item comes from the path (an id), a header or a cookie (a session token)", name)); }
         if let Src::Header(h) = &src { if matches!(ty, InTy::Item(..)) && !h.eq_ignore_ascii_case("X-Session") { return Err(format!("input `{}`: a session item comes from `header(\"X-Session\")`", name)); } }
         Ok(Input { name, src, ty, default, optional })
     }

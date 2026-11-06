@@ -940,10 +940,16 @@ static int h_json_txt(Ctx *c, const Txt *t) { Mito *m = M_(c); return a_json_str
 static int h_json_val(Ctx *c, const Val *v) { return json_val(M_(c), v); }
 static int h_json_f64(Ctx *c, double f) { Mito *m = M_(c); return a_json_float(&m->out, f) ? 0 : resp_full(m); }
 /* The session item named by the request's X-Session token (slot.generation.secret in hex), checked against pool `cid`. */
+static int auth_token(Mito *m, u32 cid, const u8 *v, u64 n, u32 *out);
 static int h_auth(Ctx *c, u32 cid, u32 *out) {
     Mito *m = M_(c);
     const u8 *v; u64 n;
     if (!header(m, (const u8 *)"x-session", 9, &v, &n)) return fail(m, 401, "missing X-Session header");
+    return auth_token(m, cid, v, n, out);
+}
+/* The item of pool `cid` a session token names (slot.generation.secret, the secret in hex; shard first in a system), checked live and
+   against its `secret`: 0, or -1 with the error (401 malformed or ended, 403 wrong secret). */
+static int auth_token(Mito *m, u32 cid, const u8 *v, u64 n, u32 *out) {
     const u8 *part[4]; u64 plen[4]; int np = 0, want = m->insys ? 4 : 3; u64 st = 0;
     for (u64 i = 0; i <= n && np < want; i++) if (i == n || v[i] == '.') { part[np] = v + st; plen[np] = i - st; np++; st = i + 1; }
     u64 slot, gen, sec, w;
@@ -962,6 +968,37 @@ static int h_auth(Ctx *c, u32 cid, u32 *out) {
     if (real.tag != 1) return fail(m, 500, "`secret` must be an integer");
     if ((u64)real.i != sec) return fail(m, 403, "bad session secret");
     *out = (u32)idx; return 0;
+}
+/* The value of cookie `name` in the request's Cookie header ("a=1; b=2"; a value in double quotes without them); the first if repeated. */
+static int cookie(Mito *m, const u8 *name, u64 nn, const u8 **v, u64 *vn) {
+    for (u32 h = 0; h < m->nhdrs; h++) {
+        const MitoPair *p = &m->hdrs[h];
+        if (p->kn != 6) continue;
+        int is = 1; for (u32 j = 0; j < 6; j++) if (lower(p->k[j]) != "cookie"[j]) is = 0;
+        if (!is) continue;
+        const u8 *s = (const u8 *)p->v; u64 n = p->vn;
+        for (u64 i = 0; i < n; ) {
+            while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == ';')) i++;
+            u64 b = i; while (i < n && s[i] != ';') i++;
+            u64 e = i; while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t')) e--;
+            u64 eq = b; while (eq < e && s[eq] != '=') eq++;
+            if (eq == e || eq - b != nn || !b_eq(s + b, nn, name, nn)) continue;
+            const u8 *x = s + eq + 1; u64 xn = e - eq - 1;
+            if (xn >= 2 && x[0] == '"' && x[xn - 1] == '"') { x++; xn -= 2; }
+            *v = x; *vn = xn; return 1;
+        }
+    }
+    return 0;
+}
+/* `set_cookie(name, value, max_age)`: the value must be cookie octets (printable ASCII but space, " , ; \), at most 4000 bytes */
+static int h_set_cookie(Ctx *c, const char *name, u32 nn, const Txt *t, i64 age) {
+    Mito *m = M_(c); const u8 *p = m->text.p + t->off; u32 n = t->present ? t->len : 0;
+    if (n > 4000) return fail(m, 500, "set_cookie: a value is at most 4000 bytes");
+    for (u32 i = 0; i < n; i++) if (p[i] <= 0x20 || p[i] >= 0x7F || p[i] == '"' || p[i] == ',' || p[i] == ';' || p[i] == '\\') return fail(m, 500, "set_cookie: a value is printable ASCII without spaces, quotes, commas, semicolons or backslashes");
+    if (age < 0) return fail(m, 500, "set_cookie: max age is 0 (delete) or more seconds");
+    if (!(a_str(&m->head, "Set-Cookie: ") && a_put(&m->head, name, nn) && a_str(&m->head, "=") && a_put(&m->head, p, n) &&
+          a_str(&m->head, "; Path=/; Max-Age=") && a_i64(&m->head, age) && a_str(&m->head, "; HttpOnly; SameSite=Lax\r\n"))) return fail(m, 500, "too many header lines on the answer");
+    return 0;
 }
 /* ---- typed inputs of an endpoint: `points: i64`, `name: string<1..24>`, `{p}` as an item, a session from a header ---- */
 /* a 400 (or another code) naming the input: "`name`: <msg>" */
@@ -1006,6 +1043,15 @@ static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, 
         int found = 0;
         for (u32 i = 0; i < m->nquery; i++) if (b_eq(t_ptr(m, m->query[i].k), m->query[i].k.len, (const u8 *)name, nn)) { tp = t_ptr(m, m->query[i].v); tn = m->query[i].v.len; found = 1; break; }
         if (!found) return 0;
+    } else if (src == 5) {
+        const u8 *cv; u64 cn;
+        if (!cookie(m, (const u8 *)name, nn, &cv, &cn)) return 0;
+        if (kind == 8) { /* an item named by a session token in a cookie: null when it names none (malformed, ended, wrong secret) */
+            u32 idx;
+            if (auth_token(m, (u32)lo, cv, cn, &idx)) { m->ekind = E_NONE; m->emsg.len = 0; return 0; }
+            *out = v_item((u32)lo, idx); return 0;
+        }
+        tp = cv; tn = cn;
     } else {
         const u8 *hv; u64 hn;
         if (!(src == 3 ? header(m, (const u8 *)name, nn, &hv, &hn) : find_pair(m->fwd, m->nfwd, (const u8 *)name, nn, &hv, &hn))) return 0;
@@ -1622,7 +1668,7 @@ static const H mito_h = {
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

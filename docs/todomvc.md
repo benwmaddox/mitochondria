@@ -35,3 +35,20 @@ what it needs is added to the language as general features.
 3. A redirect answer (`see_other(path)`, 303).
 4. Cookies: an input `from cookie("todos")`, and setting one on an answer.
 5. The stylesheet and script served (static text in the program, or a static directory).
+
+## The web layer, built from scratch
+
+The server (runtime/http.c) is our own C with no libraries. It has HTTP/1.1 with keep-alive, Content-Length bodies up to 1 MB,
+path and query decoding (`%XX`, `+`), header lookup, JSON in and out, and the OS's random numbers. What TodoMVC needs beyond that, each
+built as a general feature with its own cases and `tests/http.record` exchanges:
+
+1. Answers other than JSON: a content type per answer (HTML, CSS, JavaScript), and `303 See Other` with `Location`.
+2. Form bodies: the decoder chosen by `Content-Type`; the query decoder reused; fields bound to typed inputs with JSON's checks.
+3. Cookies: the `Cookie` header split into pairs; `Set-Cookie` with `HttpOnly; SameSite=Lax; Path=/; Max-Age`. A list's token is a
+   long random value kept in state and compared: nothing to sign or encrypt, so no crypto of our own.
+4. HTML: escaping of text and attributes; HTML literals compiled to appends into the response (declared storage); well-formedness
+   checked when compiling.
+5. Static assets: stylesheet and script embedded in the program, served with their content types and a caching header.
+6. What browsers do: `HEAD`, `/favicon.ico` (404), large headers and cookies, several connections per tab.
+7. Protection for a form app: cross-site posts refused by checking `Origin` (with `SameSite` cookies), `X-Content-Type-Options:
+   nosniff`, a Content-Security-Policy allowing only our script, and limits answered with an error page rather than JSON.

@@ -19,6 +19,8 @@ void mito_set_loop_budget(void *m, i64 n);
 void mito_set_marks(void *m, u64 soft, u64 hard);
 void mito_set_web_etag(void *m, int on);
 int mito_begin(void *m);
+int mito_response_binary(void *m);
+int mito_response_bare(void *m);
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 const char *mito_response_head(void *m, u32 *len);
@@ -112,7 +114,8 @@ typedef struct { void *app; Sock listener; Res data, head, body, pairs; u8 *out,
 #define DATA_CAP (HEAD_MAX + 4 + (1 << 20) + 4096)
 #define TEXT_CAP_ (3 * DATA_CAP)
 #define MAX_PAIRS (HEAD_MAX / 2 + 1)
-#define OUT_CAP (300 * 1024)
+#define OUT_CAP (RESPONSE_CAP_ + 64 * 1024) /* the program's answer (at most 4 MB) and room to spare */
+#define RESPONSE_CAP_ (4 * 1024 * 1024)
 
 static void send_all(Sock c, const char *p, u32 n) { while (n) { int k = os_send(c, (const u8 *)p, n); if (k <= 0) return; p += k; n -= (u32)k; } }
 /* head and body in one call: two small sends can wait on the client's delayed acknowledgement of the first */
@@ -362,7 +365,8 @@ static int serve_one(Conn *x, Sock c, int first) {
     lk_on(&g_app_lock);
     code = mito_handle(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, 0, 0, (const char *)body.p, body.len);
     resp = mito_response(x->app, &rn);
-    if (!utf8_valid((const u8 *)resp, rn)) rn = 0; /* a body that is not UTF-8 is sent empty */
+    int bare = mito_response_bare(x->app);
+    if (!mito_response_binary(x->app) && !utf8_valid((const u8 *)resp, rn)) rn = 0; /* a text body that is not UTF-8 is sent empty (Response<bytes> is sent as it is) */
     if (rn > OUT_CAP) rn = 0;
     memcpy(x->out, resp, rn); /* the program's response area is reused by the next request, which may run while this one is sent */
     { const char *h = mito_response_head(x->app, &x->rhn); if (x->rhn > sizeof x->rh) x->rhn = 0; memcpy(x->rh, h, x->rhn); }
@@ -371,6 +375,7 @@ static int serve_one(Conn *x, Sock c, int first) {
 #else
     code = mito_system_request(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, (const char *)body.p, body.len, 10000, (char *)x->out, OUT_CAP, &rn, x->rh, &x->rhn);
     resp = (const char *)x->out;
+    int bare = 0;
 #endif
     if (g_timing) t_end = os_perf_ns();
 #ifndef MITO_WEB
@@ -412,7 +417,7 @@ static int serve_one(Conn *x, Sock c, int first) {
 #ifdef MITO_WEB_ETAG
               { static const char cc[] = "cache-control"; u32 k = 0; while (k < 14 && name[k] == cc[k]) k++; if (tagged && mito_web_etag_cc[0] && k == 14) skip = 1; }
 #endif
-              if (!skip) HPUTN(w + i, e - i + 2);
+              if (!skip && !bare) HPUTN(w + i, e - i + 2);
               i = e + 2;
           }
         }
@@ -426,7 +431,7 @@ static int serve_one(Conn *x, Sock c, int first) {
         /* Vary: the program's, else the block's, with Accept-Encoding added when a body may be compressed */
         { const char *v = line_value(x->rh, x->rhn, "vary", &vn);
 #ifdef MITO_WEB_HEADERS
-          if (!v) v = line_value(mito_web_headers, sizeof mito_web_headers - 1, "vary", &vn);
+          if (!v && !bare) v = line_value(mito_web_headers, sizeof mito_web_headers - 1, "vary", &vn);
 #endif
           int ae = 0;
 #ifdef MITO_WEB_GZIP

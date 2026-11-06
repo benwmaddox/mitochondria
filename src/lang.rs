@@ -37,6 +37,27 @@ thread_local! {
 pub fn set_file_dir(dir: &std::path::Path) { FILES.with(|f| f.borrow_mut().0 = Some(dir.to_path_buf())); }
 /// `file("...")` finds these by name before looking on disk.
 pub fn set_files(files: Vec<(String, String)>) { FILES.with(|f| f.borrow_mut().1 = files); }
+/// The bytes of a file named in the program (`file_base64("logos/icon.png")`), read when compiling, relative to the program's directory.
+fn read_file_bytes(name: &str) -> R<Vec<u8>> {
+    if std::path::Path::new(name).is_absolute() || name.is_empty() { return Err(format!("`file_base64(\"{}\")`: a path relative to the program's directory", name)); }
+    FILES.with(|f| {
+        let f = f.borrow();
+        if let Some(x) = f.1.iter().find(|x| x.0 == name) { return Ok(x.1.clone().into_bytes()); }
+        let Some(dir) = &f.0 else { return Err(format!("`file_base64(\"{}\")`: no program directory to read from", name)) };
+        std::fs::read(dir.join(name)).map_err(|e| format!("`file_base64(\"{}\")`: {}", name, e))
+    })
+}
+/// Standard base64, padded.
+fn base64(b: &[u8]) -> String {
+    const AL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut o = String::with_capacity(b.len().div_ceil(3) * 4);
+    for c in b.chunks(3) {
+        let v = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        o.push(AL[(v >> 18) as usize] as char); o.push(AL[(v >> 12 & 63) as usize] as char);
+        o.push(if c.len() > 1 { AL[(v >> 6 & 63) as usize] as char } else { '=' }); o.push(if c.len() > 2 { AL[(v & 63) as usize] as char } else { '=' });
+    }
+    o
+}
 /// The text of a file named in the program (`file("assets/app.css")`), read when compiling: relative to the program's directory, UTF-8.
 fn read_file(name: &str) -> R<String> {
     if std::path::Path::new(name).is_absolute() || name.is_empty() { return Err(format!("`file(\"{}\")`: a path relative to the program's directory", name)); }
@@ -61,7 +82,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
-    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime }
+    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -72,7 +93,7 @@ impl B {
             "base64" => Base64, "base64_url" => Base64Url, "unbase64" => Unbase64, "hex" => Hex, "sha1" => Sha1, "sha256" => Sha256,
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
-            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "format_time" => FormatTime,
+            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml,
             _ => return None,
         })
     }
@@ -98,9 +119,10 @@ pub enum Expr {
 /// up to `hi` included; `hi` here is one past it, as the parser excludes the end internally).
 /// `from`: where a loop over a module instance starts. `via`: that instance's iteration functions (set by the binder).
 /// `whil`: `while cond` ends the loop as soon as `cond` is false (tested before `where` and the body).
+/// `scan`: a `where` over a whole table that reads every row, accepted as such (a schema the program cannot add an index to).
 /// `by`: a table walked in the order of one of its rows' fields (an indexed one). `after`: a table's rows after this row (or id) in the
 /// loop's order, for paging (null: from the start).
-pub struct Iter { pub index: Option<(String, u32)>, pub budget: bool, pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub by: Option<String>, pub after: Option<Expr>, pub whil: Option<Expr>, pub wher: Option<Expr>, pub limit: Option<Expr>, pub via: Option<Via> }
+pub struct Iter { pub index: Option<(String, u32)>, pub budget: bool, pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub by: Option<String>, pub after: Option<Expr>, pub whil: Option<Expr>, pub wher: Option<Expr>, pub limit: Option<Expr>, pub via: Option<Via>, pub scan: bool }
 
 /// A module instance's iteration functions: a cursor from `first(from)` (or `last(from)` for reverse), the next from
 /// `next(cur)` (or `prev`), the item at it from `item(cur)`; a null cursor ends the loop.
@@ -595,7 +617,7 @@ impl P {
     fn no_init<T>(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> { let was = self.init_ok; self.init_ok = false; let r = f(self); self.init_ok = was; r }
 
     fn iter(&mut self) -> R<Iter> { self.no_init(|p| p.iter_inner()) }
-    /// `item[, i] in coll [from k] [by field] [after x] [reverse] [while c] [where c] [limit n]`, or `i in lo..hi` (both ends included).
+    /// `item[, i] in coll [from k] [by field] [after x] [reverse] [while c] [scan] [where c] [limit n]`, or `i in lo..hi` (both ends included).
     fn iter_inner(&mut self) -> R<Iter> {
         let var = self.id()?;
         let index = if self.sym(",") { Some((self.id()?, 0)) } else { None };
@@ -611,10 +633,12 @@ impl P {
         let after = if self.is_kw("after") { self.i += 1; Some(self.expr()?) } else { None };
         let reverse = if self.is_kw("reverse") { self.i += 1; true } else { false };
         let whil = if self.is_kw("while") { self.i += 1; Some(self.expr()?) } else { None };
+        let scan = if self.is_kw("scan") { self.i += 1; true } else { false };
         let wher = if self.is_kw("where") { self.i += 1; Some(self.expr()?) } else { None };
+        if scan && wher.is_none() { return Err("`scan` accepts that a `where` reads every row of a table: `foreach u in app.users scan where u.role == 1`".into()); }
         if self.is_kw("order") { return Err("`order by` was removed: keep the data in order with a sorted collection (lib/sorted.mito)".into()); }
         let limit = if self.is_kw("limit") { self.i += 1; Some(self.expr()?) } else { None };
-        Ok(Iter { index, budget: false, var, slot: 0, coll, hi, from, reverse, by, after, whil, wher, limit, via: None })
+        Ok(Iter { index, budget: false, var, slot: 0, coll, hi, from, reverse, by, after, whil, wher, limit, via: None, scan })
     }
 
     /// Markup (an HTML literal), lowered to ordinary statements that write it into the answer: its fixed text as `__html_lit("...")`
@@ -706,7 +730,7 @@ impl P {
     fn stmt(&mut self) -> R<Stmt> {
         // `include_html("fragments/head.html");` in markup: a file of the program's (read when compiling, relative to the program) written as
         // it is, for fixed markup that is not worth writing as code (generated asset lists, another app's templates' output)
-        if self.markup == Some(false) && matches!(self.peek(), Some(Tok::Id(n)) if n == "include_html") {
+        if self.markup != Some(true) && matches!(self.peek(), Some(Tok::Id(n)) if n == "include_html") {
             if let (Some(Tok::Sym(o)), Some(Tok::Str(name)), Some(Tok::Sym(c))) = (self.t.get(self.i + 1).cloned(), self.t.get(self.i + 2).cloned(), self.t.get(self.i + 3).cloned()) {
                 if o == "(" && c == ")" { self.i += 4; self.sym(";"); return Ok(Stmt::Do(Expr::Call("__html_lit".into(), vec![Expr::Str(read_file(&name)?)], CallRes::Unbound))); }
             }
@@ -841,7 +865,7 @@ impl P {
             _ => None,
         };
         if let Some(hi) = counted {
-            let it = Iter { index: None, budget: false, var: v, slot: 0, coll: init, hi: Some(hi), from: None, reverse: false, by: None, after: None, whil: None, wher: None, limit: None, via: None };
+            let it = Iter { index: None, budget: false, var: v, slot: 0, coll: init, hi: Some(hi), from: None, reverse: false, by: None, after: None, whil: None, wher: None, limit: None, via: None, scan: false };
             return Ok(Stmt::Each(it, body));
         }
         let mut b = body;
@@ -992,6 +1016,13 @@ impl P {
                     self.pre.push(Stmt::Var(t.clone(), 0, Expr::Null));
                     self.pre.push(Stmt::Each(it, vec![Stmt::Assign(Expr::Var(t.clone(), VarRes::Unbound), Expr::Var(var, VarRes::Unbound))]));
                     return Ok(Expr::Var(t, VarRes::Unbound));
+                }
+                // `file_base64("logos/icon.png")`: any file's bytes, read when compiling, as a base64 literal (`unbase64` gives the bytes)
+                if n == "file_base64" && matches!(self.peek(), Some(Tok::Sym(s)) if s == "(") {
+                    if let (Some(Tok::Str(name)), Some(Tok::Sym(close))) = (self.t.get(self.i + 1).cloned(), self.t.get(self.i + 2).cloned()) {
+                        if close == ")" { self.i += 3; return Ok(Expr::Str(base64(&read_file_bytes(&name)?))); }
+                    }
+                    return Err("`file_base64` takes the path as a literal: `file_base64(\"logos/icon.png\")`".into());
                 }
                 // `file("assets/app.css")`: the file's text, read when compiling, as a literal
                 if n == "file" && matches!(self.peek(), Some(Tok::Sym(s)) if s == "(") {
@@ -1352,7 +1383,7 @@ pub const BUILTIN_NAMES: &[&str] = &["int", "str", "len", "now", "random", "min"
 /// A loop without a fixed extent (`while`, a `for` that is not counted): a range as long as it needs, stopped by `cond`, and
 /// counted against the request's step budget.
 fn unbounded(cond: Option<Expr>) -> Iter {
-    Iter { index: None, budget: true, var: "__mito__round".into(), slot: 0, coll: Expr::Int(0), hi: Some(Expr::Int(i64::MAX)), from: None, reverse: false, by: None, after: None, whil: cond, wher: None, limit: None, via: None }
+    Iter { index: None, budget: true, var: "__mito__round".into(), slot: 0, coll: Expr::Int(0), hi: Some(Expr::Int(i64::MAX)), from: None, reverse: false, by: None, after: None, whil: cond, wher: None, limit: None, via: None, scan: false }
 }
 /// Is the variable `name` assigned anywhere in these statements?
 fn assigns_name(stmts: &[Stmt], name: &str) -> bool {

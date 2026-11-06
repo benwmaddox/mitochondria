@@ -191,6 +191,12 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
 - `Response<T>` declares the answer's JSON shape, checked against every answer when compiling. `ok` 200, `created`
   201, `no_content` 204, `status(code, x)`; `fail CODE "message"` ends a request with an error from any function. An
   item is written as its id (`"slot.generation"` for a checked pool).
+- `Response<bytes>` answers any bytes as they are (`application/octet-stream`, or the Content-Type the endpoint sets with
+  `set_header`, which replaces the kind's for any answer); `file_base64("logos/icon.png")` is a file's bytes read when compiling, as
+  base64 (`unbase64` it once, in `@start`). `no_default_headers()` sends the answer without the `web` block's header lines (as a
+  file Rails sends). `escape_html(t)` is text with `& < > " '` as entities (ERB's escaping, for JSON or markup built as text);
+  `contains`, `starts_with` and `ends_with` compare bytes; `json_field(text, "name")` reads a field of a JSON object (null if absent).
+  A loop's `scan where ...` accepts that a `where` over a whole table reads every row (a schema that cannot have the index).
 - `Response<html>`, `<text>`, `<css>`, `<js>` and `<svg>` answer text as it is with that content type (UTF-8). `file("assets/app.css")`
   is a file's text, read when compiling (relative to the program) and kept in the program, so a stylesheet is served as
   `@get("/app.css") fn css() -> Response<css> { return ok(file("assets/app.css")); }`. An answer that is a literal is the same

@@ -226,12 +226,14 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 37] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 42] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
     B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
-    // the process's environment: code 35; a time as text: 36
-    B::Env, B::FormatTime];
+    // the process's environment: code 35; a time as text: 36; texts within texts: 37 to 39
+    B::Env, B::FormatTime, B::Contains, B::StartsWith, B::EndsWith,
+    // the answer without the web block's header lines: 40; text escaped as markup: 41
+    B::NoDefaultHeaders, B::EscapeHtml];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
 const CRYPTO_BUILTINS: [B; 10] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck];
 
@@ -579,9 +581,10 @@ type R<T> = Result<T, String>;
 fn no<T>(what: impl Into<String>) -> R<T> { Err(what.into()) }
 fn is_name(e: &str) -> bool { e.chars().all(|c| c.is_alphanumeric() || c == '_') }
 
-/// `Response<html>`, `<text>`, `<css>`, `<js>`, `<svg>`: answers of text, with the runtime's content type code.
+/// `Response<html>`, `<text>`, `<css>`, `<js>`, `<svg>`: answers of text, with the runtime's content type code; `<bytes>`: any bytes
+/// (`application/octet-stream` unless the endpoint sets its Content-Type), sent as they are.
 fn text_answer(t: &crate::lang::RType) -> Option<(u32, &'static str)> {
-    match t { crate::lang::RType::Name(n) => match n.as_str() { "html" => Some((1, "html")), "text" => Some((2, "text")), "css" => Some((3, "css")), "js" => Some((4, "js")), "svg" => Some((5, "svg")), _ => None }, _ => None }
+    match t { crate::lang::RType::Name(n) => match n.as_str() { "html" => Some((1, "html")), "text" => Some((2, "text")), "css" => Some((3, "css")), "js" => Some((4, "js")), "svg" => Some((5, "svg")), "bytes" => Some((6, "bytes")), _ => None }, _ => None }
 }
 /// FNV-1a, 64 bits: a static answer's ETag.
 fn fnv64(b: &[u8]) -> u64 { b.iter().fold(0xcbf29ce484222325u64, |h, x| (h ^ *x as u64).wrapping_mul(0x100000001b3)) }
@@ -3011,10 +3014,10 @@ impl<'p> G<'p> {
         let mut in_c = None; // the `where` tested here, when it is not SQL
         if let Some(w) = &it.wher {
             if self.sql_where(w, it.slot, t, conds.len(), &mut wconds, &mut wvals, &mut wcols) {
-                if !nested {
+                if !nested && !it.scan {
                     for f in &wcols {
                         if !tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)) {
-                            return no(format!("`where` over the whole table {} on `{}`, which has no index: every row would be read; declare one (`{}: table<{}> index({})`)", tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
+                            return no(format!("`where` over the whole table {} on `{}`, which has no index: every row would be read; declare one (`{}: table<{}> index({})`), or accept the scan (`scan where ...`) when the schema cannot have one", tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
                         }
                     }
                 }
@@ -3486,7 +3489,8 @@ impl<'p> G<'p> {
             return Ok(CV::Null);
         }
         if bi == B::JsonField {
-            // `field(text, "name")` in a test: the field of a JSON object (a string's characters, anything else as written)
+            // `json_field(text, "name")` (`field` in a test): the field of a JSON object (a string's characters as written, escapes kept; anything else
+            // as written), or null
             let [j, k] = <[CV; 2]>::try_from(a).map_err(|_| "`field` takes a JSON text and a field name: `field(r.body, \"id\")`".to_string())?;
             let CV::Lit(key) = k else { return no("`field`'s name is a string written in the test") };
             let j = self.txt_of(j)?;
@@ -3545,8 +3549,8 @@ impl<'p> G<'p> {
         };
         // arity of the byte and crypto built-ins, checked when compiling
         let want = match bi {
-            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env => Some((1, "one argument")),
-            B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime => Some((2, "two arguments")),
+            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml => Some((1, "one argument")),
+            B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime | B::Contains | B::StartsWith | B::EndsWith => Some((2, "two arguments")),
             B::GcmSeal | B::GcmOpen => Some((3, "the key, the 12-byte nonce and the text")),
             B::Pbkdf2Sha256 => Some((4, "the password, the salt, the iterations and the length")),
             _ => None,
@@ -3554,8 +3558,8 @@ impl<'p> G<'p> {
         if let Some((k, what)) = want {
             if a.len() != k {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
-                    B::RandomBytes => "random_bytes", B::Env => "env", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
-                    B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time",
+                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
+                    B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time", B::Contains => "contains", B::StartsWith => "starts_with", B::EndsWith => "ends_with",
                     B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));
             }
@@ -3575,9 +3579,9 @@ impl<'p> G<'p> {
             let _ = int_out;
             return Ok(match bi {
                 B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot => CV::Int(format!("{}.i", r)),
-                B::SecretEqual | B::BcryptCheck => CV::Bool(format!("({}.i != 0)", r)),
+                B::SecretEqual | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith => CV::Bool(format!("({}.i != 0)", r)),
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
-                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
+                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
                 B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
                 _ => CV::Any(r),

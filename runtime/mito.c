@@ -31,6 +31,8 @@ static int a_hex(Area *a, u64 v) { char b[16]; int n = 0; do { b[15 - n++] = "01
 static u64 c_len(const char *s) { u64 n = 0; while (s[n]) n++; return n; }
 static int c_eq(const char *a, const u8 *b, u64 n) { u64 i = 0; for (; i < n; i++) if ((u8)a[i] != b[i] || !a[i]) return 0; return a[n] == 0; }
 static int b_eq(const u8 *a, u64 an, const u8 *b, u64 bn) { if (an != bn) return 0; for (u64 i = 0; i < an; i++) if (a[i] != b[i]) return 0; return 1; }
+/* the first n bytes of a equal those of the lowercase literal b, letters compared without case */
+static int b_eq_ci(const u8 *a, u32 n, const char *b) { for (u32 k = 0; k < n; k++) { u8 c = a[k]; if (c >= 'A' && c <= 'Z') c += 32; if (c != (u8)b[k]) return 0; } return 1; }
 static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 
 /* Bytes as UTF-8 text, each maximal invalid sequence replaced by U+FFFD (as Rust's String::from_utf8_lossy). */
@@ -562,7 +564,7 @@ static void relieve(Mem *m, Pressure *p) {
 #ifndef COMMIT_ALL_MAX
 #define COMMIT_ALL_MAX (1ULL << 30) /* state up to 1 GiB is committed whole at start (see MITO(start)) */
 #endif
-#define RESPONSE_CAP (256 * 1024)
+#define RESPONSE_CAP (4 * 1024 * 1024) /* an answer: pages with long lists, images an endpoint sends */
 /* The declared limits of a request, the same in every runtime (serve.rs MAX_QUERY ...). A route has at most 32 parts
    (checked when the program loads), names at most 128 bytes and fail messages 1024, so messages fit `ebuf`. */
 #define MAX_PARAMS 32
@@ -585,6 +587,7 @@ typedef struct Mito {
     i64 clock; int fixed_clock; u64 rng;
     int web_etag; /* the web block says `etag;`: the front end tags every answer, so a literal answer adds no ETag of its own */
     int starting; /* MITO(begin) is running the program's `@start` function */
+    int bare; /* the answer leaves out the web block's header lines (`no_default_headers()`) */
     i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
     u64 small;       /* bytes of the block holding the page flags (released with the instance) */
     u32 text_base;   /* where a request's text starts: after the literals, or after a running test's own text */
@@ -1539,6 +1542,27 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
             memcpy(w + o, src, len); o += len;
         }
         return t_done(m, start, o, out); }
+    case 37: case 38: case 39: { /* contains(t, part), starts_with(t, part), ends_with(t, part): bytes compared */
+        if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y)) return -1;
+        const u8 *p = t_ptr(m, x), *q = t_ptr(m, y); int found = 0;
+        if (y.len <= x.len) {
+            if (code == 38) found = b_eq(p, y.len, q, y.len);
+            else if (code == 39) found = b_eq(p + x.len - y.len, y.len, q, y.len);
+            else for (u32 i = 0; i + y.len <= x.len && !found; i++) found = b_eq(p + i, y.len, q, y.len);
+        }
+        *out = v_int(found); return 0; }
+    case 41: { /* escape_html(t): & < > " ' as entities (as ERB's <%= %> writes text), for markup or JSON written as text */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x);
+        if (!(w = t_room(m, (u64)x.len * 6))) return -1;
+        u64 o = 0;
+        for (u32 i = 0; i < x.len; i++) {
+            const char *e = s[i] == '&' ? "&amp;" : s[i] == '<' ? "&lt;" : s[i] == '>' ? "&gt;" : s[i] == '"' ? "&quot;" : s[i] == '\'' ? "&#39;" : 0;
+            if (e) { while (*e) w[o++] = (u8)*e++; } else w[o++] = s[i];
+        }
+        return t_done(m, start, o, out); }
+    case 40: /* no_default_headers(): the answer goes without the web block's header lines (as Rails' send_file answers) */
+        m->bare = 1; *out = v_null(); return 0;
     case 35: { /* env("NAME"): the process's environment variable, or null when it is not set */
         if (arg_txt(m, a, n, 0, &x)) return -1;
         char name[256]; if (x.len == 0 || x.len > 255) return fail(m, 500, "env: a name of 1 to 255 bytes");
@@ -2219,7 +2243,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
 /* Handle one request, with its headers and (in a system) the fields forwarded with it. Returns the status, or 0 when
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
-    m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0;
+    m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0; m->bare = 0;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     /* the `@start` function only through MITO(begin), never as a request */
@@ -2360,15 +2384,22 @@ MITO_API int MITO(tables_extern)(void) {
 #endif
 }
 MITO_API const char *MITO(response)(void *mp_, u32 *len) { Mito *m = (Mito *)mp_; *len = m->out.len; return (const char *)m->out.p; }
+/* the last answer: bytes (Response<bytes>, sent as they are, not checked as UTF-8), and whether it leaves out the web block's lines */
+MITO_API int MITO(response_binary)(void *mp_) { return ((Mito *)mp_)->ctype == 6; }
+MITO_API int MITO(response_bare)(void *mp_) { return ((Mito *)mp_)->bare; }
 /* The answer's header lines, each ending in CRLF: its content type, then any the program set (Location). */
-static const char *const ctypes[] = { "application/json", "text/html; charset=utf-8", "text/plain; charset=utf-8", "text/css; charset=utf-8", "text/javascript; charset=utf-8", "image/svg+xml" };
+static const char *const ctypes[] = { "application/json", "text/html; charset=utf-8", "text/plain; charset=utf-8", "text/css; charset=utf-8", "text/javascript; charset=utf-8", "image/svg+xml", "application/octet-stream" };
 MITO_API const char *MITO(response_head)(void *mp_, u32 *len) { Mito *m = (Mito *)mp_;
     static const char pre[] = "Content-Type: ";
     u8 *b = m->hout; u32 n = 0;
-    const char *ct = ctypes[m->ctype < 6 ? m->ctype : 0];
-    for (const char *x = pre; *x; x++) b[n++] = (u8)*x;
-    for (const char *x = ct; *x; x++) b[n++] = (u8)*x;
-    b[n++] = '\r'; b[n++] = '\n';
+    const char *ct = ctypes[m->ctype < 7 ? m->ctype : 0];
+    /* the content type for the answer's kind, unless the endpoint set its own (`set_header("Content-Type", ...)`) */
+    int own = 0; for (u32 i = 0; i + 13 <= m->head.len && !own; i++) if ((i == 0 || m->head.p[i - 1] == '\n') && (m->head.p[i] | 32) == 'c' && b_eq_ci(m->head.p + i, 13, "content-type:")) own = 1;
+    if (!own) {
+        for (const char *x = pre; *x; x++) b[n++] = (u8)*x;
+        for (const char *x = ct; *x; x++) b[n++] = (u8)*x;
+        b[n++] = '\r'; b[n++] = '\n';
+    }
     u32 k = (u32)m->head.len; /* at most sizeof hbuf, and hout has room for it after the content type */
     memcpy(b + n, m->head.p, k); n += k;
     *len = n; return (const char *)b;

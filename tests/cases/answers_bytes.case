@@ -1,0 +1,32 @@
+// `Response<bytes>`: any bytes, with the content type the endpoint sets (application/octet-stream otherwise); `file_base64` embeds a
+// file's bytes when compiling; `no_default_headers()` marks an answer to go without the web block's lines (the front end's business);
+// `escape_html`, `contains` / `starts_with` / `ends_with`, `json_field` outside tests, and an endpoint's own Content-Type on text
+--- program
+struct A { icon: utf8<64>; }
+state a: A;
+
+@start
+fn init() { a.icon = unbase64(file_base64("icon.bin")); }
+
+@get("/icon")
+fn icon() -> Response<bytes> { no_default_headers(); set_header("Content-Type", "image/png"); return ok(a.icon); }
+@get("/raw")
+fn raw() -> Response<bytes> { return ok(a.icon); }
+@get("/json")
+fn json(name: utf8<64>) -> Response<text> {
+    set_header("Content-Type", "application/json; charset=utf-8");
+    return ok("{\"name\": \"" + escape_html(name) + "\"}");
+}
+@get("/texts")
+fn texts(t: utf8<64>) -> Response<{ has: bool; starts: bool; ends: bool; field: string?; missing: string? }> {
+    return ok({ has: contains(t, "*/*"), starts: starts_with(t, "text/"), ends: ends_with(t, "q=0.8"),
+        field: json_field("{\"_rails\":{\"pur\":\"cookie.x\"}}", "_rails"), missing: json_field("{\"a\":1}", "b") });
+}
+--- file icon.bin
+PNG
+--- requests
+GET /icon
+GET /raw
+GET /json?name=a%26b%3C%22%27
+GET /texts?t=text%2Fhtml%2C*%2F*%3Bq%3D0.8
+GET /texts?t=application%2Fjson

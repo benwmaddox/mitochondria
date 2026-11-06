@@ -13,6 +13,7 @@ mod layout;
 mod cgen;
 mod source;
 mod spec;
+mod web;
 // the in-memory compiler drives the tests; uild runs tcc.exe from the same directory
 #[cfg_attr(not(test), allow(dead_code))]
 mod tcc;
@@ -101,7 +102,12 @@ fn compile(f: &str, text: &str, system: bool) -> Result<(Vec<String>, String), S
     let (s, code) = source::load(text).map_err(|e| report(f, text, &e))?;
     let prog = layout::Program::parse(&s).map_err(|e| report(f, text, &e))?;
     let a = cgen::check(&prog, &code).map_err(|e| report(f, text, &e))?;
-    Ok((cgen::program_exe(&prog, &a, Some((&file, &code)))?, name))
+    // the `web` block (src/web.rs), as data ahead of the HTTP front end
+    let web = match web::find(text) {
+        Some((w, line)) => web::c(&web::parse(&w, line, path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))).map_err(|e| report(f, text, &e))?),
+        None => String::new(),
+    };
+    Ok((cgen::program_exe(&prog, &a, Some((&file, &code)), &web)?, name))
 }
 
 /// `build <program> [-o app.exe] [--tcc]`

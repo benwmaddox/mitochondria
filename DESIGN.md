@@ -145,6 +145,30 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   its errors as a small page (the message escaped) instead of JSON.
 - `set_cookie("list", token(b), 31536000)` adds a Set-Cookie line to the answer (`Path=/; HttpOnly; SameSite=Lax`; max age 0
   deletes it). The value must be cookie characters (printable ASCII without spaces, quotes, commas, semicolons, backslashes).
+  `set_header("Link", value)` adds a header line (the name a literal token, checked when compiling, and not one the server writes
+  itself such as Content-Length; the value printable ASCII, checked when running).
+- **The `web` block** (src/web.rs) says how a program's answers look on the wire, for a program that must answer as another
+  server does (a port of an existing app):
+  ```
+  web {
+      headers { "X-Frame-Options": "SAMEORIGIN"; "Vary": "Accept"; }  // every endpoint answer, in place of the policy lines above
+      etag "max-age=0, private, must-revalidate";  // a weak ETag on every 200 answer to a GET, with this Cache-Control
+      gzip;                                         // bodies gzip-compressed when the request accepts gzip
+      static "/" from "public" {                    // the directory's files, kept in the program, answered before the endpoints
+          "Cache-Control": "public, max-age=2592000";
+          types { ".map": "text/plain"; }           // content types beyond the usual ones, by extension
+      }
+  }
+  ```
+  `headers` replaces the built-in `nosniff`, Content-Security-Policy and Referrer-Policy lines; an endpoint's own line of the same
+  name (`set_header`) wins over the block's. `etag`: the tag is two 64-bit hashes of the body; `If-None-Match` naming it answers 304
+  without a body or content type; its Cache-Control (if given) replaces the block's on tagged answers unless the endpoint set one.
+  `gzip` compresses every answer with a body, whatever its type, at zlib's default level (third_party/zlib, linked only into such a
+  program), and adds `Accept-Encoding` to `Vary`. A `static` block's files are read when compiling (binary files too, every file under
+  the directory) and kept in the program as data; they answer GET and HEAD for their path whatever the query, with their type, the
+  block's lines, `Last-Modified` (when the server started, by its clock) and, with `gzip`, a copy compressed once at start. A file whose
+  extension has no known type is refused when compiling, naming it, rather than served as a guess. Systems of workers take no web block
+  yet.
 - `Response<T>` declares the answer's JSON shape, checked against every answer when compiling. `ok` 200, `created`
   201, `no_content` 204, `status(code, x)`; `fail CODE "message"` ends a request with an error from any function. An
   item is written as its id (`"slot.generation"` for a checked pool).

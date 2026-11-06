@@ -53,7 +53,7 @@ static u32 box_recv(Box *b, u8 *out) {
 static void box_close(Box *b) { lk_on(&b->lk); b->closed = 1; lk_off(&b->lk); cv_all(&b->cv); }
 
 /* ---- reply slots: 0 free, 1 waiting for an answer, 2 answered, 3 abandoned by a caller that gave up ---- */
-typedef struct { Lock lk; Cond cv; u32 state, code, len, hlen; u8 *body; u64 committed; u8 head[4160]; } Reply; /* head: the answer's header lines */
+typedef struct { Lock lk; Cond cv; u32 state, code, len, hlen; u8 *body; u64 committed; u8 head[16448]; } Reply; /* head: the answer's header lines */
 typedef struct { Lock lk; u32 *free; u32 nfree; } FreeList;
 typedef struct Sys Sys;
 typedef struct { Sys *sys; u32 kind, index, me; void *prog; u8 *msg; MitoPair *pairs; u32 maxpairs; OsThread thread; u64 handled, forwarded, restarts; } Worker;
@@ -220,7 +220,7 @@ MITO_API void *mito_system_start(u64 seed, int seeded) {
 }
 MITO_API void mito_system_set_clock(void *sp, i64 ms, int fixed) { Sys *s = (Sys *)sp; lk_on(&s->lk); s->clock = ms; s->fixed = fixed; lk_off(&s->lk); }
 /* Send a request in at the entry worker and wait for its answer (copied into `out`, its header lines into `head`, which has room
-   for 4160 bytes). A session token with four parts (shard.slot.generation.secret) goes to its shard; other requests are spread in turn. */
+   for 16448 bytes). A session token with four parts (shard.slot.generation.secret) goes to its shard; other requests are spread in turn. */
 MITO_API int mito_system_request(void *sp, const char *m, u32 mn, const char *t, u32 tn, const MitoPair *h, u32 nh, const char *body, u32 bn, u32 timeout_ms, char *out, u32 cap, u32 *outlen, char *head, u32 *headlen) {
     Sys *s = (Sys *)sp;
     const char *err = 0; int code = 0;

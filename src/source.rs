@@ -34,6 +34,12 @@ pub fn split(src: &str) -> Result<(String, String), String> {
                 let e = end_of_block(src, from).ok_or_else(|| format!("line {}: unclosed `{{`", line))?;
                 put(&mut code, &mut state, &src[i..e]); i = e;
             }
+            // the `web` block is neither state nor code (src/web.rs reads it): its lines are blank in both
+            "web" => {
+                let e = end_of_block(src, i).ok_or_else(|| format!("line {}: unclosed `web {{`", line))?;
+                for c in src[i..e].chars() { if c == '\n' { state.push('\n'); code.push('\n'); } }
+                i = e;
+            }
             "system" => return Err(format!("line {}: a `system` block is a file of its own, not part of a program", line)),
             "global" => return Err(format!("line {}: `global` was replaced by `state`: a program has one state, a struct holding everything (`state game: Game;`)", line)),
             "" => return Err(format!("line {}: unexpected `{}`", line, &src[i..i + src[i..].chars().next().map_or(1, |c| c.len_utf8())])),
@@ -80,7 +86,7 @@ fn skip_words(src: &str, mut i: usize, n: usize) -> usize {
 
 /// The end (just past the closing brace) of the item starting at `i`: its first `{` and the matching `}`, skipping
 /// strings and comments.
-fn end_of_block(src: &str, i: usize) -> Option<usize> {
+pub(crate) fn end_of_block(src: &str, i: usize) -> Option<usize> {
     let b = src.as_bytes();
     let (mut k, mut depth) = (i, 0usize);
     while k < b.len() {

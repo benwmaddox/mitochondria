@@ -583,6 +583,7 @@ typedef struct Mito {
     Area out, text;
     u8 *areas;
     i64 clock; int fixed_clock; u64 rng;
+    int web_etag; /* the web block says `etag;`: the front end tags every answer, so a literal answer adds no ETag of its own */
     i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
     u64 small;       /* bytes of the block holding the page flags (released with the instance) */
     u32 text_base;   /* where a request's text starts: after the literals, or after a running test's own text */
@@ -596,7 +597,7 @@ typedef struct Mito {
     u32 njson; JField json[MAX_JSON]; int form; /* form: the body was a form (application/x-www-form-urlencoded), its values text */
     int ekind; int ecode; Area emsg; u8 ebuf[4096];
     /* the answer's head: its content type (0 JSON, 1 HTML, 2 plain text) and header lines after it (`Location: ...\r\n`) */
-    u32 ctype; Area head; u8 hbuf[4096]; u8 hout[4096 + 64];
+    u32 ctype; Area head; u8 hbuf[16384]; u8 hout[16384 + 64];
 #ifdef MITO_USES_SQLITE
     Store store; /* the program's tables, in SQLite (runtime/store.c) */
 #endif
@@ -1007,6 +1008,14 @@ static int h_set_cookie(Ctx *c, const char *name, u32 nn, const Txt *t, i64 age)
     if (age < 0) return fail(m, 500, "set_cookie: max age is 0 (delete) or more seconds");
     if (!(a_str(&m->head, "Set-Cookie: ") && a_put(&m->head, name, nn) && a_str(&m->head, "=") && a_put(&m->head, p, n) &&
           a_str(&m->head, "; Path=/; Max-Age=") && a_i64(&m->head, age) && a_str(&m->head, "; HttpOnly; SameSite=Lax\r\n"))) return fail(m, 500, "too many header lines on the answer");
+    return 0;
+}
+/* `set_header(name, value)`: the value is printable ASCII (tabs allowed), at most 8000 bytes, so it can add no header line of its own */
+static int h_set_header(Ctx *c, const char *name, u32 nn, const Txt *t) {
+    Mito *m = M_(c); const u8 *p = m->text.p + t->off; u32 n = t->present ? t->len : 0;
+    if (n > 8000) return fail(m, 500, "set_header: a value is at most 8000 bytes");
+    for (u32 i = 0; i < n; i++) if ((p[i] < 0x20 && p[i] != '\t') || p[i] >= 0x7F) return fail(m, 500, "set_header: a value is printable ASCII");
+    if (!(a_put(&m->head, name, nn) && a_str(&m->head, ": ") && a_put(&m->head, p, n) && a_str(&m->head, "\r\n"))) return fail(m, 500, "too many header lines on the answer");
     return 0;
 }
 /* ---- typed inputs of an endpoint: `points: i64`, `name: string<1..24>`, `{p}` as an item, a session from a header ---- */
@@ -1845,6 +1854,7 @@ static int h_html_col(Ctx *c, u32 cid, u32 idx, u32 ci, u32 attr) {
 static int h_etag(Ctx *c, const char *tag, u32 n, int *nm) {
     Mito *m = M_(c); const u8 *v; u64 vn;
     *nm = 0;
+    if (m->web_etag) return 0;
     if (header(m, (const u8 *)"if-none-match", 13, &v, &vn)) {
         for (u64 i = 0; i < vn; ) {
             while (i < vn && (v[i] == ' ' || v[i] == ',')) i++;
@@ -1882,7 +1892,7 @@ static const H mito_h = {
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */
@@ -1943,6 +1953,7 @@ MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return;
     os_release(m->mem.base, m->mem.reserved); os_release(m->mem.committed, m->small); os_release(m->mem.dirty, up(m->mem.npages * (PAGE / 64 / 8), PAGE)); os_release(m->mem.jb.p, m->mem.jb.reserved); os_release(m->frees.p, m->frees.reserved); os_release(m->sel.p, m->sel.reserved); os_release(m->areas, TEXT_CAP + RESPONSE_CAP); os_release(m, sizeof(Mito)); }
 MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n; }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
+MITO_API void MITO(set_web_etag)(void *mp_, int on) { ((Mito *)mp_)->web_etag = on; }
 MITO_API void MITO(set_marks)(void *mp_, u64 soft, u64 hard) { Mito *m = (Mito *)mp_;
     m->pr.on = 1; m->pr.soft = soft; m->pr.hard = hard; m->pr.refusing = 0; m->pr.trims = m->pr.full_trims = m->pr.freed = 0;
     if (m->mem.all) { m->mem.all = 0; trim_all(&m->mem); } /* pressure needs exact accounting: give back what is not live, commit on demand from here */

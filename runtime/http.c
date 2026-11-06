@@ -17,6 +17,7 @@ void *mito_start(u64 budget, u64 seed);
 void mito_set_clock(void *m, i64 ms, int fixed);
 void mito_set_loop_budget(void *m, i64 n);
 void mito_set_marks(void *m, u64 soft, u64 hard);
+void mito_set_web_etag(void *m, int on);
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 const char *mito_response_head(void *m, u32 *len);
@@ -103,7 +104,7 @@ static int res_ensure(Res *r, u64 n) {
     r->committed = c; return 1;
 }
 /* rh: the answer's header lines from the program (content type, Location); hd: the head sent, status line to blank line */
-typedef struct { void *app; Sock listener; Res data, head, body, pairs; u8 *out; u32 carry; u32 rhn; char rh[4160]; char hd[4160 + 256]; } Conn;
+typedef struct { void *app; Sock listener; Res data, head, body, pairs; u8 *out, *gz; void *zs; u32 carry; u32 rhn; char rh[16448]; char hd[32768]; } Conn;
 /* the head search stops past 64 KB (at most one more 4 KB read), the body read past Content-Length (at most 1 MB) */
 #define HEAD_MAX (64 * 1024 + 4096)
 #define DATA_CAP (HEAD_MAX + 4 + (1 << 20) + 4096)
@@ -117,6 +118,123 @@ static void send_two(Sock c, const char *a, u32 an, const char *b, u32 bn) {
     u64 sent = os_send2(c, (const u8 *)a, an, (const u8 *)b, bn);
     if (sent < an) { send_all(c, a + sent, an - (u32)sent); send_all(c, b, bn); } else if (sent < (u64)an + bn) send_all(c, b + (sent - an), (u32)(an + bn - sent));
 }
+/* ---- the program's `web` block (src/web.rs): its header lines, ETags, gzip and static files ---- */
+static char lower_(char ch) { return ch >= 'A' && ch <= 'Z' ? (char)(ch + 32) : ch; }
+/* header lines s[0..n) (each ending CRLF): the value of the line named `name` (lowercase), and its length, or 0 */
+static const char *line_value(const char *s, u32 n, const char *name, u32 *vn) {
+    u32 nl = 0; while (name[nl]) nl++;
+    for (u32 i = 0; i < n;) {
+        u32 e = i; while (e < n && s[e] != '\r') e++;
+        if (e - i > nl && s[i + nl] == ':') {
+            u32 k = 0; while (k < nl && lower_(s[i + k]) == name[k]) k++;
+            if (k == nl) { u32 v = i + nl + 1; while (v < e && s[v] == ' ') v++; *vn = e - v; return s + v; }
+        }
+        i = e + 2;
+    }
+    return 0;
+}
+/* the request's header `name` (lowercase), or 0 */
+static const MitoPair *req_header(const MitoPair *p, u32 np, const char *name) {
+    u32 nl = 0; while (name[nl]) nl++;
+    for (u32 i = 0; i < np; i++) {
+        if (p[i].kn != nl) continue;
+        u32 k = 0; while (k < nl && lower_(p[i].k[k]) == name[k]) k++;
+        if (k == nl) return &p[i];
+    }
+    return 0;
+}
+#ifdef MITO_WEB
+/* Accept-Encoding names gzip (or *) without q=0 */
+static int accepts_gzip(const MitoPair *p, u32 np) {
+    const MitoPair *a = req_header(p, np, "accept-encoding"); if (!a) return 0;
+    for (u32 i = 0; i < a->vn;) {
+        while (i < a->vn && (a->v[i] == ' ' || a->v[i] == ',')) i++;
+        u32 w = i; while (i < a->vn && a->v[i] != ',' && a->v[i] != ';' && a->v[i] != ' ') i++;
+        int gz = (i - w == 4 && lower_(a->v[w]) == 'g' && lower_(a->v[w + 1]) == 'z' && lower_(a->v[w + 2]) == 'i' && lower_(a->v[w + 3]) == 'p') || (i - w == 1 && a->v[w] == '*');
+        /* parameters up to the next comma: q=0 (0, 0.0, 0.00, 0.000) refuses it */
+        int zero = 0;
+        while (i < a->vn && a->v[i] != ',') {
+            if (a->v[i] == 'q' && i + 2 < a->vn && a->v[i + 1] == '=' && a->v[i + 2] == '0') {
+                u32 j = i + 3; if (j < a->vn && a->v[j] == '.') { j++; while (j < a->vn && a->v[j] == '0') j++; }
+                zero = j >= a->vn || a->v[j] == ',' || a->v[j] == ' ' || a->v[j] == ';';
+            }
+            i++;
+        }
+        if (gz && !zero) return 1;
+    }
+    return 0;
+}
+/* the static file whose path is the target's (up to `?`), or -1: a binary search of the sorted table */
+static int static_find(const char *t, u32 tn) {
+    u32 n = 0; while (n < tn && t[n] != '?' && t[n] != '#') n++;
+    int lo = 0, hi = MITO_NSTATIC - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2; const MitoStatic *s = &mito_static[mid];
+        if (!s->path) return -1;
+        u32 k = 0, m = s->pn < n ? s->pn : n; int d = 0;
+        while (k < m && !(d = (int)(u8)s->path[k] - (int)(u8)t[k])) k++;
+        if (!d) d = (int)s->pn - (int)n;
+        if (!d) return mid;
+        if (d < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}
+static char g_last_modified[48]; /* the static files' Last-Modified: when the server started (by its clock) */
+/* an HTTP date (RFC 9110 IMF-fixdate) for ms since 1970 */
+static void http_date(i64 ms, char *o) {
+    static const char *dn[] = { "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" }, *mn[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    i64 s = ms / 1000, days = s / 86400, r = s % 86400; if (r < 0) { r += 86400; days--; }
+    const char *wd = dn[((days % 7) + 7) % 7];
+    /* civil from days (Howard Hinnant's algorithm) */
+    i64 z = days + 719468, era = (z >= 0 ? z : z - 146096) / 146097; i64 doe = z - era * 146097;
+    i64 yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365, y = yoe + era * 400, doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    i64 mp = (5 * doy + 2) / 153, d = doy - (153 * mp + 2) / 5 + 1, m = mp < 10 ? mp + 3 : mp - 9; if (m <= 2) y++;
+    u32 n = 0; const char *p;
+    for (p = wd; *p; p++) o[n++] = *p;
+    o[n++] = ','; o[n++] = ' '; o[n++] = (char)('0' + d / 10); o[n++] = (char)('0' + d % 10); o[n++] = ' ';
+    for (p = mn[m - 1]; *p; p++) o[n++] = *p;
+    o[n++] = ' '; o[n++] = (char)('0' + y / 1000 % 10); o[n++] = (char)('0' + y / 100 % 10); o[n++] = (char)('0' + y / 10 % 10); o[n++] = (char)('0' + y % 10);
+    o[n++] = ' '; o[n++] = (char)('0' + r / 36000); o[n++] = (char)('0' + r / 3600 % 10); o[n++] = ':'; o[n++] = (char)('0' + r % 3600 / 600); o[n++] = (char)('0' + r % 600 / 60);
+    o[n++] = ':'; o[n++] = (char)('0' + r % 60 / 10); o[n++] = (char)('0' + r % 10); o[n++] = ' '; o[n++] = 'G'; o[n++] = 'M'; o[n++] = 'T'; o[n] = 0;
+}
+#ifdef MITO_WEB_GZIP
+/* runtime/gzip.c with zlib (third_party/zlib), linked in: a deflate stream, and gzip `in` into `out` (room for mito_gzip_bound(n) bytes)
+   with it; the length written, 0 on failure */
+void *mito_gzip_new(void);
+u64 mito_gzip_with(void *st, const u8 *in, u64 n, u8 *out, u64 cap);
+u64 mito_gzip_bound(u64 n);
+static u8 *g_static_gz[MITO_NSTATIC]; static u64 g_static_gzn[MITO_NSTATIC];
+#endif
+#ifdef MITO_WEB_ETAG
+/* a weak ETag for an answer's bytes: W/"<32 hex digits>", two 64-bit hashes of the body */
+static void body_tag(const u8 *p, u32 n, char *o) {
+    u64 a = 0x9E3779B97F4A7C15ULL ^ n, b = 0xC2B2AE3D27D4EB4FULL + n;
+    u32 i = 0;
+    for (; i + 8 <= n; i += 8) { u64 w; memcpy(&w, p + i, 8); a = (a ^ w) * 0x100000001B3ULL; a ^= a >> 29; b = (b + w) * 0xFF51AFD7ED558CCDULL; b ^= b >> 32; }
+    for (; i < n; i++) { a = (a ^ p[i]) * 0x100000001B3ULL; b = (b + p[i]) * 0xFF51AFD7ED558CCDULL; }
+    a ^= a >> 33; a *= 0xC4CEB9FE1A85EC53ULL; a ^= a >> 33; b ^= b >> 31; b *= 0x94D049BB133111EBULL; b ^= b >> 29;
+    static const char hx[] = "0123456789abcdef";
+    o[0] = 'W'; o[1] = '/'; o[2] = '"';
+    for (int k = 0; k < 16; k++) { o[3 + k] = hx[(a >> (60 - 4 * k)) & 15]; o[19 + k] = hx[(b >> (60 - 4 * k)) & 15]; }
+    o[35] = '"'; o[36] = 0;
+}
+/* If-None-Match names the tag (weakly: W/ ignored on both sides) or is * */
+static int none_match(const MitoPair *p, u32 np, const char *tag) {
+    const MitoPair *h = req_header(p, np, "if-none-match"); if (!h) return 0;
+    for (u32 i = 0; i < h->vn;) {
+        while (i < h->vn && (h->v[i] == ' ' || h->v[i] == ',')) i++;
+        u32 b = i; while (i < h->vn && h->v[i] != ',') i++;
+        u32 e = i; while (e > b && h->v[e - 1] == ' ') e--;
+        const char *v = h->v + b; u32 vn = e - b;
+        if (vn == 1 && v[0] == '*') return 1;
+        if (vn >= 2 && v[0] == 'W' && v[1] == '/') { v += 2; vn -= 2; }
+        if (vn == 34) { u32 k = 0; while (k < 34 && v[k] == tag[2 + k]) k++; if (k == 34) return 1; }
+    }
+    return 0;
+}
+#endif
+#endif
+
 /* the lock around one program's handler (HTTP_SINGLE): several connection threads, one request in the program at a time */
 static Lock g_app_lock;
 /* Read one request from connection c and answer it. `first`: the connection's first request (an empty one is answered 400;
@@ -209,6 +327,34 @@ static int serve_one(Conn *x, Sock c, int first) {
     /* HEAD: answered as GET, with the same head and no body */
     int head_only = mn == 4 && method[0] == 'H' && method[1] == 'E' && method[2] == 'A' && method[3] == 'D';
     if (head_only) { method = "GET"; mn = 3; }
+    char *hd = x->hd; u32 n = 0; char num[24]; int dn;
+    #define HPUT(s) do { const char *s_ = (s); while (*s_ && n < sizeof x->hd) hd[n++] = *s_++; } while (0)
+    #define HPUTN(s, k) do { const char *s_ = (s); u32 k_ = (k); for (u32 i_ = 0; i_ < k_ && n < sizeof x->hd; i_++) hd[n++] = s_[i_]; } while (0)
+    #define HNUM(x_) do { u64 v_ = (u64)(x_); dn = 0; do { num[dn++] = (char)('0' + v_ % 10); v_ /= 10; } while (v_); while (dn && n < sizeof x->hd) hd[n++] = num[--dn]; } while (0)
+#ifdef MITO_WEB
+    /* a static file: answered before the endpoints, for GET and HEAD, whatever the query */
+    if (mn == 3 && method[0] == 'G' && method[1] == 'E' && method[2] == 'T') {
+        int si = static_find(target, tn);
+        if (si >= 0) {
+            const MitoStatic *s = &mito_static[si];
+            const char *bp = (const char *)s->data; u64 bn = s->len; int gz = 0;
+#ifdef MITO_WEB_GZIP
+            if (g_static_gz[si] && accepts_gzip((MitoPair *)x->pairs.p, np)) { bp = (const char *)g_static_gz[si]; bn = g_static_gzn[si]; gz = 1; }
+#endif
+            HPUT("HTTP/1.1 200 OK\r\nContent-Type: "); HPUT(s->type); HPUT("\r\n"); HPUT(s->headers);
+            HPUT("Last-Modified: "); HPUT(g_last_modified); HPUT("\r\n");
+#ifdef MITO_WEB_GZIP
+            HPUT("Vary: Accept-Encoding\r\n");
+#endif
+            if (gz) HPUT("Content-Encoding: gzip\r\n");
+            HPUT("Content-Length: "); HNUM(bn);
+            HPUT(keep ? "\r\nConnection: keep-alive\r\n\r\n" : "\r\nConnection: close\r\n\r\n");
+            send_two(c, hd, n, bp, head_only ? 0 : (u32)bn);
+            if (keep && rest) { memmove(x->data.p, x->data.p + be, rest); x->carry = rest; }
+            return keep;
+        }
+    }
+#endif
     if (g_timing) t_start = os_perf_ns();
 #ifdef HTTP_SINGLE
     lk_on(&g_app_lock);
@@ -225,25 +371,87 @@ static int serve_one(Conn *x, Sock c, int first) {
     resp = (const char *)x->out;
 #endif
     if (g_timing) t_end = os_perf_ns();
-    char *hd = x->hd; u32 n = 0; const char *r = reason(code);
-    #define HPUT(s) do { const char *s_ = (s); while (*s_ && n < sizeof x->hd) hd[n++] = *s_++; } while (0)
-    char num[24]; int dn;
-    HPUT("HTTP/1.1 "); { u64 v = (u64)code; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
-    HPUT(" "); HPUT(r); HPUT("\r\n");
-    for (u32 i = 0; i < x->rhn && n < sizeof x->hd; i++) hd[n++] = x->rh[i]; /* Content-Type and any other lines, each ending CRLF */
+#ifndef MITO_WEB
+    HPUT("HTTP/1.1 "); HNUM(code); HPUT(" "); HPUT(reason(code)); HPUT("\r\n");
+    HPUTN(x->rh, x->rhn); /* Content-Type and any other lines, each ending CRLF */
     /* every answer: the browser takes the content type as given; a page: scripts, styles and form targets only from this site */
     HPUT("X-Content-Type-Options: nosniff\r\n");
     { static const char html[] = "Content-Type: text/html"; u32 k = 0; while (html[k] && k < x->rhn && x->rh[k] == html[k]) k++;
       if (!html[k]) HPUT("Content-Security-Policy: default-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\nReferrer-Policy: same-origin\r\n"); }
-    HPUT("Content-Length: ");
-    { u64 v = rn; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
-    if (g_timing) {
-        u64 v = t_end - t_start;
-        HPUT("\r\nX-Handler-Ns: "); dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn];
+#else
+    {
+        /* the web block's answer: the program's lines, the block's lines it did not give, an ETag, Vary and gzip */
+        u32 vn; const MitoPair *pairs = (const MitoPair *)x->pairs.p;
+        int get = mn == 3 && method[0] == 'G';
+#ifdef MITO_WEB_ETAG
+        char tag[40]; int tagged = 0;
+        if (code == 200 && rn > 0 && get && !line_value(x->rh, x->rhn, "etag", &vn)) {
+            body_tag((const u8 *)resp, rn, tag); tagged = 1;
+            if (none_match(pairs, np, tag)) { code = 304; rn = 0; }
+        }
+#endif
+        HPUT("HTTP/1.1 "); HNUM(code); HPUT(" "); HPUT(reason(code)); HPUT("\r\n");
+        /* the program's lines, but Vary (merged below) and, on a 304, the content type */
+        for (u32 i = 0; i < x->rhn;) {
+            u32 e = i; while (e < x->rhn && x->rh[e] != '\r') e++;
+            int vary = e - i > 5 && lower_(x->rh[i]) == 'v' && lower_(x->rh[i + 1]) == 'a' && lower_(x->rh[i + 2]) == 'r' && lower_(x->rh[i + 3]) == 'y' && x->rh[i + 4] == ':';
+            int ctype = code == 304 && e - i > 13 && lower_(x->rh[i]) == 'c' && lower_(x->rh[i + 8]) == 't' && x->rh[i + 12] == ':';
+            if (!vary && !ctype) HPUTN(x->rh + i, e - i + 2);
+            i = e + 2;
+        }
+#ifdef MITO_WEB_HEADERS
+        /* the block's lines whose names the program did not give (Vary merged below; Cache-Control left to the ETag's when tagged) */
+        { const char *w = mito_web_headers; u32 wn = sizeof mito_web_headers - 1;
+          for (u32 i = 0; i < wn;) {
+              u32 e = i; while (e < wn && w[e] != '\r') e++;
+              u32 col = i; while (col < e && w[col] != ':') col++;
+              char name[72]; u32 nl = col - i < 71 ? col - i : 71; for (u32 k = 0; k < nl; k++) name[k] = lower_(w[i + k]); name[nl] = 0;
+              int skip = line_value(x->rh, x->rhn, name, &vn) != 0 || (nl == 4 && name[0] == 'v' && name[1] == 'a' && name[2] == 'r' && name[3] == 'y');
+#ifdef MITO_WEB_ETAG
+              { static const char cc[] = "cache-control"; u32 k = 0; while (k < 14 && name[k] == cc[k]) k++; if (tagged && mito_web_etag_cc[0] && k == 14) skip = 1; }
+#endif
+              if (!skip) HPUTN(w + i, e - i + 2);
+              i = e + 2;
+          }
+        }
+#endif
+#ifdef MITO_WEB_ETAG
+        if (tagged) {
+            HPUT("ETag: "); HPUT(tag); HPUT("\r\n");
+            if (mito_web_etag_cc[0] && !line_value(x->rh, x->rhn, "cache-control", &vn)) { HPUT("Cache-Control: "); HPUT(mito_web_etag_cc); HPUT("\r\n"); }
+        }
+#endif
+        /* Vary: the program's, else the block's, with Accept-Encoding added when a body may be compressed */
+        { const char *v = line_value(x->rh, x->rhn, "vary", &vn);
+#ifdef MITO_WEB_HEADERS
+          if (!v) v = line_value(mito_web_headers, sizeof mito_web_headers - 1, "vary", &vn);
+#endif
+          int ae = 0;
+#ifdef MITO_WEB_GZIP
+          ae = rn > 0;
+#endif
+          if (v || ae) {
+              HPUT("Vary: "); if (v) HPUTN(v, vn);
+              if (ae) { if (v && vn) HPUT(","); HPUT("Accept-Encoding"); }
+              HPUT("\r\n");
+          }
+        }
+#ifdef MITO_WEB_GZIP
+        if (rn > 0 && accepts_gzip(pairs, np)) {
+            u64 zn = mito_gzip_with(x->zs, (const u8 *)resp, rn, x->gz, mito_gzip_bound(OUT_CAP));
+            if (zn) { resp = (const char *)x->gz; rn = (u32)zn; HPUT("Content-Encoding: gzip\r\n"); }
+        }
+#endif
+        (void)get; (void)vn;
     }
+#endif
+    HPUT("Content-Length: "); HNUM(rn);
+    if (g_timing) { HPUT("\r\nX-Handler-Ns: "); HNUM(t_end - t_start); }
     HPUT(keep ? "\r\nConnection: keep-alive\r\n\r\n" : "\r\nConnection: close\r\n\r\n");
     send_two(c, hd, n, resp, head_only ? 0 : rn);
     #undef HPUT
+    #undef HPUTN
+    #undef HNUM
     if (keep && rest) { memmove(x->data.p, x->data.p + be, rest); x->carry = rest; }
     return keep;
 }
@@ -254,6 +462,10 @@ static Conn *conn_new(void *app, Sock listener) {
     if (!res_init(&x->data, DATA_CAP) || !res_init(&x->head, TEXT_CAP_) || !res_init(&x->body, TEXT_CAP_) || !res_init(&x->pairs, sizeof(MitoPair) * (u64)MAX_PAIRS)) return 0;
     x->out = (u8 *)os_alloc(OUT_CAP); /* the answer is copied here, so the program can take the next request while it is sent */
     if (!x->out) return 0;
+#ifdef MITO_WEB_GZIP
+    x->gz = (u8 *)os_alloc(mito_gzip_bound(OUT_CAP)); x->zs = mito_gzip_new(); /* a compressed answer, and the stream that writes it */
+    if (!x->gz || !x->zs) return 0;
+#endif
     return x;
 }
 /* Connections with a request waiting: a ring the poller fills and the connection threads empty. */
@@ -392,6 +604,24 @@ int main(int argc, char **argv) {
     if (marks) mito_set_marks(app, soft << 20, hard << 20);
     if (clocked) mito_set_clock(app, (i64)clock, 1);
     if (flag(argc, argv, "--loop-budget", &loop_budget)) mito_set_loop_budget(app, (i64)loop_budget);
+#ifdef MITO_WEB
+    /* the web block: static files dated when the server starts (by its clock), every answer tagged, static files compressed once */
+    http_date(clocked ? (i64)clock : os_now_ms(), g_last_modified);
+#ifdef MITO_WEB_ETAG
+    mito_set_web_etag(app, 1);
+#endif
+#ifdef MITO_WEB_GZIP
+    void *zs = mito_gzip_new();
+    if (!zs) { printf("error: no memory for gzip\n"); return 1; }
+    for (u32 i = 0; i < MITO_NSTATIC; i++) {
+        if (!mito_static[i].path) continue;
+        u64 cap = mito_gzip_bound(mito_static[i].len); u8 *b = (u8 *)os_alloc(cap);
+        if (!b) { printf("error: no memory to compress the static files\n"); return 1; }
+        g_static_gzn[i] = mito_gzip_with(zs, (const u8 *)mito_static[i].data, mito_static[i].len, b, cap);
+        g_static_gz[i] = g_static_gzn[i] ? b : 0;
+    }
+#endif
+#endif
     /* the program's tables: in --data (default ./data), data.db, SQLite's memory --db-memory MB (default 64); a database that does not fit
        the program stops the server here, saying why */
     if (mito_has_tables()) {

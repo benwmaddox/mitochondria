@@ -109,6 +109,7 @@ struct H {
     int (*tclear)(Ctx *, u32, u32);                              /* remove every row of a table (of one owner) */
     int (*texists)(Ctx *, u32, u32, u32 *);                      /* is there a row with this id (a stored id from working state) */
     int (*tmerge)(Ctx *, u32, u32, u32 *, int *);                /* a merged inner loop: the next row of this owner from the merge cursor */
+    int (*set_header)(Ctx *, const char *, u32, const Txt *);   /* a header line on the answer: name (checked when compiling), value (checked) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -689,9 +690,9 @@ static const unsigned char mito_lits[] = {{ {} }};
 /// The HTTP server and `main` (runtime/http.c), for executables.
 pub const HTTP: &str = include_str!("../runtime/http.c");
 
-/// One program as an executable's source: the program, then its HTTP server.
-pub fn program_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>) -> Result<Vec<String>, String> {
-    Ok(vec![program_c(prog, api, source)? + "#define HTTP_SINGLE\n" + HTTP])
+/// One program as an executable's source: the program, its `web` block's data (src/web.rs; empty without one), then its HTTP server.
+pub fn program_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>, web: &str) -> Result<Vec<String>, String> {
+    Ok(vec![program_c(prog, api, source)? + web + "#define HTTP_SINGLE\n" + HTTP])
 }
 
 /// A system as an executable's sources: its translation units, the HTTP server after the system's.
@@ -3415,6 +3416,15 @@ impl<'p> G<'p> {
             let t = self.txt_of(value).map_err(|_| "`set_cookie` takes the value as text".to_string())?;
             let age = self.int_or(age, 500, "`set_cookie` takes the number of seconds as an integer");
             self.call(&format!("c->h->set_cookie(c, {}, {}, &{}, {})", c_lit(name.as_bytes()), name.len(), t, age));
+            return Ok(CV::Null);
+        }
+        if bi == B::SetHeader {
+            // `set_header("Link", value)`: a header line on the answer, in place of the `web` block's line of that name
+            let [name, value] = <[CV; 2]>::try_from(a).map_err(|_| "`set_header` takes the name and the value: `set_header(\"Link\", links)`".to_string())?;
+            let CV::Lit(name) = name else { return no("`set_header`: the name is a literal, as in `set_header(\"Link\", ...)`") };
+            if let Err(e) = crate::web::header_name_ok(&name) { return no(format!("`set_header`: {}", e)); }
+            let t = self.txt_of(value).map_err(|_| "`set_header` takes the value as text".to_string())?;
+            self.call(&format!("c->h->set_header(c, {}, {}, &{})", c_lit(name.as_bytes()), name.len(), t));
             return Ok(CV::Null);
         }
         if bi == B::Truncate {

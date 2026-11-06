@@ -55,26 +55,54 @@ WINBASEAPI int WINAPI WideCharToMultiByte(UINT, DWORD, LPCWSTR, int, LPSTR, int,
 /// SQLite compiled to an object file by the compiler building the program (TinyCC or clang), once per compiler and flags, then reused from a cache in the temp directory (the clang build takes
 /// tens of seconds; nothing needs it twice). The file name carries a hash of what it was built from.
 pub fn sqlite_object(tcc: bool, opt: &str) -> Result<std::path::PathBuf, String> {
+    cached_object("SQLite", "sqlite-3540100", &[("sqlite3.c", SQLITE_C), ("sqlite3.h", SQLITE_H)], if tcc { SQLITE_TCC_SHIM } else { "#include \"sqlite3.c\"\n" }, SQLITE_FLAGS, tcc, opt)
+}
+
+/// zlib's deflate side (third_party/zlib) and runtime/gzip.c, for programs whose web block says `gzip;`: a unit that defines
+/// `MITO_USES_ZLIB` is linked with them.
+const ZLIB_FILES: &[(&str, &str)] = &[
+    ("adler32.c", include_str!("../third_party/zlib/adler32.c")), ("crc32.c", include_str!("../third_party/zlib/crc32.c")),
+    ("crc32.h", include_str!("../third_party/zlib/crc32.h")), ("deflate.c", include_str!("../third_party/zlib/deflate.c")),
+    ("deflate.h", include_str!("../third_party/zlib/deflate.h")), ("trees.c", include_str!("../third_party/zlib/trees.c")),
+    ("trees.h", include_str!("../third_party/zlib/trees.h")), ("zutil.c", include_str!("../third_party/zlib/zutil.c")),
+    ("zutil.h", include_str!("../third_party/zlib/zutil.h")), ("zlib.h", include_str!("../third_party/zlib/zlib.h")),
+    ("zconf.h", include_str!("../third_party/zlib/zconf.h")), ("gzguts.h", include_str!("../third_party/zlib/gzguts.h")),
+    ("gzip.c", include_str!("../runtime/gzip.c")),
+];
+/// zlib and the front end's gzip, as one object (cached as SQLite is).
+pub fn zlib_object(tcc: bool, opt: &str) -> Result<std::path::PathBuf, String> {
+    cached_object("zlib", "zlib-1.4", ZLIB_FILES, "#include \"adler32.c\"\n#include \"crc32.c\"\n#include \"deflate.c\"\n#include \"trees.c\"\n#include \"zutil.c\"\n#include \"gzip.c\"\n", &[], tcc, opt)
+}
+
+/// C sources (`files`, written beside `unit`, the file compiled) compiled to one object by the compiler building the program
+/// (TinyCC or clang), once per compiler and flags, then kept in a cache in the temp directory; the name carries a hash of what it was
+/// built from.
+fn cached_object(what: &str, tag: &str, files: &[(&str, &str)], unit: &str, flags: &[&str], tcc: bool, opt: &str) -> Result<std::path::PathBuf, String> {
     let cc = if tcc { tcc_exe() } else { clang().ok_or("clang not found (install LLVM, set MITO_CLANG, or build with --tcc)")? };
-    let mut args: Vec<String> = SQLITE_FLAGS.iter().map(|s| s.to_string()).collect();
+    let mut args: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
     if !tcc { args.push(opt.to_string()); args.push("-w".into()); if !cfg!(windows) { args.push("-fPIC".into()); } }
     else { args.push("-w".into()); if cfg!(windows) { let d = crate::tcc::dir(); args.push(format!("-I{}/include", d)); args.push(format!("-I{}/include/winapi", d)); } }
-    let key = { let mut h: u64 = 0xcbf29ce484222325; for b in cc.bytes().chain(args.join(" ").bytes()).chain(SQLITE_C.len().to_string().bytes()) { h = (h ^ b as u64).wrapping_mul(0x100000001b3); } h };
+    let key = {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in cc.bytes().chain(args.join(" ").bytes()).chain(unit.bytes()).chain(files.iter().flat_map(|f| f.1.bytes())) { h = (h ^ b as u64).wrapping_mul(0x100000001b3); }
+        h
+    };
     let dir = std::env::temp_dir().join("mitochondria-cache");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
-    let obj = dir.join(format!("sqlite-3540100-{:016x}.o", key));
+    let obj = dir.join(format!("{}-{:016x}.o", tag, key));
     if obj.exists() { return Ok(obj); }
-    // sqlite3.c beside a unit that includes it (after the shim, for TinyCC)
-    let sub = dir.join(format!("src-{}", std::process::id()));
+    // a directory of its own per compile (tests in one process may compile the same object at once)
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let sub = dir.join(format!("src-{}-{}-{}", tag, std::process::id(), n));
     std::fs::create_dir_all(&sub).map_err(|e| format!("{}: {}", sub.display(), e))?;
-    std::fs::write(sub.join("sqlite3.c"), SQLITE_C).map_err(|e| format!("{}: {}", sub.display(), e))?;
-    let _ = std::fs::write(sub.join("sqlite3.h"), SQLITE_H);
+    for (name, text) in files { std::fs::write(sub.join(name), text).map_err(|e| format!("{}: {}", sub.display(), e))?; }
     let src = sub.join("unit.c");
-    std::fs::write(&src, if tcc { SQLITE_TCC_SHIM } else { "#include \"sqlite3.c\"\n" }).map_err(|e| format!("{}: {}", src.display(), e))?;
-    let part = dir.join(format!("sqlite-{:016x}-{}.o.part", key, std::process::id()));
+    std::fs::write(&src, unit).map_err(|e| format!("{}: {}", src.display(), e))?;
+    let part = dir.join(format!("{}-{:016x}-{}-{}.o.part", tag, key, std::process::id(), n));
     let r = std::process::Command::new(&cc).args(&args).arg("-c").arg(&src).arg("-o").arg(&part).output().map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&sub);
-    if !r.status.success() { let _ = std::fs::remove_file(&part); return Err(format!("compiling SQLite failed:\n{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr))); }
+    if !r.status.success() { let _ = std::fs::remove_file(&part); return Err(format!("compiling {} failed:\n{}{}", what, String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr))); }
     if std::fs::rename(&part, &obj).is_err() && !obj.exists() { return Err(format!("{}: could not be kept", obj.display())); }
     let _ = std::fs::remove_file(&part);
     Ok(obj)
@@ -109,6 +137,7 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
     };
     cmd.arg("-o").arg(out).args(&cs);
     if sqlite { cmd.arg(sqlite_object(tcc, "-O2")?); } // SQLite, compiled by the same compiler, from its cache
+    if units.iter().any(|u| u.contains("#define MITO_USES_ZLIB")) { cmd.arg(zlib_object(tcc, "-O2")?); } // zlib for `gzip;`, likewise
     if !tcc && cfg!(windows) { cmd.arg("-lkernel32"); }
     for l in crate::tcc::LIBS { cmd.arg(format!("-l{}", l)); } // after the sources: system DLLs imported normally
     let r = cmd.output().map_err(|e| e.to_string())?;
@@ -155,6 +184,82 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A program's `web` block through the real server: its header lines (an endpoint's own replacing one), ETags and 304s, gzip
+    /// when accepted, static files (binary ones byte for byte, dated by the server's clock) and HEAD.
+    #[test]
+    fn a_web_block_shapes_answers() {
+        use std::io::{Read, Write};
+        let dir = std::env::temp_dir().join(format!("mito-web-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pub/assets")).unwrap();
+        let bin: Vec<u8> = (0..=255u8).collect();
+        std::fs::write(dir.join("pub/assets/b.png"), &bin).unwrap();
+        std::fs::write(dir.join("pub/robots.txt"), "User-agent: *\n").unwrap();
+        let src = "struct A { n: i64; }\nstate a: A;\nweb {\n    headers { \"X-Frame-Options\": \"SAMEORIGIN\"; \"Vary\": \"Accept\"; \"Cache-Control\": \"no-cache\"; }\n    etag \"max-age=0, private, must-revalidate\";\n    gzip;\n    static \"/\" from \"pub\" { \"Cache-Control\": \"public, max-age=60\"; }\n}\n@get(\"/p\") fn p() -> Response<html> { return ok(<p>{\"hello \" + str(a.n)}</p>); }\n@get(\"/deny\") fn deny() -> Response<html> { set_header(\"X-Frame-Options\", \"DENY\"); return ok(<p>no frames</p>); }\n";
+        let (st, code) = crate::source::load(src).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap();
+        let (w, line) = crate::web::find(src).unwrap();
+        let web = crate::web::c(&crate::web::parse(&w, line, &dir).unwrap());
+        let exe = dir.join(format!("web{}", std::env::consts::EXE_SUFFIX));
+        if super::clang().is_none() { return; }
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, &web).unwrap(), &exe, false, &["-O0"]).unwrap();
+        let port = 18000 + (std::process::id() % 1000) as u16;
+        let mut srv = std::process::Command::new(&exe).args(["--port", &port.to_string(), "--clock", "1772467200000"]).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        { use std::io::BufRead; let mut l = String::new(); std::io::BufReader::new(srv.stdout.take().unwrap()).read_line(&mut l).unwrap(); }
+        // one request on its own connection: (status line and headers, body)
+        let ask = |req: &str| -> (String, Vec<u8>) {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(format!("{}\r\nHost: x\r\nConnection: close\r\n\r\n", req).as_bytes()).unwrap();
+            let mut all = Vec::new(); s.read_to_end(&mut all).unwrap();
+            let he = all.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            (String::from_utf8_lossy(&all[..he]).into_owned(), all[he + 4..].to_vec())
+        };
+        let lines = |h: &str, name: &str| -> Vec<String> { h.lines().filter(|l| l.to_ascii_lowercase().starts_with(&format!("{}:", name))).map(|l| l[name.len() + 1..].trim().to_string()).collect() };
+        let crc32 = |b: &[u8]| -> u32 { let mut c = !0u32; for &x in b { c ^= x as u32; for _ in 0..8 { c = if c & 1 != 0 { (c >> 1) ^ 0xEDB88320 } else { c >> 1 }; } } !c };
+        let (h, body) = ask("GET /p HTTP/1.1");
+        assert!(h.starts_with("HTTP/1.1 200") && body == b"<p>hello 0</p>", "{}", h);
+        assert_eq!(lines(&h, "x-frame-options"), vec!["SAMEORIGIN"]);
+        assert_eq!(lines(&h, "vary"), vec!["Accept,Accept-Encoding"]);
+        assert_eq!(lines(&h, "cache-control"), vec!["max-age=0, private, must-revalidate"]); // the ETag's, in place of the block's
+        assert!(lines(&h, "content-security-policy").is_empty() && lines(&h, "content-encoding").is_empty());
+        let tag = lines(&h, "etag")[0].clone();
+        assert!(tag.starts_with("W/\"") && tag.len() == 36, "{}", tag);
+        // an endpoint's own line replaces the block's
+        let (h, _) = ask("GET /deny HTTP/1.1");
+        assert_eq!(lines(&h, "x-frame-options"), vec!["DENY"]);
+        // the browser has it: 304, no body, no content type, Vary without Accept-Encoding
+        let (h, body) = ask(&format!("GET /p HTTP/1.1\r\nIf-None-Match: {}", tag));
+        assert!(h.starts_with("HTTP/1.1 304") && body.is_empty() && lines(&h, "content-type").is_empty() && lines(&h, "vary") == vec!["Accept"], "{}", h);
+        // gzip when accepted (not with q=0): a gzip stream whose trailer gives the original's CRC-32 and length
+        let (h, body) = ask("GET /p HTTP/1.1\r\nAccept-Encoding: deflate, gzip;q=0.5");
+        assert_eq!(lines(&h, "content-encoding"), vec!["gzip"]);
+        let n = body.len();
+        assert!(body[0] == 0x1f && body[1] == 0x8b);
+        assert_eq!(u32::from_le_bytes(body[n - 4..].try_into().unwrap()), 14);
+        assert_eq!(u32::from_le_bytes(body[n - 8..n - 4].try_into().unwrap()), crc32(b"<p>hello 0</p>"));
+        let (h, _) = ask("GET /p HTTP/1.1\r\nAccept-Encoding: gzip;q=0");
+        assert!(lines(&h, "content-encoding").is_empty());
+        // a static file: before the endpoints, whatever the query, binary bytes as they are, dated by the server's clock
+        let (h, body) = ask("GET /assets/b.png?v=3 HTTP/1.1");
+        assert!(h.starts_with("HTTP/1.1 200") && body == bin, "{}", h);
+        assert_eq!(lines(&h, "content-type"), vec!["image/png"]);
+        assert_eq!(lines(&h, "cache-control"), vec!["public, max-age=60"]);
+        assert_eq!(lines(&h, "last-modified"), vec!["Mon, 02 Mar 2026 16:00:00 GMT"]);
+        assert_eq!(lines(&h, "vary"), vec!["Accept-Encoding"]);
+        assert!(lines(&h, "x-frame-options").is_empty());
+        let (h, body) = ask("GET /robots.txt HTTP/1.1\r\nAccept-Encoding: gzip");
+        let n = body.len();
+        assert!(lines(&h, "content-encoding") == vec!["gzip"] && u32::from_le_bytes(body[n - 8..n - 4].try_into().unwrap()) == crc32(b"User-agent: *\n"));
+        // HEAD: the same head, no body
+        let (h, body) = ask("HEAD /robots.txt HTTP/1.1");
+        assert!(h.starts_with("HTTP/1.1 200") && body.is_empty() && lines(&h, "content-length") == vec!["14"], "{}", h);
+        let (h, _) = ask("GET /missing.txt HTTP/1.1");
+        assert!(h.starts_with("HTTP/1.1 404"), "{}", h);
+        let _ = srv.kill(); let _ = srv.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A program's tables across builds, through the real server: created, then migrated by name (a column added, one dropped); a
     /// column whose type changed, or a row written from outside past a declared limit, stops the server at start, saying why.
     #[test]
@@ -172,7 +277,7 @@ int main(int argc, char **argv) {
             let exe = dir.join(format!("{}{}", n, std::env::consts::EXE_SUFFIX));
             // clang: Windows Defender's machine-learning heuristics now and then take a small unsigned TinyCC executable for malware
             // (Sabsik/Wacatac "!ml"), which would make this test about Defender instead of about migration
-            super::exe(&crate::cgen::program_exe(&prog, &api, None).unwrap(), &exe, false, &["-O0"]).unwrap();
+            super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O0"]).unwrap();
             exe
         };
         // a server that opened its tables keeps running: read its first line, then stop it; one that refused exits with the reason

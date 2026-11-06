@@ -141,7 +141,7 @@ fn http_servers_match_their_record() {
         let prog = crate::layout::Program::parse(&s).unwrap();
         let mut api = crate::lang::parse(&a).unwrap();
         crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
-        crate::cgen::program_exe(&prog, &api, None).unwrap()
+        crate::cgen::program_exe(&prog, &api, None, "").unwrap()
     };
     let dir = std::env::temp_dir().join(format!("mito-http-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -196,10 +196,10 @@ fn http_load() {
     let prog = crate::layout::Program::parse(&s).unwrap();
     let api = crate::cgen::check(&prog, &a).unwrap();
     let tcc = crate::build::clang().is_none();
-    let mut variants = vec![("this http.c".to_string(), crate::cgen::program_exe(&prog, &api, None).unwrap())];
+    let mut variants = vec![("this http.c".to_string(), crate::cgen::program_exe(&prog, &api, None, "").unwrap())];
     if let Ok(f) = std::env::var("MITO_LOAD_OTHER") {
         let other = std::fs::read_to_string(&f).unwrap();
-        let mut u = crate::cgen::program_exe(&prog, &api, None).unwrap();
+        let mut u = crate::cgen::program_exe(&prog, &api, None, "").unwrap();
         u[0] = u[0].replace(crate::cgen::HTTP, &other);
         variants.push((f, u));
     }
@@ -277,7 +277,7 @@ fn connection_floor() {
     let prog = crate::layout::Program::parse(&s).unwrap();
     let api = crate::cgen::check(&prog, &a).unwrap();
     let exe = std::env::temp_dir().join(format!("mito-floor-{}{}", std::process::id(), std::env::consts::EXE_SUFFIX));
-    crate::build::exe(&crate::cgen::program_exe(&prog, &api, None).unwrap(), &exe, crate::build::clang().is_none(), &[]).unwrap();
+    crate::build::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, crate::build::clang().is_none(), &[]).unwrap();
     let port = free_port();
     let _server = start_exe(&exe, port);
     let req = b"GET /nope HTTP/1.1\r\n\r\n";

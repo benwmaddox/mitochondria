@@ -1406,6 +1406,38 @@ static int h_sel_end(Ctx *c, u32 h) { M_(c)->sel.len = h; return 0; }
 
 /* ---- builtins (cgen BUILTINS order) ---- */
 static int arg_txt(Mito *m, const Val *a, u32 n, u32 i, T *out) { if (i >= n || a[i].tag != 4) return fail(m, 500, "expected a string argument"); out->off = a[i].a; out->len = a[i].b; return 0; }
+/* a time's text (`2026-03-02 16:00:00`, `.ffffff` to 9 digits, a `T` for the space and a final `Z` allowed) as microseconds since 1970 */
+static int time_parse(const u8 *s, u32 n, i64 *out) {
+    if (n < 19) return 0;
+    for (u32 i = 0; i < 19; i++) { int dig = i != 4 && i != 7 && i != 10 && i != 13 && i != 16; if (dig ? (s[i] < '0' || s[i] > '9') : 0) return 0; }
+    if (s[4] != '-' || s[7] != '-' || (s[10] != ' ' && s[10] != 'T') || s[13] != ':' || s[16] != ':') return 0;
+    i64 y = (s[0] - '0') * 1000 + (s[1] - '0') * 100 + (s[2] - '0') * 10 + (s[3] - '0'), mo = (s[5] - '0') * 10 + (s[6] - '0'), d = (s[8] - '0') * 10 + (s[9] - '0');
+    i64 h = (s[11] - '0') * 10 + (s[12] - '0'), mi = (s[14] - '0') * 10 + (s[15] - '0'), se = (s[17] - '0') * 10 + (s[18] - '0');
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || se > 60) return 0;
+    u32 i = 19; i64 us = 0;
+    if (i < n && s[i] == '.') { i++; i64 scale = 100000; u32 k = 0; while (i < n && s[i] >= '0' && s[i] <= '9') { if (k < 6) { us += (s[i] - '0') * scale; scale /= 10; } k++; i++; } if (!k || k > 9) return 0; }
+    if (i < n && s[i] == 'Z') i++;
+    if (i != n) return 0;
+    /* days from civil (Howard Hinnant's algorithm) */
+    i64 yy = mo <= 2 ? y - 1 : y, era = (yy >= 0 ? yy : yy - 399) / 400, yoe = yy - era * 400, mp = mo > 2 ? mo - 3 : mo + 9;
+    i64 doy = (153 * mp + 2) / 5 + d - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy, days = era * 146097 + doe - 719468;
+    *out = ((days * 86400 + h * 3600 + mi * 60 + se) * 1000000) + us;
+    return 1;
+}
+/* microseconds since 1970 as a time's text, as Rails writes one: `YYYY-MM-DD HH:MM:SS`, then `.ffffff` only when there are microseconds */
+static u32 time_text(i64 us, char *o) {
+    i64 s = us >= 0 ? us / 1000000 : -((-us + 999999) / 1000000), frac = us - s * 1000000, days = s >= 0 ? s / 86400 : -((-s + 86399) / 86400), r = s - days * 86400;
+    i64 z = days + 719468, era = (z >= 0 ? z : z - 146096) / 146097, doe = z - era * 146097;
+    i64 yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365, y = yoe + era * 400, doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    i64 mp = (5 * doy + 2) / 153, d = doy - (153 * mp + 2) / 5 + 1, mo = mp < 10 ? mp + 3 : mp - 9; if (mo <= 2) y++;
+    u32 n = 0;
+    o[n++] = (char)('0' + y / 1000 % 10); o[n++] = (char)('0' + y / 100 % 10); o[n++] = (char)('0' + y / 10 % 10); o[n++] = (char)('0' + y % 10); o[n++] = '-';
+    o[n++] = (char)('0' + mo / 10); o[n++] = (char)('0' + mo % 10); o[n++] = '-'; o[n++] = (char)('0' + d / 10); o[n++] = (char)('0' + d % 10); o[n++] = ' ';
+    o[n++] = (char)('0' + r / 36000); o[n++] = (char)('0' + r / 3600 % 10); o[n++] = ':'; o[n++] = (char)('0' + r % 3600 / 600); o[n++] = (char)('0' + r % 600 / 60); o[n++] = ':';
+    o[n++] = (char)('0' + r % 60 / 10); o[n++] = (char)('0' + r % 10);
+    if (frac) { o[n++] = '.'; for (i64 dv = 100000; dv; dv /= 10) o[n++] = (char)('0' + frac / dv % 10); }
+    return n;
+}
 /* ---- bytes, encodings and cryptography: builtins 17 to 34 (the primitives in runtime/crypto.c) ----
    Texts here are bytes (any bytes; a utf8 field holds them as they are). Results go in the text area. */
 /* room for `need` more bytes at the end of the text area, or 0 (the request fails: 507) */
@@ -1483,6 +1515,28 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
                 w[o++] = (u8)(hi << 4 | lo); i += 2;
             }
             else w[o++] = s[i];
+        }
+        return t_done(m, start, o, out); }
+    case 36: { /* format_time(t, "%Y-%m-%d"): a time (microseconds since 1970, UTC) written by the pattern: %Y %m %d %H %M %S, %L milliseconds,
+                  %N microseconds (6 digits), %s seconds since 1970, %%; other characters as they are */
+        if (n < 2 || a[0].tag != 1 || arg_txt(m, a, n, 1, &x)) return fail(m, 500, "format_time(time, \"pattern\")");
+        const u8 *f = t_ptr(m, x); char tx[40]; time_text(a[0].i, tx); /* YYYY-MM-DD HH:MM:SS[.ffffff] */
+        i64 us = a[0].i, frac = ((us % 1000000) + 1000000) % 1000000, secs = (us - frac) / 1000000;
+        if (!(w = t_room(m, (u64)x.len * 20 + 1))) return -1;
+        u64 o = 0;
+        for (u32 i = 0; i < x.len; i++) {
+            if (f[i] != '%' || i + 1 == x.len) { w[o++] = f[i]; continue; }
+            u8 d = f[++i]; const char *src = 0; u32 len = 0; char num[24];
+            switch (d) {
+                case 'Y': src = tx; len = 4; break; case 'm': src = tx + 5; len = 2; break; case 'd': src = tx + 8; len = 2; break;
+                case 'H': src = tx + 11; len = 2; break; case 'M': src = tx + 14; len = 2; break; case 'S': src = tx + 17; len = 2; break;
+                case 'L': num[0] = (char)('0' + frac / 100000); num[1] = (char)('0' + frac / 10000 % 10); num[2] = (char)('0' + frac / 1000 % 10); src = num; len = 3; break;
+                case 'N': for (int k = 0; k < 6; k++) { i64 dv = 100000; for (int j = 0; j < k; j++) dv /= 10; num[k] = (char)('0' + frac / dv % 10); } src = num; len = 6; break;
+                case 's': { i64 v = secs; int neg = v < 0; u64 uv = neg ? (u64)0 - (u64)v : (u64)v; char r[24]; int k = 0; do { r[k++] = (char)('0' + uv % 10); uv /= 10; } while (uv); if (neg) r[k++] = '-'; for (int j = 0; j < k; j++) num[j] = r[k - 1 - j]; src = num; len = (u32)k; break; }
+                case '%': src = "%"; len = 1; break;
+                default: return fail(m, 500, "format_time: the pattern's directives are %Y %m %d %H %M %S %L %N %s and %%");
+            }
+            memcpy(w + o, src, len); o += len;
         }
         return t_done(m, start, o, out); }
     case 35: { /* env("NAME"): the process's environment variable, or null when it is not set */
@@ -1831,12 +1885,23 @@ static int t_dbfail(Mito *m) {
     if ((ec & 0xFF) == 19) return fail(m, 409, "a row with those values already exists (a unique index)"); /* SQLITE_CONSTRAINT */
     err(m, E_FAIL, 500); a_str(&m->emsg, "database: "); a_str(&m->emsg, sqlite3_errmsg(st->db)); return -1;
 }
-static int t_val(Mito *m, sqlite3_stmt *s, int col, Val *out) {
-    switch (sqlite3_column_type(s, col)) {
-        case 1: *out = v_int(sqlite3_column_int64(s, col)); return 0;
-        case 2: *out = v_flt(sqlite3_column_double(s, col)); return 0;
-        case 3: { T t; if (t_push(m, sqlite3_column_text(s, col), (u64)sqlite3_column_bytes(s, col), &t)) return -1; *out = v_str(t); return 0; }
-        default: *out = v_null(); return 0;
+/* column `col` (as the program declares it: `c`) of the current row of statement s, read as its declared type whatever SQLite holds (another
+   program's tables are not STRICT): null for NULL; text over its declared most bytes, or a time that is not one, fails the request (500) */
+static int t_val(Mito *m, sqlite3_stmt *s, int col, const StoreCol *c, const char *table, Val *out) {
+    int ty = sqlite3_column_type(s, col);
+    if (ty == 5) { *out = v_null(); return 0; }
+    switch (c->type) {
+        case 0: *out = v_int(sqlite3_column_int64(s, col)); return 0;
+        case 1: *out = v_flt(sqlite3_column_double(s, col)); return 0;
+        case 2: {
+            const u8 *p = sqlite3_column_text(s, col); u64 n = (u64)sqlite3_column_bytes(s, col);
+            if (n > c->max) { err(m, E_FAIL, 500); a_str(&m->emsg, "a row of "); a_str(&m->emsg, table); a_str(&m->emsg, " holds a "); a_str(&m->emsg, c->name); a_str(&m->emsg, " longer than "); a_u64(&m->emsg, c->max); a_str(&m->emsg, " bytes, the program's limit"); return -1; }
+            T t; if (t_push(m, p, n, &t)) return -1; *out = v_str(t); return 0; }
+        case 4: {
+            const u8 *p = sqlite3_column_text(s, col); u32 n = (u32)sqlite3_column_bytes(s, col); i64 us;
+            if (!time_parse(p, n, &us)) { err(m, E_FAIL, 500); a_str(&m->emsg, "a row of "); a_str(&m->emsg, table); a_str(&m->emsg, " holds a "); a_str(&m->emsg, c->name); a_str(&m->emsg, " that is not a time: "); a_lossy(&m->emsg, p, n < 40 ? n : 40); return -1; }
+            *out = v_int(us); return 0; }
+        default: { T t; if (t_push(m, sqlite3_column_blob(s, col), (u64)sqlite3_column_bytes(s, col), &t)) return -1; *out = v_str(t); return 0; }
     }
 }
 static int t_bind(Mito *m, sqlite3_stmt *s, int at, const Val *v) {
@@ -1858,7 +1923,7 @@ static int t_get(Mito *m, u32 t, u32 rowid, u32 col, Val *out) {
         if (r != SQ_ROW) { sqlite3_reset(s); if (r == SQ_DONE) { err(m, E_FAIL, 404); a_str(&m->emsg, "no row "); a_u64(&m->emsg, rowid); a_str(&m->emsg, " in "); a_str(&m->emsg, st->tabs[t].sql); return -1; } return t_dbfail(m); }
         st->row = s; st->row_t = t; st->row_id = rowid; st->row_off = 0;
     }
-    return t_val(m, st->row, (int)(st->row_off + col), out);
+    return t_val(m, st->row, (int)(st->row_off + col), &st->tabs[t].cols[col], st->tabs[t].sql, out);
 }
 static int t_run(Mito *m, sqlite3_stmt *s) { int r = sqlite3_step(s); sqlite3_reset(s); return r == SQ_DONE || r == SQ_ROW ? 0 : t_dbfail(m); }
 #endif
@@ -1868,10 +1933,14 @@ static int h_tget(Ctx *c, u32 t, u32 rowid, u32 col, Val *out) { return t_get(M_
 static int h_tset(Ctx *c, u32 t, u32 rowid, u32 col, const Val *v) {
     Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
     if (v->tag == 4 && st->tabs[t].cols[col].ascii && not_ascii(m, t_ptr(m, (T){ v->a, v->b }), v->b)) return -1; /* an ascii<N> column */
-    sqlite3_stmt *s = st->ts[t].upd[col]; t_bind(m, s, 1, v); sqlite3_bind_int64(s, 2, (i64)rowid); return t_run(m, s);
+    sqlite3_stmt *s = st->ts[t].upd[col];
+    if (st->tabs[t].cols[col].type == 4 && v->tag == 1) { char tx[40]; u32 n = time_text(v->i, tx); sqlite3_bind_text(s, 1, tx, (int)n, (void (*)(void *))-1); } /* a time, as text (copied) */
+    else t_bind(m, s, 1, v);
+    sqlite3_bind_int64(s, 2, (i64)rowid); return t_run(m, s);
 }
 static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) {
     Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
+    if (st->noadd[t]) { err(m, E_FAIL, 500); a_str(&m->emsg, "cannot add a row: "); a_str(&m->emsg, st->noadd_msg[t]); return -1; }
     sqlite3_stmt *s = st->ts[t].ins; if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent);
     if (t_run(m, s)) return -1;
     i64 id = sqlite3_last_insert_rowid(st->db);
@@ -2278,6 +2347,14 @@ MITO_API const char *MITO(data_error)(void *mp_) {
 MITO_API int MITO(has_tables)(void) {
 #ifdef MITO_USES_SQLITE
     return 1;
+#else
+    return 0;
+#endif
+}
+/* Are the program's tables another program's (`extern`)? Then the server opens that database (`--db FILE`) instead of its own. */
+MITO_API int MITO(tables_extern)(void) {
+#ifdef MITO_USES_SQLITE
+    return MITO_NTABLES > 0 && mito_tables[0].ext;
 #else
     return 0;
 #endif

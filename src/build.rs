@@ -283,6 +283,108 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Another program's database (a Rails schema: `datetime(6)`, `varchar`, nullable `text`, `<name>_id`, unique indexes), through the real
+    /// server: read as its declared types (nullable text, times with and without microseconds, a reference), a time written back as Rails
+    /// writes one, and a database that does not fit refused at start, saying why; nothing in it created or changed in shape.
+    #[test]
+    fn extern_tables_use_another_programs_database() {
+        use std::io::{BufRead, Read, Write};
+        if super::clang().is_none() { return; }
+        let dir = std::env::temp_dir().join(format!("mito-extern-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("production.sqlite3");
+        // the other program's database, and a way to read it back
+        let tool = format!("#define MITO_USES_SQLITE\n{}\n{}", super::SQLITE_H, r#"
+#include <stdio.h>
+static unsigned char pool[4 << 20];
+static int row(void *u, int n, char **v, char **c) { for (int i = 0; i < n; i++) printf("%s%s", i ? "|" : "", v[i] ? v[i] : "NULL"); printf("\n"); return 0; }
+int main(int argc, char **argv) { sqlite3 *db; sqlite3_config(SQLITE_CONFIG_HEAP, pool, (int)sizeof pool, 64);
+    if (sqlite3_open(argv[1], &db) != SQLITE_OK) return 1;
+    return sqlite3_exec(db, argv[2], row, 0, 0) == SQLITE_OK ? 0 : 2; }
+"#);
+        let sq = dir.join(format!("sq{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&[tool], &sq, false, &["-O0"]).unwrap();
+        let sql = |q: &str| -> String { let o = std::process::Command::new(&sq).arg(&db).arg(q).output().unwrap(); assert!(o.status.success(), "{}", q); String::from_utf8_lossy(&o.stdout).trim().to_string() };
+        sql("PRAGMA journal_mode=WAL; CREATE TABLE accounts (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, created_at datetime(6) NOT NULL, custom_styles text, join_code varchar NOT NULL, name varchar NOT NULL, updated_at datetime(6) NOT NULL, singleton_guard integer DEFAULT 0 NOT NULL);
+            CREATE UNIQUE INDEX index_accounts_on_singleton_guard ON accounts (singleton_guard);
+            CREATE TABLE users (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, name varchar NOT NULL, email_address varchar, role integer DEFAULT 0 NOT NULL, created_at datetime(6) NOT NULL, updated_at datetime(6) NOT NULL);
+            CREATE UNIQUE INDEX index_users_on_email_address ON users (email_address);
+            CREATE TABLE sessions (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, user_id integer NOT NULL REFERENCES users(id), token varchar NOT NULL, last_active_at datetime(6) NOT NULL, created_at datetime(6) NOT NULL, updated_at datetime(6) NOT NULL);
+            CREATE UNIQUE INDEX index_sessions_on_token ON sessions (token); CREATE INDEX index_sessions_on_user_id ON sessions (user_id);
+            INSERT INTO accounts VALUES (873240054, '2026-01-01 16:00:00', NULL, 'Ab12', '37signals', '2026-01-01 16:00:00', 0);
+            INSERT INTO users VALUES (127326141, 'David', 'david@example.com', 1, '2026-01-02 16:00:00', '2026-01-02 16:00:00');
+            INSERT INTO sessions VALUES (481019661, 127326141, 'tok3n', '2026-03-02 14:00:00.123456', '2026-01-07 16:00:00', '2026-01-07 16:00:00');");
+        let program = |extra: &str| format!("struct Account {{ name: utf8<255>; custom_styles: utf8<65536>?; join_code: utf8<64>; updated_at: time; }}
+struct User {{ name: utf8<255>; email_address: utf8<255>?; role: i64; {} }}
+struct Session {{ user: User?; token: utf8<64>; last_active_at: time; }}
+struct Db {{ accounts: table<Account> extern; users: table<User> unique(email_address) extern; sessions: table<Session> unique(token) index(user) extern; }}
+state db: Db;
+@get(\"/account\") fn account() -> Response<html> {{
+    foreach a in db.accounts limit 1 {{ return ok(<p>{{a.name}} {{format_time(a.updated_at, \"%Y%m%d%H%M%S\")}} {{if exists(a.custom_styles) {{ \"styled\"; }} else {{ \"plain\"; }}}}</p>); }}
+    return ok(<p>no account</p>);
+}}
+@get(\"/sessions/{{token}}\") fn session(token: ascii<64>) -> Response<html> {{
+    let s = first s in db.sessions where s.token == token;
+    if !exists(s) {{ return ok(<p>signed out</p>); }}
+    let u = s.user;
+    if !exists(u) {{ return ok(<p>no user</p>); }}
+    return ok(<p>{{u.name}} {{format_time(s.last_active_at, \"%Y-%m-%d %H:%M:%S.%N\")}}</p>);
+}}
+@post(\"/sessions/{{token}}/touch\") fn touch(token: ascii<64>) -> Response<html> {{
+    let s = first s in db.sessions where s.token == token;
+    if exists(s) {{ s.last_active_at = 1772467200000005; }}
+    return ok(<p>ok</p>);
+}}
+", extra);
+        let build = |n: &str, src: &str| -> std::path::PathBuf {
+            let (st, code) = crate::source::load(src).unwrap();
+            let prog = crate::layout::Program::parse(&st).unwrap_or_else(|e| panic!("{}: {}", n, e));
+            let api = crate::cgen::check(&prog, &code).unwrap_or_else(|e| panic!("{}: {}", n, e));
+            let exe = dir.join(format!("{}{}", n, std::env::consts::EXE_SUFFIX));
+            super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O0"]).unwrap();
+            exe
+        };
+        let port = 17000 + (std::process::id() % 1000) as u16;
+        let start = |exe: &std::path::Path| -> (std::process::Child, String) {
+            let mut c = std::process::Command::new(exe).args(["--port", &port.to_string(), "--db"]).arg(&db).stdout(std::process::Stdio::piped()).spawn().unwrap();
+            let mut l = String::new(); std::io::BufReader::new(c.stdout.take().unwrap()).read_line(&mut l).unwrap();
+            (c, l.trim().to_string())
+        };
+        let ask = |req: &str| -> String {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(format!("{}\r\nHost: x\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", req).as_bytes()).unwrap();
+            let mut all = String::new(); s.read_to_string(&mut all).unwrap();
+            all.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+        };
+        let good = build("good", &program(""));
+        let (mut srv, line) = start(&good);
+        assert!(line.starts_with("tables in"), "{}", line);
+        assert_eq!(ask("GET /account HTTP/1.1"), "<p>37signals 20260101160000 plain</p>");
+        assert_eq!(ask("GET /sessions/tok3n HTTP/1.1"), "<p>David 2026-03-02 14:00:00.123456</p>");
+        assert_eq!(ask("GET /sessions/nope HTTP/1.1"), "<p>signed out</p>");
+        assert_eq!(ask("POST /sessions/tok3n/touch HTTP/1.1"), "<p>ok</p>");
+        let _ = srv.kill(); let _ = srv.wait();
+        assert_eq!(sql("SELECT last_active_at FROM sessions"), "2026-03-02 16:00:00.000005"); // as Rails writes it
+        sql("UPDATE accounts SET custom_styles = 'body {}'");
+        let (mut srv, _) = start(&good);
+        assert_eq!(ask("GET /account HTTP/1.1"), "<p>37signals 20260101160000 styled</p>");
+        let _ = srv.kill(); let _ = srv.wait();
+        // nothing created or changed in shape: the same three tables
+        assert_eq!(sql("SELECT group_concat(name) FROM (SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name)"), "accounts,sessions,users");
+        // what does not fit is refused at start, naming it
+        let fails = "error: the database does not fit the program: ";
+        assert_eq!(start(&build("missing", &program("bio: utf8<100>?;"))).1, format!("{}\"users\" has no column bio", fails));
+        assert_eq!(start(&build("notnull", &program("").replace("email_address: utf8<255>?;", "email_address: utf8<255>;"))).1, format!("{}column \"users\".email_address may be NULL in the database: declare the field nullable (`?`)", fails));
+        assert_eq!(start(&build("typed", &program("").replace("role: i64;", "role: utf8<10>;"))).1, format!("{}column \"users\".role is INTEGER in the database, TEXT in the program", fails));
+        assert_eq!(start(&build("noindex", &program("").replace("table<User> unique(email_address)", "table<User> unique(name)"))).1, format!("{}\"users\" has no unique index on (name), which the program declares", fails));
+        let other = dir.join("missing.sqlite3");
+        let mut c = std::process::Command::new(&good).args(["--port", &port.to_string(), "--db"]).arg(&other).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut l = String::new(); std::io::BufReader::new(c.stdout.take().unwrap()).read_line(&mut l).unwrap(); let _ = c.wait();
+        assert!(l.starts_with("error:") && !other.exists(), "{}", l); // another program's database is never created
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A program's tables across builds, through the real server: created, then migrated by name (a column added, one dropped); a
     /// column whose type changed, or a row written from outside past a declared limit, stops the server at start, saying why.
     #[test]

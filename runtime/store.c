@@ -24,6 +24,7 @@ i64 sqlite3_last_insert_rowid(sqlite3 *);
 int sqlite3_extended_errcode(sqlite3 *);
 i64 sqlite3_column_int64(sqlite3_stmt *, int);
 const unsigned char *sqlite3_column_text(sqlite3_stmt *, int);
+const void *sqlite3_column_blob(sqlite3_stmt *, int);
 int sqlite3_column_bytes(sqlite3_stmt *, int);
 const char *sqlite3_errmsg(sqlite3 *);
 #define SQ_OK 0
@@ -34,9 +35,11 @@ const char *sqlite3_errmsg(sqlite3 *);
 /* A column as the program declares it: SQLite type (0 INTEGER, 1 REAL, 2 TEXT, 3 BLOB), a range to check (when has_range), the most
    bytes of text, or the exact bytes of a fixed array (a BLOB of 0 bytes is the array's zeros). */
 /* ascii: text of bytes 0..127 only; decl: the column's declaration after its name; refers: the table a reference names (-1 none) */
-typedef struct { const char *name; u32 type; int has_range; i64 lo, hi; u32 max; int ascii; const char *decl; int refers; } StoreCol;
-/* A table: its quoted SQL name, its CREATE TABLE, its owner (-1 none), its columns, its indexes (CREATE INDEX statements) */
-typedef struct { const char *sql; const char *create; int parent; u32 ncols; const StoreCol *cols; const char *indexes; } StoreTable;
+/* type 4: a time, TEXT in SQLite (`2026-03-02 16:00:00[.ffffff]`), microseconds since 1970 in the program; nullable: the column may be NULL */
+typedef struct { const char *name; u32 type; int has_range; i64 lo, hi; u32 max; int ascii; const char *decl; int refers; int nullable; } StoreCol;
+/* A table: its quoted SQL name, its CREATE TABLE, its owner (-1 none), its columns, its indexes (CREATE INDEX statements); `ext`: another
+   program's table (checked, never created or changed), `need` the indexes it must have, one per line (`u` unique or `i`, columns) */
+typedef struct { const char *sql; const char *create; int parent; u32 ncols; const StoreCol *cols; const char *indexes; int ext; const char *need; } StoreTable;
 
 /* A table's statements, prepared once after migration: its row's columns by id, insert (with the owner's id for a nested table), delete,
    count (of one owner's rows), find (a row of one owner), and one update per column. `secret`: the column a session token checks, or -1. */
@@ -47,11 +50,13 @@ typedef struct { sqlite3_stmt *s; int own, on, pending, done; u32 t; } SqCursor;
 typedef struct { const char *sql; sqlite3_stmt *s; int busy; } SqCached;
 #define SQ_CURSORS 32
 #define SQ_CACHED 128
+#define SQ_TABLES 64
 /* The row cache: the last row read (table, id) and the statement holding it, `off` the column of its first field (1 in a cursor's
    statement, whose column 0 is the id); any write forgets it. */
 typedef struct { sqlite3 *db; sqlite3_stmt *begin, *commit, *rollback; int open; char err[1024];
     const StoreTable *tabs; u32 ntabs; TStmts *ts; SqCursor cur[SQ_CURSORS]; SqCached cached[SQ_CACHED]; u32 ncached;
-    sqlite3_stmt *row; u32 row_t, row_id, row_off; } Store;
+    sqlite3_stmt *row; u32 row_t, row_id, row_off;
+    u8 noadd[SQ_TABLES]; char noadd_msg[SQ_TABLES][200]; /* another program's table the program cannot add rows to, and why */ } Store;
 
 static const char *const sq_types[] = { "INTEGER", "REAL", "TEXT", "BLOB" };
 static const char *const sq_defaults[] = { "0", "0.0", "''", "x''" };
@@ -88,11 +93,69 @@ static void st_dropped(const char *what) { os_err("dropped: ", 9); u32 n = 0; wh
    else WAL commits synced at checkpoints (NORMAL: a process crash loses nothing, an OS crash or power cut can lose the last moments, never
    corrupts); 2 `drop`: what does not fit the program is dropped (a column whose type changed loses its values, a table whose owner changed
    its rows, rows past a declared limit are deleted with the rows they own), each said on standard error; without it the server refuses. */
+/* Does a column declared `ct` in another program's schema hold what the program's column type `type` reads? By SQLite's affinity rules
+   (a type naming INT is INTEGER, CHAR/CLOB/TEXT is TEXT, REAL/FLOA/DOUB is REAL), with Rails' `datetime`, `date`, `json` and `boolean` too. */
+static int sq_has(const char *s, const char *w) {
+    for (; *s; s++) { u32 k = 0; while (w[k] && ((s[k] | 32) == w[k])) k++; if (!w[k]) return 1; }
+    return 0;
+}
+static int sq_fits(const char *ct, u32 type) {
+    int integer = sq_has(ct, "int") || sq_has(ct, "bool"), text = sq_has(ct, "char") || sq_has(ct, "clob") || sq_has(ct, "text") || sq_has(ct, "json");
+    int real = sq_has(ct, "real") || sq_has(ct, "floa") || sq_has(ct, "doub") || sq_has(ct, "decimal") || sq_has(ct, "numeric");
+    int time = sq_has(ct, "date") || sq_has(ct, "time") || text;
+    switch (type) { case 0: return integer; case 1: return real || integer; case 2: return text; case 3: return sq_has(ct, "blob") || !ct[0]; case 4: return time; }
+    return 0;
+}
+/* Another program's table (`extern`): it must exist with every declared column, of a type the program can read, not NULL where the program
+   declares no `?`, with the indexes the program declares; nothing is created, changed or scanned. A NOT NULL column the program does not
+   declare and that has no default is noted: the program can read and change rows, not add them (st->noadd). */
+static int st_check_ext(Store *st, const StoreTable *tb, u32 t) {
+    char sqlb[1024], msg[1024], bare[300];
+    sq_bare(tb->sql, bare, sizeof bare);
+    if (st_int(st, "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1", bare) <= 0) return st_fail(st, "the database does not have the program's table", tb->sql);
+    SqBuf q = { sqlb, sizeof sqlb, 0 }; sb_s(&q, "SELECT name, type, \"notnull\", dflt_value IS NOT NULL, pk FROM pragma_table_info('"); sb_s(&q, bare); sb_s(&q, "')");
+    sqlite3_stmt *ti; if (sqlite3_prepare_v2(st->db, sqlb, -1, &ti, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
+    u32 seen[256] = { 0 };
+    while (sqlite3_step(ti) == SQ_ROW) {
+        const char *cn = (const char *)sqlite3_column_text(ti, 0), *ct = (const char *)sqlite3_column_text(ti, 1);
+        int notnull = (int)sqlite3_column_int64(ti, 2), dflt = (int)sqlite3_column_int64(ti, 3), pk = (int)sqlite3_column_int64(ti, 4);
+        u32 k = 0; while (k < tb->ncols && !sq_streq(tb->cols[k].name, cn)) k++;
+        if (k == tb->ncols) {
+            if (notnull && !dflt && !pk && !st->noadd[t]) { SqBuf m = { st->noadd_msg[t], sizeof st->noadd_msg[t], 0 }; sb_s(&m, "rows of "); sb_s(&m, tb->sql); sb_s(&m, " need "); sb_s(&m, cn); sb_s(&m, ", which the program does not declare"); st->noadd[t] = 1; }
+            continue;
+        }
+        if (k < 256) seen[k] = 1;
+        const StoreCol *c = &tb->cols[k];
+        SqBuf m = { msg, sizeof msg, 0 };
+        if (!sq_fits(ct ? ct : "", c->type)) { sb_s(&m, "column "); sb_s(&m, tb->sql); sb_s(&m, "."); sb_s(&m, cn); sb_s(&m, " is "); sb_s(&m, ct && ct[0] ? ct : "untyped"); sb_s(&m, " in the database, "); sb_s(&m, c->type == 4 ? "a time" : sq_types[c->type]); sb_s(&m, " in the program"); }
+        else if (!notnull && !c->nullable) { sb_s(&m, "column "); sb_s(&m, tb->sql); sb_s(&m, "."); sb_s(&m, cn); sb_s(&m, " may be NULL in the database: declare the field nullable (`?`)"); }
+        if (m.n) { sqlite3_finalize(ti); return st_fail(st, "the database does not fit the program", msg); }
+    }
+    sqlite3_finalize(ti);
+    for (u32 k = 0; k < tb->ncols && k < 256; k++) if (!seen[k]) { SqBuf m = { msg, sizeof msg, 0 }; sb_s(&m, tb->sql); sb_s(&m, " has no column "); sb_s(&m, tb->cols[k].name); return st_fail(st, "the database does not fit the program", msg); }
+    /* the declared indexes: an index whose first columns are those (a unique one: exactly those, unique) */
+    for (const char *nd = tb->need; *nd;) {
+        const char *e = nd; while (*e && *e != '\n') e++;
+        int uniq = nd[0] == 'u'; char want[300]; u32 wn = 0; for (const char *x = nd + 1; x < e && wn + 1 < sizeof want; x++) want[wn++] = *x; want[wn] = 0;
+        SqBuf a = { sqlb, sizeof sqlb, 0 };
+        sb_s(&a, "SELECT count(*) FROM pragma_index_list('"); sb_s(&a, bare); sb_s(&a, "') l WHERE (SELECT group_concat(name, ',') FROM (SELECT name FROM pragma_index_info(l.name) ORDER BY seqno)) ");
+        sb_s(&a, uniq ? "= ?1 AND l.\"unique\" = 1" : "|| ',' LIKE ?1 || ',%'");
+        if (st_int(st, sqlb, want) <= 0) { SqBuf m = { msg, sizeof msg, 0 }; sb_s(&m, tb->sql); sb_s(&m, uniq ? " has no unique index on (" : " has no index starting with ("); sb_s(&m, want); sb_s(&m, "), which the program declares"); return st_fail(st, "the database does not fit the program", msg); }
+        nd = *e ? e + 1 : e;
+    }
+    return 1;
+}
+
 static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *dir, const char *file, u64 pool_mb, int flags) {
     int full = flags & 1, dropmis = (flags & 2) != 0;
-    char path[1200]; SqBuf p = { path, sizeof path, 0 }; sb_s(&p, dir);
-    if (!os_mkdir(path)) return st_fail(st, "cannot make the data directory", path);
-    sb_s(&p, "/"); sb_s(&p, file);
+    int ext = ntabs && tabs[0].ext; /* another program's database: `file` is its path, opened as it is */
+    char path[1200]; SqBuf p = { path, sizeof path, 0 };
+    if (ext) sb_s(&p, file);
+    else {
+        sb_s(&p, dir);
+        if (!os_mkdir(path)) return st_fail(st, "cannot make the data directory", path);
+        sb_s(&p, "/"); sb_s(&p, file);
+    }
     if (!sq_configured) {
         /* SQLite's memory: one fixed pool for the process, given before anything opens */
         u64 n = (pool_mb ? pool_mb : 64) << 20;
@@ -100,9 +163,12 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         if (!pool || sqlite3_config(SQ_CONFIG_HEAP, pool, (int)n, 64) != SQ_OK) return st_fail(st, "cannot give SQLite its memory pool", 0);
         sq_configured = 1;
     }
-    if (sqlite3_open_v2(path, &st->db, 0x2 | 0x4, 0) != SQ_OK) return st_fail(st, path, st->db ? sqlite3_errmsg(st->db) : "cannot open"); /* READWRITE | CREATE */
+    if (ntabs > SQ_TABLES) return st_fail(st, "a program has at most 64 tables", 0);
+    /* READWRITE, and CREATE for the program's own database (another program's must be there) */
+    if (sqlite3_open_v2(path, &st->db, ext ? 0x2 : 0x2 | 0x4, 0) != SQ_OK) return st_fail(st, path, st->db ? sqlite3_errmsg(st->db) : "cannot open");
     if (!st_exec(st, full ? "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=OFF;" : "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;") || !st_exec(st, "BEGIN IMMEDIATE")) return 0;
     char sqlb[4096], msg[1024], bare[300];
+    if (ext) { for (u32 t = 0; t < ntabs; t++) if (!st_check_ext(st, &tabs[t], t)) return 0; goto prepared; }
     for (u32 t = 0; t < ntabs; t++) {
         const StoreTable *tb = &tabs[t];
         sq_bare(tb->sql, bare, sizeof bare);
@@ -207,6 +273,7 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         if (!st_exec(st, sqlb)) return 0;
     }
     for (u32 t = 0; t < ntabs; t++) if (tabs[t].indexes[0] && !st_exec(st, tabs[t].indexes)) return 0;
+prepared:
     if (!st_exec(st, "COMMIT") || !st_exec(st, "PRAGMA foreign_keys=ON")) return 0;
     if (sqlite3_prepare_v2(st->db, "BEGIN", -1, &st->begin, 0) != SQ_OK || sqlite3_prepare_v2(st->db, "COMMIT", -1, &st->commit, 0) != SQ_OK ||
         sqlite3_prepare_v2(st->db, "ROLLBACK", -1, &st->rollback, 0) != SQ_OK) return st_fail(st, "cannot prepare", sqlite3_errmsg(st->db));

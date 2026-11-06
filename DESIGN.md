@@ -152,6 +152,8 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   before each test), as a request without inputs whose writes are kept; a failure stops the server, saying why. It is never
   reachable as a request. It is where a program reads its environment (`env("SECRET_KEY_BASE")`, the variable's text or null) and
   keeps what it derives from it (a key from 1000 rounds of PBKDF2 is computed once, not per request).
+- **Times.** A `time` field is an i64 of microseconds since 1970 (UTC); in a table's row it is kept as text (docs/persistence.md).
+  `format_time(t, "%Y-%m-%d %H:%M:%S")` writes one out (%Y %m %d %H %M %S, %L milliseconds, %N microseconds, %s seconds, %%).
 - **Bytes, encodings and cryptography.** A text holds any bytes, so these work on texts and give texts (in the request's text area):
   `base64(t)` (padded), `base64_url(t)` (URL alphabet, no padding), `unbase64(t)` (either alphabet, padding optional; null if not
   base64), `hex(t)`, `form_encode(t)` / `form_decode(t)` (as `URI.encode_www_form_component`; null for a bad `%`), `xor_bytes(a, b)`

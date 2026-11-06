@@ -1,7 +1,8 @@
 # Persistence and outside libraries (design, 2026-11-05)
 
 Today a program's state lives only in its process: a restart, a crash or `serve --watch` rebuilding it starts from empty. This page records
-how data will be kept, and how programs reach outside C libraries. Nothing here is built yet.
+how data will be kept, and how programs reach outside C libraries. Built since (2026-11-05/06): `table<T>` with everything below,
+`extern` tables, `time` and nullable text columns; declared C functions are not built yet (system libraries come in as runtime built-ins).
 
 ## Decisions (Ben, 2026-11-05)
 
@@ -63,6 +64,30 @@ How the program's operations become SQL (statements prepared once at start, type
 
 Every read of a table is a query (fast for one row by id or an indexed field, a scan otherwise); in exchange a table has no fixed size,
 and removing any item keeps the others in insertion order (TodoMVC's `order` array goes away).
+
+### Columns beyond plain fields (2026-11-06)
+
+| In the row's struct | Its column |
+| --- | --- |
+| `owner: User?` (a reference) | `owner_id INTEGER`, NULL when unset, set to NULL when its row goes |
+| `bio: utf8<4000>?` (nullable text; table rows only) | `bio TEXT` that may be NULL: read as null, written with `= null` |
+| `created_at: time` | text as Rails and SQLite's date functions write it, `2026-03-02 16:00:00` with `.ffffff` only when there are microseconds; in the program an i64 of microseconds since 1970 (UTC); `format_time(t, "%Y%m%d%H%M%S")` writes one out |
+
+### Another program's database: `table<T> extern` (2026-11-06)
+
+A program can work on a database another program owns (the Campfire port on Rails' `production.sqlite3`): every table declared
+`users: table<User> unique(email_address) extern;`, the file named with `--db FILE` (`--data` is not used). Then:
+
+- the database must exist (it is never created); every table and declared column must be there, of a type the program reads by SQLite's
+  affinity rules (Rails' `varchar`, `text`, `json` as text, `datetime(6)` as a time, `integer`/`bigint`, `boolean`), not NULL where the
+  field has no `?`, and the declared indexes must exist (`unique` as a unique index); otherwise the server refuses to start, naming it;
+- nothing is created, migrated, dropped or scanned at start (the other program owns the schema); columns the program does not declare are
+  left alone;
+- values are read as the program declares them whatever SQLite holds (such tables are not STRICT); text longer than the field's limit, or
+  a time that is not one, fails that request (500) naming the column;
+- a NOT NULL column without a default that the program does not declare means the program can read and change rows but not add them:
+  `add` fails, saying which column; tables are a table of their own each (no nested tables);
+- a program's tables are all its own or all another's: one database.
 
 ## Build order
 

@@ -226,12 +226,12 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 36] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 37] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
     B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
-    // the process's environment: code 35
-    B::Env];
+    // the process's environment: code 35; a time as text: 36
+    B::Env, B::FormatTime];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
 const CRYPTO_BUILTINS: [B; 10] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck];
 
@@ -845,13 +845,16 @@ fn store_tables_c(prog: &Program) -> String {
             let max = match &c.kind { crate::layout::TKind::Text(m, _) => *m, crate::layout::TKind::Blob(sc, n) => sc.size() * n, _ => 0 };
             let ascii = matches!(c.kind, crate::layout::TKind::Text(_, true)) as u32;
             let refers = match c.kind { crate::layout::TKind::Ref(t) => t as i64, _ => -1 };
-            o += &format!(" {{ {}, {}, {}, {}, {}, {}, {}, {}, {} }},", c_lit(c.path.as_bytes()), c.kind.code(), has, i64_lit(lo), i64_lit(hi), max, ascii, c_lit(prog.col_decl(c).as_bytes()), refers);
+            o += &format!(" {{ {}, {}, {}, {}, {}, {}, {}, {}, {}, {} }},", c_lit(c.sql.as_bytes()), c.kind.code(), has, i64_lit(lo), i64_lit(hi), max, ascii, c_lit(prog.col_decl(c).as_bytes()), refers, c.null as u32);
         }
-        o += " { 0, 0, 0, 0, 0, 0, 0, 0, -1 } };\n";
+        o += " { 0, 0, 0, 0, 0, 0, 0, 0, -1, 0 } };\n";
     }
     o += "static const StoreTable mito_tables[] = {\n";
     for (t, tb) in prog.tables.iter().enumerate() {
-        o += &format!("    {{ {}, {}, {}, {}, mito_tcols{}, {} }},\n", c_lit(tb.sql.as_bytes()), c_lit(prog.table_create_sql(t).as_bytes()), tb.parent.map_or(-1, |p| p as i64), tb.cols.len(), t, c_lit(prog.table_index_sql(t).as_bytes()));
+        // another program's table: the indexes it must have, one per line (`u` unique or `i`, then the columns), checked at start
+        let need: String = tb.unique.iter().map(|fs| (1, fs)).chain(tb.index.iter().map(|fs| (0, fs)))
+            .map(|(u, fs)| format!("{}{}\n", if u == 1 { "u" } else { "i" }, fs.iter().map(|f| tb.cols.iter().find(|c| c.path == *f).map_or(f.clone(), |c| c.sql.clone())).collect::<Vec<_>>().join(","))).collect();
+        o += &format!("    {{ {}, {}, {}, {}, mito_tcols{}, {}, {}, {} }},\n", c_lit(tb.sql.as_bytes()), c_lit(prog.table_create_sql(t).as_bytes()), tb.parent.map_or(-1, |p| p as i64), tb.cols.len(), t, c_lit(prog.table_index_sql(t).as_bytes()), tb.ext as u32, c_lit(need.as_bytes()));
     }
     o += &format!("}};\n#define MITO_NTABLES {}\n", prog.tables.len());
     o
@@ -2858,6 +2861,10 @@ impl<'p> G<'p> {
                 TKind::Int(Scalar::Bool) => CV::Bool(format!("({}.i != 0)", v)),
                 TKind::Int(_) => { let x = CV::Int(format!("{}.i", v)); self.with_field_range(x, col.range) }
                 TKind::Real(_) => CV::Flt(format!("{}.f", v)),
+                // a time: the runtime reads the column's text as microseconds since 1970
+                TKind::Time => CV::Int(format!("{}.i", v)),
+                // a nullable column (`utf8<N>?`): null when the column is NULL
+                TKind::Text(..) if col.null => { let tt = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", tt, v, v, v)); CV::Txt(tt) }
                 TKind::Text(..) => { let tt = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", tt, v, v)); CV::Txt(tt) }
                 // a reference: null, or a row (SQLite makes it null when its row goes, so it names a live row)
                 TKind::Ref(target) => { let (s, k) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}.tag != 0, {} = (u32){}.i;", s, v, k, v)); CV::Ref(TBASE + target, s, k) }
@@ -2894,10 +2901,14 @@ impl<'p> G<'p> {
                 CV::Int(x)
             }
             TKind::Real(_) => match v { CV::Int(e) => CV::Flt(format!("(double)({})", e)), CV::Flt(e) => CV::Flt(e), _ => return no(format!("`{}` takes a number", path)) },
+            // a time: microseconds since 1970, written as text by the runtime
+            TKind::Time => { let x = self.int_or(v, 400, "a time field takes microseconds since 1970 (an integer)"); CV::Int(self.hold_int(x)) }
+            TKind::Text(..) if col.null && matches!(v, CV::Null) => CV::Null,
             TKind::Text(max, _) => {
                 let tt = self.txt_of(v).map_err(|_| format!("`{}` takes text", path))?;
                 let msg = format!("`{}` is at most {} bytes", path, max);
                 self.line(&format!("if (UNLIKELY({tt}.len > {max})) FAIL(413, {}, {});", c_lit(msg.as_bytes()), msg.len()));
+                if !col.null { let m2 = format!("`{}` cannot be null", path); self.line(&format!("if (UNLIKELY(!{tt}.present)) FAIL(400, {}, {});", c_lit(m2.as_bytes()), m2.len())); }
                 CV::Txt(tt)
             }
             TKind::Blob(..) => return no(format!("`{}` is a fixed array in a table's row: writing it is not compiled yet", path)),
@@ -2946,6 +2957,8 @@ impl<'p> G<'p> {
     /// `where` as SQL, when it is comparisons of the loop's row's fields with values the loop does not change, joined by `&&`
     /// (`t.done == false && t.rank > n`, `!t.done`): its conditions (`?n` for each value, numbered from `first`), the values, and the
     /// columns it uses. False when it is anything else.
+    /// A row field's column in SQL, quoted: its path, or for a reference `<path>_id`.
+    fn csql(&self, t: usize, path: &str) -> String { crate::layout::sql_ident(&self.prog.tables[t].cols.iter().find(|c| c.path == path).map_or(path.to_string(), |c| c.sql.clone())) }
     fn sql_where(&self, e: &'p Expr, slot: u32, t: usize, first: usize, conds: &mut Vec<String>, vals: &mut Vec<&'p Expr>, cols: &mut Vec<String>) -> bool {
         fn uses(e: &Expr, slot: u32) -> bool {
             match e {
@@ -2971,12 +2984,12 @@ impl<'p> G<'p> {
                     _ => return false,
                 };
                 vals.push(v);
-                conds.push(format!("{} {} ?{}", crate::layout::sql_ident(&f), if op == "==" { "=" } else { op }, first + vals.len()));
+                conds.push(format!("{} {} ?{}", self.csql(t, &f), if op == "==" { "=" } else { op }, first + vals.len()));
                 cols.push(f);
                 true
             }
-            Expr::Un('!', x) => match col(x) { Some(f) => { conds.push(format!("{} = 0", crate::layout::sql_ident(&f))); cols.push(f); true } None => false },
-            e => match col(e) { Some(f) => { conds.push(format!("{} != 0", crate::layout::sql_ident(&f))); cols.push(f); true } None => false },
+            Expr::Un('!', x) => match col(x) { Some(f) => { conds.push(format!("{} = 0", self.csql(t, &f))); cols.push(f); true } None => false },
+            e => match col(e) { Some(f) => { conds.push(format!("{} != 0", self.csql(t, &f))); cols.push(f); true } None => false },
         }
     }
     /// `foreach r in table [where ...] [reverse] [limit n]`: one query (written here, prepared once) whose cursor gives the rows' ids
@@ -2991,7 +3004,7 @@ impl<'p> G<'p> {
         }
         let tb = self.prog.tables[t].clone();
         let nested = tb.parent.is_some();
-        let mut sql = format!("SELECT id{} FROM {}", tb.cols.iter().map(|c| format!(", {}", crate::layout::sql_ident(&c.path))).collect::<String>(), tb.sql);
+        let mut sql = format!("SELECT id{} FROM {}", tb.cols.iter().map(|c| format!(", {}", crate::layout::sql_ident(&c.sql))).collect::<String>(), tb.sql);
         let mut conds: Vec<String> = Vec::new();
         if nested { conds.push("parent_id = ?1".into()); }
         let (mut wconds, mut wvals, mut wcols) = (Vec::new(), Vec::new(), Vec::new());
@@ -3016,7 +3029,7 @@ impl<'p> G<'p> {
             let n = nested as usize + wvals.len() + 1; // after the owner's and the `where`'s values
             let op = if it.reverse { "<" } else { ">" };
             conds.push(match &it.by {
-                Some(f) => format!("(?{n} IS NULL OR ({}, id) {op} ((SELECT {} FROM {} WHERE id = ?{n}), ?{n}))", crate::layout::sql_ident(f), crate::layout::sql_ident(f), tb.sql),
+                Some(f) => format!("(?{n} IS NULL OR ({}, id) {op} ((SELECT {} FROM {} WHERE id = ?{n}), ?{n}))", self.csql(t, f), self.csql(t, f), tb.sql),
                 None => format!("(?{n} IS NULL OR id {op} ?{n})"),
             });
             after_val = Some(a);
@@ -3032,7 +3045,7 @@ impl<'p> G<'p> {
                     return no(format!("`by {}` walks an index, and {} has none on `{}`: declare one (`{}: table<{}> index({})`)", f, tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
                 }
                 let d = if it.reverse { " DESC" } else { "" };
-                sql += &format!(" ORDER BY {}{}, id{}", crate::layout::sql_ident(f), d, d);
+                sql += &format!(" ORDER BY {}{}, id{}", self.csql(t, f), d, d);
             }
             None => sql += if it.reverse { " ORDER BY id DESC" } else { " ORDER BY id" },
         }
@@ -3072,7 +3085,7 @@ impl<'p> G<'p> {
                     if inner_ok {
                         let sub_limit = sql_limit.map_or(String::new(), |n| format!(" ORDER BY id LIMIT {}", n));
                         let outer_where = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
-                        let mut msql = format!("SELECT parent_id, id{} FROM {} WHERE parent_id IN (SELECT id FROM {}{}{})", ctb.cols.iter().map(|c| format!(", {}", crate::layout::sql_ident(&c.path))).collect::<String>(), ctb.sql, tb.sql, outer_where, sub_limit);
+                        let mut msql = format!("SELECT parent_id, id{} FROM {} WHERE parent_id IN (SELECT id FROM {}{}{})", ctb.cols.iter().map(|c| format!(", {}", crate::layout::sql_ident(&c.sql))).collect::<String>(), ctb.sql, tb.sql, outer_where, sub_limit);
                         for c in &iconds { msql += &format!(" AND {}", c); }
                         msql += " ORDER BY parent_id, id";
                         let mut mnames = names.clone();
@@ -3524,7 +3537,7 @@ impl<'p> G<'p> {
         // arity of the byte and crypto built-ins, checked when compiling
         let want = match bi {
             B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env => Some((1, "one argument")),
-            B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck => Some((2, "two arguments")),
+            B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime => Some((2, "two arguments")),
             B::GcmSeal | B::GcmOpen => Some((3, "the key, the 12-byte nonce and the text")),
             B::Pbkdf2Sha256 => Some((4, "the password, the salt, the iterations and the length")),
             _ => None,
@@ -3533,7 +3546,7 @@ impl<'p> G<'p> {
             if a.len() != k {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
                     B::RandomBytes => "random_bytes", B::Env => "env", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
-                    B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check",
+                    B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time",
                     B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));
             }
@@ -3555,7 +3568,7 @@ impl<'p> G<'p> {
                 B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot => CV::Int(format!("{}.i", r)),
                 B::SecretEqual | B::BcryptCheck => CV::Bool(format!("({}.i != 0)", r)),
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
-                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
+                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
                 B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
                 _ => CV::Any(r),

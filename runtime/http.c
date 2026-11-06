@@ -25,6 +25,7 @@ const char *mito_response_head(void *m, u32 *len);
 int mito_open_data(void *m, const char *dir, const char *file, u64 pool_mb, int full);
 const char *mito_data_error(void *m);
 int mito_has_tables(void);
+int mito_tables_extern(void);
 void mito_stop(void *m);
 #else
 void *mito_system_start(u64 seed, int seeded);
@@ -630,8 +631,16 @@ int main(int argc, char **argv) {
         const char *dir = sflag(argc, argv, "--data", "data");
         int full = db_sync(argc, argv);
         if (full < 0) { printf("error: --db-sync is full or normal, --db-fit refuse or drop\n"); mito_stop(app); return 1; }
-        if (!mito_open_data(app, dir, "data.db", dbmem, full)) { printf("error: %s\n", mito_data_error(app)); mito_stop(app); return 1; }
-        printf("tables in %s/data.db\n", dir);
+        if (mito_tables_extern()) {
+            /* another program's database (its tables are `extern`): named by --db, checked against the program, never changed in shape */
+            const char *db = sflag(argc, argv, "--db", 0);
+            if (!db) { printf("error: the program's tables are another program's (`extern`): name its database with --db FILE\n"); mito_stop(app); return 1; }
+            if (!mito_open_data(app, "", db, dbmem, full)) { printf("error: %s\n", mito_data_error(app)); mito_stop(app); return 1; }
+            printf("tables in %s\n", db);
+        } else {
+            if (!mito_open_data(app, dir, "data.db", dbmem, full)) { printf("error: %s\n", mito_data_error(app)); mito_stop(app); return 1; }
+            printf("tables in %s/data.db\n", dir);
+        }
     }
     /* the program's `@start` function, once, before any request: a failure stops the server, saying why */
     { int sc = mito_begin(app);

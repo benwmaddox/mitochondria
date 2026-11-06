@@ -398,6 +398,9 @@ fn unify(a: K, b: K) -> K {
 }
 
 thread_local! {
+    /// Ranges of plain integer fields worked out from the whole program (see `generate_with`): `.0` the ranges reads may assume, `.1` what
+    /// each field was seen given by every store compiled (None once a store's value has no proven range).
+    static FIELD_RANGES: std::cell::RefCell<(std::collections::HashMap<usize, (i64, i64)>, std::collections::HashMap<usize, Option<(i64, i64)>>)> = std::cell::RefCell::new(Default::default());
     /// The string literals of the program, each once, back to back: the runtime keeps them at the start of every
     /// request's text area, so a literal in generated code is a constant (offset, length) and costs nothing to use.
     static LITS: std::cell::RefCell<(Vec<u8>, Vec<(u32, u32)>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
@@ -911,7 +914,24 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
 
 /// `linkage`: "static " in a whole C program (only its `mito_*` interface is external), "" when the Rust runtime looks
 /// endpoints up by name.
+/// Generate the program twice when that helps. A plain integer field without a declared range whose every store in the program has a
+/// proven range (`size = n` with `n: i64 in 2..900`) is given the union of those ranges and 0, its value at start, for its reads; the
+/// second build is kept only if every store it compiled still lies within the ranges it assumed. Nothing else writes plain state:
+/// a failed request puts back values those same stores wrote.
 fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str, tests: bool) -> Generated {
+    FIELD_RANGES.with(|f| *f.borrow_mut() = Default::default());
+    let first = generate_once(prog, api, source, linkage, tests);
+    let seen = FIELD_RANGES.with(|f| std::mem::take(&mut f.borrow_mut().1));
+    let assume: std::collections::HashMap<usize, (i64, i64)> = seen.iter().filter_map(|(off, r)| r.map(|(lo, hi)| (*off, (lo.min(0), hi.max(0))))).collect();
+    if !first.notes.is_empty() || assume.is_empty() { return first; }
+    FIELD_RANGES.with(|f| *f.borrow_mut() = (assume.clone(), Default::default()));
+    let second = generate_once(prog, api, source, linkage, tests);
+    let seen2 = FIELD_RANGES.with(|f| std::mem::take(&mut *f.borrow_mut()).1);
+    let holds = assume.iter().all(|(off, (lo, hi))| match seen2.get(off) { Some(Some((a, b))) => a >= lo && b <= hi, Some(None) => false, None => true });
+    if holds && second.notes.is_empty() { second } else { first }
+}
+
+fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str, tests: bool) -> Generated {
     LITS.with(|l| *l.borrow_mut() = (Vec::new(), Vec::new()));
     let mut src = String::from(PRELUDE);
     let mut notes = Vec::new();
@@ -1407,6 +1427,15 @@ impl<'p> G<'p> {
     }
     /// Is the byte at plain-state offset `off` kept out of the undo log (an unlogged field)?
     fn unlogged_at(&self, off: usize) -> bool { self.prog.unlogged.iter().any(|(a, b)| off >= *a && off < *b) }
+    /// A store of `range` (None: not proven) into the plain integer field at `at`, for the whole-program field ranges.
+    fn field_store_seen(&mut self, at: usize, range: Option<(i64, i64)>) {
+        if self.prog.request.map_or(false, |(a, n)| at >= a && at < a + n) { return; } // the request struct starts zeroed every request; left alone
+        FIELD_RANGES.with(|fr| {
+            let mut fr = fr.borrow_mut();
+            let e = fr.1.entry(at).or_insert(range);
+            *e = match (*e, range) { (Some((a, b)), Some((c, d))) => Some((a.min(c), b.max(d))), _ => None };
+        });
+    }
     /// A value read from a field declared with a range: the range analysis may assume it.
     fn with_field_range(&mut self, v: CV, range: Option<(i64, i64)>) -> CV {
         match (v, range) {
@@ -1795,6 +1824,7 @@ impl<'p> G<'p> {
                         let range = sd.ranges[k];
                         self.may_write_plain(at)?;
                         if let Some(target) = self.prog.id_at(crate::layout::IdAt::Plain(at)) {
+                            self.field_store_seen(at, None);
                             let v = self.expr(rhs, env, None)?;
                             let v = self.id_store_value(target, v, f)?;
                             let vv = self.val(v)?;
@@ -1805,7 +1835,13 @@ impl<'p> G<'p> {
                         if code == 20 { if let Some((clear, pieces)) = str_pieces(&Expr::Field(base.clone(), f.clone()), rhs) { return self.str_append(if ascii { 4 } else { 0 }, format!("{}ULL", at), format!("{}ULL", cap), 0, clear, &pieces, env); } }
                         let v = self.expr(rhs, env, None)?;
                         if ascii { self.ascii_lit(&v, f)?; }
-                        let v = match range { Some(r) if code != 20 => self.in_field_range(v, r, f)?, _ => v };
+                        let mut v = match range { Some(r) if code != 20 => self.in_field_range(v, r, f)?, _ => v };
+                        if range.is_none() && (1..=8).contains(&code) {
+                            let v2 = match v { CV::Int(e) => { let n = self.hold_int(e); CV::Int(n) } v => v };
+                            let r = match &v2 { CV::Int(n) => self.interval(n), _ => None };
+                            self.field_store_seen(at, r);
+                            v = v2;
+                        }
                         let code = if ascii { 21 } else { code };
                         self.skip_save = self.unlogged_at(at) || (code != 21 && self.presaved(at, scalar_bytes(code) as usize));
                         if self.scalar_store(code, format!("{}ULL", at), &v, &format!("c->h->store_plain(c, {}, {}, {}, &@VAL)", at, code, cap), true, at % scalar_bytes(code) as usize == 0)? { return Ok(()); }
@@ -2546,6 +2582,7 @@ impl<'p> G<'p> {
                 let range = sd.ranges[k];
                 if ty.is_coll() { return Ok(CV::Coll(self.prog.plain_coll(off, sid, f).ok_or("plain collection")?, "0".into())); }
                 let v = self.plain(off + sd.offs[k], &ty, dead)?;
+                let range = range.or_else(|| FIELD_RANGES.with(|fr| fr.borrow().0.get(&(off + sd.offs[k])).copied()));
                 return Ok(self.with_field_range(v, range));
             }
             CV::Null => { let Some(l) = dead else { return no(format!("`.{}` of `null`", f)) }; self.line(&format!("goto {};", l)); return Ok(CV::Null); }

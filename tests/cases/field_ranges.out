@@ -1,0 +1,12 @@
+POST /fill -> 200 {"last":0}
+POST /size/10 -> 200 {}
+POST /fill -> 200 {"last":81}
+POST /size/3 -> 200 {}
+POST /fill -> 200 {"last":18}
+POST /size/11 -> 400 {"error":"`n`: 11 is outside 1..10"}
+POST /big/4611686018427387904 -> 200 {}
+GET /grow -> 500 {"error":"integer overflow","line":14}
+POST /big/21 -> 200 {}
+GET /grow -> 200 {"v":42}
+state <plain values> 824
+memory reserved=4096 committed=4096 live=824

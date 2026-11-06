@@ -970,3 +970,12 @@ the zero pages `prepare` fills).
 Whole suite against the previous compiler (3 rounds, pinned): geometric mean 0.977x. Etc::NeuralNet -27%, Calculator::Ast -11%,
 Base64 -7% to -9%, Maze::Generator -6%, the arithmetic coders -4%; Etc::Sieve +6% (no change in its code worth that; placement).
 All 41 against Rust: 0.886x time (Round 29: 0.909x), 0.94x memory.
+
+## Round 31: field ranges from the whole program (2026-11-05)
+
+Most ports keep their size in a plain `i64` field with no declared range, written only from a range-checked input (`m.n = n`). The
+compiler now builds the program once, noting the proven range of every value stored into each plain integer field; a field whose every
+store has one gets their union (with 0, its value at start) for its reads, and the program is built again with those ranges. The second
+build is kept only if each of its stores still lies within what it assumed. Across the ports: checked arithmetic 2809 to 2500 sites,
+index tests 2442 to 2280, versioning guards 219 to 170. Whole suite: geometric mean 0.994x of the previous compiler (Matmul::Single
+-9%, Compress::BWTEncode -10%; Etc::Words +8% with only held temporaries changed, placement). All 41 against Rust: 0.880x time.

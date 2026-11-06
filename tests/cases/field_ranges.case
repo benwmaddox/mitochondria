@@ -1,0 +1,28 @@
+// a plain integer field without a declared range whose every store has a proven range takes their union (and 0) for its reads, so
+// arithmetic and indexes on it lose their tests; a field also given an unproven value keeps every test (and its overflow still fails)
+--- program
+struct S { n: i64; m: i64; big: i64; cells: i64[100]; }
+state s: S;
+
+@post("/size/{n}")
+fn size(n: i64 in 1..10) -> Response<{}> { s.n = n; s.m = n * 10 - 1; return ok({}); }
+@post("/big/{v}")
+fn big(v: i64) -> Response<{}> { s.big = v; return ok({}); }
+@post("/fill")
+fn fill() -> Response<{ last: i64 }> {
+    foreach i in 0..s.n - 1 { foreach j in 0..s.n - 1 { s.cells[i * s.n + j] = i * j; } }
+    return ok({ last: s.cells[s.m] });
+}
+@get("/grow")
+fn grow() -> Response<{ v: i64 }> { return ok({ v: s.big * 2 }); }
+--- requests
+POST /fill
+POST /size/10
+POST /fill
+POST /size/3
+POST /fill
+POST /size/11
+POST /big/4611686018427387904
+GET /grow
+POST /big/21
+GET /grow

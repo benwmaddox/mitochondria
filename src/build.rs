@@ -17,9 +17,46 @@ pub fn tcc_exe() -> String {
 /// Is there a TinyCC to build with? (Without one, `--tcc` builds with clang -O0: slower to build, still quick.)
 pub fn has_tcc() -> bool { cfg!(windows) || on_path(&tcc_exe()) }
 
+/// SQLite's amalgamation (third_party/sqlite), for programs with a `table<T>`: a unit that defines `MITO_USES_SQLITE` is linked with it.
+pub const SQLITE_C: &str = include_str!("../third_party/sqlite/sqlite3.c");
+pub const SQLITE_H: &str = include_str!("../third_party/sqlite/sqlite3.h");
+/// How SQLite is compiled: connections used one thread each (a system's workers each have their own); its memory from one fixed pool the
+/// runtime gives it (MEMSYS5, so peak memory is declared); no extensions loaded from files, no deprecated or shared-cache code; double-quoted
+/// strings are not identifiers (one meaning only).
+pub const SQLITE_FLAGS: &[&str] = &["-DSQLITE_THREADSAFE=2", "-DSQLITE_ENABLE_MEMSYS5", "-DSQLITE_DEFAULT_MEMSTATUS=0", "-DSQLITE_OMIT_LOAD_EXTENSION",
+    "-DSQLITE_OMIT_DEPRECATED", "-DSQLITE_OMIT_SHARED_CACHE", "-DSQLITE_DQS=0", "-DSQLITE_LIKE_DOESNT_MATCH_BLOBS"];
+
+/// SQLite compiled to an object file (by clang: see `exe`), once per compiler and flags, then reused from a cache in the temp directory (the clang build takes
+/// tens of seconds; nothing needs it twice). The file name carries a hash of what it was built from.
+pub fn sqlite_object(tcc: bool, opt: &str) -> Result<std::path::PathBuf, String> {
+    let cc = if tcc { tcc_exe() } else { clang().ok_or("clang not found (install LLVM, set MITO_CLANG, or build with --tcc)")? };
+    let mut args: Vec<String> = SQLITE_FLAGS.iter().map(|s| s.to_string()).collect();
+    if !tcc { args.push(opt.to_string()); args.push("-w".into()); if !cfg!(windows) { args.push("-fPIC".into()); } } else { args.push("-w".into()); }
+    let key = { let mut h: u64 = 0xcbf29ce484222325; for b in cc.bytes().chain(args.join(" ").bytes()).chain(SQLITE_C.len().to_string().bytes()) { h = (h ^ b as u64).wrapping_mul(0x100000001b3); } h };
+    let dir = std::env::temp_dir().join("mitochondria-cache");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+    let obj = dir.join(format!("sqlite-3540100-{:016x}.o", key));
+    if obj.exists() { return Ok(obj); }
+    let src = dir.join(format!("sqlite3-{}.c", std::process::id()));
+    std::fs::write(&src, SQLITE_C).map_err(|e| format!("{}: {}", src.display(), e))?;
+    let _ = std::fs::write(dir.join("sqlite3.h"), SQLITE_H);
+    let part = dir.join(format!("sqlite-{:016x}-{}.o.part", key, std::process::id()));
+    let r = std::process::Command::new(&cc).args(&args).arg("-c").arg(&src).arg("-o").arg(&part).output().map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&src);
+    if !r.status.success() { let _ = std::fs::remove_file(&part); return Err(format!("compiling SQLite failed:\n{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr))); }
+    if std::fs::rename(&part, &obj).is_err() && !obj.exists() { return Err(format!("{}: could not be kept", obj.display())); }
+    let _ = std::fs::remove_file(&part);
+    Ok(obj)
+}
+
 /// Build C translation units into the executable `out`: with TinyCC (`tcc`), or else clang with `flags` (default -O3, the optimisation level of Rust's release profile, which the benchmarks compare with).
 pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -> Result<(), String> {
-    let tcc_wanted = tcc;
+    // a program with tables links SQLite, which TinyCC's bundle cannot compile (no system headers) or link (clang's objects): clang builds
+    // it, without optimising when TinyCC was asked for (still quick: SQLite itself comes from the cache)
+    let sqlite = units.iter().any(|u| u.contains("#define MITO_USES_SQLITE"));
+    let quick_sqlite = sqlite && tcc && flags.is_empty();
+    let tcc = tcc && !sqlite;
+    let tcc_wanted = tcc || quick_sqlite;
     let dir = std::env::temp_dir().join(format!("mito-build-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -44,6 +81,7 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
         c
     };
     cmd.arg("-o").arg(out).args(&cs);
+    if sqlite { cmd.arg(sqlite_object(false, "-O2")?); } // SQLite, from its cache
     if !tcc && cfg!(windows) { cmd.arg("-lkernel32"); }
     for l in crate::tcc::LIBS { cmd.arg(format!("-l{}", l)); } // after the sources: system DLLs imported normally
     let r = cmd.output().map_err(|e| e.to_string())?;
@@ -51,4 +89,42 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
     let _ = std::fs::remove_dir(&dir);
     if !r.status.success() { return Err(format!("{} failed:\n{}{}", if tcc { "tcc" } else { "clang" }, String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr))); }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The bundled SQLite builds with both compilers and works from its fixed memory pool: a file database in WAL mode, a row in and out.
+    #[test]
+    fn bundled_sqlite_builds_and_runs() {
+        let prog = format!("#define MITO_USES_SQLITE\n{}\n{}", super::SQLITE_H, r#"
+#include <stdio.h>
+static unsigned char pool[8 << 20];
+int main(int argc, char **argv) {
+    sqlite3 *db; sqlite3_stmt *st; int n = -1;
+    if (sqlite3_config(SQLITE_CONFIG_HEAP, pool, (int)sizeof pool, 64) != SQLITE_OK) return 2;
+    if (sqlite3_open(argv[1], &db) != SQLITE_OK) return 3;
+    if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT); INSERT INTO t(v) VALUES ('hello');", 0, 0, 0) != SQLITE_OK) return 4;
+    if (sqlite3_prepare_v2(db, "SELECT count(*) FROM t WHERE v = ?1", -1, &st, 0) != SQLITE_OK) return 5;
+    sqlite3_bind_text(st, 1, "hello", 5, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st); sqlite3_close(db);
+    printf("rows %d version %s\n", n, sqlite3_libversion());
+    return n == 1 ? 0 : 6;
+}
+"#);
+        let dir = std::env::temp_dir().join(format!("mito-sqlite-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for tcc in [true, false] {
+            if !tcc && super::clang().is_none() { continue; }
+            if tcc && !super::has_tcc() { continue; }
+            let exe = dir.join(format!("sq-{}{}", tcc, std::env::consts::EXE_SUFFIX));
+            super::exe(&[prog.clone()], &exe, tcc, &[]).unwrap_or_else(|e| panic!("tcc {}: {}", tcc, e));
+            let db = dir.join(format!("t-{}.db", tcc));
+            let _ = std::fs::remove_file(&db);
+            let out = std::process::Command::new(&exe).arg(&db).output().unwrap();
+            assert!(out.status.success(), "tcc {}: exit {:?} {}", tcc, out.status.code(), String::from_utf8_lossy(&out.stdout));
+            assert!(String::from_utf8_lossy(&out.stdout).contains("rows 1 version 3.54.1"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

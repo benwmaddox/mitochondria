@@ -19,16 +19,17 @@ void mito_set_loop_budget(void *m, i64 n);
 void mito_set_marks(void *m, u64 soft, u64 hard);
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
+const char *mito_response_head(void *m, u32 *len);
 #else
 void *mito_system_start(u64 seed, int seeded);
 void mito_system_set_clock(void *s, i64 ms, int fixed);
-int mito_system_request(void *s, const char *m, u32 mn, const char *t, u32 tn, const MitoPair *h, u32 nh, const char *body, u32 bn, u32 timeout_ms, char *out, u32 cap, u32 *outlen);
+int mito_system_request(void *s, const char *m, u32 mn, const char *t, u32 tn, const MitoPair *h, u32 nh, const char *body, u32 bn, u32 timeout_ms, char *out, u32 cap, u32 *outlen, char *head, u32 *headlen);
 #endif
 
 
 static const char *reason(int code) {
     switch (code) {
-        case 200: return "OK"; case 201: return "Created"; case 204: return "No Content"; case 400: return "Bad Request"; case 401: return "Unauthorized";
+        case 200: return "OK"; case 201: return "Created"; case 204: return "No Content"; case 303: return "See Other"; case 400: return "Bad Request"; case 401: return "Unauthorized";
         case 403: return "Forbidden"; case 404: return "Not Found"; case 409: return "Conflict"; case 413: return "Payload Too Large"; case 429: return "Too Many Requests";
         case 500: return "Internal Server Error"; case 503: return "Service Unavailable"; case 504: return "Gateway Timeout"; case 507: return "Insufficient Storage";
     }
@@ -95,7 +96,8 @@ static int res_ensure(Res *r, u64 n) {
     if (!os_commit(r->p, c)) return 0;
     r->committed = c; return 1;
 }
-typedef struct { void *app; Sock listener; Res data, head, body, pairs; u8 *out; u32 carry; } Conn;
+/* rh: the answer's header lines from the program (content type, Location); hd: the head sent, status line to blank line */
+typedef struct { void *app; Sock listener; Res data, head, body, pairs; u8 *out; u32 carry; u32 rhn; char rh[4160]; char hd[4160 + 256]; } Conn;
 /* the head search stops past 64 KB (at most one more 4 KB read), the body read past Content-Length (at most 1 MB) */
 #define HEAD_MAX (64 * 1024 + 4096)
 #define DATA_CAP (HEAD_MAX + 4 + (1 << 20) + 4096)
@@ -206,18 +208,21 @@ static int serve_one(Conn *x, Sock c, int first) {
     if (!utf8_valid((const u8 *)resp, rn)) rn = 0; /* a body that is not UTF-8 is sent empty */
     if (rn > OUT_CAP) rn = 0;
     memcpy(x->out, resp, rn); /* the program's response area is reused by the next request, which may run while this one is sent */
+    { const char *h = mito_response_head(x->app, &x->rhn); if (x->rhn > sizeof x->rh) x->rhn = 0; memcpy(x->rh, h, x->rhn); }
     lk_off(&g_app_lock);
     resp = (const char *)x->out;
 #else
-    code = mito_system_request(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, (const char *)body.p, body.len, 10000, (char *)x->out, OUT_CAP, &rn);
+    code = mito_system_request(x->app, method, mn, target, tn, (MitoPair *)x->pairs.p, np, (const char *)body.p, body.len, 10000, (char *)x->out, OUT_CAP, &rn, x->rh, &x->rhn);
     resp = (const char *)x->out;
 #endif
     if (g_timing) t_end = os_perf_ns();
-    char hd[240]; u32 n = 0; const char *r = reason(code);
-    #define HPUT(s) do { const char *s_ = (s); while (*s_ && n < sizeof hd) hd[n++] = *s_++; } while (0)
+    char *hd = x->hd; u32 n = 0; const char *r = reason(code);
+    #define HPUT(s) do { const char *s_ = (s); while (*s_ && n < sizeof x->hd) hd[n++] = *s_++; } while (0)
     char num[24]; int dn;
     HPUT("HTTP/1.1 "); { u64 v = (u64)code; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
-    HPUT(" "); HPUT(r); HPUT("\r\nContent-Type: application/json\r\nContent-Length: ");
+    HPUT(" "); HPUT(r); HPUT("\r\n");
+    for (u32 i = 0; i < x->rhn && n < sizeof x->hd; i++) hd[n++] = x->rh[i]; /* Content-Type and any other lines, each ending CRLF */
+    HPUT("Content-Length: ");
     { u64 v = rn; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
     if (g_timing) {
         u64 v = t_end - t_start;

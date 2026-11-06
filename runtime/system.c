@@ -53,7 +53,7 @@ static u32 box_recv(Box *b, u8 *out) {
 static void box_close(Box *b) { lk_on(&b->lk); b->closed = 1; lk_off(&b->lk); cv_all(&b->cv); }
 
 /* ---- reply slots: 0 free, 1 waiting for an answer, 2 answered, 3 abandoned by a caller that gave up ---- */
-typedef struct { Lock lk; Cond cv; u32 state, code, len; u8 *body; u64 committed; } Reply;
+typedef struct { Lock lk; Cond cv; u32 state, code, len, hlen; u8 *body; u64 committed; u8 head[4160]; } Reply; /* head: the answer's header lines */
 typedef struct { Lock lk; u32 *free; u32 nfree; } FreeList;
 typedef struct Sys Sys;
 typedef struct { Sys *sys; u32 kind, index, me; void *prog; u8 *msg; MitoPair *pairs; u32 maxpairs; OsThread thread; u64 handled, forwarded, restarts; } Worker;
@@ -73,11 +73,14 @@ static int reply_take(Sys *s, u32 *id) {
     return 1;
 }
 static void reply_free(Sys *s, u32 id) { lk_on(&s->fl.lk); s->fl.free[s->fl.nfree++] = id; lk_off(&s->fl.lk); }
-static void reply_put(Sys *s, u32 id, u32 code, const char *body, u32 n) {
+static const char json_head[] = "Content-Type: application/json\r\n";
+static void reply_put(Sys *s, u32 id, u32 code, const char *head, u32 hn, const char *body, u32 n) {
     if (id >= SYS_INFLIGHT) return;
     Reply *r = &s->replies[id];
     lk_on(&r->lk);
     if (r->state == 1) {
+        if (hn > sizeof r->head) hn = 0;
+        memcpy(r->head, head, hn); r->hlen = hn;
         if (n > REPLY_CAP) n = REPLY_CAP;
         if (n > r->committed) { u64 c = (n + 65535) / 65536 * 65536; if (c > REPLY_CAP) c = REPLY_CAP; os_commit(r->body, c); r->committed = c; }
         memcpy(r->body, body, n); r->len = n; r->code = code; r->state = 2;
@@ -87,7 +90,7 @@ static void reply_put(Sys *s, u32 id, u32 code, const char *body, u32 n) {
     if (r->state == 3) { r->state = 0; lk_off(&r->lk); reply_free(s, id); return; }
     lk_off(&r->lk);
 }
-static void reply_c(Sys *s, u32 id, u32 code, const char *msg) { u32 n = 0; while (msg[n]) n++; reply_put(s, id, code, msg, n); }
+static void reply_c(Sys *s, u32 id, u32 code, const char *msg) { u32 n = 0; while (msg[n]) n++; reply_put(s, id, code, json_head, sizeof json_head - 1, msg, n); }
 
 /* ---- a worker ---- */
 static void *make(Worker *w) {
@@ -146,9 +149,9 @@ static u32 worker_main(void *arg) {
             continue;
         }
         if (code != 0) {
-            u32 len; const char *resp = k->response(w->prog, &len);
+            u32 len, hn; const char *resp = k->response(w->prog, &len), *head = k->response_head(w->prog, &hn);
             lk_on(&s->lk); w->handled++; lk_off(&s->lk); /* counted before answering: a caller with its answer sees it */
-            reply_put(s, reply, (u32)code, resp, len);
+            reply_put(s, reply, (u32)code, head, hn, resp, len);
             continue;
         }
         u32 fk; i64 key;
@@ -203,12 +206,13 @@ MITO_API void *mito_system_start(u64 seed, int seeded) {
     return s;
 }
 MITO_API void mito_system_set_clock(void *sp, i64 ms, int fixed) { Sys *s = (Sys *)sp; lk_on(&s->lk); s->clock = ms; s->fixed = fixed; lk_off(&s->lk); }
-/* Send a request in at the entry worker and wait for its answer (copied into `out`). A session token with four parts
-   (shard.slot.generation.secret) goes to its shard; other requests are spread in turn. */
-MITO_API int mito_system_request(void *sp, const char *m, u32 mn, const char *t, u32 tn, const MitoPair *h, u32 nh, const char *body, u32 bn, u32 timeout_ms, char *out, u32 cap, u32 *outlen) {
+/* Send a request in at the entry worker and wait for its answer (copied into `out`, its header lines into `head`, which has room
+   for 4160 bytes). A session token with four parts (shard.slot.generation.secret) goes to its shard; other requests are spread in turn. */
+MITO_API int mito_system_request(void *sp, const char *m, u32 mn, const char *t, u32 tn, const MitoPair *h, u32 nh, const char *body, u32 bn, u32 timeout_ms, char *out, u32 cap, u32 *outlen, char *head, u32 *headlen) {
     Sys *s = (Sys *)sp;
     const char *err = 0; int code = 0;
     u32 id;
+    memcpy(head, json_head, sizeof json_head - 1); *headlen = sizeof json_head - 1;
     #define ANSWER(c, msg) do { u32 l_ = 0; while (msg[l_]) l_++; if (l_ > cap) l_ = cap; memcpy(out, msg, l_); *outlen = l_; return (c); } while (0)
     if (!reply_take(s, &id)) ANSWER(503, "{\"error\":\"too many requests in flight\"}");
     u32 n = s->counts[SYS_ENTRY];
@@ -242,6 +246,7 @@ MITO_API int mito_system_request(void *sp, const char *m, u32 mn, const char *t,
     code = (int)r->code;
     u32 l = r->len < cap ? r->len : cap;
     memcpy(out, r->body, l); *outlen = l;
+    memcpy(head, r->head, r->hlen); *headlen = r->hlen;
     r->state = 0;
     lk_off(&r->lk);
     reply_free(s, id);

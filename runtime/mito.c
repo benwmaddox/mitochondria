@@ -595,6 +595,8 @@ typedef struct Mito {
     u32 nquery; struct { T k, v; } query[MAX_QUERY];
     u32 njson; JField json[MAX_JSON];
     int ekind; int ecode; Area emsg; u8 ebuf[4096];
+    /* the answer's head: its content type (0 JSON, 1 HTML, 2 plain text) and header lines after it (`Location: ...\r\n`) */
+    u32 ctype; Area head; u8 hbuf[4096]; u8 hout[4096 + 64];
     Grow frees; /* (collection, item) pairs, u32 each */
     Grow sel;   /* items collected by loops (u32 each) */
     int crashed;
@@ -1556,11 +1558,33 @@ static int h_log(Ctx *c, u32 line, const Val *v, u32 n) {
     return 0;
 }
 
+/* ---- answers other than JSON ---- */
+static int h_answer(Ctx *c, u32 kind) { M_(c)->ctype = kind; return 0; }
+/* text sent as it is (an HTML or plain-text answer): from the text area, from state, from a text column */
+static int h_raw_txt(Ctx *c, const Txt *t) { Mito *m = M_(c); return a_put(&m->out, m->text.p + t->off, t->len) ? 0 : resp_full(m); }
+static int h_raw_at(Ctx *c, u64 at, u32 n) { Mito *m = M_(c); return a_put(&m->out, m->mem.base + at, n) ? 0 : resp_full(m); }
+static int h_raw_col(Ctx *c, u32 cid, u32 idx, u32 ci) {
+    Mito *m = M_(c); u64 a = caddr(m, cid, idx, ci); u32 n = (u32)rd(&m->mem, a, 4);
+    return a_put(&m->out, m->mem.base + a + 4, n) ? 0 : resp_full(m);
+}
+/* `see_other(path)`: 303 to a path on this server. The path starts with one `/` and is printable ASCII (no spaces, no line breaks),
+   so the answer can neither send the browser to another site nor add header lines of its own. */
+static int h_see_other(Ctx *c, const Txt *t) {
+    Mito *m = M_(c); const u8 *p = m->text.p + t->off; u32 n = t->len;
+    int ok = n >= 1 && p[0] == '/' && !(n >= 2 && (p[1] == '/' || p[1] == '\\'));
+    for (u32 i = 0; ok && i < n; i++) if (p[i] <= 0x20 || p[i] >= 0x7F) ok = 0;
+    if (!ok) return fail(m, 500, "see_other takes a path on this server: one leading /, printable ASCII, no spaces");
+    m->out.len = 0;
+    if (!(a_str(&m->head, "Location: ") && a_put(&m->head, p, n) && a_str(&m->head, "\r\n"))) return fail(m, 500, "redirect path too long");
+    return 0;
+}
+
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */
@@ -1589,7 +1613,7 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     m->areas = (u8 *)os_alloc(TEXT_CAP + RESPONSE_CAP);
     if (!m->areas) return 0;
     m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
-    m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf;
+    m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf; m->head.p = m->hbuf; m->head.cap = sizeof m->hbuf;
     m->rng = seed;
     m->loop_budget = 100000000;
     m->text_base = MITO_LITS_LEN;
@@ -1643,7 +1667,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
 /* Handle one request, with its headers and (in a system) the fields forwarded with it. Returns the status, or 0 when
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
-    m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE;
+    m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     u32 ei = route(m, (const u8 *)method, mn, t, q);
@@ -1689,6 +1713,7 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     else if (res > 0) { code = res; ok = 1; }
     else {
         ok = 0;
+        m->ctype = 0; m->head.len = 0; /* an error is answered in JSON */
         switch (m->ekind) {
             case E_FULL: { u8 b[4200]; Area x = { b, sizeof b, 0 }; a_str(&x, "capacity: "); a_put(&x, m->ebuf, m->emsg.len); out_err(m, b, x.len); code = 503; break; }
             case E_DEAD: out_err_c(m, "reference is not live"); code = 404; break;
@@ -1729,6 +1754,19 @@ MITO_API u32 MITO(test_count)(void) { return MITO_NTESTS; }
 MITO_API const char *MITO(test_name)(u32 k) { return mito_test_names[k]; }
 #endif
 MITO_API const char *MITO(response)(void *mp_, u32 *len) { Mito *m = (Mito *)mp_; *len = m->out.len; return (const char *)m->out.p; }
+/* The answer's header lines, each ending in CRLF: its content type, then any the program set (Location). */
+static const char *const ctypes[] = { "application/json", "text/html; charset=utf-8", "text/plain; charset=utf-8" };
+MITO_API const char *MITO(response_head)(void *mp_, u32 *len) { Mito *m = (Mito *)mp_;
+    static const char pre[] = "Content-Type: ";
+    u8 *b = m->hout; u32 n = 0;
+    const char *ct = ctypes[m->ctype < 3 ? m->ctype : 0];
+    for (const char *x = pre; *x; x++) b[n++] = (u8)*x;
+    for (const char *x = ct; *x; x++) b[n++] = (u8)*x;
+    b[n++] = '\r'; b[n++] = '\n';
+    u32 k = (u32)m->head.len; /* at most sizeof hbuf, and hout has room for it after the content type */
+    memcpy(b + n, m->head.p, k); n += k;
+    *len = n; return (const char *)b;
+}
 
 /* ---- in a system of workers ---- */
 MITO_API void MITO(set_system)(void *mp_, u32 nkinds, const char *const *names, const u32 *counts, u32 me_kind, u32 me_index) { Mito *m = (Mito *)mp_;

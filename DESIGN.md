@@ -109,6 +109,10 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
 - `Response<T>` declares the answer's JSON shape, checked against every answer when compiling. `ok` 200, `created`
   201, `no_content` 204, `status(code, x)`; `fail CODE "message"` ends a request with an error from any function. An
   item is written as its id (`"slot.generation"` for a checked pool).
+- `Response<html>` and `Response<text>` answer text as it is (`text/html` or `text/plain`, UTF-8). `return see_other("/path")`
+  answers 303 from any endpoint; the address must be a path on this server (one leading `/`, printable ASCII), checked when
+  compiling for a literal and when running otherwise, so a redirect can neither leave the site nor add header lines. Errors are
+  answered in JSON.
 - Collections are used through their functions: `add` (or `add { field: value }`), `try_add`, `remove`, `count`,
   `capacity`.
 

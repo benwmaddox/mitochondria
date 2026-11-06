@@ -90,9 +90,17 @@ pub fn clang_dll_units(srcs: &[&str], name: &str, extra: &[&str]) -> Result<*mut
     if h.is_null() { return Err(format!("could not load {}", dll.display())); }
     Ok(h)
 }
+/// An answer as the records show it: the body, after the header lines the program set (content type other than JSON, Location),
+/// in angle brackets; a JSON answer with no other header lines is the body alone, as before.
+fn with_head(head: &[u8], body: &str) -> String {
+    let head = String::from_utf8_lossy(head);
+    let lines: Vec<&str> = head.split("\r\n").filter(|l| !l.is_empty() && *l != "Content-Type: application/json").collect();
+    if lines.is_empty() { body.to_string() } else { format!("<{}> {}", lines.join(" | "), body) }
+}
 struct CFns {
     handle: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, u32, *const u8, u32, *const MitoPair, u32, *const MitoPair, u32, *const u8, u32) -> i32,
     response: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u32) -> *const u8,
+    head: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u32) -> *const u8,
     set_clock: unsafe extern "C" fn(*mut std::ffi::c_void, i64, i32),
     set_marks: unsafe extern "C" fn(*mut std::ffi::c_void, u64, u64),
     state: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u8, u32) -> u32,
@@ -118,7 +126,7 @@ impl CBackend {
         };
         unsafe {
             let start: unsafe extern "C" fn(u64, u64) -> *mut std::ffi::c_void = std::mem::transmute(sym("mito_start"));
-            let f = CFns { handle: std::mem::transmute(sym("mito_handle")), response: std::mem::transmute(sym("mito_response")), set_clock: std::mem::transmute(sym("mito_set_clock")),
+            let f = CFns { handle: std::mem::transmute(sym("mito_handle")), response: std::mem::transmute(sym("mito_response")), head: std::mem::transmute(sym("mito_response_head")), set_clock: std::mem::transmute(sym("mito_set_clock")),
                 set_marks: std::mem::transmute(sym("mito_set_marks")), state: std::mem::transmute(sym("mito_state")), stats: std::mem::transmute(sym("mito_stats")), stop: std::mem::transmute(sym("mito_stop")) };
             let m = start(1 << 30, 0x1234_5678_9abc_def0);
             assert!(!m.is_null(), "{}: mito_start failed", case.name);
@@ -144,7 +152,10 @@ impl Backend for CBackend {
         let mut n = 0u32;
         let p = unsafe { (self.f.response)(self.m, &mut n) };
         let body = unsafe { std::slice::from_raw_parts(p, n as usize) };
-        (code as u16, std::str::from_utf8(body).unwrap_or("").to_string())
+        let mut hn = 0u32;
+        let h = unsafe { (self.f.head)(self.m, &mut hn) };
+        let head = unsafe { std::slice::from_raw_parts(h, hn as usize) };
+        (code as u16, with_head(head, std::str::from_utf8(body).unwrap_or("")))
     }
     fn handle_quiet(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> u16 { self.call(m, t, h, b) as u16 }
     fn set_clock(&mut self, ms: i64) { unsafe { (self.f.set_clock)(self.m, ms, 1) } }
@@ -156,7 +167,7 @@ impl Backend for CBackend {
 /// A system of worker threads in C (runtime/system.c with each kind's program), built by TinyCC or clang.
 pub struct CSystemBackend { _code: Code, s: *mut std::ffi::c_void, f: SysFns, out: Vec<u8> }
 struct SysFns {
-    request: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, u32, *const u8, u32, *const MitoPair, u32, *const u8, u32, u32, *mut u8, u32, *mut u32) -> i32,
+    request: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, u32, *const u8, u32, *const MitoPair, u32, *const u8, u32, u32, *mut u8, u32, *mut u32, *mut u8, *mut u32) -> i32,
     set_clock: unsafe extern "C" fn(*mut std::ffi::c_void, i64, i32),
     report: unsafe extern "C" fn(*mut std::ffi::c_void, *mut u8, u32) -> u32,
     stop: unsafe extern "C" fn(*mut std::ffi::c_void),
@@ -187,9 +198,10 @@ impl Drop for CSystemBackend { fn drop(&mut self) { unsafe { (self.f.stop)(self.
 impl Backend for CSystemBackend {
     fn handle(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> (u16, String) {
         let pairs: Vec<MitoPair> = h.iter().map(|(k, v)| MitoPair { k: k.as_ptr(), kn: k.len() as u32, v: v.as_ptr(), vn: v.len() as u32 }).collect();
-        let mut n = 0u32;
-        let code = unsafe { (self.f.request)(self.s, m.as_ptr(), m.len() as u32, t.as_ptr(), t.len() as u32, pairs.as_ptr(), pairs.len() as u32, b.as_ptr(), b.len() as u32, 10_000, self.out.as_mut_ptr(), self.out.len() as u32, &mut n) };
-        (code as u16, String::from_utf8_lossy(&self.out[..n as usize]).into_owned())
+        let (mut n, mut hn) = (0u32, 0u32);
+        let mut head = vec![0u8; 4160];
+        let code = unsafe { (self.f.request)(self.s, m.as_ptr(), m.len() as u32, t.as_ptr(), t.len() as u32, pairs.as_ptr(), pairs.len() as u32, b.as_ptr(), b.len() as u32, 10_000, self.out.as_mut_ptr(), self.out.len() as u32, &mut n, head.as_mut_ptr(), &mut hn) };
+        (code as u16, with_head(&head[..hn as usize], &String::from_utf8_lossy(&self.out[..n as usize])))
     }
     fn handle_quiet(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> u16 { self.handle(m, t, h, b).0 }
     fn set_clock(&mut self, ms: i64) { unsafe { (self.f.set_clock)(self.s, ms, 1) } }
@@ -473,11 +485,11 @@ MITO_API int t_reply(void *sp) {
     Sys *s = (Sys *)sp; u32 a, b, c;
     if (!reply_take(s, &a) || !reply_take(s, &b)) return 1;
     if (reply_take(s, &c)) return 2; /* inflight 2 */
-    reply_put(s, a, 200, "x", 1);
+    reply_put(s, a, 200, json_head, sizeof json_head - 1, "x", 1);
     if (s->replies[a].state != 2 || s->replies[a].code != 200 || s->replies[a].len != 1) return 3;
     s->replies[a].state = 0; reply_free(s, a);
     s->replies[b].state = 3; /* its caller gave up, as mito_system_request does at its deadline */
-    reply_put(s, b, 200, "late", 4); /* the late answer frees the slot instead of being delivered */
+    reply_put(s, b, 200, json_head, sizeof json_head - 1, "late", 4); /* the late answer frees the slot instead of being delivered */
     if (s->replies[b].state != 0) return 4;
     return reply_take(s, &a) && reply_take(s, &c) ? 0 : 5;
 }

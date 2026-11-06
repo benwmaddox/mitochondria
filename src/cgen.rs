@@ -86,6 +86,11 @@ struct H {
     int (*id_get)(Ctx *, u32, i64, u32 *, u32 *);                /* a stored id read back: still that item (1, its index) or not (0) */
     int (*id_of)(Ctx *, u32, u32, i64 *);                       /* the stored id of an item (slot + 1, generation) */
     int (*log)(Ctx *, u32, const Val *, u32);                    /* `log(...)`: values on a line of standard error, with the source line */
+    int (*answer)(Ctx *, u32);                                   /* the answer's content type: 0 JSON, 1 HTML, 2 plain text */
+    int (*raw_txt)(Ctx *, const Txt *);                          /* text of the text area added to the answer as it is */
+    int (*raw_at)(Ctx *, u64, u32);                              /* n bytes of state at an offset added to the answer as they are */
+    int (*raw_col)(Ctx *, u32, u32, u32);                        /* a text column added to the answer as it is */
+    int (*see_other)(Ctx *, const Txt *);                        /* a 303 answer to a path on this server (checked) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -615,11 +620,11 @@ pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
     let mut table = String::from("/* ---- the system's worker kinds (generated) ---- */\ntypedef unsigned char u8; typedef unsigned short u16; typedef unsigned int u32; typedef unsigned long long u64; typedef long long i64;\n");
     table += OS;
     table += "typedef struct { const char *k; u32 kn; const char *v; u32 vn; } MitoPair;\n";
-    table += "typedef struct { const char *name; u32 count, mailbox, slot; u64 soft, hard; int marks;\n    void *(*start)(u64, u64); void (*stop)(void *); void (*set_clock)(void *, i64, int); void (*set_marks)(void *, u64, u64);\n    int (*handle)(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);\n    const char *(*response)(void *, u32 *); void (*set_system)(void *, u32, const char *const *, const u32 *, u32, u32);\n    u32 (*forward_to)(void *, u32 *, i64 *, MitoPair *, u32); void (*finish_forward)(void *, int); int (*crashed)(void *); } SysKind;\n";
-    let fns = ["start", "stop", "set_clock", "set_marks", "handle", "response", "set_system", "forward_to", "finish_forward", "crashed"];
+    table += "typedef struct { const char *name; u32 count, mailbox, slot; u64 soft, hard; int marks;\n    void *(*start)(u64, u64); void (*stop)(void *); void (*set_clock)(void *, i64, int); void (*set_marks)(void *, u64, u64);\n    int (*handle)(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);\n    const char *(*response)(void *, u32 *); void (*set_system)(void *, u32, const char *const *, const u32 *, u32, u32);\n    u32 (*forward_to)(void *, u32 *, i64 *, MitoPair *, u32); void (*finish_forward)(void *, int); int (*crashed)(void *);\n    const char *(*response_head)(void *, u32 *); } SysKind;\n";
+    let fns = ["start", "stop", "set_clock", "set_marks", "handle", "response", "set_system", "forward_to", "finish_forward", "crashed", "response_head"];
     let sigs = ["void *{}start(u64, u64);", "void {}stop(void *);", "void {}set_clock(void *, i64, int);", "void {}set_marks(void *, u64, u64);",
         "int {}handle(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);", "const char *{}response(void *, u32 *);",
-        "void {}set_system(void *, u32, const char *const *, const u32 *, u32, u32);", "u32 {}forward_to(void *, u32 *, i64 *, MitoPair *, u32);", "void {}finish_forward(void *, int);", "int {}crashed(void *);"];
+        "void {}set_system(void *, u32, const char *const *, const u32 *, u32, u32);", "u32 {}forward_to(void *, u32 *, i64 *, MitoPair *, u32);", "void {}finish_forward(void *, int);", "int {}crashed(void *);", "const char *{}response_head(void *, u32 *);"];
     let mut rows = Vec::new();
     let mut total = 0usize;
     for (i, k) in spec.kinds.iter().enumerate() {
@@ -632,7 +637,7 @@ pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
         for s in &sigs { table += &s.replace("{}", &pre); table.push('\n'); }
         let f: Vec<String> = fns.iter().map(|f| format!("{}{}", pre, f)).collect();
         rows.push(format!("    {{ {}, {}, {}, {}, {}ULL, {}ULL, {}, {} }}", c_lit(k.name.as_bytes()), k.count, k.mailbox, k.slot, k.soft.unwrap_or(0), k.hard.unwrap_or(usize::MAX), k.soft.is_some() as i32,
-            f.iter().zip(["(void *(*)(u64, u64))", "", "", "", "", "", "", "", "", ""]).map(|(n, c)| format!("{}{}", c, n)).collect::<Vec<_>>().join(", ")));
+            f.iter().zip(["(void *(*)(u64, u64))", "", "", "", "", "", "", "", "", "", ""]).map(|(n, c)| format!("{}{}", c, n)).collect::<Vec<_>>().join(", ")));
     }
     const MB: usize = 1 << 20;
     if total > spec.budget { return Err(format!("over budget: {} workers need {} MB, budget is {} MB", spec.kinds.iter().map(|k| k.count).sum::<usize>(), total / MB, spec.budget / MB)); }
@@ -2112,8 +2117,30 @@ impl<'p> G<'p> {
                 }
             }
             Stmt::Fail(code, m) => self.fail(*code, m),
+            Stmt::Respond(303, Json::E(e)) => {
+                // `see_other(path)`: from any endpoint, whatever its Response<T>; the runtime checks the path is on this server
+                let v = self.expr(e, env, None)?;
+                if let CV::Lit(s) = &v {
+                    let b = s.as_bytes();
+                    if !(b.first() == Some(&b'/') && !matches!(b.get(1), Some(b'/' | b'\\')) && b.iter().all(|c| *c > 0x20 && *c < 0x7F)) {
+                        return no(format!("`see_other(\"{}\")`: the address is a path on this server, one leading `/`, printable ASCII, no spaces (encode them as %20)", s));
+                    }
+                }
+                let t = self.txt_of(v).map_err(|_| "`see_other` takes the path as text, as in `see_other(\"/active\")`".to_string())?;
+                self.call(&format!("c->h->see_other(c, &{})", t));
+                self.line("return 303;");
+            }
+            Stmt::Respond(code, Json::E(e)) if matches!(&self.ep.resp, crate::lang::RType::Name(n) if n == "html" || n == "text") => {
+                // an HTML or plain-text answer: the text sent as it is
+                let kind = if matches!(&self.ep.resp, crate::lang::RType::Name(n) if n == "html") { 1 } else { 2 };
+                let v = self.expr(e, env, None)?;
+                self.call(&format!("c->h->answer(c, {})", kind));
+                self.raw(v, if kind == 1 { "html" } else { "text" })?;
+                self.line(&format!("return {};", code));
+            }
             Stmt::Respond(code, j) => {
                 let resp = self.ep.resp.clone();
+                if matches!(&resp, crate::lang::RType::Name(n) if n == "html" || n == "text") { return no(format!("a Response<{}> answer is text: `ok(page.html)`, `ok(\"...\")`", show_rtype(&resp))); }
                 let shape = self.json(j, env, Some(&resp))?;
                 if let Err(e) = fits_shape(self.prog, &shape, &self.ep.resp, "") { return no(format!("the answer is {}, not Response<{}>: {}", shape, show_rtype(&self.ep.resp), e)); }
                 self.line(&format!("return {};", code));
@@ -3467,6 +3494,18 @@ impl<'p> G<'p> {
         }
     }
 
+    /// Text added to the answer as it is (an HTML or plain-text answer).
+    fn raw(&mut self, v: CV, what: &str) -> R<()> {
+        match v {
+            CV::Lit(s) => self.out(&s),
+            CV::Txt(t) => self.line(&format!("if ({}.present) CALL(c->h->raw_txt(c, &{}));", t, t)),
+            CV::PlainStr(off) => { let at = self.sub_bytes_at(&CV::PlainStr(off), "0"); let n = self.field_len(&CV::PlainStr(off)); self.call(&format!("c->h->raw_at(c, {}, (u32)({}))", at, n)); }
+            CV::Sub(base, from, count) => { let at = self.sub_bytes_at(&base, &from); self.call(&format!("c->h->raw_at(c, {}, (u32)({}))", at, count)); }
+            CV::StateStr(c, idx, ci) => self.call(&format!("c->h->raw_col(c, {}, {}, {})", c, idx, ci)),
+            _ => return no(format!("a Response<{}> answer is text", what)),
+        }
+        Ok(())
+    }
     fn out(&mut self, text: &str) { if !text.is_empty() { self.call(&format!("c->h->out(c, {}, {})", c_lit(text.as_bytes()), text.len())); } }
     fn write(&mut self, v: CV) -> R<()> {
         match v {

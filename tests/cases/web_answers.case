@@ -1,0 +1,32 @@
+// answers other than JSON: Response<html> and Response<text> send their text as it is with that content type; see_other(path)
+// answers 303 with a Location on this server from any endpoint (a path built at run time is checked: one leading /, printable ASCII)
+--- program
+struct Page { title: utf8<64>; next: ascii<64>; visits: i64; }
+state page: Page;
+
+@get("/")
+fn home() -> Response<html> { page.visits += 1; return ok("<!doctype html><title>Home</title><p>hello</p>"); }
+@get("/title")
+fn title() -> Response<html> { return ok(page.title); }
+@get("/plain")
+fn plain() -> Response<text> { return ok("just text\n"); }
+@post("/title/{t}")
+fn set_title(t: utf8<64>) -> Response<{}> { page.title = t; return see_other("/title"); }
+@post("/next/{n}")
+fn set_next(n: ascii<64>) -> Response<{}> { page.next = n; return ok({}); }
+@post("/go")
+fn go() -> Response<html> { return see_other(page.next); }
+@get("/count")
+fn count() -> Response<{ visits: i64 }> { return ok({ visits: page.visits }); }
+--- requests
+GET /
+GET /plain
+POST /title/caf%C3%A9
+GET /title
+POST /next/%2Factive%3Fx%3D1
+POST /go
+POST /next/%2F%2Fevil.example
+POST /go
+POST /next/%2Fa%20b
+POST /go
+GET /count

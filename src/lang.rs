@@ -475,17 +475,17 @@ impl P {
         }
         if self.is_kw("return") {
             self.i += 1;
-            // in an endpoint, the answer: ok(...) 200, created(...) 201, no_content() 204, status(code, ...)
+            // in an endpoint, the answer: ok(...) 200, created(...) 201, no_content() 204, status(code, ...), see_other(path) 303
             if self.in_endpoint {
                 let how = self.here_word();
-                let code: u16 = match how.as_str() { "ok" => 200, "created" => 201, "no_content" => 204, "status" => 0, _ => return Err("an endpoint returns its answer: `return ok(...)`, `created(...)`, `no_content()` or `status(code, ...)`".into()) };
+                let code: u16 = match how.as_str() { "ok" => 200, "created" => 201, "no_content" => 204, "status" => 0, "see_other" => 303, _ => return Err("an endpoint returns its answer: `return ok(...)`, `created(...)`, `no_content()`, `status(code, ...)` or `see_other(path)`".into()) };
                 self.i += 1; self.eat("(")?;
                 let code = if code == 0 {
                     let c = self.int()?;
                     if !(200..300).contains(&c) { return Err(format!("`status({}, ...)`: an answer is a success (2xx); end with `fail {} \"...\"` for an error", c, c)); }
                     self.eat(",")?; c as u16
                 } else { code };
-                let j = if code == 204 { Json::Empty } else { self.json()? };
+                let j = if code == 204 { Json::Empty } else if code == 303 { Json::E(self.expr()?) } else { self.json()? };
                 self.eat(")")?; self.eat(";")?;
                 return Ok(Stmt::Respond(code, j));
             }

@@ -1,0 +1,57 @@
+// arrays of structs in items: one array column per field, read and written as item.vals[i].a, moved together, rolled back with the request
+--- program
+struct P { a: i64; b: i64; }
+struct Box { n: i64; vals: P[4]; }
+struct App { boxes: pool<Box, 4>; }
+state app: App;
+
+@post("/make")
+fn make() -> Response<{ id: i64 }> {
+    let b = app.boxes.add();
+    return ok({ "id": slot(b) });
+}
+@post("/set/{i}/{v}")
+fn set(i: i64 in 0..3, v: i64) -> Response<{ ok: bool }> {
+    let b = app.boxes[0];
+    b.vals[i].a = v;
+    b.vals[i].b = v * 2;
+    return ok({ "ok": true });
+}
+@post("/setfail/{i}/{v}")
+fn setfail(i: i64 in 0..3, v: i64) -> Response<{ ok: bool }> {
+    let b = app.boxes[0];
+    b.vals[i].a = v;
+    fail 409 "no";
+}
+@post("/shift")
+fn shift() -> Response<{ ok: bool }> {
+    let b = app.boxes[0];
+    b.vals.move(0, 1, 3);
+    return ok({ "ok": true });
+}
+@get("/get/{i}")
+fn get(i: i64 in 0..3) -> Response<{ a: i64, b: i64 }> {
+    let b = app.boxes[0];
+    return ok({ "a": b.vals[i].a, "b": b.vals[i].b });
+}
+@get("/bad/{i}")
+fn bad(i: i64) -> Response<{ a: i64 }> {
+    let b = app.boxes[0];
+    return ok({ "a": b.vals[i].a });
+}
+--- requests
+POST /make
+POST /set/0/10
+POST /set/1/11
+POST /set/2/12
+POST /set/3/13
+GET /get/0
+GET /get/3
+POST /shift
+GET /get/0
+GET /get/1
+GET /get/3
+POST /setfail/0/99
+GET /get/0
+GET /bad/7
+GET /bad/-1

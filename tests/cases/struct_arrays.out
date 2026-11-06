@@ -1,0 +1,18 @@
+POST /make -> 200 {"id":0}
+POST /set/0/10 -> 200 {"ok":true}
+POST /set/1/11 -> 200 {"ok":true}
+POST /set/2/12 -> 200 {"ok":true}
+POST /set/3/13 -> 200 {"ok":true}
+GET /get/0 -> 200 {"a":10,"b":20}
+GET /get/3 -> 200 {"a":13,"b":26}
+POST /shift -> 200 {"ok":true}
+GET /get/0 -> 200 {"a":10,"b":20}
+GET /get/1 -> 200 {"a":10,"b":20}
+GET /get/3 -> 200 {"a":12,"b":24}
+POST /setfail/0/99 -> 409 {"error":"no","line":22}
+GET /get/0 -> 200 {"a":10,"b":20}
+GET /bad/7 -> 400 {"error":"index 7 out of range (fixed size 4)","line":38}
+GET /bad/-1 -> 404 {"error":"index -1 is negative","line":38}
+state <plain values> 0
+state app.boxes 96
+memory reserved=4096 committed=4096 live=96

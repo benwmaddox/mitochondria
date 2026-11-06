@@ -557,6 +557,15 @@ impl Program {
             },
             Ty::Scalar(_) | Ty::Str(_) => leaves.push((prefix.to_string(), t.clone(), range)),
             Ty::Arr(e, _) if matches!(**e, Ty::Scalar(_)) => leaves.push((prefix.to_string(), t.clone(), None)),
+            // a fixed array of structs of numbers and bools: one array column per field (`vals.a`, `vals.b`), read and written as `item.vals[i].a`
+            Ty::Arr(e, k) if matches!(**e, Ty::Struct(_)) => {
+                let Ty::Struct(i) = **e else { unreachable!() };
+                for (fk, (f, ft)) in self.structs[i].fields.iter().enumerate() {
+                    if self.structs[i].unlogged[fk] { return Err(format!("`{}`: `{}` is declared unlogged, but items of a collection are logged or not as a whole: declare the collection `unlogged`", name, join(f))); }
+                    if !matches!(ft, Ty::Scalar(_)) { return Err(format!("`{}`: the structs in the array at `{}` hold numbers and bools only (`{}` is `{}`)", name, prefix, f, self.show(ft))); }
+                    leaves.push((join(f), Ty::Arr(Box::new(ft.clone()), *k), None));
+                }
+            }
             Ty::List(..) | Ty::Pool(..) => kids.push((prefix.to_string(), t.clone())),
             Ty::Table(..) => return Err(format!("`{}`: a table inside an item of a pool or list is not supported (its rows would belong to memory that is not kept); put the table in the state or in another table's rows", name)),
             _ => return Err(format!("`{}`: items cannot hold `{}` at `{}`; use a nested list instead of a fixed array of structs", name, self.show(t), prefix)),

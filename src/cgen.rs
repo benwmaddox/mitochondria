@@ -399,6 +399,7 @@ enum CV {
     Plain(usize, usize),            // a plain struct: struct id, offset
     Part(usize, String, String),    // a struct-valued field of an item: collection, item index, path of the field
     ArrCol(usize, String, usize),   // a fixed-array field of an item: collection, item index, column
+    Elem(usize, String, String, String), // one struct of an item's array of structs: collection, item index, path of the array, element index (held)
     PlainArr(usize, Ty, usize),     // a plain fixed array: offset, element type, length
     Resp(String, String),           // a test's request's answer: its status (i64) and body (Txt), read as `.status` and `.body`
     Null,
@@ -509,7 +510,7 @@ fn type_text(prog: &Program, v: &CV) -> String {
         CV::Item(c, _) => item(*c), CV::Ref(c, ..) => format!("{}?", item(*c)),
         CV::Coll(c, _) => format!("coll {}", coll_name(prog, *c)),
         CV::Plain(sd, o) => format!("plain {}@{}", prog.structs[*sd].name, o),
-        CV::Part(..) => "part".into(), CV::ArrCol(..) => "arrcol".into(), CV::Resp(..) => "response".into(), CV::PlainArr(_, t, n) => format!("plainarr {:?}[{}]", t, n),
+        CV::Part(..) => "part".into(), CV::ArrCol(..) => "arrcol".into(), CV::Elem(..) => "elem".into(), CV::Resp(..) => "response".into(), CV::PlainArr(_, t, n) => format!("plainarr {:?}[{}]", t, n),
     }
 }
 /// Every local of the program and its kind (`mito check --kinds`), in source order, each once: (where, line, name, kind).
@@ -1261,7 +1262,7 @@ fn kind(v: &CV) -> Option<K> {
         CV::Int(_) => K::Int, CV::Flt(_) => K::Flt, CV::Bool(_) => K::Bool, CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => K::Txt,
         CV::Any(_) => K::Any, CV::Item(c, _) => K::Item(*c), CV::Ref(c, ..) => K::Ref(*c), CV::Null => K::Null,
         CV::Coll(c, _) => K::Coll(*c), CV::Plain(s, o) => K::Plain(*s, *o),
-        CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..) => return None,
+        CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) | CV::Resp(..) => return None,
     })
 }
 /// Can a value of kind `v` be stored where kind `k` is held? (Collections and structs are places, not values: they fit
@@ -2029,6 +2030,21 @@ impl<'p> G<'p> {
                 let (c, idx, path) = match bv {
                     CV::Item(c, idx) => (c, idx, f.clone()),
                     CV::Part(c, idx, p) => (c, idx, format!("{}.{}", p, f)),
+                    CV::Elem(c, idx, p, k) => {
+                        // `item.vals[i].a = x`: element i of the array column `vals.a`
+                        let path = format!("{}.{}", p, f);
+                        let Some(ci) = self.prog.colls[c].cols.iter().position(|x| x.path == path && matches!(x.kind, CKind::Arr(..))) else { return no(format!("no field `{}` in the elements of `{}`", f, p)) };
+                        self.may_write_col(c, &path)?;
+                        let v = self.expr(rhs, env, None)?;
+                        self.skip_save = self.prog.colls[c].unlogged;
+                        let inline = self.int_store(c, &idx, ci, Some(&k), &v, &format!("c->h->store_elem(c, {}, {}, {}, {}, &@VAL)", c, idx, ci, k))?;
+                        self.skip_save = false;
+                        if !inline {
+                            let vv = self.val(v)?;
+                            self.call(&format!("c->h->store_elem(c, {}, {}, {}, {}, &{})", c, idx, ci, k, vv));
+                        }
+                        return Ok(());
+                    }
                     CV::Ref(..) => return no(format!("assigning `.{}` of a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`", f)),
                     CV::Plain(sid, off) => {
                         let sd = &self.prog.structs[sid];
@@ -2246,6 +2262,22 @@ impl<'p> G<'p> {
                 let av = self.expr(arr, env, None)?;
                 let mut pos = |g: &mut Self, e: &'p Expr, env: &mut Vec<Option<CV>>| -> R<String> { let v = g.expr(e, env, None)?; let k = g.int_or(v, 400, "a position and a count must be integers"); Ok(g.hold_int(k)) };
                 let (f, t2, n) = (pos(self, from, env)?, pos(self, to, env)?, pos(self, count, env)?);
+                if let CV::Part(c, idx, p) = &av {
+                    // an array of structs: every field's column moves alike
+                    let inner = format!("{}.", p);
+                    let cols: Vec<usize> = (0..self.prog.colls[*c].cols.len()).filter(|&i| self.prog.colls[*c].cols[i].path.starts_with(&inner) && matches!(self.prog.colls[*c].cols[i].kind, CKind::Arr(..))).collect();
+                    if cols.is_empty() { return no("`move` works on a fixed array"); }
+                    let CKind::Arr(_, len) = self.prog.colls[*c].cols[cols[0]].kind else { unreachable!() };
+                    self.line(&format!("if (UNLIKELY({f} < 0 || {f} > {len}LL || {t2} < 0 || {t2} > {len}LL || {n} < 0 || {n} > {len}LL || {f} + {n} > {len}LL || {t2} + {n} > {len}LL)) FAIL(400, \"move out of range\", 17);"));
+                    for ci in cols {
+                        let path = self.prog.colls[*c].cols[ci].path.clone();
+                        self.may_write_col(*c, &path)?;
+                        let col = &self.prog.colls[*c].cols[ci];
+                        let (base, esize) = (format!("{}ULL + (u64)({}) * {}ULL", col.off, idx, col.kind.size()), col.kind.size() / len);
+                        self.call(&format!("c->h->move_elems(c, {}, {}, {}, {}, {})", base, esize, f, t2, n));
+                    }
+                    return Ok(());
+                }
                 let (base, esize, len) = match av {
                     CV::ArrCol(c, idx, ci) => {
                         self.may_write_col(c, &self.prog.colls[c].cols[ci].path.clone())?;
@@ -2580,7 +2612,7 @@ impl<'p> G<'p> {
         if !vals.iter().any(|v| matches!(v, CV::Sub(..) | CV::PlainStr(_) | CV::StateStr(..))) {
             let mut names = Vec::new();
             for v in vals {
-                if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("only text, numbers and bools can be added to a string"); }
+                if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("only text, numbers and bools can be added to a string"); }
                 names.push(self.val(v)?);
             }
             let argv = self.tmp("argv");
@@ -2589,7 +2621,7 @@ impl<'p> G<'p> {
             return Ok(());
         }
         for (i, v) in vals.into_iter().enumerate() {
-            if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("only text, numbers and bools can be added to a string"); }
+            if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("only text, numbers and bools can be added to a string"); }
             let k = kind | if clear && i == 0 { 2 } else { 0 };
             // a text field or a window onto one: copied from where it is, field to field
             let window = match v.clone() { CV::Sub(base, from, count) => Some((*base, from, count)), b @ (CV::PlainStr(_) | CV::StateStr(..)) => { let l = self.field_len(&b); Some((b, "0".to_string(), l)) } _ => None };
@@ -2707,7 +2739,7 @@ impl<'p> G<'p> {
             CV::Item(c, e) => self.line(&format!("Val {} = {{ 5, {}, {}, 0, 0 }};", t, c, e)),
             CV::Ref(c, s, k) => self.line(&format!("Val {} = {{ {} == 0 ? 0 : 5, {}, {}, 0, 0 }};", t, s, c, k)),
             v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)) => { let x = self.txt_of(v)?; self.line(&format!("Val {} = {{ {}.present ? 4 : 0, {}.off, {}.len, 0, 0 }};", t, x, x, x)); }
-            CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) => return no("a collection, struct or array used as a value is not compiled yet"),
+            CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) => return no("a collection, struct or array used as a value is not compiled yet"),
             CV::Resp(..) => return no("an answer is read through `.status` and `.body`"),
         }
         Ok(t)
@@ -2782,6 +2814,14 @@ impl<'p> G<'p> {
                         let k = self.hold_int(k);
                         self.elem_check(&k, n as u64);
                         self.load(&off.to_string(), &format!("(i64)({}) * {} + {}", idx, n, k), sc)
+                    }
+                    // one struct of an array of structs (`item.vals[i]`): its fields are read as `.a`
+                    CV::Part(c, idx, p) => {
+                        let inner = format!("{}.", p);
+                        let Some(CKind::Arr(_, n)) = self.prog.colls[c].cols.iter().find(|x| x.path.starts_with(&inner) && matches!(x.kind, CKind::Arr(..))).map(|x| x.kind.clone()) else { return no("only fixed arrays and collections can be indexed") };
+                        let k = self.hold_int(k);
+                        self.elem_check(&k, n as u64);
+                        Ok(CV::Elem(c, idx, p, k))
                     }
                     CV::PlainArr(off, Ty::Scalar(sc), n) => {
                         let k = self.hold_int(k);
@@ -2891,6 +2931,12 @@ impl<'p> G<'p> {
                 let v = self.plain(off + sd.offs[k], &ty, dead)?;
                 let range = range.or_else(|| FIELD_RANGES.with(|fr| fr.borrow().0.get(&(off + sd.offs[k])).copied()));
                 return Ok(self.with_field_range(v, range));
+            }
+            CV::Elem(c, idx, p, k) => {
+                let path = format!("{}.{}", p, f);
+                let Some(ci) = self.prog.colls[c].cols.iter().position(|x| x.path == path && matches!(x.kind, CKind::Arr(..))) else { return no(format!("no field `{}` in the elements of `{}`", f, p)) };
+                let (off, CKind::Arr(sc, n)) = (self.prog.colls[c].cols[ci].off, self.prog.colls[c].cols[ci].kind.clone()) else { unreachable!() };
+                return self.load(&off.to_string(), &format!("(i64)({}) * {} + {}", idx, n, k), sc);
             }
             CV::Null => { let Some(l) = dead else { return no(format!("`.{}` of `null`", f)) }; self.line(&format!("goto {};", l)); return Ok(CV::Null); }
             CV::Any(x) => {
@@ -3513,7 +3559,7 @@ impl<'p> G<'p> {
             let mut names = Vec::new();
             for v in a {
                 let v = match v { w @ (CV::PlainStr(_) | CV::StateStr(..) | CV::Sub(..)) => CV::Txt(self.txt_of(w)?), o => o };
-                if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("`log` takes text, numbers, bools and items"); }
+                if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("`log` takes text, numbers, bools and items"); }
                 names.push(self.val(v)?);
             }
             let argv = self.tmp("argv");
@@ -4251,7 +4297,7 @@ impl<'p> G<'p> {
             }
             CV::Item(c, i) if tab(c).is_some() => self.call(&format!("c->h->json_i64(c, (i64)({}))", i)),
             CV::Item(c, i) if self.prog.colls[c].parent.is_none() && matches!(self.prog.colls[c].kind, Kind::Pool(_)) => self.call(&format!("c->h->json_id(c, {}, {})", c, i)),
-            CV::Item(..) | CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..) => self.fail(500, "cannot write this value as JSON"),
+            CV::Item(..) | CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) | CV::Resp(..) => self.fail(500, "cannot write this value as JSON"),
         }
         Ok(())
     }

@@ -29,7 +29,7 @@ state chat: Chat;
 ```
 
 **Values.** Scalars (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `bool`), enums (`enum Op { Plus, Minus }`, stored in the smallest
-integer), text of at most N bytes (`utf8<N>`, also written `string<N>`, or `ascii<N>` for bytes 0..127) and `T[N]` (exactly N). Code reads maxima rather than repeating them (`x.capacity()`, `maxlen(s)`). An integer field may declare a range,
+integer), text of at most N bytes (`utf8<N>`, also written `string<N>`, or `ascii<N>` for bytes 0..127) and `T[N]` (exactly N). In the items of a pool or list, `T` may also be a struct of numbers and bools (`vals: V[17]`): kept as one array per field and used as `item.vals[i].a`, with `item.vals.move(from, to, n)` moving every field alike (not yet in plain state, and an element cannot yet be read or written as a whole). Code reads maxima rather than repeating them (`x.capacity()`, `maxlen(s)`). An integer field may declare a range,
 `limit: i64 in 0..3000000` (both ends included, 0 inside, since state starts zeroed): every write is tested (400 outside), and reads let the
 compiler drop overflow and index tests on what is computed from them. A field without a declared range whose every store in the program has a proven range
 (`s.n = n` with `n: i64 in 2..900`) gets their union, with 0, the same way: the compiler works it out from the whole program. `unlogged` after a plain field, a collection, a struct field (with the collections inside it) or a module instance (`m: ordmap<N> unlogged;`) keeps it out of the

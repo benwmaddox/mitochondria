@@ -35,7 +35,7 @@ Start with the [tutorial](docs/tutorial.md). The design is in [DESIGN.md](DESIGN
 
 **Web pages.** Programs can answer HTML written as markup in the code, take HTML form posts and cookies, and serve their
 stylesheet and script compiled in. [examples/todomvc](examples/todomvc) is TodoMVC rendered on the server, checked in a browser
-against the app spec with and without script.
+against the app spec with and without script. Against crudspec's build of the same app on Linux: [bench/todomvc/RESULTS.md](bench/todomvc/RESULTS.md).
 
 **Benchmarks.** 41 [LangArena](https://github.com/kostya/LangArena) tests ported and measured against LangArena's Rust and Crystal
 implementations, time and peak memory per test: [bench/langarena/RESULTS.md](bench/langarena/RESULTS.md) (written by the benchmark script;

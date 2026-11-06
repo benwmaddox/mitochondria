@@ -1,0 +1,189 @@
+// TodoMVC (todomvc.com/app-spec) in Mitochondria, rendered on the server: every page is HTML from here, every change a form post
+// answered with a redirect back to the page it came from. Each browser has its own list, as the reference apps do with local
+// storage: its first todo makes the list, and a cookie names it. Pages and forms work without script; assets/app.js adds
+// what the spec asks of a browser (a ticked checkbox submits, double-click edits, Escape cancels). See docs/todomvc.md.
+
+struct Todo { title: utf8<1000>; done: bool; }
+// a browser's list: its todos in a pool, and their order (slots, oldest first) kept beside them
+struct Board { secret: i64; count: i64 in 0..1000; order: u16[1000]; todos: pool<Todo, 1000>; }
+struct App { boards: pool<Board, 64> checked; }
+state app: App;
+
+// ---- pages: all todos, the active ones, the completed ones (show 0, 1, 2); `?edit=<slot>` shows one as a text field
+
+@get("/")
+fn all(board: Board? from cookie("todos"), edit: i64 in -1..999 = -1) -> Response<html> {
+    return ok(<!doctype html><html lang="en">{document(board, 0, edit);}</html>);
+}
+@get("/active")
+fn active(board: Board? from cookie("todos"), edit: i64 in -1..999 = -1) -> Response<html> {
+    return ok(<!doctype html><html lang="en">{document(board, 1, edit);}</html>);
+}
+@get("/completed")
+fn completed(board: Board? from cookie("todos"), edit: i64 in -1..999 = -1) -> Response<html> {
+    return ok(<!doctype html><html lang="en">{document(board, 2, edit);}</html>);
+}
+
+fn document(b: Board?, show: i64, edit: i64) -> html {
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Mitochondria • TodoMVC</title>
+        <link rel="stylesheet" href="/todomvc.css">
+        <script src="/app.js" defer></script>
+    </head>
+    <body>
+        <section class="todoapp">
+            <header class="header">
+                <h1>todos</h1>
+                <form method="post" action="/todos">
+                    {back(show);}
+                    <input class="new-todo" name="title" placeholder="What needs to be done?" autofocus autocomplete="off">
+                </form>
+            </header>
+            {if exists(b) { lists(b, show, edit); }}
+        </section>
+        <footer class="info">
+            <p>Double-click to edit a todo</p>
+            <p>Written in Mitochondria</p>
+            <p>Part of <a href="https://todomvc.com">TodoMVC</a></p>
+        </footer>
+    </body>
+}
+
+// the list and its footer, when there are todos
+fn lists(b: Board, show: i64, edit: i64) -> html {
+    var left = 0;
+    foreach k in 0..b.count - 1 { if !b.todos[b.order[k]].done { left += 1; } }
+    if b.count > 0 {
+        <section class="main">
+            <form method="post" action="/toggle-all">
+                {back(show);}
+                <input id="toggle-all" class="toggle-all" type="checkbox" checked={left == 0}>
+                <label for="toggle-all">Mark all as complete</label>
+                <noscript><button>Mark all</button></noscript>
+            </form>
+            <ul class="todo-list">
+                {foreach k in 0..b.count - 1 {
+                    let slot = b.order[k];
+                    let t = b.todos[slot];
+                    if show == 0 || (show == 1 && !t.done) || (show == 2 && t.done) { item(t, slot, show, slot == edit); }
+                }}
+            </ul>
+        </section>
+        <footer class="footer">
+            <span class="todo-count"><strong>{left}</strong> {if left == 1 { "item" } else { "items" }} left</span>
+            <ul class="filters">
+                <li><a class="{if show == 0 { "selected" }}" href="/">All</a></li>
+                <li><a class="{if show == 1 { "selected" }}" href="/active">Active</a></li>
+                <li><a class="{if show == 2 { "selected" }}" href="/completed">Completed</a></li>
+            </ul>
+            {if b.count > left {
+                <form method="post" action="/clear-completed">{back(show);}<button class="clear-completed">Clear completed</button></form>
+            }}
+        </footer>
+    }
+}
+
+fn item(t: Todo, slot: i64, show: i64, editing: bool) -> html {
+    <li class="{if t.done { "completed" }}{if editing { " editing" }}">
+        <div class="view">
+            <form id="toggle-{slot}" method="post" action="/todos/{slot}/toggle">
+                {back(show);}
+                <noscript><button>Done</button></noscript>
+            </form>
+            <!-- the stylesheet draws the circle on the label right after the checkbox, so the checkbox joins its form by id -->
+            <input class="toggle" type="checkbox" form="toggle-{slot}" checked={t.done}>
+            <label>{t.title}</label>
+            <noscript><a href="?edit={slot}">Edit</a></noscript>
+            <form method="post" action="/todos/{slot}/delete">{back(show);}<button class="destroy" aria-label="Delete"></button></form>
+        </div>
+        <form method="post" action="/todos/{slot}/edit">
+            {back(show);}
+            <input class="edit" name="title" value="{t.title}" autofocus={editing}>
+        </form>
+    </li>
+}
+
+// where a form's redirect goes: the page it is on
+fn back(show: i64) -> html {
+    <input type="hidden" name="back" value="{if show == 1 { "/active" } else if show == 2 { "/completed" } else { "/" }}">
+}
+
+// ---- changes: each answers 303 back to the page (`back`, a path on this server, checked)
+
+// a new todo; a browser's first makes its list (and the cookie that names it)
+@post("/todos")
+fn add(board: Board? from cookie("todos"), title: utf8<1000>, back: ascii<16> = "/") -> Response<html> {
+    let text = trim(title);
+    if len(text) == 0 { return see_other(back); }
+    if exists(board) { append(board, text); return see_other(back); }
+    let made = app.boards.try_add();
+    if !exists(made) { fail 503 "This server has no room for another list right now. Try again later."; }
+    made.secret = random();
+    set_cookie("todos", token(made), 31536000);
+    append(made, text);
+    return see_other(back);
+}
+fn append(b: Board, title: string) {
+    let t = b.todos.try_add();
+    if !exists(t) { fail 507 "This list is full: 1000 todos. Clear some first."; }
+    t.title = title;
+    b.order[b.count] = slot(t);
+    b.count += 1;
+}
+@post("/todos/{id}/toggle")
+fn toggle(board: Board from cookie("todos"), id: i64 in 0..999, back: ascii<16> = "/") -> Response<html> {
+    let t = board.todos[id];
+    t.done = !t.done;
+    return see_other(back);
+}
+// an edit that leaves the title empty removes the todo
+@post("/todos/{id}/edit")
+fn rename(board: Board from cookie("todos"), id: i64 in 0..999, title: utf8<1000>, back: ascii<16> = "/") -> Response<html> {
+    let t = board.todos[id];
+    let text = trim(title);
+    if len(text) == 0 { forget(board, id); } else { t.title = text; }
+    return see_other(back);
+}
+@post("/todos/{id}/delete")
+fn destroy(board: Board from cookie("todos"), id: i64 in 0..999, back: ascii<16> = "/") -> Response<html> {
+    let t = board.todos[id];
+    forget(board, id);
+    return see_other(back);
+}
+// all complete, or, when all already are, all active again
+@post("/toggle-all")
+fn toggle_all(board: Board from cookie("todos"), back: ascii<16> = "/") -> Response<html> {
+    var all_done = true;
+    foreach t in board.todos { if !t.done { all_done = false; } }
+    foreach t in board.todos { t.done = !all_done; }
+    return see_other(back);
+}
+@post("/clear-completed")
+fn clear_completed(board: Board from cookie("todos"), back: ascii<16> = "/") -> Response<html> {
+    var k = 0;
+    foreach step in 0..999 while k < board.count {
+        if board.todos[board.order[k]].done { forget(board, board.order[k]); } else { k += 1; }
+    }
+    return see_other(back);
+}
+
+// remove the todo in `slot`, keeping the order of the rest
+fn forget(b: Board, slot: i64) {
+    foreach k in 0..b.count - 1 {
+        if b.order[k] == slot {
+            b.order.move(k + 1, k, b.count - k - 1);
+            b.count -= 1;
+            b.todos.remove(b.todos[slot]);
+            return;
+        }
+    }
+}
+
+// ---- the stylesheet (todomvc-app-css 2.4.3, CC-BY-4.0, Sindre Sorhus) and the script
+
+@get("/todomvc.css")
+fn css() -> Response<css> { return ok(file("assets/todomvc.css")); }
+@get("/app.js")
+fn js() -> Response<js> { return ok(file("assets/app.js")); }

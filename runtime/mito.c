@@ -1689,6 +1689,12 @@ static int h_etag(Ctx *c, const char *tag, u32 n, int *nm) {
     if (*nm) m->out.len = 0;
     return 0;
 }
+static int h_trim(Ctx *c, const Txt *in, Txt *out) {
+    const u8 *p = M_(c)->text.p + in->off; u32 b = 0, e = in->present ? in->len : 0;
+    while (b < e && (p[b] == ' ' || (p[b] >= 9 && p[b] <= 13))) b++;
+    while (e > b && (p[e - 1] == ' ' || (p[e - 1] >= 9 && p[e - 1] <= 13))) e--;
+    out->off = in->off + b; out->len = e - b; out->present = in->present; return 0;
+}
 /* `see_other(path)`: 303 to a path on this server. The path starts with one `/` and is printable ASCII (no spaces, no line breaks),
    so the answer can neither send the browser to another site nor add header lines of its own. */
 static int h_see_other(Ctx *c, const Txt *t) {
@@ -1706,7 +1712,7 @@ static const H mito_h = {
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

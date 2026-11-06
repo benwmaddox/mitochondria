@@ -1,0 +1,5 @@
+POST /t -> 200 {"kept":"café","n":5}
+POST /t -> 200 {"kept":"","n":0}
+POST /t -> 200 {"kept":"a b","n":3}
+state <plain values> 36
+memory reserved=4096 committed=4096 live=36

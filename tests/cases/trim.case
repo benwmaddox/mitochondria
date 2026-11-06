@@ -1,0 +1,10 @@
+// trim(text): the text without spaces, tabs and line breaks at either end, a window onto the same bytes
+--- program
+struct S { t: utf8<32>; }
+state s: S;
+@post("/t")
+fn set(v: utf8<32>) -> Response<{ kept: string, n: i64 }> { let x = trim(v); s.t = x; return ok({ kept: s.t, n: len(x) }); }
+--- requests
+POST /t {"v": "  café \t\n"}
+POST /t {"v": "   "}
+POST /t {"v": "a b"}

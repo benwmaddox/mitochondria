@@ -88,7 +88,7 @@ A collection whose trim released nothing is skipped until 256 of its items have 
 **Functions.** `fn name(p: Player, n: i64) -> f64 { ... }`: every parameter and the result are typed (`-> T?` when it may be
 null, no arrow when it gives nothing), and checked at every call and `return`. `let` and `var`; `+=` and friends. No closures. A
 `var` keeps the kind of its first value. A local holds numbers, bools, items and windows onto text (a field, an input, a literal,
-a `substr` of one), never text of its own: `var t = ""` and a function returning text are errors that say to build the text in a
+a `substr` or `trim` of one), never text of its own: `var t = ""` and a function returning text are errors that say to build the text in a
 field (a function takes the item or struct to write into).
 
 **Endpoints** are functions with an attribute and typed inputs:

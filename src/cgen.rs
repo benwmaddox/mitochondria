@@ -96,6 +96,7 @@ struct H {
     int (*html_at)(Ctx *, u64, u32, u32);                        /* n bytes of state into markup, escaped */
     int (*html_col)(Ctx *, u32, u32, u32, u32);                  /* a text column into markup, escaped */
     int (*etag)(Ctx *, const char *, u32, int *);                /* a static answer's ETag: set, and *1 when the browser already has it (304) */
+    int (*trim)(Ctx *, const Txt *, Txt *);                      /* a text without spaces, tabs and line breaks at either end (same bytes) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -2214,10 +2215,11 @@ impl<'p> G<'p> {
                 self.line(&format!("u32 {};", t));
                 self.call(&format!("c->h->alloc(c, {}, {}, {}, &{})", c, inst, *try_ as i32, t));
                 env[*slot as usize] = Some(if *try_ {
-                    // try_alloc gives an item or null: keep it as a value
-                    let v = self.tmp("v");
-                    self.line(&format!("Val {} = {{ {} == 0xFFFFFFFFu ? 0 : 5, {}, {}, 0, 0 }};", v, t, c, t));
-                    CV::Any(v)
+                    // try_add gives an item or null (a full collection): an item that may be null, narrowed by `if exists(x)` or
+                    // `if !exists(x) { fail ...; }` as any other
+                    let r = self.tmp("r");
+                    self.line(&format!("u32 {} = {} != 0xFFFFFFFFu;", r, t));
+                    CV::Ref(c, r, t)
                 } else { CV::Item(c, t) });
             }
         }
@@ -3151,6 +3153,15 @@ impl<'p> G<'p> {
                 self.line(&format!("if (UNLIKELY({from} < 0 || {count} < 0 || {from} + {count} > (i64){t}.len)) FAIL(400, \"substring out of range\", 22);"));
                 let r = self.tmp("t");
                 self.line(&format!("Txt {r} = {{ (u32)({t}.off + {from}), (u32){count}, 1 }};"));
+                CV::Txt(r)
+            }
+            B::Trim => {
+                // `trim(text)`: the text without the spaces, tabs and line breaks at either end, a window onto the same bytes
+                let [text] = <[CV; 1]>::try_from(a).map_err(|_| "`trim` takes one text".to_string())?;
+                let t = self.txt_of(text).map_err(|_| "`trim` takes a text".to_string())?;
+                let r = self.tmp("t");
+                self.line(&format!("Txt {} = {{ 0, 0, 0 }};", r));
+                self.call(&format!("c->h->trim(c, &{}, &{})", t, r));
                 CV::Txt(r)
             }
             B::WrapAdd | B::WrapSub | B::WrapMul => {

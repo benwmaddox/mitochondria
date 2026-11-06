@@ -33,6 +33,10 @@ an out-of-memory kill, and peak memory is known before the program runs. In retu
 
 Start with the [tutorial](docs/tutorial.md). The design is in [DESIGN.md](DESIGN.md).
 
+**Web pages.** Programs can answer HTML written as markup in the code, take HTML form posts and cookies, and serve their
+stylesheet and script compiled in. [examples/todomvc](examples/todomvc) is TodoMVC rendered on the server, checked in a browser
+against the app spec with and without script.
+
 **Benchmarks.** 41 [LangArena](https://github.com/kostya/LangArena) tests ported and measured against LangArena's Rust and Crystal
 implementations, time and peak memory per test: [bench/langarena/RESULTS.md](bench/langarena/RESULTS.md) (written by the benchmark script;
 how the comparison is made, and each port's audit, in [bench/langarena/README.md](bench/langarena/README.md)).

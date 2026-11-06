@@ -1,0 +1,73 @@
+// The same eight workloads on lib/ordmap.mito (values inside the tree's leaves): see ordered.mito and ordered_btree.mito.
+struct Bench { m: rowmap<1048576, 3> unlogged; } // kept out of the undo log, as a Rust map has no rollback
+state b: Bench;
+
+@post("/insert/{n}")
+fn insert(n: i64 in 1..1048576) -> Response<{ size: i64 }> {
+    var x = 20261104;
+    foreach i in 0..n - 1 { x = x * 48271 % 2147483647; b.m.put(x * 2, 0, x); }
+    return ok({ "size": b.m.size() });
+}
+@get("/hit/{n}/{ops}")
+fn hit(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        s = s + b.m.get_or(x * 2, 0, 0);
+    }
+    return ok({ "sum": s });
+}
+@get("/miss/{n}/{ops}")
+fn miss(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        s = s + b.m.get_or(x * 2 + 1, 0, 0);
+    }
+    return ok({ "sum": s });
+}
+@get("/mixed/{n}/{ops}")
+fn mixed(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        s = s + b.m.get_or(x * 2 + j % 2, 0, 0);
+    }
+    return ok({ "sum": s });
+}
+@post("/increment/{n}/{ops}")
+fn increment(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        b.m.add_to(x * 2, 0, 1);
+    }
+    return ok({ "sum": 0 });
+}
+@get("/range/{n}/{ops}")
+fn range(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        s = s + b.m.range_sum(x * 2, 100, 0);
+    }
+    return ok({ "sum": s });
+}
+@delete("/delete/{x}/{count}")
+fn delete(x: i64, count: i64 in 1..16384) -> Response<{ x: i64, size: i64 }> {
+    var y = x;
+    foreach i in 0..count - 1 {
+        y = y * 48271 % 2147483647;
+        b.m.del(y * 2);
+    }
+    return ok({ "x": y, "size": b.m.size() });
+}
+@get("/stats")
+fn stats() -> Response<{ committed_kb: i64, live_kb: i64, reserved_kb: i64 }> {
+    return ok({ "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb"), "reserved_kb": stat("reserved_kb") });
+}

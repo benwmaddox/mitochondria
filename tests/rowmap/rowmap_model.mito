@@ -1,0 +1,15 @@
+// Driven by tests/rowmap/model.py: random put, get, add_to, del and range_sum on lib/rowmap.mito (rows of 3) against a Python dict.
+struct S { m: rowmap<3000, 3>; }
+state om: S;
+@post("/put/{k}/{c}/{v}")
+fn put(k: i64, c: i64 in 0..2, v: i64) -> Response<{}> { om.m.put(k, c, v); return ok({}); }
+@get("/get/{k}/{c}")
+fn get(k: i64, c: i64 in 0..2) -> Response<{ v: i64 }> { return ok({ "v": om.m.get_or(k, c, -999999) }); }
+@post("/addto/{k}/{c}/{d}")
+fn addto(k: i64, c: i64 in 0..2, d: i64) -> Response<{ done: bool }> { return ok({ "done": om.m.add_to(k, c, d) }); }
+@post("/del/{k}")
+fn del(k: i64) -> Response<{ done: bool }> { return ok({ "done": om.m.del(k) }); }
+@get("/range/{k}/{n}/{c}")
+fn range(k: i64, n: i64 in 0..100000, c: i64 in 0..2) -> Response<{ sum: i64 }> { return ok({ "sum": om.m.range_sum(k, n, c) }); }
+@get("/size")
+fn size() -> Response<{ n: i64, leaves: i64, inners: i64 }> { return ok({ "n": om.m.size(), "leaves": om.m.leaf_count(), "inners": om.m.inner_count() }); }

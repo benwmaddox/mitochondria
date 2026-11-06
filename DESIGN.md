@@ -269,7 +269,7 @@ cannot be written, its items not added or removed directly, and its key not assi
 `iter_next` and `iter_item` can be walked by `each`.
 
 Standard library: `sorted<T, N, key>` (a skip list, items in order of a field: `add(k)`, `remove`, `set_key`,
-`first`, `last`, walks from a key) and `bag<T, N>` (the smallest module, for tests).
+`first`, `last`, walks from a key) and `bag<T, N>` (the smallest module, for tests). `rowmap<N, W>` is `ordmap` with a row of W numbers per key (`put(key, col, value)`, `get_or`, `add_to`, `range_sum` by column): a record's numbers kept in the leaves beside its key.
 
 ## Workers
 A system runs several programs as workers, each on its own thread with its own memory; they share nothing.

@@ -94,8 +94,8 @@ static void reply_c(Sys *s, u32 id, u32 code, const char *msg) { u32 n = 0; whil
 
 /* ---- a worker ---- */
 /* where workers keep their tables (mito_system_set_data): one database per worker, <dir>/<kind>-<index>.db */
-static const char *sys_data_dir = "data"; static u64 sys_db_mem = 64; static char sys_data_err[1200];
-MITO_API void mito_system_set_data(const char *dir, u64 pool_mb) { sys_data_dir = dir; sys_db_mem = pool_mb; }
+static const char *sys_data_dir = "data"; static u64 sys_db_mem = 64; static int sys_db_full = 1; static char sys_data_err[1200];
+MITO_API void mito_system_set_data(const char *dir, u64 pool_mb, int full) { sys_data_dir = dir; sys_db_mem = pool_mb; sys_db_full = full; }
 MITO_API const char *mito_system_data_error(void) { return sys_data_err; }
 static void *make(Worker *w) {
     const SysKind *k = &SYS_KINDS[w->kind];
@@ -107,7 +107,7 @@ static void *make(Worker *w) {
         char file[160]; u32 n = 0; const char *nm = k->name; while (*nm && n < 140) file[n++] = *nm++;
         file[n++] = '-'; { char d[12]; int j = 0; u32 v = w->index; do { d[j++] = (char)('0' + v % 10); v /= 10; } while (v); while (j) file[n++] = d[--j]; }
         const char *ext = ".db"; while (*ext) file[n++] = *ext++; file[n] = 0;
-        if (!k->open_data(p, sys_data_dir, file, sys_db_mem)) {
+        if (!k->open_data(p, sys_data_dir, file, sys_db_mem, sys_db_full)) {
             const char *e = k->data_error(p); u32 i = 0; while (e[i] && i + 1 < sizeof sys_data_err) { sys_data_err[i] = e[i]; i++; } sys_data_err[i] = 0;
             k->stop(p); return 0;
         }

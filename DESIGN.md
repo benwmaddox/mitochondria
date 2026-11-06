@@ -52,7 +52,8 @@ table's, or this owner's, row), `foreach ... where ... reverse limit`, a row fro
 named by `token(b)`). A row's id is its SQLite row id, never reused. `index(f)` and `unique(f)` on the collection declare
 indexes; a `where` over a whole top-level table is compiled to SQL and must use indexed fields (one that would read every row is
 refused), while a loop over one owner's rows may filter on anything. Each request is one transaction, committed before its
-answer. At start the database is created or migrated by field name; a column whose type changed, or rows that break a declared
+answer and synced to disk first (`--db-sync full`, the default; `--db-sync normal` syncs at checkpoints instead, losing nothing on a
+process crash but possibly the last moments on an OS crash or power cut). At start the database is created or migrated by field name; a column whose type changed, or rows that break a declared
 limit, stop the server with the reason (docs/persistence.md).
 
 **Naming another item.** A field `best: Player?` holds an item's id (its slot and generation, 8 bytes) and reads back as a

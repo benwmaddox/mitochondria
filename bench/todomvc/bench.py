@@ -137,10 +137,11 @@ def run_app(name, cmd, port, cleanup):
 def measure():
     out = {}
     for rnd in range(ROUNDS):
-        for name in (["mito", "crudspec"] if rnd % 2 == 0 else ["crudspec", "mito"]):
-            if name == "mito":
+        for name in (["mito", "mito_normal", "crudspec"] if rnd % 2 == 0 else ["crudspec", "mito_normal", "mito"]):
+            if name.startswith("mito"):
                 d = tempfile.mkdtemp(prefix="mito-todomvc-")
-                r = run_app(name, [MITO, "--port", "18301", "--data", d], 18301, lambda: shutil.rmtree(d, ignore_errors=True))
+                sync = ["--db-sync", "normal"] if name == "mito_normal" else []
+                r = run_app(name, [MITO, "--port", "18301", "--data", d] + sync, 18301, lambda: shutil.rmtree(d, ignore_errors=True))
             else:
                 d = tempfile.mkdtemp(prefix="cs-todomvc-")
                 r = run_app(name, [CS, "--data", d, "--assets", CS_ASSETS, "--port", "18302"], 18302, lambda: shutil.rmtree(d, ignore_errors=True))
@@ -161,30 +162,30 @@ def measure():
 
 
 def markdown(b):
-    m, c = b["mito"], b["crudspec"]
+    m, n, c = b["mito"], b["mito_normal"], b["crudspec"]
     o = ["# TodoMVC: Mitochondria against crudspec", "",
          f"Written by `bench.py` from `results.json` ({b['date']}, {b['machine']}, best of {b['rounds']} alternating rounds); do not edit by hand.", "",
          "Both are TodoMVC rendered on the server, from this repository's `examples/todomvc` and crudspec's `apps/todomvc`, each server "
          "alone on one pinned CPU. The client submits each app's own forms (url-encoded for Mitochondria, multipart with a signed field for "
          "crudspec). Times are the client's round trip on one kept-open connection, in microseconds (Python's client adds its own share to both). "
-         "Both keep the lists in SQLite on disk (WAL): Mitochondria as tables (`table<T>`), crudspec as its entities; Mitochondria syncs every "
-         "commit to disk before answering (`synchronous=FULL`: an answered change survives a power cut), crudspec runs `synchronous=NORMAL` "
-         "(WAL commits not synced one by one: a process crash loses nothing, an OS crash or power cut can lose the last moments), so the "
-         "changes' times measure that guarantee more than SQL. crudspec keeps a rendered page until its data changes, so its page time barely grows "
+         "Both keep the lists in SQLite on disk (WAL): Mitochondria as tables (`table<T>`), crudspec as its entities. By default Mitochondria syncs "
+         "every commit to disk before answering (`--db-sync full`: an answered change survives a power cut); `--db-sync normal`, like "
+         "crudspec's `synchronous=NORMAL`, syncs WAL commits at checkpoints (a process crash loses nothing, an OS crash or power cut can "
+         "lose the last moments): the middle column is the like-for-like comparison. crudspec keeps a rendered page until its data changes, so its page time barely grows "
          "with the list; Mitochondria renders every page.", "",
-         "| Measure | Mitochondria | crudspec | Mitochondria / crudspec |", "|---|---:|---:|---:|"]
+         "| Measure | Mitochondria (default, `--db-sync full`) | Mitochondria `--db-sync normal` | crudspec | full / crudspec | normal / crudspec |", "|---|---:|---:|---:|---:|---:|"]
     for size in map(str, SIZES):
         for k, label in (("render", "page"), ("toggle", "toggle a todo")):
             for q, ql in (("median_us", "median"), ("p99_us", "99th percentile")):
-                x, y = m[size][k][q], c[size][k][q]
-                o.append(f"| {size} todos: {label}, {ql} (us) | {x:.0f} | {y:.0f} | {x / y:.2f}x |")
-        x, y = m[size]["pages_per_s"], c[size]["pages_per_s"]
-        o.append(f"| {size} todos: pages per second, 4 clients | {x:,.0f} | {y:,.0f} | {x / y:.2f}x |")
-        o.append(f"| {size} todos: page size (bytes) | {m[size]['page_bytes']:,} | {c[size]['page_bytes']:,} | |")
+                x, z, y = m[size][k][q], n[size][k][q], c[size][k][q]
+                o.append(f"| {size} todos: {label}, {ql} (us) | {x:.0f} | {z:.0f} | {y:.0f} | {x / y:.2f}x | {z / y:.2f}x |")
+        x, z, y = m[size]["pages_per_s"], n[size]["pages_per_s"], c[size]["pages_per_s"]
+        o.append(f"| {size} todos: pages per second, 4 clients | {x:,.0f} | {z:,.0f} | {y:,.0f} | {x / y:.2f}x | {z / y:.2f}x |")
+        o.append(f"| {size} todos: page size (bytes) | {m[size]['page_bytes']:,} | {n[size]['page_bytes']:,} | {c[size]['page_bytes']:,} | | |")
     for q, ql in (("median_us", "median"), ("p99_us", "99th percentile")):
-        x, y = m["add"][q], c["add"][q]
-        o.append(f"| add a todo ({SIZES[-1]} to {SIZES[-1] + 200} todos), {ql} (us) | {x:.0f} | {y:.0f} | {x / y:.2f}x |")
-    o.append(f"| peak memory (MB, VmHWM) | {m['peak_mb']:.1f} | {c['peak_mb']:.1f} | {m['peak_mb'] / c['peak_mb']:.2f}x |")
+        x, z, y = m["add"][q], n["add"][q], c["add"][q]
+        o.append(f"| add a todo ({SIZES[-1]} to {SIZES[-1] + 200} todos), {ql} (us) | {x:.0f} | {z:.0f} | {y:.0f} | {x / y:.2f}x | {z / y:.2f}x |")
+    o.append(f"| peak memory (MB, VmHWM) | {m['peak_mb']:.1f} | {n['peak_mb']:.1f} | {c['peak_mb']:.1f} | {m['peak_mb'] / c['peak_mb']:.2f}x | {n['peak_mb'] / c['peak_mb']:.2f}x |")
     open(os.path.join(here, "RESULTS.md"), "w").write("\n".join(o) + "\n")
     print("\n".join(o))
 

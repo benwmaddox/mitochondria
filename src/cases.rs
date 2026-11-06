@@ -64,7 +64,7 @@ pub trait Backend {
 /// by TinyCC, or by clang (-O2) into a DLL.
 /// `data`: the folder of a program's tables (fresh for each backend of a case); None without tables.
 pub struct CBackend { _code: Code, m: *mut std::ffi::c_void, f: CFns, pairs: Vec<MitoPair>, start: unsafe extern "C" fn(u64, u64) -> *mut std::ffi::c_void,
-    open: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, *const u8, u64) -> i32, data_error: unsafe extern "C" fn(*mut std::ffi::c_void) -> *const u8, data: Option<std::path::PathBuf> }
+    open: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, *const u8, u64, i32) -> i32, data_error: unsafe extern "C" fn(*mut std::ffi::c_void) -> *const u8, data: Option<std::path::PathBuf> }
 /// A header or forwarded field, as runtime/types.h declares it.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -155,7 +155,7 @@ impl CBackend {
         let Some(d) = &self.data else { return Ok(()) };
         let dir = format!("{}\0", d.display());
         unsafe {
-            if (self.open)(self.m, dir.as_ptr(), "data.db\0".as_ptr(), 16) == 0 { return Err(std::ffi::CStr::from_ptr((self.data_error)(self.m) as *const std::ffi::c_char).to_string_lossy().into_owned()); }
+            if (self.open)(self.m, dir.as_ptr(), "data.db\0".as_ptr(), 16, 1) == 0 { return Err(std::ffi::CStr::from_ptr((self.data_error)(self.m) as *const std::ffi::c_char).to_string_lossy().into_owned()); }
         }
         Ok(())
     }

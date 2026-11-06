@@ -78,7 +78,9 @@ static void sq_bare(const char *q, char *out, u32 cap) { u32 n = 0; for (q++; *q
 
 static int sq_configured;
 /* Open (create) the database and bring its tables to the program's declarations. 1, or 0 with the reason in st->err. */
-static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *dir, const char *file, u64 pool_mb) {
+/* `full`: each commit synced to disk before the request is answered (synchronous=FULL; an answered change survives a power cut); 0: WAL
+   commits synced at checkpoints (NORMAL: a process crash loses nothing, an OS crash or power cut can lose the last moments, never corrupts). */
+static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *dir, const char *file, u64 pool_mb, int full) {
     char path[1200]; SqBuf p = { path, sizeof path, 0 }; sb_s(&p, dir);
     if (!os_mkdir(path)) return st_fail(st, "cannot make the data directory", path);
     sb_s(&p, "/"); sb_s(&p, file);
@@ -90,7 +92,7 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         sq_configured = 1;
     }
     if (sqlite3_open_v2(path, &st->db, 0x2 | 0x4, 0) != SQ_OK) return st_fail(st, path, st->db ? sqlite3_errmsg(st->db) : "cannot open"); /* READWRITE | CREATE */
-    if (!st_exec(st, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=OFF;") || !st_exec(st, "BEGIN IMMEDIATE")) return 0;
+    if (!st_exec(st, full ? "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=OFF;" : "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=OFF;") || !st_exec(st, "BEGIN IMMEDIATE")) return 0;
     char sqlb[4096], msg[1024], bare[300];
     for (u32 t = 0; t < ntabs; t++) {
         const StoreTable *tb = &tabs[t];

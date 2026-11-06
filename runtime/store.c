@@ -76,11 +76,17 @@ static int sq_streq(const char *a, const char *b) { while (*a && *a == *b) { a++
 /* a table's name without its quotes, as sqlite_schema keeps it */
 static void sq_bare(const char *q, char *out, u32 cap) { u32 n = 0; for (q++; *q && n + 1 < cap; q++) { if (*q == '"') { if (q[1] == '"') q++; else break; } out[n++] = *q; } out[n] = 0; }
 
+static u32 c_strlen_sq(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
 static int sq_configured;
 /* Open (create) the database and bring its tables to the program's declarations. 1, or 0 with the reason in st->err. */
-/* `full`: each commit synced to disk before the request is answered (synchronous=FULL; an answered change survives a power cut); 0: WAL
-   commits synced at checkpoints (NORMAL: a process crash loses nothing, an OS crash or power cut can lose the last moments, never corrupts). */
-static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *dir, const char *file, u64 pool_mb, int full) {
+/* What does not fit, dropped deliberately (`--db-fit drop`): said on standard error, one line each. */
+static void st_dropped(const char *what) { os_err("dropped: ", 9); u32 n = 0; while (what[n]) n++; os_err(what, n); os_err("\n", 1); }
+/* flags: 1 `full`: each commit synced to disk before the request is answered (synchronous=FULL; an answered change survives a power cut),
+   else WAL commits synced at checkpoints (NORMAL: a process crash loses nothing, an OS crash or power cut can lose the last moments, never
+   corrupts); 2 `drop`: what does not fit the program is dropped (a column whose type changed loses its values, a table whose owner changed
+   its rows, rows past a declared limit are deleted with the rows they own), each said on standard error; without it the server refuses. */
+static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *dir, const char *file, u64 pool_mb, int flags) {
+    int full = flags & 1, dropmis = (flags & 2) != 0;
     char path[1200]; SqBuf p = { path, sizeof path, 0 }; sb_s(&p, dir);
     if (!os_mkdir(path)) return st_fail(st, "cannot make the data directory", path);
     sb_s(&p, "/"); sb_s(&p, file);
@@ -98,6 +104,16 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         const StoreTable *tb = &tabs[t];
         sq_bare(tb->sql, bare, sizeof bare);
         if (st_int(st, "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1", bare) <= 0) { if (!st_exec(st, tb->create)) return 0; continue; }
+        /* the owner changed (a table now nested, or no longer): refused, or (dropping) the table made again, empty */
+        { SqBuf q = { sqlb, sizeof sqlb, 0 }; sb_s(&q, "SELECT count(*) FROM pragma_table_info('"); sb_s(&q, bare); sb_s(&q, "') WHERE name = 'parent_id'");
+          int had = st_int(st, sqlb, 0) > 0;
+          if (had != (tb->parent >= 0)) {
+              SqBuf m = { msg, sizeof msg, 0 }; sb_s(&m, "table "); sb_s(&m, tb->sql); sb_s(&m, had ? " belongs to another table's rows in the database, not in the program" : " belongs to another table's rows in the program, not in the database");
+              if (!dropmis) return st_fail(st, "the database does not fit the program (--db-fit drop drops what does not fit)", msg);
+              st_dropped(msg);
+              SqBuf a = { sqlb, sizeof sqlb, 0 }; sb_s(&a, "DROP TABLE "); sb_s(&a, tb->sql); if (!st_exec(st, sqlb) || !st_exec(st, tb->create)) return 0;
+              continue;
+          } }
         /* an existing table: its columns against the declared ones */
         SqBuf q = { sqlb, sizeof sqlb, 0 }; sb_s(&q, "SELECT name, type FROM pragma_table_info("); sb_s(&q, "'"); sb_s(&q, bare); sb_s(&q, "')");
         sqlite3_stmt *ti; if (sqlite3_prepare_v2(st->db, sqlb, -1, &ti, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
@@ -112,11 +128,15 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
             if (!sq_streq(ct, sq_types[tb->cols[k].type])) {
                 SqBuf m = { msg, sizeof msg, 0 }; sb_s(&m, "column "); sb_s(&m, tb->sql); sb_s(&m, "."); sb_s(&m, cn); sb_s(&m, " is "); sb_s(&m, ct); sb_s(&m, " in the database, ");
                 sb_s(&m, sq_types[tb->cols[k].type]); sb_s(&m, " in the program");
-                sqlite3_finalize(ti); return st_fail(st, "the database does not fit the program", msg);
+                if (!dropmis) { sqlite3_finalize(ti); return st_fail(st, "the database does not fit the program (--db-fit drop drops what does not fit)", msg); }
+                /* dropping: the column goes and comes back with its new type, every row with its first value */
+                st_dropped(msg);
+                if (k < 256) seen[k] = 0;
+                if (ndrop < 32) { SqBuf d = { drop[ndrop], 128, 0 }; sb_s(&d, cn); ndrop++; }
             }
         }
         sqlite3_finalize(ti);
-        if (has_parent != (tb->parent >= 0)) { SqBuf m = { msg, sizeof msg, 0 }; sb_s(&m, "table "); sb_s(&m, tb->sql); sb_s(&m, has_parent ? " belongs to another table's rows in the database, not in the program" : " belongs to another table's rows in the program, not in the database"); return st_fail(st, "the database does not fit the program", msg); }
+        (void)has_parent; /* checked above */
         /* our indexes go (they are made again below); removed columns are dropped, new ones added */
         { SqBuf d = { sqlb, sizeof sqlb, 0 }; sb_s(&d, "SELECT group_concat('DROP INDEX \"' || replace(name, '\"', '\"\"') || '\";', ' ') FROM sqlite_schema WHERE type = 'index' AND sql IS NOT NULL AND tbl_name = ?1");
           sqlite3_stmt *di; if (sqlite3_prepare_v2(st->db, sqlb, -1, &di, 0) == SQ_OK) { sqlite3_bind_text(di, 1, bare, -1, (void (*)(void *))0);
@@ -149,13 +169,26 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         else if (c->type == 3) { sb_s(&a, "length("); sb_q(&a, c->name); sb_s(&a, ") NOT IN (0, "); sb_i(&a, c->max); sb_s(&a, ")"); }
         else continue;
         i64 bad = st_int(st, sqlb, 0);
+        if (bad > 0 && dropmis) {
+            /* dropping: those rows deleted (and below, the rows they owned) */
+            SqBuf m = { msg, sizeof msg, 0 }; sb_i(&m, bad); sb_s(&m, bad == 1 ? " row of " : " rows of "); sb_s(&m, tabs[t].sql); sb_s(&m, " past the limit of "); sb_s(&m, c->name);
+            st_dropped(msg);
+            char del[4200]; SqBuf d = { del, sizeof del, 0 }; sb_s(&d, "DELETE FROM "); sb_s(&d, tabs[t].sql); sb_s(&d, sqlb + 21 + (u32)c_strlen_sq(tabs[t].sql));
+            if (!st_exec(st, del)) return 0;
+            continue;
+        }
         if (bad != 0) {
             SqBuf m = { msg, sizeof msg, 0 }; sb_i(&m, bad); sb_s(&m, bad == 1 ? " row of " : " rows of "); sb_s(&m, tabs[t].sql); sb_s(&m, bad == 1 ? " holds a " : " hold a "); sb_s(&m, c->name);
             if (c->has_range) { sb_s(&m, " outside "); sb_i(&m, c->lo); sb_s(&m, ".."); sb_i(&m, c->hi); }
             else if (c->type == 2) { sb_s(&m, " longer than "); sb_i(&m, c->max); sb_s(&m, c->ascii ? " bytes or not ASCII" : " bytes"); }
             else { sb_s(&m, " that is not "); sb_i(&m, c->max); sb_s(&m, " bytes"); }
-            return st_fail(st, "the database does not fit the program", msg);
+            return st_fail(st, "the database does not fit the program (--db-fit drop drops what does not fit)", msg);
         }
+    }
+    /* rows whose owner is gone (deleted above while foreign keys are off during migration): deleted, owners before what they own */
+    if (dropmis) for (u32 t = 0; t < ntabs; t++) if (tabs[t].parent >= 0) {
+        SqBuf a = { sqlb, sizeof sqlb, 0 }; sb_s(&a, "DELETE FROM "); sb_s(&a, tabs[t].sql); sb_s(&a, " WHERE parent_id NOT IN (SELECT id FROM "); sb_s(&a, tabs[tabs[t].parent].sql); sb_s(&a, ")");
+        if (!st_exec(st, sqlb)) return 0;
     }
     for (u32 t = 0; t < ntabs; t++) if (tabs[t].indexes[0] && !st_exec(st, tabs[t].indexes)) return 0;
     if (!st_exec(st, "COMMIT") || !st_exec(st, "PRAGMA foreign_keys=ON")) return 0;

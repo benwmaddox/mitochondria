@@ -8,7 +8,7 @@
    ones (poll) and hands a connection back to the threads when its next request arrives; an idle connection is closed
    after 10 s. One program's handler runs for one request at a time (a lock); a system has its own workers.
    Sockets, threads, locks and timers are runtime/os.c's (Windows and Linux). Flags: --port N, --conns N (a system's connection threads), --budget MB, --soft MB,
-   --hard MB (one program's memory), --data DIR, --db-memory MB and --db-sync full|normal (a program's tables, in SQLite), and for tests --seed N and --clock MS. */
+   --hard MB (one program's memory), --data DIR, --db-memory MB, --db-sync full|normal and --db-fit refuse|drop (a program's tables, in SQLite), and for tests --seed N and --clock MS. */
 
 static int g_timing; /* --timing: every answer carries X-Handler-Ns, the time the handler took (for benchmarks; off, the answers are byte for byte as recorded) */
 
@@ -369,12 +369,13 @@ static const char *sflag(int argc, char **argv, const char *name, const char *de
     for (int i = 1; i + 1 < argc; i++) { const char *a = argv[i]; u32 k = 0; while (name[k] && a[k] == name[k]) k++; if (!name[k] && !a[k]) return argv[i + 1]; }
     return def;
 }
-/* --db-sync full (default: an answered change is on disk) or normal (synced at checkpoints): 1, 0, or -1 for anything else */
+static int same(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+/* the tables' flags: --db-sync full (default: an answered change is on disk) or normal (synced at checkpoints) gives 1 or 0; --db-fit refuse
+   (default: a database that does not fit the program stops the server) or drop (drop what does not fit, saying each) adds 2; -1 for anything else */
 static int db_sync(int argc, char **argv) {
-    const char *v = sflag(argc, argv, "--db-sync", "full"), *f = "full", *n = "normal"; int i = 0;
-    while (v[i] && v[i] == f[i]) i++; if (!v[i] && !f[i]) return 1;
-    i = 0; while (v[i] && v[i] == n[i]) i++; if (!v[i] && !n[i]) return 0;
-    return -1;
+    const char *v = sflag(argc, argv, "--db-sync", "full"), *f = sflag(argc, argv, "--db-fit", "refuse");
+    int s = same(v, "full") ? 1 : same(v, "normal") ? 0 : -1, d = same(f, "refuse") ? 0 : same(f, "drop") ? 2 : -1;
+    return s < 0 || d < 0 ? -1 : s | d;
 }
 int main(int argc, char **argv) {
     u64 port = 8080, conns = 16, budget = 1024, soft = 0, hard = 0, seed = 0, clock = 0, loop_budget = 0;
@@ -397,7 +398,7 @@ int main(int argc, char **argv) {
         u64 dbmem = 64; flag(argc, argv, "--db-memory", &dbmem);
         const char *dir = sflag(argc, argv, "--data", "data");
         int full = db_sync(argc, argv);
-        if (full < 0) { printf("error: --db-sync is full or normal\n"); mito_stop(app); return 1; }
+        if (full < 0) { printf("error: --db-sync is full or normal, --db-fit refuse or drop\n"); mito_stop(app); return 1; }
         if (!mito_open_data(app, dir, "data.db", dbmem, full)) { printf("error: %s\n", mito_data_error(app)); mito_stop(app); return 1; }
         printf("tables in %s/data.db\n", dir);
     }
@@ -407,7 +408,7 @@ int main(int argc, char **argv) {
 #else
     (void)marks; (void)budget;
     { u64 dbmem = 64; flag(argc, argv, "--db-memory", &dbmem); int full = db_sync(argc, argv);
-      if (full < 0) { printf("error: --db-sync is full or normal\n"); return 1; }
+      if (full < 0) { printf("error: --db-sync is full or normal, --db-fit refuse or drop\n"); return 1; }
       mito_system_set_data(sflag(argc, argv, "--data", "data"), dbmem, full); }
     void *app = mito_system_start(seed, seeded);
     if (!app) { const char *e = mito_system_data_error(); printf("error: %s\n", e[0] ? e : "the system did not start"); return 1; }

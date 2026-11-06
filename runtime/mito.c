@@ -2055,12 +2055,13 @@ MITO_API u32 MITO(test_count)(void) { return MITO_NTESTS; }
 MITO_API const char *MITO(test_name)(u32 k) { return mito_test_names[k]; }
 #endif
 /* Open the program's tables in `dir` (the database file `file`, SQLite's memory pool `pool_mb` MB, `full`: every commit synced to disk
-   before its answer): 1, or 0 with MITO(data_error) saying why. A program without tables has nothing to open. */
-MITO_API int MITO(open_data)(void *mp_, const char *dir, const char *file, u64 pool_mb, int full) {
+   before its answer; flags: 1 that, 2 drop what does not fit instead of refusing): 1, or 0 with MITO(data_error) saying why. A program
+   without tables has nothing to open. */
+MITO_API int MITO(open_data)(void *mp_, const char *dir, const char *file, u64 pool_mb, int flags) {
 #ifdef MITO_USES_SQLITE
-    Mito *m = (Mito *)mp_; return store_open(&m->store, mito_tables, MITO_NTABLES, dir, file, pool_mb, full);
+    Mito *m = (Mito *)mp_; return store_open(&m->store, mito_tables, MITO_NTABLES, dir, file, pool_mb, flags);
 #else
-    (void)mp_; (void)dir; (void)file; (void)pool_mb; (void)full; return 1;
+    (void)mp_; (void)dir; (void)file; (void)pool_mb; (void)flags; return 1;
 #endif
 }
 MITO_API const char *MITO(data_error)(void *mp_) {

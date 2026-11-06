@@ -176,14 +176,18 @@ int main(int argc, char **argv) {
             exe
         };
         // a server that opened its tables keeps running: read its first line, then stop it; one that refused exits with the reason
-        let run = |exe: &std::path::Path| -> String {
-            use std::io::BufRead;
-            let mut c = std::process::Command::new(exe).args(["--port", "18131", "--data"]).arg(&data).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        // its first line on standard output, and (`extra` flags given) what it said it dropped on standard error
+        let run_with = |exe: &std::path::Path, extra: &[&str]| -> (String, String) {
+            use std::io::{BufRead, Read};
+            let mut c = std::process::Command::new(exe).args(["--port", "18131", "--data"]).arg(&data).args(extra)
+                .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
             let mut line = String::new();
             std::io::BufReader::new(c.stdout.take().unwrap()).read_line(&mut line).unwrap();
             let _ = c.kill(); let _ = c.wait();
-            line.trim().to_string()
+            let mut err = String::new(); let _ = c.stderr.take().unwrap().read_to_string(&mut err);
+            (line.trim().to_string(), err.trim().to_string())
         };
+        let run = |exe: &std::path::Path| run_with(exe, &[]).0;
         assert!(run(&build("v1", "title: utf8<1000>; done: bool;")).starts_with("tables in"));
         assert!(run(&build("v2", "title: utf8<1000>; done: bool; due: i64;")).starts_with("tables in"));
         // a row from outside: a title of 10 bytes
@@ -196,9 +200,18 @@ int main(int argc, char **argv) { sqlite3 *db; sqlite3_config(SQLITE_CONFIG_HEAP
         let ins = dir.join(format!("insert{}", std::env::consts::EXE_SUFFIX));
         super::exe(&[insert], &ins, false, &["-O0"]).unwrap();
         assert!(std::process::Command::new(&ins).arg(data.join("data.db")).status().unwrap().success());
-        assert_eq!(run(&build("v3", "title: utf8<1000>; done: f64; due: i64;")), "error: the database does not fit the program: column \"boards.todos\".done is INTEGER in the database, REAL in the program");
-        assert_eq!(run(&build("v4", "title: utf8<5>; done: bool; due: i64;")), "error: the database does not fit the program: 1 row of \"boards.todos\" holds a title longer than 5 bytes");
+        let refused = "error: the database does not fit the program (--db-fit drop drops what does not fit): ";
+        assert_eq!(run(&build("v3", "title: utf8<1000>; done: f64; due: i64;")), format!("{}column \"boards.todos\".done is INTEGER in the database, REAL in the program", refused));
+        assert_eq!(run(&build("v4", "title: utf8<5>; done: bool; due: i64;")), format!("{}1 row of \"boards.todos\" holds a title longer than 5 bytes", refused));
         assert!(run(&build("v5", "title: utf8<10>; done: bool;")).starts_with("tables in")); // fits again; `due` dropped
+        // dropping deliberately: the type change, then the row past a smaller limit, each said on standard error
+        let (out, err) = run_with(&build("v6", "title: utf8<10>; done: f64;"), &["--db-fit", "drop"]);
+        assert!(out.starts_with("tables in"), "{}", out);
+        assert_eq!(err, "dropped: column \"boards.todos\".done is INTEGER in the database, REAL in the program");
+        let (out, err) = run_with(&build("v7", "title: utf8<5>; done: f64;"), &["--db-fit", "drop"]);
+        assert!(out.starts_with("tables in"), "{}", out);
+        assert_eq!(err, "dropped: 1 row of \"boards.todos\" past the limit of title");
+        assert!(run(&build("v8", "title: utf8<5>; done: f64;")).starts_with("tables in")); // nothing left that does not fit
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

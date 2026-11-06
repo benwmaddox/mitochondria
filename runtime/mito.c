@@ -1609,6 +1609,18 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
         if (!(w = t_room(m, z.len - 16))) return -1;
         if (!cr_gcm(1, t_ptr(m, x), t_ptr(m, y), t_ptr(m, z), z.len - 16, w, tag)) { *out = v_null(); return 0; }
         return t_done(m, start, z.len - 16, out); }
+    case 42: { /* random_text(n, alphabet): n characters each drawn uniformly from the alphabet (ASCII, 2 to 255 of them) by the system's
+                  generator (bytes past the largest multiple of its size are drawn again), as SecureRandom.base58 and alphanumeric do */
+        if (n < 2 || a[0].tag != 1 || a[0].i < 1 || a[0].i > 4096 || arg_txt(m, a, n, 1, &x) || x.len < 2 || x.len > 255) return fail(m, 500, "random_text(1 to 4096 characters, an alphabet of 2 to 255)");
+        u32 cnt = (u32)a[0].i, lim = 256 - 256 % x.len;
+        if (!(w = t_room(m, cnt))) return -1;
+        const u8 *al = t_ptr(m, x); u8 buf[64]; u32 have = 0, used = 0, o = 0;
+        while (o < cnt) {
+            if (used == have) { if (!cr_random(buf, sizeof buf)) return fail(m, 500, "the system's random generator failed"); have = sizeof buf; used = 0; }
+            u8 r = buf[used++];
+            if (r < lim) w[o++] = al[r % x.len];
+        }
+        return t_done(m, start, cnt, out); }
     case 31: case 32: { /* bcrypt_hash(password, cost): a `$2a$` digest; bcrypt_check(password, digest): whether it matches */
         if (arg_txt(m, a, n, 0, &x)) return -1;
         char pw[73]; u32 pn = 0; const u8 *p = t_ptr(m, x);
@@ -2157,13 +2169,27 @@ static int h_see_other(Ctx *c, const Txt *t) {
     if (!(a_str(&m->head, "Location: ") && a_put(&m->head, p, n) && a_str(&m->head, "\r\n"))) return fail(m, 500, "redirect path too long");
     return 0;
 }
+/* `found(path)`: a 302 whose Location is the path made absolute with this request's Host (as Rails' redirect_to writes it); the path is
+   checked as see_other's, and the Host must be a host name (letters, digits, - . : [ ]) so it cannot add header lines */
+static int h_found(Ctx *c, const Txt *t) {
+    Mito *m = M_(c); const u8 *p = m->text.p + t->off; u32 n = t->len;
+    int ok = n >= 1 && p[0] == '/' && !(n >= 2 && (p[1] == '/' || p[1] == '\\'));
+    for (u32 i = 0; ok && i < n; i++) if (p[i] <= 0x20 || p[i] >= 0x7F) ok = 0;
+    if (!ok) return fail(m, 500, "found takes a path on this server: one leading /, printable ASCII, no spaces");
+    const u8 *h; u64 hn;
+    if (!header(m, (const u8 *)"host", 4, &h, &hn) || hn == 0 || hn > 255) return fail(m, 400, "a redirect needs the request's Host");
+    for (u64 i = 0; i < hn; i++) { u8 ch = h[i]; if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '.' || ch == ':' || ch == '[' || ch == ']')) return fail(m, 400, "the request's Host is not a host name"); }
+    m->out.len = 0;
+    if (!(a_str(&m->head, "Location: http://") && a_put(&m->head, h, hn) && a_put(&m->head, p, n) && a_str(&m->head, "\r\n"))) return fail(m, 500, "redirect path too long");
+    return 0;
+}
 
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header, h_tinsert,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header, h_tinsert, h_found,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

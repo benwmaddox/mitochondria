@@ -82,7 +82,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
-    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml }
+    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -93,7 +93,7 @@ impl B {
             "base64" => Base64, "base64_url" => Base64Url, "unbase64" => Unbase64, "hex" => Hex, "sha1" => Sha1, "sha256" => Sha256,
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
-            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml,
+            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml, "random_text" => RandomText,
             _ => return None,
         })
     }
@@ -793,17 +793,18 @@ impl P {
         }
         if self.is_kw("return") {
             self.i += 1;
-            // in an endpoint, the answer: ok(...) 200, created(...) 201, no_content() 204, status(code, ...), see_other(path) 303
+            // in an endpoint, the answer: ok(...) 200, created(...) 201, no_content() 204, status(code, ...), see_other(path) 303, found(path) 302
             if self.in_endpoint {
                 let how = self.here_word();
-                let code: u16 = match how.as_str() { "ok" => 200, "created" => 201, "no_content" => 204, "status" => 0, "see_other" => 303, _ => return Err("an endpoint returns its answer: `return ok(...)`, `created(...)`, `no_content()`, `status(code, ...)` or `see_other(path)`".into()) };
+                let code: u16 = match how.as_str() { "ok" => 200, "created" => 201, "no_content" => 204, "status" => 0, "see_other" => 303, "found" => 302, _ => return Err("an endpoint returns its answer: `return ok(...)`, `created(...)`, `no_content()`, `status(code, ...)`, `see_other(path)` or `found(path)`".into()) };
                 self.i += 1; self.eat("(")?;
                 let code = if code == 0 {
                     let c = self.int()?;
-                    if !(200..300).contains(&c) { return Err(format!("`status({}, ...)`: an answer is a success (2xx); end with `fail {} \"...\"` for an error", c, c)); }
+                    // a page may be answered with an error status (a form shown again 422, a sign-in refused 401); redirects are `see_other`/`found`
+                    if !((200..300).contains(&c) || (400..600).contains(&c)) { return Err(format!("`status({}, ...)`: an answer is 2xx, 4xx or 5xx (a redirect is `see_other(path)` or `found(path)`)", c)); }
                     self.eat(",")?; c as u16
                 } else { code };
-                let j = if code == 204 { Json::Empty } else if code == 303 { Json::E(self.expr()?) }
+                let j = if code == 204 { Json::Empty } else if code == 303 || code == 302 { Json::E(self.expr()?) }
                     else if matches!(self.peek(), Some(Tok::HOpen(_) | Tok::HText(_))) { let body = self.html()?; self.pre.extend(body); Json::Html }
                     else { self.json()? };
                 self.eat(")")?; self.eat(";")?;

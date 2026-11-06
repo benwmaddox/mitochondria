@@ -111,6 +111,7 @@ struct H {
     int (*tmerge)(Ctx *, u32, u32, u32 *, int *);                /* a merged inner loop: the next row of this owner from the merge cursor */
     int (*set_header)(Ctx *, const char *, u32, const Txt *);   /* a header line on the answer: name (checked when compiling), value (checked) */
     int (*tinsert)(Ctx *, u32, u32, const char *, const u32 *, const Val *, u32, u32 *); /* a row added with its fields' values: one INSERT */
+    int (*found)(Ctx *, const Txt *);                            /* a 302 answer to a path on this server, Location absolute (this Host) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -227,16 +228,16 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 42] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 43] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
     B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
     // the process's environment: code 35; a time as text: 36; texts within texts: 37 to 39
     B::Env, B::FormatTime, B::Contains, B::StartsWith, B::EndsWith,
-    // the answer without the web block's header lines: 40; text escaped as markup: 41
-    B::NoDefaultHeaders, B::EscapeHtml];
+    // the answer without the web block's header lines: 40; text escaped as markup: 41; random characters: 42
+    B::NoDefaultHeaders, B::EscapeHtml, B::RandomText];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
-const CRYPTO_BUILTINS: [B; 10] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck];
+const CRYPTO_BUILTINS: [B; 11] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::RandomText];
 
 /// Operator codes for the `binop` helper (the interpreter's operator names, in this order).
 pub const OPS: [&str; 11] = ["==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"];
@@ -2329,6 +2330,19 @@ impl<'p> G<'p> {
                 self.call(&format!("c->h->see_other(c, &{})", t));
                 self.line("return 303;");
             }
+            Stmt::Respond(302, Json::E(e)) => {
+                // `found(path)`: a 302 from any endpoint, its Location the path made absolute with the request's Host (checked by the runtime)
+                let v = self.expr(e, env, None)?;
+                if let CV::Lit(s) = &v {
+                    let b = s.as_bytes();
+                    if !(b.first() == Some(&b'/') && !matches!(b.get(1), Some(b'/' | b'\\')) && b.iter().all(|c| *c > 0x20 && *c < 0x7F)) {
+                        return no(format!("`found(\"{}\")`: the address is a path on this server, one leading `/`, printable ASCII, no spaces (encode them as %20)", s));
+                    }
+                }
+                let t = self.txt_of(v).map_err(|_| "`found` takes the path as text, as in `found(\"/\")`".to_string())?;
+                self.call(&format!("c->h->found(c, &{})", t));
+                self.line("return 302;");
+            }
             Stmt::Respond(code, Json::Html) => {
                 // `ok(<markup>)`: the statements before wrote the body
                 if !self.html_answer() { return no("markup is an HTML answer: the endpoint returns `Response<html>`"); }
@@ -3606,7 +3620,7 @@ impl<'p> G<'p> {
         // arity of the byte and crypto built-ins, checked when compiling
         let want = match bi {
             B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml => Some((1, "one argument")),
-            B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime | B::Contains | B::StartsWith | B::EndsWith => Some((2, "two arguments")),
+            B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime | B::Contains | B::StartsWith | B::EndsWith | B::RandomText => Some((2, "two arguments")),
             B::GcmSeal | B::GcmOpen => Some((3, "the key, the 12-byte nonce and the text")),
             B::Pbkdf2Sha256 => Some((4, "the password, the salt, the iterations and the length")),
             _ => None,
@@ -3614,7 +3628,7 @@ impl<'p> G<'p> {
         if let Some((k, what)) = want {
             if a.len() != k {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
-                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
+                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::RandomText => "random_text", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
                     B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time", B::Contains => "contains", B::StartsWith => "starts_with", B::EndsWith => "ends_with",
                     B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));
@@ -3637,7 +3651,7 @@ impl<'p> G<'p> {
                 B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot => CV::Int(format!("{}.i", r)),
                 B::SecretEqual | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith => CV::Bool(format!("({}.i != 0)", r)),
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
-                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
+                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
                 B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
                 _ => CV::Any(r),
@@ -4463,7 +4477,7 @@ mod profile_tests {
             ("@get(\"/a\") fn a() -> Response<{ x: [i64] }> { return ok({ x: [foreach it in app.items it.name] }); }", "`x[]` is string, declared i64"),
             ("@get(\"/a\") fn a() -> Response<[Row]> { return ok([foreach it in app.items { name: it.name }]); }", "has no `n`"),
             ("@get(\"/a\") fn a() -> Response<null> { return ok({}); }", "declared null"),
-            ("@get(\"/a\") fn a() -> Response<{}> { return status(404, {}); }", "an answer is a success (2xx)"),
+            ("@get(\"/a\") fn a() -> Response<{}> { return status(302, {}); }", "an answer is 2xx, 4xx or 5xx"),
             ("@get(\"/a\") fn a() -> Response<{}> { return {}; }", "an endpoint returns its answer"),
             ("@get(\"/a\") fn a() -> Response<{}> { respond 200 {}; }", "`respond` was replaced"),
             ("endpoint GET /a { respond 200 {}; }", "endpoints are functions with an attribute"),

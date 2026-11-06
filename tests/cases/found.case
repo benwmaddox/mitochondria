@@ -1,0 +1,24 @@
+// `found(path)`: a 302 whose Location is absolute with the request's Host (a Host that is not a host name is refused); `status(401,
+// <markup>)`: a page with an error status; `random_text(n, alphabet)`: characters of the alphabet only
+--- program
+struct A { n: i64; }
+state a: A;
+
+@post("/session")
+fn sign_in(ok_: bool = false) -> Response<html> {
+    if ok_ { return found("/rooms/7"); }
+    return status(401, <p>Too many requests or unauthorized.</p>);
+}
+@get("/token")
+fn token() -> Response<{ size: i64; base58: bool }> {
+    let t = random_text(24, "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz");
+    return ok({ size: len(t), base58: !contains(t, "0") && !contains(t, "O") && !contains(t, "I") && !contains(t, "l") });
+}
+--- requests
+@Host: campfire.test:3000
+POST /session {"ok_":true}
+@Host: evil.test/x
+POST /session {"ok_":true}
+POST /session {"ok_":true}
+POST /session {}
+GET /token

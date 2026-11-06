@@ -195,13 +195,15 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   `set_header`, which replaces the kind's for any answer); `file_base64("logos/icon.png")` is a file's bytes read when compiling, as
   base64 (`unbase64` it once, in `@start`). `no_default_headers()` sends the answer without the `web` block's header lines (as a
   file Rails sends). `escape_html(t)` is text with `& < > " '` as entities (ERB's escaping, for JSON or markup built as text);
-  `contains`, `starts_with` and `ends_with` compare bytes; `json_field(text, "name")` reads a field of a JSON object (null if absent).
+  `contains`, `starts_with` and `ends_with` compare bytes; `random_text(n, alphabet)` draws characters uniformly with the system's
+  generator (session tokens: base58); `json_field(text, "name")` reads a field of a JSON object (null if absent).
   A loop's `scan where ...` accepts that a `where` over a whole table reads every row (a schema that cannot have the index).
 - `Response<html>`, `<text>`, `<css>`, `<js>` and `<svg>` answer text as it is with that content type (UTF-8). `file("assets/app.css")`
   is a file's text, read when compiling (relative to the program) and kept in the program, so a stylesheet is served as
   `@get("/app.css") fn css() -> Response<css> { return ok(file("assets/app.css")); }`. An answer that is a literal is the same
   every time: it gets an `ETag` (`Cache-Control: no-cache`), and a request whose `If-None-Match` names it is answered 304. `return see_other("/path")`
-  answers 303 from any endpoint; the address must be a path on this server (one leading `/`, printable ASCII), checked when
+  answers 303 from any endpoint (`return found("/path")` answers 302 with the Location made absolute from the request's Host, as Rails'
+  `redirect_to` writes it; `status(401, <markup>)` answers a page with an error status); the address must be a path on this server (one leading `/`, printable ASCII), checked when
   compiling for a literal and when running otherwise, so a redirect can neither leave the site nor add header lines. Errors are
   answered in JSON.
 - Collections are used through their functions: `add` (or `add { field: value }`), `try_add`, `remove`, `count`,

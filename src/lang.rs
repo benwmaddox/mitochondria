@@ -6,25 +6,47 @@
 //! calls into an enum. Errors that used to surface as a 500 at run time (an unknown name, assigning to a `let`)
 //! now stop the server from starting.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Tok { Id(String), Int(i64), Flt(f64), Str(String), Sym(String) }
+pub enum Tok { Id(String), Int(i64), Flt(f64), Str(String), Sym(String),
+    /// markup (HTML literals): `<tag`, an attribute's name, `>` or `/>` (true), `</tag>`, text, a `"` around an attribute's value
+    HOpen(String), HAttr(String), HEnd(bool), HClose(String), HText(String), HQ }
+
+/// HTML's void elements: no closing tag, no content.
+pub const VOID: [&str; 14] = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"];
+
+/// Text between tags as written in source: on one line it is kept as it is; across lines, each line is trimmed, empty lines dropped, and
+/// the rest joined by one space (so indentation and line breaks between tags cost nothing in the page).
+fn markup_text(raw: &str) -> String {
+    if !raw.contains('\n') { return raw.to_string(); }
+    let lines: Vec<&str> = raw.split('\n').collect();
+    let n = lines.len();
+    lines.iter().enumerate().map(|(k, l)| if k == 0 { l.trim_end() } else if k == n - 1 { l.trim_start() } else { l.trim() }).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+}
+/// Where the lexer is: code (`depth` braces open since it began; `html`: it began at a `{` inside markup and ends at its `}`), the
+/// content of markup (`depth` elements open), inside a start tag (its name), inside a quoted attribute value.
+enum Mode { Code { depth: u32, html: bool }, Content { depth: u32 }, Tag(String), AttrQ }
 
 /// What a name refers to, filled in by the binder.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VarRes { #[default] Unbound, Local(u32), Global(u32) }
+
+/// Markup's fixed text so far, as one statement that writes it.
+fn flush_lit(out: &mut Vec<Stmt>, lit: &mut String) {
+    if !lit.is_empty() { out.push(Stmt::Do(Expr::Call("__html_lit".into(), vec![Expr::Str(std::mem::take(lit))], CallRes::Unbound))); }
+}
 
 /// A cookie name: an HTTP token (RFC 6265 cookie-name).
 pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) }
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie }
+pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
         Some(match n {
             "body" => Body, "param" => Param, "query" => Query, "header" => Header, "fwd" => Fwd, "int" => Int, "str" => Str, "len" => Len, "now" => Now,
             "random" => Random, "min" => Min, "max" => Max, "count" => Count, "capacity" => Capacity, "slot" => Slot, "stat" => Stat, "token" => Token,
-            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie,
+            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie, "__html_lit" => HtmlLit, "__html_esc" => HtmlEsc, "__html_esc_attr" => HtmlEscAttr, "__html_attr" => HtmlAttr,
             _ => return None,
         })
     }
@@ -59,7 +81,9 @@ pub struct Via { pub first: u32, pub next: u32, pub item: u32, pub last: Option<
 
 #[derive(Debug, Clone)]
 /// An answer's JSON: an object, an array made by a loop, a value, or nothing (`no_content()`).
-pub enum Json { Obj(Vec<(String, Json)>), Arr(Iter, Box<Json>), E(Expr), Empty }
+pub enum Json { Obj(Vec<(String, Json)>), Arr(Iter, Box<Json>), E(Expr), Empty,
+    /// the answer's body was written by the markup before (`ok(<p>...</p>)`)
+    Html }
 
 /// The `T` of an endpoint's `Response<T>`: the shape of every answer it gives. `Name` is a scalar (`i64`, `bool`,
 /// `string`, ...), `none` (no body), a declared struct (an object with its fields), or an item type (written as an id).
@@ -129,7 +153,8 @@ pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64, bool), Item(String, Opti
 /// (`pub fn`) can be called from outside the module.
 /// `ret_opt`: declared `-> T?`: the result may be null, and a caller must check it (`if exists(x)`) or give a fallback (`or`).
 /// `test`: a test (`test "name" { ... }`): no parameters, a result of `bool` or text, run by `mito test` only.
-pub struct Func { pub test: Option<String>, pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool }
+/// `html`: declared `-> html`, a function that writes markup into the answer (used inside markup, as `{item(t)}`).
+pub struct Func { pub test: Option<String>, pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool, pub html: bool }
 /// A type in a function's signature, as written: `i64`, `f64`, `bool`, `string`, a struct whose items the function takes
 /// (`Player`, or `Player in game.players` when several collections hold it), the type of a struct's field (`T.key`, for
 /// modules), each with `?` for "or null".
@@ -157,11 +182,103 @@ pub const MAX_FAIL: usize = 1024;
 fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
     let c: Vec<char> = src.chars().collect();
     let (mut i, mut out, mut at, mut line, mut tl, mut line_start, mut tc) = (0, Vec::new(), Vec::new(), 1u32, 1u32, 0usize, 1u32);
+    let mut modes = vec![Mode::Code { depth: 0, html: false }];
     while i < c.len() {
         let ch = c[i];
         while at.len() < out.len() { at.push((tl, tc)); } // tokens pushed by the last step started where it started
         tl = line;
         tc = (i - line_start + 1) as u32;
+        // markup: content, a start tag, a quoted attribute value
+        match modes.last_mut().unwrap() {
+            Mode::Content { depth } => {
+                if ch == '<' && c.get(i + 1) == Some(&'/') {
+                    let s = i + 2; let mut k = s; while k < c.len() && (c[k].is_alphanumeric() || c[k] == '-') { k += 1; }
+                    let name: String = c[s..k].iter().collect();
+                    while k < c.len() && c[k] == ' ' { k += 1; }
+                    if c.get(k) != Some(&'>') || name.is_empty() { return Err(format!("{}:{}: a closing tag is `</name>`", tl, tc)); }
+                    i = k + 1; out.push(Tok::HClose(name));
+                    *depth -= 1;
+                    if *depth == 0 { modes.pop(); }
+                } else if ch == '<' && c[i..].iter().take(4).collect::<String>() == "<!--" {
+                    let mut k = i + 4; while k < c.len() && c[k..].iter().take(3).collect::<String>() != "-->" { if c[k] == '\n' { line += 1; line_start = k + 1; } k += 1; }
+                    if k >= c.len() { return Err(format!("{}:{}: a comment that is never closed (`-->` is missing)", tl, tc)); }
+                    i = k + 3; // comments are not sent
+                } else if ch == '<' && c.get(i + 1) == Some(&'!') {
+                    let s = i; let mut k = i; while k < c.len() && c[k] != '>' { k += 1; }
+                    if k >= c.len() || *depth != 0 { return Err(format!("{}:{}: `<!doctype html>` comes first, before the root element", tl, tc)); }
+                    i = k + 1; out.push(Tok::HText(c[s..i].iter().collect()));
+                } else if ch == '<' && c.get(i + 1).map_or(false, |x| x.is_ascii_alphabetic()) {
+                    let s = i + 1; let mut k = s; while k < c.len() && (c[k].is_alphanumeric() || c[k] == '-') { k += 1; }
+                    let name: String = c[s..k].iter().collect();
+                    i = k; out.push(Tok::HOpen(name.clone())); modes.push(Mode::Tag(name));
+                } else if ch == '<' {
+                    return Err(format!("{}:{}: a `<` in text: write `&lt;`", tl, tc));
+                } else if ch == '{' {
+                    i += 1; out.push(Tok::Sym("{".into())); modes.push(Mode::Code { depth: 0, html: true });
+                } else if ch == '}' {
+                    return Err(format!("{}:{}: a `}}` in text: write `&#125;` (code in markup is inside `{{ }}`)", tl, tc));
+                } else {
+                    let s = i;
+                    while i < c.len() && c[i] != '<' && c[i] != '{' && c[i] != '}' { if c[i] == '\n' { line += 1; line_start = i + 1; } i += 1; }
+                    let raw: String = c[s..i].iter().collect();
+                    let t = markup_text(&raw);
+                    if *depth == 0 { if !t.trim().is_empty() { return Err(format!("{}:{}: text outside the root element", tl, tc)); } }
+                    else if !t.is_empty() { out.push(Tok::HText(t)); }
+                }
+                continue;
+            }
+            Mode::Tag(name) => {
+                if ch.is_whitespace() { if ch == '\n' { line += 1; line_start = i + 1; } i += 1; continue; }
+                let closes = ch == '>' || (ch == '/' && c.get(i + 1) == Some(&'>'));
+                if closes {
+                    let selfc = ch == '/';
+                    i += if selfc { 2 } else { 1 };
+                    let void = selfc || VOID.contains(&name.to_ascii_lowercase().as_str());
+                    out.push(Tok::HEnd(selfc));
+                    modes.pop();
+                    if let Some(Mode::Content { depth }) = modes.last_mut() {
+                        if !void { *depth += 1; } else if *depth == 0 { modes.pop(); }
+                    }
+                    continue;
+                }
+                if ch.is_alphanumeric() || ch == '-' || ch == ':' || ch == '_' || ch == '@' {
+                    let s = i; while i < c.len() && (c[i].is_alphanumeric() || matches!(c[i], '-' | ':' | '_' | '@' | '.')) { i += 1; }
+                    out.push(Tok::HAttr(c[s..i].iter().collect()));
+                    if c.get(i) == Some(&'=') {
+                        i += 1;
+                        if c.get(i) == Some(&'"') { i += 1; out.push(Tok::HQ); modes.push(Mode::AttrQ); }
+                        else if c.get(i) == Some(&'{') { i += 1; out.push(Tok::Sym("{".into())); modes.push(Mode::Code { depth: 0, html: true }); }
+                        else { return Err(format!("{}:{}: an attribute's value is in double quotes or braces: `class=\"x\"`, `checked={{done}}`", tl, tc)); }
+                    }
+                    continue;
+                }
+                return Err(format!("{}:{}: unexpected `{}` in a tag", tl, tc, ch));
+            }
+            Mode::AttrQ => {
+                if ch == '"' { i += 1; out.push(Tok::HQ); modes.pop(); }
+                else if ch == '{' { i += 1; out.push(Tok::Sym("{".into())); modes.push(Mode::Code { depth: 0, html: true }); }
+                else {
+                    let s = i;
+                    while i < c.len() && c[i] != '"' && c[i] != '{' { if c[i] == '\n' { line += 1; line_start = i + 1; } i += 1; }
+                    out.push(Tok::HText(c[s..i].iter().collect()));
+                }
+                continue;
+            }
+            Mode::Code { .. } => {}
+        }
+        // code: braces counted, so the `}` that ends code inside markup returns to the markup
+        if ch == '{' { if let Some(Mode::Code { depth, .. }) = modes.last_mut() { *depth += 1; } out.push(Tok::Sym("{".into())); i += 1; continue; }
+        if ch == '}' {
+            out.push(Tok::Sym("}".into())); i += 1;
+            if let Some(Mode::Code { depth, html }) = modes.last_mut() { if *depth == 0 && *html { modes.pop(); } else { *depth = depth.saturating_sub(1); } }
+            continue;
+        }
+        // markup starts at `<` and a letter (or `<!doctype`) where no expression can be followed by `<`: after `(`, `,`, `{`, `;`, or other markup
+        if ch == '<' && c.get(i + 1).map_or(false, |x| x.is_ascii_alphabetic() || *x == '!')
+            && matches!(out.last(), Some(Tok::Sym(s)) if s == "(" || s == "," || s == "{" || s == ";") || (ch == '<' && c.get(i + 1).map_or(false, |x| x.is_ascii_alphabetic()) && matches!(out.last(), Some(Tok::HClose(_) | Tok::HEnd(_)))) {
+            modes.push(Mode::Content { depth: 0 });
+            continue;
+        }
         if ch == '\n' { line += 1; line_start = i + 1; }
         if ch.is_whitespace() { i += 1; }
         else if ch == '/' && c.get(i + 1) == Some(&'/') { while i < c.len() && c[i] != '\n' { i += 1; } }
@@ -200,18 +317,23 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
         }
     }
     while at.len() < out.len() { at.push((tl, tc)); }
+    match modes.last() {
+        Some(Mode::Code { html: false, .. }) => {}
+        _ => return Err(format!("{}:{}: markup that is never closed (a closing tag, `\"` or `}}` is missing)", tl, tc)),
+    }
     Ok((out, at))
 }
 
 /// `pre`: statements an initializer (`coll.add() { f: v }`) puts before the statement it is in; `init_ok`: whether
 /// an initializer may appear here (not in a condition, a loop's clauses or a JSON array, where it would run at a
 /// different time); `tmp`: hidden locals made so far.
-struct P { t: Vec<Tok>, i: usize, lines: Vec<(u32, u32)>, pre: Vec<Stmt>, init_ok: bool, tmp: u32, in_endpoint: bool, in_test: bool }
+/// `markup`: inside code in markup (`{if ...}`), where a bare string statement writes itself: Some(false) in content, Some(true) in an attribute.
+struct P { t: Vec<Tok>, i: usize, lines: Vec<(u32, u32)>, pre: Vec<Stmt>, init_ok: bool, tmp: u32, in_endpoint: bool, in_test: bool, markup: Option<bool> }
 type R<T> = Result<T, String>;
 
 pub fn parse(src: &str) -> R<Api> {
     let (t, lines) = lex_lines(src)?;
-    let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0, in_endpoint: false, in_test: false };
+    let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0, in_endpoint: false, in_test: false, markup: None };
     let mut api = Api::default();
     parse_items(&mut p, &mut api).map_err(|e| {
         if starts_with_place(&e) { return e; }
@@ -230,7 +352,8 @@ pub fn starts_with_place(e: &str) -> bool {
 }
 /// The characters a token takes in the source (a text's escapes counted as written once).
 fn tok_width(t: &Tok) -> u32 {
-    match t { Tok::Id(x) | Tok::Sym(x) => x.chars().count() as u32, Tok::Str(x) => x.chars().count() as u32 + 2, Tok::Int(n) => n.to_string().len() as u32, Tok::Flt(f) => f.to_string().len() as u32 }
+    match t { Tok::Id(x) | Tok::Sym(x) => x.chars().count() as u32, Tok::Str(x) => x.chars().count() as u32 + 2, Tok::Int(n) => n.to_string().len() as u32, Tok::Flt(f) => f.to_string().len() as u32,
+        Tok::HOpen(x) => x.chars().count() as u32 + 1, Tok::HAttr(x) | Tok::HText(x) => x.chars().count() as u32, Tok::HClose(x) => x.chars().count() as u32 + 3, Tok::HEnd(s) => 1 + *s as u32, Tok::HQ => 1 }
 }
 fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
     while p.i < p.t.len() {
@@ -244,9 +367,11 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             let (mut params, mut ptys) = (Vec::new(), Vec::new());
             while !p.sym(")") { params.push(p.id()?); ptys.push(if p.sym(":") { Some(p.pty()?) } else { None }); p.sym(","); }
             let ret = if p.sym("->") { Some(p.pty()?) } else { None };
+            let html = ret.as_ref().map_or(false, |t| t.name == "html" && t.arg.is_none() && !t.opt);
+            let ret = if html { None } else { ret };
             let ret_opt = ret.as_ref().map_or(false, |t| t.opt);
             let body = p.block()?;
-            api.fns.push(Func { test: None, name, params, ptys, ret, body, slots: 0, public, ret_opt });
+            api.fns.push(Func { test: None, name, params, ptys, ret, body, slots: 0, public, ret_opt, html });
             continue;
         }
         // `test "name" { ... }`: a function the test runner calls; inside, `get`, `post`, `put`, `patch`, `delete` make requests
@@ -258,7 +383,7 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             let body = p.block();
             p.in_test = false;
             let n = api.fns.iter().filter(|f| f.test.is_some()).count();
-            api.fns.push(Func { test: Some(title), name: format!("__mito__test{}", n), params: Vec::new(), ptys: Vec::new(), ret: None, body: body?, slots: 0, public: false, ret_opt: false });
+            api.fns.push(Func { test: Some(title), name: format!("__mito__test{}", n), params: Vec::new(), ptys: Vec::new(), ret: None, body: body?, slots: 0, public: false, ret_opt: false, html: false });
             continue;
         }
         if p.is_kw("endpoint") { return Err("endpoints are functions with an attribute: `@post(\"/path\") fn name() -> Response<T> { ... }`".into()); }
@@ -444,7 +569,110 @@ impl P {
         Ok(Iter { index, budget: false, var, slot: 0, coll, hi, from, reverse, whil, wher, limit, via: None })
     }
 
+    /// Markup (an HTML literal), lowered to ordinary statements that write it into the answer: its fixed text as `__html_lit("...")`
+    /// (each run merged), `{x}` as `__html_esc(x)` (escaped), an attribute's `{x}` parts as `__html_esc_attr(x)`, `name={x}` as
+    /// `__html_attr("name", x)` (a bool writes the bare attribute when true), and `{if ...}` / `{foreach ...}` as the statements they are.
+    fn html(&mut self) -> R<Vec<Stmt>> {
+        let (mut out, mut lit) = (Vec::new(), String::new());
+        if let Some(Tok::HText(t)) = self.peek() { let t = t.clone(); self.i += 1; lit.push_str(&t); }
+        self.html_elem(&mut out, &mut lit)?;
+        flush_lit(&mut out, &mut lit);
+        Ok(out)
+    }
+    fn html_elem(&mut self, out: &mut Vec<Stmt>, lit: &mut String) -> R<()> {
+        let call = |n: &str, a: Vec<Expr>| Stmt::Do(Expr::Call(n.into(), a, CallRes::Unbound));
+        let Some(Tok::HOpen(tag)) = self.peek().cloned() else { return Err(format!("expected markup (`<tag`), found {}", self.here())) };
+        self.i += 1;
+        lit.push('<'); lit.push_str(&tag);
+        loop {
+            match self.peek().cloned() {
+                Some(Tok::HAttr(name)) => {
+                    self.i += 1;
+                    if matches!(self.peek(), Some(Tok::HQ)) {
+                        self.i += 1;
+                        lit.push(' '); lit.push_str(&name); lit.push_str("=\"");
+                        loop {
+                            match self.peek().cloned() {
+                                Some(Tok::HQ) => { self.i += 1; break; }
+                                Some(Tok::HText(t)) => { self.i += 1; lit.push_str(&t); }
+                                Some(Tok::Sym(s)) if s == "{" => { flush_lit(out, lit); self.markup_code(out, true)?; }
+                                _ => return Err(format!("unfinished attribute value, found {}", self.here())),
+                            }
+                        }
+                        lit.push('"');
+                    } else if self.sym("{") {
+                        let e = self.expr()?; self.eat("}")?;
+                        flush_lit(out, lit); out.push(call("__html_attr", vec![Expr::Str(name), e]));
+                    } else { lit.push(' '); lit.push_str(&name); }
+                }
+                Some(Tok::HEnd(selfc)) => {
+                    self.i += 1;
+                    lit.push('>');
+                    if VOID.contains(&tag.to_ascii_lowercase().as_str()) { return Ok(()); }
+                    if selfc { lit.push_str("</"); lit.push_str(&tag); lit.push('>'); return Ok(()); }
+                    break;
+                }
+                _ => return Err(format!("expected an attribute or the end of `<{}`, found {}", tag, self.here())),
+            }
+        }
+        loop {
+            match self.peek().cloned() {
+                Some(Tok::HClose(t)) => {
+                    self.i += 1;
+                    if t != tag { return Err(format!("`</{}>` closes `<{}>`: the tags must match", t, tag)); }
+                    lit.push_str("</"); lit.push_str(&tag); lit.push('>');
+                    return Ok(());
+                }
+                Some(Tok::HText(t)) => { self.i += 1; lit.push_str(&t); }
+                Some(Tok::HOpen(_)) => self.html_elem(out, lit)?,
+                Some(Tok::Sym(s)) if s == "{" => { flush_lit(out, lit); self.markup_code(out, false)?; }
+                None => return Err(format!("`<{}>` is never closed", tag)),
+                _ => return Err(format!("unexpected {} inside `<{}>`", self.here(), tag)),
+            }
+        }
+    }
+
+    /// `{ ... }` in markup (`attr`: inside an attribute's quotes): statements (`{if ...}`, `{foreach ...}`, `{item(t);}`), in which a bare
+    /// string writes itself; or one expression, written escaped.
+    fn markup_code(&mut self, out: &mut Vec<Stmt>, attr: bool) -> R<()> {
+        let code = match self.t.get(self.i + 1) {
+            Some(Tok::Id(k)) if ["if", "foreach", "for", "while", "let", "var", "match", "log"].contains(&k.as_str()) => true,
+            // a call as a statement: `{item(t);}`
+            _ => { let mut k = self.i + 1; let mut depth = 0i32; let mut semi = false;
+                   while let Some(t) = self.t.get(k) { match t { Tok::Sym(s) if s == "(" || s == "{" || s == "[" => depth += 1, Tok::Sym(s) if s == ")" || s == "]" => depth -= 1,
+                       Tok::Sym(s) if s == "}" => { if depth == 0 { break; } depth -= 1; } Tok::Sym(s) if s == ";" && depth == 0 => { semi = true; break; } _ => {} } k += 1; }
+                   semi }
+        };
+        if code {
+            let was = self.markup.replace(attr);
+            let b = self.block();
+            self.markup = was;
+            out.push(Stmt::If(Expr::Bool(true), b?, Vec::new()));
+        } else {
+            self.i += 1; let e = self.expr()?; self.eat("}")?;
+            out.push(Stmt::Do(Expr::Call(if attr { "__html_esc_attr" } else { "__html_esc" }.into(), vec![e], CallRes::Unbound)));
+        }
+        Ok(())
+    }
+
     fn stmt(&mut self) -> R<Stmt> {
+        // in code inside markup, a bare string writes itself: `{if left == 1 { "item" } else { "items" }}`
+        if let (Some(attr), Some(Tok::Str(s))) = (self.markup, self.peek().cloned()) {
+            if matches!(self.t.get(self.i + 1), Some(Tok::Sym(x)) if x == ";" || x == "}") {
+                self.i += 1; self.sym(";");
+                return Ok(Stmt::Do(Expr::Call(if attr { "__html_esc_attr" } else { "__html_esc" }.into(), vec![Expr::Str(s)], CallRes::Unbound)));
+            }
+        }
+        // markup as a statement (in a `-> html` function, or in `{if ...}` / `{foreach ...}` inside markup): it writes itself
+        if matches!(self.peek(), Some(Tok::HOpen(_) | Tok::HText(_))) {
+            let was = self.markup.take(); // markup inside resets: its own code says where it is
+            let v = self.html();
+            self.markup = was;
+            let mut v = v?;
+            let last = v.pop().unwrap_or(Stmt::Do(Expr::Null));
+            self.pre.extend(v);
+            return Ok(last);
+        }
         if self.is_kw("each") { return Err("`each` is now `foreach`, and a range includes its end: `foreach i in 0..n - 1 { ... }`, `foreach item, i in coll { ... }`".into()); }
         if self.is_kw("foreach") {
             self.i += 1;
@@ -495,7 +723,9 @@ impl P {
                     if !(200..300).contains(&c) { return Err(format!("`status({}, ...)`: an answer is a success (2xx); end with `fail {} \"...\"` for an error", c, c)); }
                     self.eat(",")?; c as u16
                 } else { code };
-                let j = if code == 204 { Json::Empty } else if code == 303 { Json::E(self.expr()?) } else { self.json()? };
+                let j = if code == 204 { Json::Empty } else if code == 303 { Json::E(self.expr()?) }
+                    else if matches!(self.peek(), Some(Tok::HOpen(_) | Tok::HText(_))) { let body = self.html()?; self.pre.extend(body); Json::Html }
+                    else { self.json()? };
                 self.eat(")")?; self.eat(";")?;
                 return Ok(Stmt::Respond(code, j));
             }
@@ -915,7 +1145,7 @@ impl Binder<'_> {
             Json::Obj(f) => { for (_, v) in f { self.json(v)?; } Ok(()) }
             Json::Arr(it, inner) => { let (mark, next) = (self.names.len(), self.next); self.iter_head(it)?; self.json(inner)?; self.names.truncate(mark); self.next = next; Ok(()) }
             Json::E(e) => self.expr(e),
-            Json::Empty => Ok(()),
+            Json::Empty | Json::Html => Ok(()),
         }
     }
     fn expr(&mut self, e: &mut Expr) -> R<()> {
@@ -1012,6 +1242,12 @@ fn describe(t: Option<&Tok>) -> String {
         Some(Tok::Int(n)) => format!("the number {}", n),
         Some(Tok::Flt(f)) => format!("the number {}", f),
         Some(Tok::Str(x)) => format!("the text \"{}\"", x.chars().take(20).collect::<String>()),
+        Some(Tok::HOpen(x)) => format!("`<{}`", x),
+        Some(Tok::HAttr(x)) => format!("the attribute `{}`", x),
+        Some(Tok::HEnd(s)) => if *s { "`/>`".into() } else { "`>`".into() },
+        Some(Tok::HClose(x)) => format!("`</{}>`", x),
+        Some(Tok::HText(x)) => format!("the text \"{}\"", x.chars().take(20).collect::<String>()),
+        Some(Tok::HQ) => "`\"`".into(),
     }
 }
 

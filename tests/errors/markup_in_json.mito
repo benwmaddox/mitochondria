@@ -1,0 +1,4 @@
+// expect: markup is written only into an HTML answer
+struct S { n: i64; } state s: S;
+fn piece() -> html { <p>x</p> }
+@get("/a") fn a() -> Response<{}> { piece(); return ok({}); }

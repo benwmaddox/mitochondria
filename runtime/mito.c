@@ -1649,7 +1649,25 @@ static int h_raw_txt(Ctx *c, const Txt *t) { Mito *m = M_(c); return a_put(&m->o
 static int h_raw_at(Ctx *c, u64 at, u32 n) { Mito *m = M_(c); return a_put(&m->out, m->mem.base + at, n) ? 0 : resp_full(m); }
 static int h_raw_col(Ctx *c, u32 cid, u32 idx, u32 ci) {
     Mito *m = M_(c); u64 a = caddr(m, cid, idx, ci); u32 n = (u32)rd(&m->mem, a, 4);
-    return a_put(&m->out, m->mem.base + a + 4, n) ? 0 : resp_full(m);
+    return a_put(&m->out, m->mem.base + caddr(m, cid, idx, ci + 1), n) ? 0 : resp_full(m); /* the bytes are the next column */
+}
+/* text into markup: & < > as entities, and " inside an attribute's double quotes */
+static int a_html(Area *o, const u8 *s, u64 n, u32 attr) {
+    u64 b = 0;
+    for (u64 i = 0; i < n; i++) {
+        const char *e = 0; u8 c = s[i];
+        if (c == '&') e = "&amp;"; else if (c == '<') e = "&lt;"; else if (c == '>') e = "&gt;"; else if (c == '"' && attr) e = "&quot;";
+        if (!e) continue;
+        if (!a_put(o, s + b, i - b) || !a_str(o, e)) return 0;
+        b = i + 1;
+    }
+    return a_put(o, s + b, n - b);
+}
+static int h_html_txt(Ctx *c, const Txt *t, u32 attr) { Mito *m = M_(c); return a_html(&m->out, m->text.p + t->off, t->len, attr) ? 0 : resp_full(m); }
+static int h_html_at(Ctx *c, u64 at, u32 n, u32 attr) { Mito *m = M_(c); return a_html(&m->out, m->mem.base + at, n, attr) ? 0 : resp_full(m); }
+static int h_html_col(Ctx *c, u32 cid, u32 idx, u32 ci, u32 attr) {
+    Mito *m = M_(c); u64 a = caddr(m, cid, idx, ci); u32 n = (u32)rd(&m->mem, a, 4);
+    return a_html(&m->out, m->mem.base + caddr(m, cid, idx, ci + 1), n, attr) ? 0 : resp_full(m); /* the bytes are the next column */
 }
 /* `see_other(path)`: 303 to a path on this server. The path starts with one `/` and is printable ASCII (no spaces, no line breaks),
    so the answer can neither send the browser to another site nor add header lines of its own. */
@@ -1668,7 +1686,7 @@ static const H mito_h = {
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

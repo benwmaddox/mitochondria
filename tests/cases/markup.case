@@ -1,0 +1,43 @@
+// markup (HTML literals): written straight into an HTML answer; text and attribute values in { } escaped, numbers as digits, a bool
+// attribute written bare when true; {if} and {foreach} with markup inside; `-> html` functions as reusable pieces; text across lines
+// joined by one space; void elements; comments dropped
+--- program
+struct Todo { title: utf8<64>; done: bool; }
+struct App { todos: pool<Todo, 8>; name: utf8<32>; }
+state app: App;
+
+fn item(t: Todo) -> html {
+    <li class="todo{if t.done { " completed" }}" data-title="{t.title}">
+        <input class="toggle" type="checkbox" checked={t.done} />
+        <label>{t.title}</label>
+    </li>
+}
+@post("/todos")
+fn add(title: utf8<64>, done: bool = false) -> Response<{}> { let t = app.todos.add(); t.title = title; t.done = done; return ok({}); }
+@get("/")
+fn home() -> Response<html> {
+    var left = 0;
+    foreach t in app.todos { if !t.done { left += 1; } }
+    return ok(<!doctype html>
+        <html>
+            <!-- not sent -->
+            <head><meta charset="utf-8"><title>todos for {app.name}</title></head>
+            <body>
+                <ul class="todo-list">
+                    {foreach t in app.todos { item(t); }}
+                </ul>
+                <span class="todo-count"><strong>{left}</strong> {if left == 1 { "item" } else { "items" }} left</span>
+            </body>
+        </html>);
+}
+@post("/name/{n}")
+fn name(n: utf8<32>) -> Response<{}> { app.name = n; return ok({}); }
+@get("/first")
+fn first() -> Response<text> { foreach t in app.todos { return ok(t.title); } return ok("none"); }
+--- requests
+GET /
+POST /name/%3Cb%3E%26
+POST /todos {"title": "buy <milk> & \"eggs\""}
+POST /todos {"title": "done one", "done": true}
+GET /
+GET /first

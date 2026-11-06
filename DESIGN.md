@@ -110,6 +110,14 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   item with that secret, as for a first visit), or another worker
   (`forwarded`). They are checked before the body runs: absent, wrong kind or out of range 400, too long 413, no such
   item 404, a body field not taken 400.
+- Markup: an HTML answer is written as HTML in the code, `return ok(<ul>{foreach t in b.todos { item(t); }}</ul>);`, and a
+  function declared `-> html` writes a reusable piece (`fn item(t: Todo) -> html { <li class="{if t.done { "done" }}">{t.title}</li> }`).
+  Markup starts at `<tag` after `(`, `,`, `{` or `;`. `{x}` writes a value escaped (text with `& < >` as entities, and `"` inside
+  an attribute's quotes; numbers as digits); `name={b}` with a bool writes the bare attribute when true; `{if ...}`, `{foreach ...}`
+  and `{piece(x);}` are statements, in which a bare string writes itself. The compiler checks that tags match (void elements such
+  as `<input>` need no closing tag), that text has no raw `<`, and that markup is written only into an HTML answer. It is lowered
+  to plain statements that append to the answer, fixed text merged into one copy per run; text across lines is joined by one
+  space and comments are dropped.
 - `set_cookie("list", token(b), 31536000)` adds a Set-Cookie line to the answer (`Path=/; HttpOnly; SameSite=Lax`; max age 0
   deletes it). The value must be cookie characters (printable ASCII without spaces, quotes, commas, semicolons, backslashes).
 - `Response<T>` declares the answer's JSON shape, checked against every answer when compiling. `ok` 200, `created`

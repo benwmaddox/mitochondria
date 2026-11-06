@@ -92,6 +92,9 @@ struct H {
     int (*raw_col)(Ctx *, u32, u32, u32);                        /* a text column added to the answer as it is */
     int (*see_other)(Ctx *, const Txt *);                        /* a 303 answer to a path on this server (checked) */
     int (*set_cookie)(Ctx *, const char *, u32, const Txt *, i64); /* a Set-Cookie line on the answer: name, value (checked), max age */
+    int (*html_txt)(Ctx *, const Txt *, u32);                    /* text of the text area into markup, escaped (1: inside an attribute) */
+    int (*html_at)(Ctx *, u64, u32, u32);                        /* n bytes of state into markup, escaped */
+    int (*html_col)(Ctx *, u32, u32, u32, u32);                  /* a text column into markup, escaped */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -503,6 +506,13 @@ type R<T> = Result<T, String>;
 fn no<T>(what: impl Into<String>) -> R<T> { Err(what.into()) }
 fn is_name(e: &str) -> bool { e.chars().all(|c| c.is_alphanumeric() || c == '_') }
 
+/// Text as markup: & < > as entities, and " inside an attribute's quotes.
+fn html_escape(s: &str, attr: bool) -> String {
+    let mut o = String::with_capacity(s.len());
+    for ch in s.chars() { match ch { '&' => o.push_str("&amp;"), '<' => o.push_str("&lt;"), '>' => o.push_str("&gt;"), '"' if attr => o.push_str("&quot;"), c => o.push(c) } }
+    o
+}
+
 /// A C string literal for `s`, safe for any bytes.
 pub fn c_lit(s: &[u8]) -> String {
     let mut o = String::from("\"");
@@ -745,7 +755,7 @@ fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
             _ => {}
         }
     }
-    fn js(j: &Json, out: &mut Vec<u32>) { match j { Json::Obj(f) => for (_, v) in f { js(v, out); }, Json::Arr(it, inner) => { ex(&it.coll, out); if let Some(w) = &it.wher { ex(w, out); } js(inner, out); } Json::E(e) => ex(e, out), Json::Empty => {} } }
+    fn js(j: &Json, out: &mut Vec<u32>) { match j { Json::Obj(f) => for (_, v) in f { js(v, out); }, Json::Arr(it, inner) => { ex(&it.coll, out); if let Some(w) = &it.wher { ex(w, out); } js(inner, out); } Json::E(e) => ex(e, out), Json::Empty | Json::Html => {} } }
     fn st(stmts: &[Stmt], out: &mut Vec<u32>) {
         for s in stmts {
             match s {
@@ -906,7 +916,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
                 Json::Obj(f) => for (_, v) in f { json_calls(v, out); },
                 Json::Arr(it, inner) => { let mut v = Vec::new(); calls(&[Stmt::Each(it.clone(), Vec::new())], &mut v); out.extend(v); json_calls(inner, out); }
                 Json::E(e) => ex(e, out),
-                Json::Empty => {}
+                Json::Empty | Json::Html => {}
             }
         }
     }
@@ -2133,6 +2143,12 @@ impl<'p> G<'p> {
                 self.call(&format!("c->h->see_other(c, &{})", t));
                 self.line("return 303;");
             }
+            Stmt::Respond(code, Json::Html) => {
+                // `ok(<markup>)`: the statements before wrote the body
+                if !self.html_answer() { return no("markup is an HTML answer: the endpoint returns `Response<html>`"); }
+                self.call("c->h->answer(c, 1)");
+                self.line(&format!("return {};", code));
+            }
             Stmt::Respond(code, Json::E(e)) if matches!(&self.ep.resp, crate::lang::RType::Name(n) if n == "html" || n == "text") => {
                 // an HTML or plain-text answer: the text sent as it is
                 let kind = if matches!(&self.ep.resp, crate::lang::RType::Name(n) if n == "html") { 1 } else { 2 };
@@ -2918,6 +2934,25 @@ impl<'p> G<'p> {
             self.call(&format!("c->h->log(c, AT_, {}, {})", argv, names.len()));
             return Ok(CV::Null);
         }
+        if matches!(bi, B::HtmlLit | B::HtmlEsc | B::HtmlEscAttr | B::HtmlAttr) {
+            // markup written into the answer (see lang.rs `html`): only in an endpoint that answers HTML, and the `-> html` functions it calls
+            if !self.html_answer() { return no("markup is written only into an HTML answer: an endpoint returning `Response<html>`, or a `-> html` function it calls"); }
+            let mut a = a.into_iter();
+            match bi {
+                B::HtmlLit => { let Some(CV::Lit(s)) = a.next() else { return no("bad markup") }; self.out(&s); }
+                B::HtmlEsc | B::HtmlEscAttr => { let v = a.next().unwrap_or(CV::Null); self.html_esc(v, bi == B::HtmlEscAttr)?; }
+                _ => {
+                    let (Some(CV::Lit(name)), Some(v)) = (a.next(), a.next()) else { return no("bad markup") };
+                    match v {
+                        CV::Bool(b) if b == "1" => self.out(&format!(" {}", name)),
+                        CV::Bool(b) if b == "0" => {}
+                        CV::Bool(b) => { let o = format!(" {}", name); self.line(&format!("if ({}) CALL(c->h->out(c, {}, {}));", b, c_lit(o.as_bytes()), o.len())); }
+                        v => { self.out(&format!(" {}=\"", name)); self.html_esc(v, true)?; self.out("\""); }
+                    }
+                }
+            }
+            return Ok(CV::Null);
+        }
         if bi == B::SetCookie {
             // `set_cookie("name", value, max_age_seconds)`: a Set-Cookie line on the answer (Path=/, HttpOnly, SameSite=Lax); 0 deletes it
             let [name, value, age] = <[CV; 3]>::try_from(a).map_err(|_| "`set_cookie` takes the name, the value and how long it lasts in seconds: `set_cookie(\"list\", token(b), 31536000)`".to_string())?;
@@ -3503,10 +3538,31 @@ impl<'p> G<'p> {
                 match (self.enum_of(want), &v) { (Some(en), CV::Int(x)) => { let x = x.clone(); self.write_enum(en, &x)?; } _ => self.write(v)? }
                 Ok(s)
             }
-            Json::Empty => Ok(Shape::Nothing),
+            Json::Empty | Json::Html => Ok(Shape::Nothing),
         }
     }
 
+    /// Is this endpoint's answer HTML (markup may be written)?
+    fn html_answer(&self) -> bool { matches!(&self.ep.resp, crate::lang::RType::Name(n) if n == "html") }
+    /// A value written into markup, escaped (`attr`: inside an attribute's double quotes): text with & < > (and ") as entities,
+    /// numbers as digits, bools as true / false, null as nothing; the result of a `-> html` call has already written itself.
+    fn html_esc(&mut self, v: CV, attr: bool) -> R<()> {
+        let mode = attr as u32;
+        match v {
+            CV::Null => {}
+            CV::Lit(s) => { let e = html_escape(&s, attr); self.out(&e); }
+            CV::Txt(t) => self.line(&format!("if ({}.present) CALL(c->h->html_txt(c, &{}, {}));", t, t, mode)),
+            CV::PlainStr(off) => { let at = self.sub_bytes_at(&CV::PlainStr(off), "0"); let n = self.field_len(&CV::PlainStr(off)); self.call(&format!("c->h->html_at(c, {}, (u32)({}), {})", at, n, mode)); }
+            CV::Sub(base, from, count) => { let at = self.sub_bytes_at(&base, &from); self.call(&format!("c->h->html_at(c, {}, (u32)({}), {})", at, count, mode)); }
+            CV::StateStr(c, idx, ci) => self.call(&format!("c->h->html_col(c, {}, {}, {}, {})", c, idx, ci, mode)),
+            CV::Int(e) => self.call(&format!("c->h->json_i64(c, {})", e)),
+            CV::Flt(e) => self.call(&format!("c->h->json_f64(c, {})", e)),
+            CV::Bool(e) if e == "1" || e == "0" => self.out(if e == "1" { "true" } else { "false" }),
+            CV::Bool(e) => self.line(&format!("CALL({} ? c->h->out(c, \"true\", 4) : c->h->out(c, \"false\", 5));", e)),
+            _ => return no("markup takes text, numbers and bools in `{ }` (or a `-> html` function's call)"),
+        }
+        Ok(())
+    }
     /// Text added to the answer as it is (an HTML or plain-text answer).
     fn raw(&mut self, v: CV, what: &str) -> R<()> {
         match v {

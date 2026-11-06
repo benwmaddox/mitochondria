@@ -1,0 +1,9 @@
+GET / -> 200 <Content-Type: text/html; charset=utf-8> <!doctype html><html><head><meta charset="utf-8"><title>todos for </title></head><body><ul class="todo-list"></ul><span class="todo-count"><strong>0</strong> items left</span></body></html>
+POST /name/%3Cb%3E%26 -> 200 {}
+POST /todos -> 200 {}
+POST /todos -> 200 {}
+GET / -> 200 <Content-Type: text/html; charset=utf-8> <!doctype html><html><head><meta charset="utf-8"><title>todos for &lt;b&gt;&amp;</title></head><body><ul class="todo-list"><li class="todo" data-title="buy &lt;milk&gt; &amp; &quot;eggs&quot;"><input class="toggle" type="checkbox"><label>buy &lt;milk&gt; &amp; "eggs"</label></li><li class="todo completed" data-title="done one"><input class="toggle" type="checkbox" checked><label>done one</label></li></ul><span class="todo-count"><strong>1</strong> item left</span></body></html>
+GET /first -> 200 <Content-Type: text/plain; charset=utf-8> buy <milk> & "eggs"
+state <plain values> 36
+state app.todos 61
+memory reserved=8192 committed=8192 live=97

@@ -1,0 +1,83 @@
+// tables (`table<T>`): rows in SQLite, kept across a restart. add (a row's id is its row id), read and write fields, loops over one
+// owner's rows (with `where`, `reverse`, `limit`), count, `table[id]` (404 for another owner's row), remove (with the rows it owns),
+// a session token in a cookie naming a row, a unique index (409), a `where` over a whole table on an indexed field compiled to SQL
+--- program
+struct Todo { title: utf8<20>; done: bool; rank: i64 in 0..9; }
+struct Board { secret: i64; name: ascii<16>; todos: table<Todo>; }
+struct App { boards: table<Board> unique(name) index(secret); hits: i64; }
+state app: App;
+
+@post("/boards/{name}")
+fn make(name: ascii<16>) -> Response<{ id: Board, token: string }> {
+    let b = app.boards.add();
+    b.secret = 48879; b.name = name;
+    return created({ id: b, token: token(b) });
+}
+@post("/todos/{title}")
+fn add(board: Board from cookie("list"), title: utf8<20>, rank: i64 in 0..9 = 0) -> Response<{ id: i64, count: i64 }> {
+    let t = board.todos.add();
+    t.title = title; t.rank = rank;
+    return created({ id: slot(t), count: board.todos.count() });
+}
+@post("/todos/{id}/toggle")
+fn toggle(board: Board from cookie("list"), id: i64) -> Response<{ done: bool }> {
+    let t = board.todos[id];
+    t.done = !t.done;
+    return ok({ done: t.done });
+}
+@post("/todos/{id}/delete")
+fn delete(board: Board from cookie("list"), id: i64) -> Response<{ left: i64 }> {
+    board.todos.remove(board.todos[id]);
+    return ok({ left: board.todos.count() });
+}
+@get("/todos")
+fn list(board: Board from cookie("list")) -> Response<{ name: string, all: [string], open: [string], newest2: [string], high: [i64] }> {
+    app.hits += 1;
+    return ok({ name: board.name,
+        all: [foreach t in board.todos t.title],
+        open: [foreach t in board.todos where !t.done t.title],
+        newest2: [foreach t in board.todos reverse limit 2 t.title],
+        high: [foreach t in board.todos where t.rank >= 5 && !t.done slot(t)] });
+}
+@get("/by-secret/{s}")
+fn by_secret(s: i64) -> Response<{ names: [string] }> { return ok({ names: [foreach b in app.boards where b.secret == s b.name] }); }
+@post("/boards/{id}/delete")
+fn drop_board(id: i64) -> Response<{ boards: i64 }> { app.boards.remove(app.boards[id]); return ok({ boards: app.boards.count() }); }
+@get("/hits")
+fn hits() -> Response<{ hits: i64, boards: i64 }> { return ok({ hits: app.hits, boards: app.boards.count() }); }
+--- requests
+POST /boards/home
+POST /boards/work
+POST /boards/home
+@Cookie: list=1.beef
+POST /todos/milk {"rank": 6}
+@Cookie: list=1.beef
+POST /todos/eggs
+@Cookie: list=1.beef
+POST /todos/bread {"rank": 7}
+@Cookie: list=2.beef
+POST /todos/report {"rank": 9}
+@Cookie: list=1.beef
+POST /todos/1/toggle
+@Cookie: list=1.beef
+POST /todos/4/toggle
+@Cookie: list=1.beef
+GET /todos
+@Cookie: list=1.beef
+POST /todos/9/delete
+GET /by-secret/48879
+@Cookie: list=1.dead
+GET /todos
+restart
+GET /hits
+@Cookie: list=1.beef
+GET /todos
+@Cookie: list=1.beef
+POST /todos/2/delete
+@Cookie: list=1.beef
+GET /todos
+POST /boards/1/delete
+@Cookie: list=1.beef
+GET /todos
+@Cookie: list=2.beef
+GET /todos

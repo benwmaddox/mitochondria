@@ -97,6 +97,15 @@ struct H {
     int (*html_col)(Ctx *, u32, u32, u32, u32);                  /* a text column into markup, escaped */
     int (*etag)(Ctx *, const char *, u32, int *);                /* a static answer's ETag: set, and *1 when the browser already has it (304) */
     int (*trim)(Ctx *, const Txt *, Txt *);                      /* a text without spaces, tabs and line breaks at either end (same bytes) */
+    int (*tget)(Ctx *, u32, u32, u32, Val *);                    /* a table's row's column: table, row id, column */
+    int (*tset)(Ctx *, u32, u32, u32, const Val *);              /* write a table's row's column */
+    int (*tadd)(Ctx *, u32, u32, u32 *);                         /* add a row (to the owner's rows for a nested table): its id */
+    int (*tdel)(Ctx *, u32, u32);                                /* remove a row (and the rows it owns) */
+    int (*tcount)(Ctx *, u32, u32, i64 *);                       /* a table's rows (of one owner) */
+    int (*tfind)(Ctx *, u32, u32, u32);                          /* `coll[id]`: that row of this table (and owner), or 404 */
+    int (*titer)(Ctx *, const char *, u32, const Val *, u32, u32 *); /* a loop over a table: its query, the table, parameters: a cursor */
+    int (*tnext)(Ctx *, u32, u32 *, int *);                      /* the cursor's next row id, or none */
+    int (*tclose)(Ctx *, u32);                                   /* the end of the loop: the cursor given back */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -324,7 +333,7 @@ fn fits_shape(prog: &Program, shape: &Shape, want: &RType, at: &str) -> Result<(
                 // an enum: written as its value's name
                 n if prog.enums.iter().any(|e| e.name == n) => *shape == Shape::Int,
                 // an item type: the answer holds an item of a pool of that struct, written as its id
-                _ if matches!(shape, Shape::Id(..)) => { let Shape::Id(c, _) = shape else { unreachable!() }; prog.colls[*c].item.map_or(false, |s| prog.structs[s].name == *n) }
+                _ if matches!(shape, Shape::Id(..)) => { let Shape::Id(c, _) = shape else { unreachable!() }; let item = match tab(*c) { Some(t) => Some(prog.tables[t].item), None => prog.colls[*c].item }; item.map_or(false, |s| prog.structs[s].name == *n) }
                 _ => {
                     // a declared struct: an object with its plain fields
                     let Some(sd) = prog.structs.iter().find(|s| s.name == *n) else { return Err(format!("{}: `{}` is not a type", here(), n)) };
@@ -387,6 +396,13 @@ enum PK { V(K), Coll(usize), Plain(usize, usize) }
 #[derive(Clone)]
 struct Spec { key: String, name: String, ret: K, proto: String, body: Option<String> }
 
+/// A table is collection TBASE + its index (in `Program::tables`) for the code that handles items: a row is an item whose index is its
+/// row id (u32), a table of one owner's rows a collection whose instance is the owner's row id (0 for a top-level table).
+const TBASE: usize = 1 << 24;
+fn tab(c: usize) -> Option<usize> { if c >= TBASE { Some(c - TBASE) } else { None } }
+/// A collection's name (a pool's or list's, or a table's path).
+fn coll_name(prog: &Program, c: usize) -> String { match tab(c) { Some(t) => prog.tables[t].name.clone(), None => prog.colls[c].name.clone() } }
+
 /// The interpreter refuses a call nested deeper than this.
 const MAX_DEPTH: u32 = 64;
 const DEPTH_MSG: &str = "calls nested more than 64 deep";
@@ -424,12 +440,12 @@ thread_local! {
 }
 /// A value's kind as a type name: what a parameter of a function that receives it would be declared as.
 fn type_text(prog: &Program, v: &CV) -> String {
-    let item = |c: usize| prog.colls[c].item.map_or(format!("?{}", prog.colls[c].name), |s| { let n = &prog.structs[s].name; let others = prog.colls.iter().filter(|x| x.item == Some(s)).count(); if others > 1 { format!("{} in {}", n, prog.colls[c].name) } else { n.clone() } });
+    let item = |c: usize| if let Some(t) = tab(c) { prog.structs[prog.tables[t].item].name.clone() } else { prog.colls[c].item.map_or(format!("?{}", prog.colls[c].name), |s| { let n = &prog.structs[s].name; let others = prog.colls.iter().filter(|x| x.item == Some(s)).count(); if others > 1 { format!("{} in {}", n, prog.colls[c].name) } else { n.clone() } }) };
     match v {
         CV::Int(_) => "i64".into(), CV::Flt(_) => "f64".into(), CV::Bool(_) => "bool".into(),
         CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => "string".into(), CV::Null => "null".into(), CV::Any(_) => "any".into(),
         CV::Item(c, _) => item(*c), CV::Ref(c, ..) => format!("{}?", item(*c)),
-        CV::Coll(c, _) => format!("coll {}", prog.colls[*c].name),
+        CV::Coll(c, _) => format!("coll {}", coll_name(prog, *c)),
         CV::Plain(sd, o) => format!("plain {}@{}", prog.structs[*sd].name, o),
         CV::Part(..) => "part".into(), CV::ArrCol(..) => "arrcol".into(), CV::Resp(..) => "response".into(), CV::PlainArr(_, t, n) => format!("plainarr {:?}[{}]", t, n),
     }
@@ -467,7 +483,7 @@ fn why(m: String) { WHY.with(|w| { let mut w = w.borrow_mut(); if !w.contains(&m
 fn kname(prog: &Program, k: K) -> String {
     match k {
         K::Int => "an integer".into(), K::Flt => "a number".into(), K::Bool => "a bool".into(), K::Txt => "a string".into(), K::Null => "null".into(),
-        K::Item(c) | K::Ref(c) => format!("an item of {}", prog.colls[c].name), K::Any => "a value of any kind".into(),
+        K::Item(c) | K::Ref(c) => if tab(c).is_some() { format!("a row of {}", coll_name(prog, c)) } else { format!("an item of {}", prog.colls[c].name) }, K::Any => "a value of any kind".into(),
         _ => "a collection or struct".into(),
     }
 }
@@ -1212,11 +1228,12 @@ impl<'p> G<'p> {
     /// The pool an input of item type `t` names: the one top-level pool of `t` items, or `in` the one given.
     fn item_pool(&self, input: &str, t: &str, pool: Option<&str>) -> R<usize> {
         let Some(sid) = self.prog.structs.iter().position(|s| s.name == t) else { return no(format!("input `{}`: `{}` is not a type", input, t)) };
-        let found: Vec<usize> = self.prog.colls.iter().enumerate().filter(|(_, c)| c.item == Some(sid) && c.parent.is_none() && matches!(c.kind, Kind::Pool(_)) && pool.map_or(true, |p| c.name == p)).map(|(i, _)| i).collect();
+        let mut found: Vec<usize> = self.prog.colls.iter().enumerate().filter(|(_, c)| c.item == Some(sid) && c.parent.is_none() && matches!(c.kind, Kind::Pool(_)) && pool.map_or(true, |p| c.name == p)).map(|(i, _)| i).collect();
+        found.extend(self.prog.tables.iter().enumerate().filter(|(_, x)| x.item == sid && x.parent.is_none() && pool.map_or(true, |p| x.name == p)).map(|(i, _)| TBASE + i));
         match found.as_slice() {
             [c] => Ok(*c),
             [] => no(format!("input `{}`: no pool that exists once holds `{}`{}", input, t, pool.map_or(String::new(), |p| format!(" as {}", p)))),
-            _ => no(format!("input `{}`: `{}` is kept in more than one pool; say which: `{}: {} in {}`", input, t, input, t, self.prog.colls[found[0]].name)),
+            _ => no(format!("input `{}`: `{}` is kept in more than one pool; say which: `{}: {} in {}`", input, t, input, t, coll_name(self.prog, found[0]))),
         }
     }
 
@@ -1224,6 +1241,7 @@ impl<'p> G<'p> {
     fn module_code(&self) -> Option<String> { let k = *self.inlining.last()?; let n = &self.api.fns[k as usize].name; n.rfind('.').map(|i| n[..i].to_string()) }
     /// The instance a collection belongs to: (instance, its items or nested in them (the program's data), its items exactly).
     fn coll_owner(&self, c: usize) -> Option<(&'p crate::layout::ModInst, bool, bool)> {
+        if tab(c).is_some() { return None; }
         let name = &self.prog.colls[c].name;
         let m = self.prog.instances.iter().find(|m| name.starts_with(&format!("{}.", m.name)))?;
         let items = format!("{}.items", m.name);
@@ -1433,11 +1451,12 @@ impl<'p> G<'p> {
             return no(format!("`{}` is not a type: a parameter is a number (i64, f64), bool, string, or an item (a struct held by a collection)", t.name));
         };
         let mut holders: Vec<usize> = (0..self.prog.colls.len()).filter(|&c| self.prog.colls[c].item == Some(sid) && t.coll.as_ref().map_or(true, |p| self.prog.colls[c].name == *p)).collect();
-        if holders.len() > 1 { if let Some(i) = &inst { let own: Vec<usize> = holders.iter().copied().filter(|&c| self.prog.colls[c].name.starts_with(i.as_str())).collect(); if own.len() == 1 { holders = own; } } }
+        holders.extend((0..self.prog.tables.len()).filter(|&k| self.prog.tables[k].item == sid && t.coll.as_ref().map_or(true, |p| self.prog.tables[k].name == *p)).map(|k| TBASE + k));
+        if holders.len() > 1 { if let Some(i) = &inst { let own: Vec<usize> = holders.iter().copied().filter(|&c| coll_name(self.prog, c).starts_with(i.as_str())).collect(); if own.len() == 1 { holders = own; } } }
         let c = match holders.as_slice() {
             [c] => *c,
             [] => return no(match &t.coll { Some(p) => format!("`{}` is not held by `{}`", t.name, p), None => format!("no collection holds `{}` items", t.name) }),
-            _ => return no(format!("several collections hold `{}` items: write `{} in path` with the one this takes ({})", t.name, t.name, holders.iter().map(|&c| self.prog.colls[c].name.clone()).collect::<Vec<_>>().join(", "))),
+            _ => return no(format!("several collections hold `{}` items: write `{} in path` with the one this takes ({})", t.name, t.name, holders.iter().map(|&c| coll_name(self.prog, c)).collect::<Vec<_>>().join(", "))),
         };
         Ok(if t.opt { K::Ref(c) } else { K::Item(c) })
     }
@@ -1914,6 +1933,7 @@ impl<'p> G<'p> {
                     CV::Any(_) => return no(format!("assigning `.{}` of a value whose kind is only known when the program runs, which may be null: give it a known kind (a plain item)", f)),
                     _ => { self.fail(500, "assignment target is not an item or a state struct"); return Ok(()); }
                 };
+                if let Some(t) = tab(c) { return self.table_set(t, &idx, &path, rhs, env); }
                 let Some(ci) = self.prog.colls[c].cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_) | CKind::Arr(..))) else {
                     let prefix = format!("{}.", path);
                     let known = self.prog.colls[c].cols.iter().any(|x| x.path == path || x.path.starts_with(&prefix)) || self.prog.colls[c].children.iter().any(|x| x.0 == path);
@@ -2151,14 +2171,16 @@ impl<'p> G<'p> {
                     return Ok(());
                 }
                 let CV::Coll(c, inst) = v else { return no("`clear` is a function of a collection or text") };
+                if tab(c).is_some() { return no("`clear` of a table is not compiled yet: remove its rows in a loop"); }
                 self.may_add_or_free(c, "clear")?;
                 self.call(&format!("c->h->clear_coll(c, {}, {})", c, inst));
             }
             Stmt::Remove(coll, e) => {
                 let CV::Coll(want, _) = self.expr(coll, env, None)? else { return no("`remove` is a function of a collection") };
-                let wname = self.prog.colls[want].name.clone();
-                let other = |c: usize| no(format!("an item of {} cannot be removed from {}", self.prog.colls[c].name, wname));
+                let wname = coll_name(self.prog, want);
+                let other = |c: usize| no(format!("an item of {} cannot be removed from {}", coll_name(self.prog, c), wname));
                 match self.expr(e, env, None)? {
+                    CV::Item(c, i) if tab(c).is_some() => { if c != want { return no(format!("a row of {} cannot be removed from {}", coll_name(self.prog, c), coll_name(self.prog, want))); } self.call(&format!("c->h->tdel(c, {}, {})", c - TBASE, i)) }
                     CV::Item(c, i) => { if c != want { return other(c); } self.may_add_or_free(c, "remove")?; self.call(&format!("c->h->free_(c, {}, {})", c, i)) }
                     CV::Ref(..) => return no("removing a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`"),
                     CV::Null => {}
@@ -2243,6 +2265,14 @@ impl<'p> G<'p> {
             Stmt::Do(e) => { self.expr(e, env, None)?; }
             Stmt::Alloc { slot, coll, try_, .. } => {
                 let CV::Coll(c, inst) = self.expr(coll, env, None)? else { return no("`add` is a function of a collection") };
+                if let Some(t) = tab(c) {
+                    // a new row (a table has no capacity, so `try_add` always gives one)
+                    let r = self.tmp("i");
+                    self.line(&format!("u32 {};", r));
+                    self.call(&format!("c->h->tadd(c, {}, (u32)({}), &{})", t, inst, r));
+                    env[*slot as usize] = Some(CV::Item(c, r));
+                    return Ok(());
+                }
                 self.may_add_or_free(c, "add")?;
                 let t = self.tmp("i");
                 self.line(&format!("u32 {};", t));
@@ -2564,6 +2594,16 @@ impl<'p> G<'p> {
                 let kv = self.expr(k_expr, env, dead)?;
                 let k = self.int_or(kv, 400, "an index must be an integer");
                 match bv {
+                    CV::Coll(c, inst) if tab(c).is_some() => {
+                        // `table[id]`: the row with that id, when it is this table's (and this owner's); otherwise 404
+                        let k = self.hold_int(k);
+                        let r = self.tmp("i");
+                        let msg = format!("no such row in {}", coll_name(self.prog, c));
+                        self.line(&format!("if ({k} < 0 || {k} > 4294967295LL) FAIL(404, {}, {});", c_lit(msg.as_bytes()), msg.len()));
+                        self.line(&format!("u32 {} = (u32){};", r, k));
+                        self.call(&format!("c->h->tfind(c, {}, {}, (u32)({}))", c - TBASE, r, inst));
+                        Ok(CV::Item(c, r))
+                    }
                     CV::Coll(c, inst) => {
                         let t = self.index_of(c, &inst, &k);
                         self.item_value(c, t, dead)
@@ -2677,7 +2717,7 @@ impl<'p> G<'p> {
                 let Some(k) = sd.fields.iter().position(|x| x.0 == f) else { return no(format!("no field `{}`{}", f, crate::lang::suggest(f, sd.fields.iter().map(|x| x.0.as_str())))) };
                 let ty = sd.fields[k].1.clone();
                 let range = sd.ranges[k];
-                if let Ty::Table(..) = ty { return no(format!("`{}` is a table: reading and writing tables is not compiled yet", f)); }
+                if let Ty::Table(..) = ty { let t = self.prog.plain_tables.iter().find(|x| x.0 == off && x.1 == sid && x.2 == f).map(|x| x.3).ok_or("plain table")?; return Ok(CV::Coll(TBASE + t, "0".into())); }
                 if ty.is_coll() { return Ok(CV::Coll(self.prog.plain_coll(off, sid, f).ok_or("plain collection")?, "0".into())); }
                 let v = self.plain(off + sd.offs[k], &ty, dead)?;
                 let range = range.or_else(|| FIELD_RANGES.with(|fr| fr.borrow().0.get(&(off + sd.offs[k])).copied()));
@@ -2695,6 +2735,7 @@ impl<'p> G<'p> {
             }
             _ => { self.fail(500, &format!("`.{}` needs an item or a state struct", f)); return Ok(CV::Null); }
         };
+        if let Some(t) = tab(c) { return self.table_field(t, idx, &path); }
         let coll = &self.prog.colls[c];
         if let Some(k) = coll.children.iter().find(|x| x.0 == path) { return Ok(CV::Coll(k.1, idx)); }
         if let Some(ci) = coll.cols.iter().position(|x| x.path == path && !matches!(x.kind, CKind::StrBytes(_))) { return self.col_value(c, idx, ci, dead); }
@@ -2717,6 +2758,189 @@ impl<'p> G<'p> {
     }
 
     /// What an item of collection `c` is as a value: the item, or for a collection of plain values, its value.
+    /// A field of a table's row (`idx` its row id): a column, read through the row cache (`tget`); a plain struct inside the row
+    /// (its fields are columns `path.x`); or a nested table, the rows this row owns.
+    fn table_field(&mut self, t: usize, idx: String, path: &str) -> R<CV> {
+        use crate::layout::TKind;
+        let tb = &self.prog.tables[t];
+        if let Some(k) = tb.children.iter().find(|x| x.0 == path) { return Ok(CV::Coll(TBASE + k.1, idx)); }
+        if let Some(ci) = tb.cols.iter().position(|x| x.path == path) {
+            let col = tb.cols[ci].clone();
+            if let TKind::Blob(..) = col.kind { return no(format!("`{}` is a fixed array in a table's row: reading it is not compiled yet", path)); }
+            let v = self.tmp("v");
+            self.line(&format!("Val {};", v));
+            self.call(&format!("c->h->tget(c, {}, {}, {}, &{})", t, idx, ci, v));
+            return Ok(match col.kind {
+                TKind::Int(Scalar::Bool) => CV::Bool(format!("({}.i != 0)", v)),
+                TKind::Int(_) => { let x = CV::Int(format!("{}.i", v)); self.with_field_range(x, col.range) }
+                TKind::Real(_) => CV::Flt(format!("{}.f", v)),
+                TKind::Text(..) => { let tt = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", tt, v, v)); CV::Txt(tt) }
+                TKind::Blob(..) => unreachable!(),
+            });
+        }
+        let prefix = format!("{}.", path);
+        if tb.cols.iter().any(|x| x.path.starts_with(&prefix)) || tb.children.iter().any(|x| x.0.starts_with(&prefix)) { return Ok(CV::Part(TBASE + t, idx, path.to_string())); }
+        no(format!("no field `{}` in a row of {}", path, tb.name))
+    }
+    /// Writing a field of a table's row: the value checked as a field of working state is (an integer's type and range, a text's most
+    /// bytes), then one UPDATE.
+    fn table_set(&mut self, t: usize, idx: &str, path: &str, rhs: &'p Expr, env: &mut Vec<Option<CV>>) -> R<()> {
+        use crate::layout::TKind;
+        let cols = self.prog.tables[t].cols.clone();
+        let Some(ci) = cols.iter().position(|x| x.path == path) else {
+            let prefix = format!("{}.", path);
+            let known = cols.iter().any(|x| x.path.starts_with(&prefix)) || self.prog.tables[t].children.iter().any(|x| x.0 == path);
+            return no(if known { format!("assigning `.{}` as a whole is not supported; assign its fields", path) } else { format!("no field `{}` in a row of {}", path, self.prog.tables[t].name) });
+        };
+        let col = cols[ci].clone();
+        let v = self.expr(rhs, env, None)?;
+        let v = match &col.kind {
+            TKind::Int(Scalar::Bool) => { let b = self.cond(v)?; CV::Bool(b) }
+            TKind::Int(sc) => {
+                let v = match col.range { Some(r) => self.in_field_range(v, r, path)?, None => v };
+                let x = self.int_or(v, 400, "an integer field takes an integer");
+                let x = self.hold_int(x);
+                let (lo, hi): (i64, i64) = match sc { Scalar::I8 => (-128, 127), Scalar::I16 => (-32768, 32767), Scalar::I32 => (i32::MIN as i64, i32::MAX as i64), Scalar::U8 => (0, 255), Scalar::U16 => (0, 65535), Scalar::U32 => (0, u32::MAX as i64), Scalar::U64 => (0, i64::MAX), _ => (i64::MIN, i64::MAX) };
+                if (lo, hi) != (i64::MIN, i64::MAX) && !matches!(self.interval(&x), Some((a, b)) if a >= lo && b <= hi) {
+                    let msg = format!("`{}` does not fit {:?}", path, sc).to_lowercase();
+                    self.line(&format!("if (UNLIKELY({x} < {} || {x} > {})) FAIL(400, {}, {});", c_i64(lo), c_i64(hi), c_lit(msg.as_bytes()), msg.len()));
+                }
+                CV::Int(x)
+            }
+            TKind::Real(_) => match v { CV::Int(e) => CV::Flt(format!("(double)({})", e)), CV::Flt(e) => CV::Flt(e), _ => return no(format!("`{}` takes a number", path)) },
+            TKind::Text(max, _) => {
+                let tt = self.txt_of(v).map_err(|_| format!("`{}` takes text", path))?;
+                let msg = format!("`{}` is at most {} bytes", path, max);
+                self.line(&format!("if (UNLIKELY({tt}.len > {max})) FAIL(413, {}, {});", c_lit(msg.as_bytes()), msg.len()));
+                CV::Txt(tt)
+            }
+            TKind::Blob(..) => return no(format!("`{}` is a fixed array in a table's row: writing it is not compiled yet", path)),
+        };
+        let vv = self.val(v)?;
+        self.call(&format!("c->h->tset(c, {}, {}, {}, &{})", t, idx, ci, vv));
+        Ok(())
+    }
+    /// `where` as SQL, when it is comparisons of the loop's row's fields with values the loop does not change, joined by `&&`
+    /// (`t.done == false && t.rank > n`, `!t.done`): its conditions (`?n` for each value, numbered from `first`), the values, and the
+    /// columns it uses. False when it is anything else.
+    fn sql_where(&self, e: &'p Expr, slot: u32, t: usize, first: usize, conds: &mut Vec<String>, vals: &mut Vec<&'p Expr>, cols: &mut Vec<String>) -> bool {
+        fn uses(e: &Expr, slot: u32) -> bool {
+            match e {
+                Expr::Var(_, VarRes::Local(s)) => *s == slot,
+                Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::Var(..) => false,
+                Expr::Field(b, _) | Expr::Un(_, b) => uses(b, slot),
+                Expr::Index(a, b) | Expr::Bin(_, a, b) => uses(a, slot) || uses(b, slot),
+                Expr::Call(_, args, _) => args.iter().any(|a| uses(a, slot)),
+            }
+        }
+        let col = |e: &Expr| -> Option<String> {
+            let Expr::Field(b, f) = e else { return None };
+            let Expr::Var(_, VarRes::Local(s)) = &**b else { return None };
+            if *s != slot || !self.prog.tables[t].cols.iter().any(|c| c.path == *f && !matches!(c.kind, crate::layout::TKind::Blob(..))) { return None; }
+            Some(f.clone())
+        };
+        match e {
+            Expr::Bin(op, a, b) if op == "&&" => self.sql_where(a, slot, t, first, conds, vals, cols) && self.sql_where(b, slot, t, first, conds, vals, cols),
+            Expr::Bin(op, a, b) if ["==", "!=", "<", "<=", ">", ">="].contains(&op.as_str()) => {
+                let (f, v, op) = match (col(a), col(b)) {
+                    (Some(f), None) if !uses(b, slot) => (f, &**b, op.as_str()),
+                    (None, Some(f)) if !uses(a, slot) => (f, &**a, match op.as_str() { "<" => ">", "<=" => ">=", ">" => "<", ">=" => "<=", o => o }),
+                    _ => return false,
+                };
+                vals.push(v);
+                conds.push(format!("{} {} ?{}", crate::layout::sql_ident(&f), if op == "==" { "=" } else { op }, first + vals.len()));
+                cols.push(f);
+                true
+            }
+            Expr::Un('!', x) => match col(x) { Some(f) => { conds.push(format!("{} = 0", crate::layout::sql_ident(&f))); cols.push(f); true } None => false },
+            e => match col(e) { Some(f) => { conds.push(format!("{} != 0", crate::layout::sql_ident(&f))); cols.push(f); true } None => false },
+        }
+    }
+    /// `foreach r in table [where ...] [reverse] [limit n]`: one query (written here, prepared once) whose cursor gives the rows' ids
+    /// and columns; a field of the loop's row is read from the cursor. A `where` that is comparisons with values goes into the query;
+    /// over a whole top-level table it must be, on indexed fields (a scan of every row is refused). Over one owner's rows anything goes:
+    /// what is not SQL is tested here. A body that adds, removes or writes collects the ids first, so its changes cannot feed the loop.
+    fn table_loop(&mut self, it: &'p Iter, t: usize, inst: String, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+        let tb = self.prog.tables[t].clone();
+        let nested = tb.parent.is_some();
+        let mut sql = format!("SELECT id{} FROM {}", tb.cols.iter().map(|c| format!(", {}", crate::layout::sql_ident(&c.path))).collect::<String>(), tb.sql);
+        let mut conds: Vec<String> = Vec::new();
+        if nested { conds.push("parent_id = ?1".into()); }
+        let (mut wconds, mut wvals, mut wcols) = (Vec::new(), Vec::new(), Vec::new());
+        let mut in_c = None; // the `where` tested here, when it is not SQL
+        if let Some(w) = &it.wher {
+            if self.sql_where(w, it.slot, t, conds.len(), &mut wconds, &mut wvals, &mut wcols) {
+                if !nested {
+                    for f in &wcols {
+                        if !tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)) {
+                            return no(format!("`where` over the whole table {} on `{}`, which has no index: every row would be read; declare one (`{}: table<{}> index({})`)", tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
+                        }
+                    }
+                }
+                conds.extend(wconds);
+            } else if !nested {
+                return no(format!("`where` over the whole table {} is compiled to SQL only when it compares the row's indexed fields with values (joined by `&&`); this one would read every row", tb.name));
+            } else { in_c = Some(w); }
+        }
+        if !conds.is_empty() { sql += &format!(" WHERE {}", conds.join(" AND ")); }
+        sql += if it.reverse { " ORDER BY id DESC" } else { " ORDER BY id" };
+        self.loop_enter();
+        self.open("{");
+        // the query's values: the owner, then the `where`'s
+        let mut names = Vec::new();
+        if nested { names.push(format!("{{ 1, 0, 0, (i64)({}), 0 }}", inst)); }
+        for e in wvals { let v = self.expr(e, env, None)?; let v = self.hold(v, false)?; names.push(self.val(v)?); }
+        let (tp, cur, hits) = (self.tmp("argv"), self.tmp("cur"), self.tmp("hits"));
+        if names.is_empty() { self.line(&format!("Val {}[1];", tp)); } else { self.line(&format!("Val {}[{}] = {{ {} }};", tp, names.len(), names.join(", "))); }
+        self.line(&format!("u32 {};", cur));
+        self.call(&format!("c->h->titer(c, {}, {}, {}, {}, &{})", c_lit(sql.as_bytes()), t, tp, names.len(), cur));
+        let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
+        let lim = lim.map(|l| self.hold_int(l));
+        if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
+        self.line(&format!("u32 {} = 0;", hits));
+        let h = self.tmp("h");
+        if collect { self.line(&format!("u32 {};", h)); self.call(&format!("c->h->sel_mark(c, &{})", h)); }
+        let (rid, more, k) = (self.tmp("i"), self.tmp("more"), self.tmp("k"));
+        // rows as long as the cursor gives them, charged to the request's step budget as any loop without a fixed extent
+        self.open(&format!("for (i64 {k} = 0LL; {k} < 9223372036854775807LL; {k}++) {{"));
+        self.line(&format!("ROUND_({});", k));
+        self.line(&format!("u32 {}; int {};", rid, more));
+        self.call(&format!("c->h->tnext(c, {}, &{}, &{})", cur, rid, more));
+        self.line(&format!("if (!{}) break;", more));
+        env[it.slot as usize] = Some(CV::Item(TBASE + t, rid.clone()));
+        if let Some(w) = in_c { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) continue;", wc)); }
+        if let Some(l) = &lim { self.line(&format!("if ((i64){} >= {}) break;", hits, l)); }
+        self.line(&format!("{}++;", hits));
+        if !collect {
+            self.round_start(it, env, &hits);
+            body(self, env, &hits)?;
+            self.loop_round_end();
+            self.close("}");
+            self.loop_exit();
+            self.call(&format!("c->h->tclose(c, {})", cur));
+            self.close("}");
+            return Ok(());
+        }
+        self.call(&format!("c->h->sel_add(c, {})", rid));
+        self.close("}");
+        self.call(&format!("c->h->tclose(c, {})", cur));
+        let (n, q, m2) = (self.tmp("n"), self.tmp("q"), self.tmp("i"));
+        self.line(&format!("u32 {};", n));
+        self.call(&format!("c->h->sel_limit(c, {}, -1, &{})", h, n));
+        self.open(&format!("for (u32 {} = 0; {} < {}; {}++) {{", q, q, n, q));
+        self.line(&format!("u32 {};", m2));
+        self.call(&format!("c->h->sel_get(c, {}, {}, &{})", h, q, m2));
+        self.line(&format!("{} = {} + 1;", hits, q));
+        env[it.slot as usize] = Some(CV::Item(TBASE + t, m2));
+        self.round_start(it, env, &hits);
+        body(self, env, &hits)?;
+        self.loop_round_end();
+        self.close("}");
+        self.loop_exit();
+        self.call(&format!("c->h->sel_end(c, {})", h));
+        self.close("}");
+        Ok(())
+    }
     fn item_value(&mut self, c: usize, idx: String, dead: Option<&str>) -> R<CV> {
         let coll = &self.prog.colls[c];
         if let Some(k) = coll.children.iter().find(|x| x.0.is_empty()) { return Ok(CV::Coll(k.1, idx)); }
@@ -3124,6 +3348,7 @@ impl<'p> G<'p> {
             }
             B::Count => {
                 let Some(CV::Coll(c, inst)) = a.first() else { return no("count(collection)") };
+                if let Some(t) = tab(*c) { let r = self.tmp("n"); self.line(&format!("i64 {};", r)); self.call(&format!("c->h->tcount(c, {}, (u32)({}), &{})", t, inst, r)); return Ok(CV::Int(r)); }
                 let col = &self.prog.colls[*c];
                 let f = if col.is_list() { 0 } else { 1 };
                 CV::Int(format!("(i64)LD_U32({}, {})", col.hdr + 4 * f * col.mult, inst))
@@ -3154,6 +3379,7 @@ impl<'p> G<'p> {
             }
             B::Capacity => { let Some(CV::Coll(c, _)) = a.first() else { return no("`capacity()` is a function of a collection") }; CV::Int(format!("{}LL", self.prog.colls[*c].cap)) }
             B::Slot => match a.first() {
+                Some(CV::Item(c, i)) if tab(*c).is_some() => CV::Int(format!("(i64)({})", i)),
                 Some(CV::Item(c, i)) => CV::Int(format!("(i64)({} % {})", i, self.prog.colls[*c].cap)),
                 Some(CV::Ref(..)) => return no("`slot(x)` of a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`"),
                 _ => unreachable!("generic above"),
@@ -3365,8 +3591,9 @@ impl<'p> G<'p> {
     fn each(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
         if let Some(v) = it.via { return self.walk(it, v, env, body); }
         if let Some(hi) = &it.hi { return self.range_loop(it, hi, env, body); }
-        self.loop_enter();
         let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
+        if let Some(t) = tab(c) { return self.table_loop(it, t, inst, env, collect, body); }
+        self.loop_enter();
         let coll = self.prog.colls[c].clone();
         let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
@@ -3655,6 +3882,7 @@ impl<'p> G<'p> {
                 self.line(&format!("if ({} == 0) {{ CALL(c->h->out(c, \"null\", 4)); }}", s));
                 self.line(&format!("else CALL(c->h->json_id(c, {}, {}));", t, k));
             }
+            CV::Item(c, i) if tab(c).is_some() => self.call(&format!("c->h->json_i64(c, (i64)({}))", i)),
             CV::Item(c, i) if self.prog.colls[c].parent.is_none() && matches!(self.prog.colls[c].kind, Kind::Pool(_)) => self.call(&format!("c->h->json_id(c, {}, {})", c, i)),
             CV::Item(..) | CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::PlainArr(..) | CV::Resp(..) => self.fail(500, "cannot write this value as JSON"),
         }

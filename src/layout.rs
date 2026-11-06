@@ -127,6 +127,7 @@ pub struct Program {
     pub plain_colls: Vec<(usize, usize, String, usize)>, // (offset of a plain struct, its struct id, field name, collection)
     /// The tables (`table<T>`): kept in SQLite, outside the fixed reservation; a nested table's rows each name a row of its parent.
     pub tables: Vec<Table>,
+    pub plain_tables: Vec<(usize, usize, String, usize)>, // (offset of a plain struct, its struct id, field name, table)
     pub plain_end: usize,
     pub total: usize,
 }
@@ -299,7 +300,7 @@ impl Program {
                 else { sd.fields[k].1 = Ty::Scalar(en.base); if sd.ranges[k].is_none() { sd.ranges[k] = Some((lo, hi)); } }
             }
         }
-        let mut prog = Program { ids: Vec::new(), enums, request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), tables: Vec::new(), plain_end: 0, total: 0 };
+        let mut prog = Program { ids: Vec::new(), enums, request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), tables: Vec::new(), plain_tables: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
             let fs = std::mem::take(&mut prog.structs[i].fields);
@@ -451,7 +452,8 @@ impl Program {
             let unl = all || self.structs[s].unlogged[k];
             if let Ty::Table(..) = t {
                 if unl { return Err(format!("`{}`: a table is kept in its database, so it cannot be `unlogged`", p)); }
-                self.build_table(&p, t, None, 0)?;
+                let tid = self.build_table(&p, t, None, 0)?;
+                self.plain_tables.push((base, s, n.clone(), tid));
             } else if t.is_coll() {
                 let cid = self.build_coll(&p, t, 1, None, unl, cur, 0)?;
                 self.plain_colls.push((base, s, n.clone(), cid));

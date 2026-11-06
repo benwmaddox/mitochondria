@@ -15,6 +15,12 @@ int sqlite3_step(sqlite3_stmt *);
 int sqlite3_reset(sqlite3_stmt *);
 int sqlite3_finalize(sqlite3_stmt *);
 int sqlite3_bind_text(sqlite3_stmt *, int, const char *, int, void (*)(void *));
+int sqlite3_bind_int64(sqlite3_stmt *, int, i64);
+int sqlite3_bind_double(sqlite3_stmt *, int, double);
+int sqlite3_column_type(sqlite3_stmt *, int);
+double sqlite3_column_double(sqlite3_stmt *, int);
+i64 sqlite3_last_insert_rowid(sqlite3 *);
+int sqlite3_extended_errcode(sqlite3 *);
 i64 sqlite3_column_int64(sqlite3_stmt *, int);
 const unsigned char *sqlite3_column_text(sqlite3_stmt *, int);
 int sqlite3_column_bytes(sqlite3_stmt *, int);
@@ -30,7 +36,19 @@ typedef struct { const char *name; u32 type; int has_range; i64 lo, hi; u32 max;
 /* A table: its quoted SQL name, its CREATE TABLE, its owner (-1 none), its columns, its indexes (CREATE INDEX statements) */
 typedef struct { const char *sql; const char *create; int parent; u32 ncols; const StoreCol *cols; const char *indexes; } StoreTable;
 
-typedef struct { sqlite3 *db; sqlite3_stmt *begin, *commit, *rollback; int open; char err[1024]; } Store;
+/* A table's statements, prepared once after migration: its row's columns by id, insert (with the owner's id for a nested table), delete,
+   count (of one owner's rows), find (a row of one owner), and one update per column. `secret`: the column a session token checks, or -1. */
+typedef struct { sqlite3_stmt *row, *ins, *del, *cnt, *find, **upd; int secret; } TStmts;
+/* A loop's cursor: its statement (a cached one, or its own when the cached one is in use by an enclosing loop), the table of its rows. */
+typedef struct { sqlite3_stmt *s; int own, on; u32 t; } SqCursor;
+typedef struct { const char *sql; sqlite3_stmt *s; int busy; } SqCached;
+#define SQ_CURSORS 32
+#define SQ_CACHED 128
+/* The row cache: the last row read (table, id) and the statement holding it, `off` the column of its first field (1 in a cursor's
+   statement, whose column 0 is the id); any write forgets it. */
+typedef struct { sqlite3 *db; sqlite3_stmt *begin, *commit, *rollback; int open; char err[1024];
+    const StoreTable *tabs; u32 ntabs; TStmts *ts; SqCursor cur[SQ_CURSORS]; SqCached cached[SQ_CACHED]; u32 ncached;
+    sqlite3_stmt *row; u32 row_t, row_id, row_off; } Store;
 
 static const char *const sq_types[] = { "INTEGER", "REAL", "TEXT", "BLOB" };
 static const char *const sq_defaults[] = { "0", "0.0", "''", "x''" };
@@ -137,8 +155,54 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
     if (!st_exec(st, "COMMIT") || !st_exec(st, "PRAGMA foreign_keys=ON")) return 0;
     if (sqlite3_prepare_v2(st->db, "BEGIN", -1, &st->begin, 0) != SQ_OK || sqlite3_prepare_v2(st->db, "COMMIT", -1, &st->commit, 0) != SQ_OK ||
         sqlite3_prepare_v2(st->db, "ROLLBACK", -1, &st->rollback, 0) != SQ_OK) return st_fail(st, "cannot prepare", sqlite3_errmsg(st->db));
+    /* each table's statements */
+    st->tabs = tabs; st->ntabs = ntabs;
+    st->ts = (TStmts *)os_alloc(sizeof(TStmts) * (ntabs ? ntabs : 1));
+    if (!st->ts) return st_fail(st, "out of memory for statements", 0);
+    for (u32 t = 0; t < ntabs; t++) {
+        const StoreTable *tb = &tabs[t]; TStmts *x = &st->ts[t];
+        x->upd = (sqlite3_stmt **)os_alloc(sizeof(sqlite3_stmt *) * (tb->ncols ? tb->ncols : 1));
+        x->secret = -1;
+        SqBuf a = { sqlb, sizeof sqlb, 0 }; sb_s(&a, "SELECT ");
+        if (!tb->ncols) sb_s(&a, "1");
+        for (u32 k = 0; k < tb->ncols; k++) { if (k) sb_s(&a, ", "); sb_q(&a, tb->cols[k].name); if (sq_streq(tb->cols[k].name, "secret") && tb->cols[k].type == 0) x->secret = (int)k; }
+        sb_s(&a, " FROM "); sb_s(&a, tb->sql); sb_s(&a, " WHERE id = ?1");
+        if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->row, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
+        a.n = 0; sb_s(&a, "INSERT INTO "); sb_s(&a, tb->sql); sb_s(&a, tb->parent >= 0 ? "(parent_id) VALUES (?1)" : " DEFAULT VALUES");
+        if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->ins, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
+        a.n = 0; sb_s(&a, "DELETE FROM "); sb_s(&a, tb->sql); sb_s(&a, " WHERE id = ?1");
+        if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->del, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
+        a.n = 0; sb_s(&a, "SELECT count(*) FROM "); sb_s(&a, tb->sql); if (tb->parent >= 0) sb_s(&a, " WHERE parent_id = ?1");
+        if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->cnt, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
+        a.n = 0; sb_s(&a, "SELECT 1 FROM "); sb_s(&a, tb->sql); sb_s(&a, " WHERE id = ?1"); if (tb->parent >= 0) sb_s(&a, " AND parent_id = ?2");
+        if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->find, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
+        for (u32 k = 0; k < tb->ncols; k++) {
+            a.n = 0; sb_s(&a, "UPDATE "); sb_s(&a, tb->sql); sb_s(&a, " SET "); sb_q(&a, tb->cols[k].name); sb_s(&a, " = ?1 WHERE id = ?2");
+            if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->upd[k], 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
+        }
+    }
     st->open = 1;
     return 1;
+}
+/* the end of a request: every statement reset (a transaction cannot end with one in progress), cursors' own statements finalized */
+static void store_settle(Store *st) {
+    for (u32 k = 0; k < SQ_CURSORS; k++) if (st->cur[k].on) { if (st->cur[k].own) sqlite3_finalize(st->cur[k].s); else sqlite3_reset(st->cur[k].s); st->cur[k].on = 0; }
+    for (u32 k = 0; k < st->ncached; k++) st->cached[k].busy = 0;
+    if (st->row) { sqlite3_reset(st->row); st->row = 0; }
+}
+static void store_forget_row(Store *st) { if (st->row) { if (st->row_off == 0) sqlite3_reset(st->row); st->row = 0; } }
+/* A loop's statement (`sql`, a literal of the program: kept by its address), ready to bind: the cached one, or its own when an enclosing
+   loop is using that one. 0, or -1 when there are too many loops open at once or it does not prepare. */
+static int store_cursor(Store *st, const char *sql, u32 t, u32 *out) {
+    u32 k = 0; while (k < SQ_CURSORS && st->cur[k].on) k++;
+    if (k == SQ_CURSORS) { st_fail(st, "more than 32 loops over tables open at once", 0); return -1; }
+    SqCached *c = 0;
+    for (u32 i = 0; i < st->ncached && !c; i++) if (st->cached[i].sql == sql) c = &st->cached[i];
+    if (!c && st->ncached < SQ_CACHED) { c = &st->cached[st->ncached]; c->sql = sql; c->busy = 0; if (sqlite3_prepare_v2(st->db, sql, -1, &c->s, 0) != SQ_OK) { st_fail(st, sql, sqlite3_errmsg(st->db)); return -1; } st->ncached++; }
+    if (c && !c->busy) { c->busy = 1; st->cur[k].s = c->s; st->cur[k].own = 0; }
+    else { if (sqlite3_prepare_v2(st->db, sql, -1, &st->cur[k].s, 0) != SQ_OK) { st_fail(st, sql, sqlite3_errmsg(st->db)); return -1; } st->cur[k].own = 1; }
+    st->cur[k].on = 1; st->cur[k].t = t; *out = k;
+    return 0;
 }
 static void store_close(Store *st) {
     if (!st->db) return;
@@ -147,5 +211,5 @@ static void store_close(Store *st) {
 }
 /* a request's transaction: begin before it runs; commit before its answer (0 failed: the request fails); roll back when it failed */
 static int store_begin(Store *st) { if (!st->open) return 1; int r = sqlite3_step(st->begin); sqlite3_reset(st->begin); return r == SQ_DONE; }
-static int store_commit(Store *st) { if (!st->open) return 1; int r = sqlite3_step(st->commit); sqlite3_reset(st->commit); if (r != SQ_DONE) { st_fail(st, "commit failed", sqlite3_errmsg(st->db)); sqlite3_step(st->rollback); sqlite3_reset(st->rollback); return 0; } return 1; }
-static void store_rollback(Store *st) { if (!st->open) return; sqlite3_step(st->rollback); sqlite3_reset(st->rollback); }
+static int store_commit(Store *st) { if (!st->open) return 1; store_settle(st); int r = sqlite3_step(st->commit); sqlite3_reset(st->commit); if (r != SQ_DONE) { st_fail(st, "commit failed", sqlite3_errmsg(st->db)); sqlite3_step(st->rollback); sqlite3_reset(st->rollback); return 0; } return 1; }
+static void store_rollback(Store *st) { if (!st->open) return; store_settle(st); sqlite3_step(st->rollback); sqlite3_reset(st->rollback); }

@@ -610,6 +610,11 @@ typedef struct Mito {
     int pending; u32 fwd_kind; i64 fwd_key;         /* a forward waiting for MITO(finish_forward) */
 } Mito;
 
+#define MITO_TBASE (1u << 24) /* a table is collection MITO_TBASE + its index in generated code */
+#ifdef MITO_USES_SQLITE
+static int t_token_row(Mito *m, u32 t, const u8 *v, u64 n, u32 *out);
+static int t_get(Mito *m, u32 t, u32 rowid, u32 col, Val *out);
+#endif
 /* ---- errors: kind, status and message ---- */
 static int err(Mito *m, int kind, int code) { m->ekind = kind; m->ecode = code; m->emsg.len = 0; return -1; }
 static int fail(Mito *m, int code, const char *msg) { err(m, E_FAIL, code); a_str(&m->emsg, msg); return -1; }
@@ -1052,6 +1057,9 @@ static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, 
         if (!cookie(m, (const u8 *)name, nn, &cv, &cn)) return 0;
         if (kind == 8) { /* an item named by a session token in a cookie: null when it names none (malformed, ended, wrong secret) */
             u32 idx;
+#ifdef MITO_USES_SQLITE
+            if ((u32)lo >= MITO_TBASE) { if (t_token_row(m, (u32)lo - MITO_TBASE, cv, cn, &idx)) *out = v_item((u32)lo, idx); return 0; }
+#endif
             if (auth_token(m, (u32)lo, cv, cn, &idx)) { m->ekind = E_NONE; m->emsg.len = 0; return 0; }
             *out = v_item((u32)lo, idx); return 0;
         }
@@ -1434,6 +1442,16 @@ static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
         case 9: { /* random */ u64 x = m->rng; if (!x) x = os_random(); else { x ^= x << 13; x ^= x >> 7; x ^= x << 17; m->rng = x; } *out = v_int((i64)x); return 0; }
         case 10: { /* token */
             if (a0.tag != 5) return fail(m, 500, "token(item)");
+#ifdef MITO_USES_SQLITE
+            if (a0.a >= MITO_TBASE) { /* a row: rowid.secret (row ids are never reused, so no generation) */
+                u32 t = a0.a - MITO_TBASE; Val x; int sc = m->store.ts[t].secret;
+                if (sc < 0) return fail(m, 500, "token needs a `secret` field");
+                if (t_get(m, t, a0.b, (u32)sc, &x)) return -1;
+                u32 start = m->text.len;
+                if (!(a_u64(&m->text, a0.b) && a_put(&m->text, ".", 1) && a_hex(&m->text, (u64)x.i))) return text_full(m);
+                *out = v_str(t_since(m, start)); return 0;
+            }
+#endif
             i64 ci = col_by_path(m, a0.a, (const u8 *)"secret", 6);
             if (ci < 0) return fail(m, 500, "token needs a `secret` field");
             const MitoCol *col = &coll(&m->mem, a0.a)->cols[ci];
@@ -1646,6 +1664,122 @@ static int h_log(Ctx *c, u32 line, const Val *v, u32 n) {
     return 0;
 }
 
+/* ---- tables (runtime/store.c): rows by id; a table is collection MITO_TBASE + its index in generated code ---- */
+#ifdef MITO_USES_SQLITE
+static int t_dbfail(Mito *m) {
+    Store *st = &m->store; int ec = sqlite3_extended_errcode(st->db);
+    if ((ec & 0xFF) == 19) return fail(m, 409, "a row with those values already exists (a unique index)"); /* SQLITE_CONSTRAINT */
+    err(m, E_FAIL, 500); a_str(&m->emsg, "database: "); a_str(&m->emsg, sqlite3_errmsg(st->db)); return -1;
+}
+static int t_val(Mito *m, sqlite3_stmt *s, int col, Val *out) {
+    switch (sqlite3_column_type(s, col)) {
+        case 1: *out = v_int(sqlite3_column_int64(s, col)); return 0;
+        case 2: *out = v_flt(sqlite3_column_double(s, col)); return 0;
+        case 3: { T t; if (t_push(m, sqlite3_column_text(s, col), (u64)sqlite3_column_bytes(s, col), &t)) return -1; *out = v_str(t); return 0; }
+        default: *out = v_null(); return 0;
+    }
+}
+static int t_bind(Mito *m, sqlite3_stmt *s, int at, const Val *v) {
+    switch (v->tag) {
+        case 1: case 3: return sqlite3_bind_int64(s, at, v->i);
+        case 2: return sqlite3_bind_double(s, at, v->f);
+        case 4: return sqlite3_bind_text(s, at, (const char *)m->text.p + v->a, (int)v->b, (void (*)(void *))0);
+        case 5: return sqlite3_bind_int64(s, at, (i64)v->b);
+        default: return sqlite3_bind_int64(s, at, 0);
+    }
+}
+/* column `col` of row `rowid` of table `t`, through the row cache (a loop's cursor or the last row read) */
+static int t_get(Mito *m, u32 t, u32 rowid, u32 col, Val *out) {
+    Store *st = &m->store;
+    if (!(st->row && st->row_t == t && st->row_id == rowid)) {
+        store_forget_row(st);
+        sqlite3_stmt *s = st->ts[t].row; sqlite3_bind_int64(s, 1, (i64)rowid);
+        int r = sqlite3_step(s);
+        if (r != SQ_ROW) { sqlite3_reset(s); if (r == SQ_DONE) { err(m, E_FAIL, 404); a_str(&m->emsg, "no row "); a_u64(&m->emsg, rowid); a_str(&m->emsg, " in "); a_str(&m->emsg, st->tabs[t].sql); return -1; } return t_dbfail(m); }
+        st->row = s; st->row_t = t; st->row_id = rowid; st->row_off = 0;
+    }
+    return t_val(m, st->row, (int)(st->row_off + col), out);
+}
+static int t_run(Mito *m, sqlite3_stmt *s) { int r = sqlite3_step(s); sqlite3_reset(s); return r == SQ_DONE || r == SQ_ROW ? 0 : t_dbfail(m); }
+#endif
+#ifdef MITO_USES_SQLITE
+#define T_ST(c) (&M_(c)->store)
+static int h_tget(Ctx *c, u32 t, u32 rowid, u32 col, Val *out) { return t_get(M_(c), t, rowid, col, out); }
+static int h_tset(Ctx *c, u32 t, u32 rowid, u32 col, const Val *v) {
+    Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
+    sqlite3_stmt *s = st->ts[t].upd[col]; t_bind(m, s, 1, v); sqlite3_bind_int64(s, 2, (i64)rowid); return t_run(m, s);
+}
+static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) {
+    Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
+    sqlite3_stmt *s = st->ts[t].ins; if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent);
+    if (t_run(m, s)) return -1;
+    i64 id = sqlite3_last_insert_rowid(st->db);
+    if (id <= 0 || id > 0xFFFFFFFFLL) return fail(m, 507, "a table's row ids reached 2^32");
+    *out = (u32)id; return 0;
+}
+static int h_tdel(Ctx *c, u32 t, u32 rowid) { Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].del; sqlite3_bind_int64(s, 1, (i64)rowid); return t_run(m, s); }
+static int h_tcount(Ctx *c, u32 t, u32 parent, i64 *out) {
+    Mito *m = M_(c); Store *st = T_ST(c); sqlite3_stmt *s = st->ts[t].cnt;
+    if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent);
+    int r = sqlite3_step(s); *out = r == SQ_ROW ? sqlite3_column_int64(s, 0) : 0; sqlite3_reset(s); return r == SQ_ROW ? 0 : t_dbfail(m);
+}
+/* `coll[id]`: the row, when it is one of this table's (and this owner's, for a nested table); otherwise 404 */
+static int h_tfind(Ctx *c, u32 t, u32 rowid, u32 parent) {
+    Mito *m = M_(c); Store *st = T_ST(c); sqlite3_stmt *s = st->ts[t].find;
+    sqlite3_bind_int64(s, 1, (i64)rowid); if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 2, (i64)parent);
+    int r = sqlite3_step(s); sqlite3_reset(s);
+    if (r == SQ_ROW) return 0;
+    if (r != SQ_DONE) return t_dbfail(m);
+    err(m, E_FAIL, 404); a_str(&m->emsg, "no row "); a_u64(&m->emsg, rowid); a_str(&m->emsg, " in "); a_str(&m->emsg, st->tabs[t].sql); return -1;
+}
+/* a loop over a table: its statement (written by the compiler; column 0 the row id, then the row's columns) with its parameters bound */
+static int h_titer(Ctx *c, const char *sql, u32 t, const Val *p, u32 n, u32 *cur) {
+    Mito *m = M_(c); Store *st = T_ST(c);
+    if (store_cursor(st, sql, t, cur)) { err(m, E_FAIL, 500); a_str(&m->emsg, st->err); return -1; }
+    for (u32 i = 0; i < n; i++) t_bind(m, st->cur[*cur].s, (int)i + 1, &p[i]);
+    return 0;
+}
+static int h_tnext(Ctx *c, u32 cur, u32 *rowid, int *more) {
+    Mito *m = M_(c); Store *st = T_ST(c); SqCursor *k = &st->cur[cur];
+    int r = sqlite3_step(k->s);
+    if (r == SQ_ROW) { *rowid = (u32)sqlite3_column_int64(k->s, 0); *more = 1; if (st->row != k->s) store_forget_row(st); st->row = k->s; st->row_t = k->t; st->row_id = *rowid; st->row_off = 1; return 0; }
+    *more = 0;
+    if (st->row == k->s) st->row = 0;
+    if (r != SQ_DONE) return t_dbfail(m);
+    return 0;
+}
+/* the end of a loop (finished or left by `break`): its cursor given back */
+static int h_tclose(Ctx *c, u32 cur) {
+    Store *st = T_ST(c); SqCursor *k = &st->cur[cur];
+    if (!k->on) return 0;
+    if (st->row == k->s) st->row = 0;
+    if (k->own) sqlite3_finalize(k->s);
+    else { sqlite3_reset(k->s); for (u32 i = 0; i < st->ncached; i++) if (st->cached[i].s == k->s) st->cached[i].busy = 0; }
+    k->on = 0; return 0;
+}
+/* a session token naming a row (`rowid.secret`, the secret in hex), checked against its `secret` column: 1 and the row, or 0 */
+static int t_token_row(Mito *m, u32 t, const u8 *v, u64 n, u32 *out) {
+    Store *st = &m->store; u64 rid = 0, sec = 0; u64 i = 0;
+    if (st->ts[t].secret < 0) return 0;
+    while (i < n && v[i] != '.') i++;
+    if (i == 0 || i == n || !parse_u64_radix(v, i, 10, &rid) || rid > 0xFFFFFFFFULL || !parse_u64_radix(v + i + 1, n - i - 1, 16, &sec)) return 0;
+    Val x; u32 mark = m->text.len;
+    if (t_get(m, t, (u32)rid, (u32)st->ts[t].secret, &x)) { m->ekind = E_NONE; m->emsg.len = 0; m->text.len = mark; return 0; }
+    if (x.tag != 1 || (u64)x.i != sec) return 0;
+    *out = (u32)rid; return 1;
+}
+#else
+static int h_tget(Ctx *c, u32 t, u32 rowid, u32 col, Val *out) { (void)t; (void)rowid; (void)col; (void)out; return fail(M_(c), 500, "no tables"); }
+static int h_tset(Ctx *c, u32 t, u32 rowid, u32 col, const Val *v) { (void)t; (void)rowid; (void)col; (void)v; return fail(M_(c), 500, "no tables"); }
+static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) { (void)t; (void)parent; (void)out; return fail(M_(c), 500, "no tables"); }
+static int h_tdel(Ctx *c, u32 t, u32 rowid) { (void)t; (void)rowid; return fail(M_(c), 500, "no tables"); }
+static int h_tcount(Ctx *c, u32 t, u32 parent, i64 *out) { (void)t; (void)parent; (void)out; return fail(M_(c), 500, "no tables"); }
+static int h_tfind(Ctx *c, u32 t, u32 rowid, u32 parent) { (void)t; (void)rowid; (void)parent; return fail(M_(c), 500, "no tables"); }
+static int h_titer(Ctx *c, const char *sql, u32 t, const Val *p, u32 n, u32 *cur) { (void)sql; (void)t; (void)p; (void)n; (void)cur; return fail(M_(c), 500, "no tables"); }
+static int h_tnext(Ctx *c, u32 cur, u32 *rowid, int *more) { (void)cur; (void)rowid; (void)more; return fail(M_(c), 500, "no tables"); }
+static int h_tclose(Ctx *c, u32 cur) { (void)c; (void)cur; return 0; }
+#endif
+
 /* ---- answers other than JSON ---- */
 static int h_answer(Ctx *c, u32 kind) { M_(c)->ctype = kind; return 0; }
 /* text sent as it is (an HTML or plain-text answer): from the text area, from state, from a text column */
@@ -1715,7 +1849,7 @@ static const H mito_h = {
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

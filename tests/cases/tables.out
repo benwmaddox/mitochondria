@@ -1,0 +1,23 @@
+POST /boards/home -> 201 {"id":1,"token":"1.beef"}
+POST /boards/work -> 201 {"id":2,"token":"2.beef"}
+POST /boards/home -> 409 {"error":"a row with those values already exists (a unique index)","line":9}
+POST /todos/milk -> 201 {"id":1,"count":1}
+POST /todos/eggs -> 201 {"id":2,"count":2}
+POST /todos/bread -> 201 {"id":3,"count":3}
+POST /todos/report -> 201 {"id":4,"count":1}
+POST /todos/1/toggle -> 200 {"done":true}
+POST /todos/4/toggle -> 404 {"error":"no row 4 in \"boards.todos\"","line":20}
+GET /todos -> 200 {"name":"home","all":["milk","eggs","bread"],"open":["eggs","bread"],"newest2":["bread","eggs"],"high":[3]}
+POST /todos/9/delete -> 404 {"error":"no row 9 in \"boards.todos\"","line":26}
+GET /by-secret/48879 -> 200 {"names":["home","work"]}
+GET /todos -> 401 {"error":"no valid `list` cookie"}
+restart
+GET /hits -> 200 {"hits":0,"boards":2}
+GET /todos -> 200 {"name":"home","all":["milk","eggs","bread"],"open":["eggs","bread"],"newest2":["bread","eggs"],"high":[3]}
+POST /todos/2/delete -> 200 {"left":2}
+GET /todos -> 200 {"name":"home","all":["milk","bread"],"open":["bread"],"newest2":["bread","milk"],"high":[3]}
+POST /boards/1/delete -> 200 {"boards":1}
+GET /todos -> 401 {"error":"no valid `list` cookie"}
+GET /todos -> 200 {"name":"work","all":["report"],"open":["report"],"newest2":["report"],"high":[4]}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

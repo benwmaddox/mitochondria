@@ -1,0 +1,3 @@
+// expect: which has no index: every row would be read
+struct U { name: ascii<20>; age: i64; } struct S { users: table<U> index(name); } state s: S;
+@get("/a") fn a() -> Response<{ n: [i64] }> { return ok({ n: [foreach u in s.users where u.age > 30 u.age] }); }

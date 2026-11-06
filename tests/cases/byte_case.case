@@ -1,0 +1,14 @@
+// byte_at(t, i): a text's byte, -1 past either end; lower(t) / upper(t): ASCII letters only, other bytes kept (é stays é)
+--- program
+struct App { n: i64; }
+state app: App;
+
+@post("/t")
+fn t(s: utf8<64>, i: i64) -> Response<{ byte: i64; lower: string; upper: string; first_up: string }> {
+    return ok({ byte: byte_at(s, i), lower: lower(s), upper: upper(s), first_up: upper(substr(s, 0, 1)) + lower(substr(s, 1, len(s) - 1)) });
+}
+--- requests
+POST /t {"s": "Internet Explorer", "i": 0}
+POST /t {"s": "AppleWebKit/É", "i": 11}
+POST /t {"s": "ab", "i": 2}
+POST /t {"s": "ab", "i": -1}

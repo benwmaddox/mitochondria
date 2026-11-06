@@ -1683,6 +1683,20 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
             else for (u32 i = 0; i + y.len <= x.len && !found; i++) found = b_eq(p + i, y.len, q, y.len);
         }
         *out = v_int(found); return 0; }
+    case 58: { /* byte_at(t, i): the byte at offset i (0 to 255), or -1 past either end */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        if (n < 2 || a[1].tag != 1) return fail(m, 500, "byte_at(text, offset)");
+        *out = v_int(a[1].i >= 0 && a[1].i < (i64)x.len ? t_ptr(m, x)[a[1].i] : -1); return 0; }
+    case 59: case 60: { /* lower(t), upper(t): ASCII letters in lower (upper) case, every other byte as it is */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        if (!(w = t_room(m, (u64)x.len))) return -1;
+        const u8 *s = t_ptr(m, x);
+        for (u32 i = 0; i < x.len; i++) {
+            u8 b = s[i];
+            if (code == 59 && b >= 'A' && b <= 'Z') b += 32; else if (code == 60 && b >= 'a' && b <= 'z') b -= 32;
+            w[i] = b;
+        }
+        return t_done(m, start, x.len, out); }
     case 41: { /* escape_html(t): & < > " ' as entities (as ERB's <%= %> writes text), for markup or JSON written as text */
         if (arg_txt(m, a, n, 0, &x)) return -1;
         const u8 *s = t_ptr(m, x);

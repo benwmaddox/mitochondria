@@ -1,0 +1,19 @@
+POST /users/ann -> 201 {"id":1}
+POST /users/bob -> 201 {"id":2}
+POST /tasks/write -> 201 {"id":1}
+POST /tasks/test -> 201 {"id":2}
+POST /tasks/1/assign/2 -> 200 {}
+POST /tasks/2/assign/1 -> 200 {}
+POST /lead/2 -> 200 {}
+GET /tasks -> 200 {"tasks":[{"title":"write","who":"bob"},{"title":"test","who":"ann"}],"lead":"bob"}
+GET /tasks/1/assignee -> 200 {"id":2}
+POST /tasks/9/assign/1 -> 404 {"error":"no row 9 in \"tasks\"","line":11}
+POST /tasks/1/assign/9 -> 404 {"error":"no row 9 in \"users\"","line":11}
+POST /users/2/delete -> 200 {}
+GET /tasks -> 200 {"tasks":[{"title":"write","who":"nobody"},{"title":"test","who":"ann"}],"lead":"nobody"}
+GET /tasks/1/assignee -> 200 {"id":null}
+POST /tasks/2/unassign -> 200 {}
+restart
+GET /tasks -> 200 {"tasks":[{"title":"write","who":"nobody"},{"title":"test","who":"nobody"}],"lead":"nobody"}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

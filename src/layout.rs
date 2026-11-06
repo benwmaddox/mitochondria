@@ -88,9 +88,12 @@ pub struct Global { pub name: String, pub ty: Ty, pub off: usize, pub coll: Opti
 /// A table's column: an item field (a plain struct inside the item flattened to `inner.x`), stored as SQLite's INTEGER (integers, bools,
 /// enums, stored ids), REAL, TEXT (with its maximum bytes, and whether it is ascii) or BLOB (a fixed array of `n` bytes).
 #[derive(Clone, Debug, PartialEq)]
-pub enum TKind { Int(Scalar), Real(Scalar), Text(usize, bool), Blob(Scalar, usize) }
+pub enum TKind { Int(Scalar), Real(Scalar), Text(usize, bool), Blob(Scalar, usize), Ref(usize) }
+/// A table is collection TABLE_BASE + its index where collections are numbered together (a stored id naming a row; the code generator).
+pub const TABLE_BASE: usize = 1 << 24;
 #[derive(Clone, Debug)]
-pub struct TCol { pub path: String, pub kind: TKind, pub range: Option<(i64, i64)> }
+/// `refers`: a `T?` field (the struct named, and `in path` if given), resolved to `TKind::Ref` once every table is known.
+pub struct TCol { pub path: String, pub kind: TKind, pub range: Option<(i64, i64)>, pub refers: Option<(String, Option<String>)> }
 /// A table: its path from the state (`app.boards`, `app.boards.todos`), its name in SQLite (the path after the state's name, quoted:
 /// `"boards"`, `"boards.todos"`), the struct of its rows, the table whose rows own its rows (a `parent_id` column names one), its
 /// columns, the nested tables of its rows, and its indexes.
@@ -351,6 +354,16 @@ impl Program {
         for c in 0..prog.colls.len() { if prog.colls[c].unlogged && prog.colls[c].parent.is_none() { let (a, b) = (prog.colls[c].start, prog.colls[c].end); prog.unlogged.push((a, up(b, 64))); } }
         if let Some((a, n)) = prog.request { prog.unlogged.push((a, a + n)); }
         prog.total = cur;
+        // a table's references, now that every table is known: each to a table (a pool's item is not kept, so a row cannot name one)
+        for t in 0..prog.tables.len() {
+            for ci in 0..prog.tables[t].cols.len() {
+                let Some((st, path)) = prog.tables[t].cols[ci].refers.clone() else { continue };
+                let owner = prog.structs[prog.tables[t].item].name.clone();
+                let target = prog.id_target(&owner, &prog.tables[t].cols[ci].path.clone(), &st, &path)?;
+                if target < TABLE_BASE { return Err(format!("`{}.{}` (`{}?`): a table's row names rows of a table; `{}` items are kept in {}, which is not stored", owner, prog.tables[t].cols[ci].path, st, st, prog.colls[target].name)); }
+                prog.tables[t].cols[ci].kind = TKind::Ref(target - TABLE_BASE);
+            }
+        }
         prog.resolve_ids()?;
         Ok(prog)
     }
@@ -387,6 +400,14 @@ impl Program {
     /// The pool a stored id names: the one top-level `checked` pool of its struct (or the collection written).
     fn id_target(&self, owner: &str, field: &str, st: &str, path: &Option<String>) -> Result<usize, String> {
         let Some(sid) = self.structs.iter().position(|s| s.name == st) else { return Err(format!("`{}.{}`: `{}` is not a struct", owner, field, st)) };
+        // a table holding `st`: its rows' ids (never reused, so no generation is needed)
+        let tabs: Vec<usize> = (0..self.tables.len()).filter(|&t| self.tables[t].item == sid && path.as_ref().map_or(true, |p| self.tables[t].name == *p)).collect();
+        let pools = (0..self.colls.len()).filter(|&c| { let k = &self.colls[c]; k.item == Some(sid) && path.as_ref().map_or(true, |p| k.name == *p) }).count();
+        match (tabs.as_slice(), pools) {
+            ([t], 0) => return Ok(TABLE_BASE + *t),
+            ([_, ..], _) => return Err(format!("`{}.{}` (`{}?`): several collections hold `{}` items: write `{} in path?`", owner, field, st, st, st)),
+            _ => {}
+        }
         let found: Vec<usize> = (0..self.colls.len()).filter(|&c| { let k = &self.colls[c]; k.item == Some(sid) && path.as_ref().map_or(true, |p| k.name == *p) }).collect();
         let c = match found.as_slice() {
             [c] => *c,
@@ -533,9 +554,9 @@ impl Program {
         self.tables.push(Table { name: path.to_string(), sql, item, parent, cols: Vec::new(), children: Vec::new(), index: index.clone(), unique: unique.clone() });
         let (mut leaves, mut kids) = (Vec::new(), Vec::new());
         self.table_fields(item, "", &mut leaves, &mut kids, path)?;
-        for (p, kind, range) in leaves {
+        for (p, kind, range, refers) in leaves {
             if p == "id" || p == "parent_id" { return Err(format!("`{}`: a row's `{}` is its table's own column (the row id{}); name the field otherwise", path, p, if p == "id" { "" } else { " of the row that owns it" })); }
-            self.tables[t].cols.push(TCol { path: p, kind, range });
+            self.tables[t].cols.push(TCol { path: p, kind, range, refers });
         }
         for fs in index.iter().chain(unique.iter()) {
             for f in fs { if !self.tables[t].cols.iter().any(|c| c.path == *f) { return Err(format!("`{}`: an index names `{}`, which is not a column of its rows", path, f)); } }
@@ -546,16 +567,18 @@ impl Program {
         }
         Ok(t)
     }
-    fn table_fields(&self, s: usize, prefix: &str, leaves: &mut Vec<(String, TKind, Option<(i64, i64)>)>, kids: &mut Vec<(String, Ty)>, name: &str) -> Result<(), String> {
+    fn table_fields(&self, s: usize, prefix: &str, leaves: &mut Vec<(String, TKind, Option<(i64, i64)>, Option<(String, Option<String>)>)>, kids: &mut Vec<(String, Ty)>, name: &str) -> Result<(), String> {
         for (k, (f, t)) in self.structs[s].fields.iter().enumerate() {
             let p = if prefix.is_empty() { f.clone() } else { format!("{}.{}", prefix, f) };
             let range = self.structs[s].ranges[k];
             if self.structs[s].unlogged[k] { return Err(format!("`{}`: `{}` is declared unlogged, but a table's rows are kept in its database", name, p)); }
+            // `owner: User?`: a reference to a row of the table that holds `User` (resolved once every table is known)
+            if let Some(r) = &self.structs[s].ids[k] { leaves.push((p, TKind::Ref(usize::MAX), None, Some(r.clone()))); continue; }
             match t {
-                Ty::Scalar(sc) if matches!(sc, Scalar::F32 | Scalar::F64) => leaves.push((p, TKind::Real(*sc), None)),
-                Ty::Scalar(sc) => leaves.push((p, TKind::Int(*sc), range)),
-                Ty::Str(m) => leaves.push((p, TKind::Text(*m, range == Some((0, 127))), None)),
-                Ty::Arr(e, n) => match **e { Ty::Scalar(sc) => leaves.push((p, TKind::Blob(sc, *n), None)), _ => return Err(format!("`{}`: a row holds a fixed array of numbers at `{}`, not of `{}`; use a nested table", name, p, self.show(e))) },
+                Ty::Scalar(sc) if matches!(sc, Scalar::F32 | Scalar::F64) => leaves.push((p, TKind::Real(*sc), None, None)),
+                Ty::Scalar(sc) => leaves.push((p, TKind::Int(*sc), range, None)),
+                Ty::Str(m) => leaves.push((p, TKind::Text(*m, range == Some((0, 127))), None, None)),
+                Ty::Arr(e, n) => match **e { Ty::Scalar(sc) => leaves.push((p, TKind::Blob(sc, *n), None, None)), _ => return Err(format!("`{}`: a row holds a fixed array of numbers at `{}`, not of `{}`; use a nested table", name, p, self.show(e))) },
                 Ty::Struct(i) => { if prefix.matches('.').count() > 6 { return Err(format!("`{}`: plain structs nested too deep at `{}`", name, p)); } self.table_fields(*i, &p, leaves, kids, name)?; }
                 Ty::Table(..) => kids.push((p, t.clone())),
                 Ty::List(..) | Ty::Pool(..) => return Err(format!("`{}`: a row holds plain fields and nested tables; `{}` is a {} (memory for every row): make it a `table<...>`", name, p, if matches!(t, Ty::List(..)) { "list" } else { "pool" })),
@@ -572,8 +595,12 @@ impl Program {
         let tb = &self.tables[t];
         let mut o = format!("CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY AUTOINCREMENT", tb.sql);
         if let Some(p) = tb.parent { o += &format!(", parent_id INTEGER NOT NULL REFERENCES {}(id) ON DELETE CASCADE", self.tables[p].sql); }
-        for c in &tb.cols { let (ty, def) = c.kind.sql(); o += &format!(", {} {} NOT NULL DEFAULT {}", sql_ident(&c.path), ty, def); }
+        for c in &tb.cols { o += &format!(", {} {}", sql_ident(&c.path), self.col_decl(c)); }
         o + ") STRICT;"
+    }
+    /// A column's declaration after its name: its type and first value; a reference may be null, and becomes null when its row goes.
+    pub fn col_decl(&self, c: &TCol) -> String {
+        match c.kind { TKind::Ref(t) => format!("INTEGER REFERENCES {}(id) ON DELETE SET NULL", self.tables[t].sql), _ => { let (ty, def) = c.kind.sql(); format!("{} NOT NULL DEFAULT {}", ty, def) } }
     }
     /// One table's indexes (one statement per line): by owner for a nested table, then the declared `index(...)` and `unique(...)`.
     pub fn table_index_sql(&self, t: usize) -> String {
@@ -592,9 +619,9 @@ impl Program {
 pub fn sql_ident(s: &str) -> String { format!("\"{}\"", s.replace('"', "\"\"")) }
 impl TKind {
     /// SQLite's type for the column and the value a new row (or a column added later) starts with.
-    pub fn sql(&self) -> (&'static str, &'static str) { match self { TKind::Int(_) => ("INTEGER", "0"), TKind::Real(_) => ("REAL", "0.0"), TKind::Text(..) => ("TEXT", "''"), TKind::Blob(..) => ("BLOB", "x''") } }
+    pub fn sql(&self) -> (&'static str, &'static str) { match self { TKind::Int(_) | TKind::Ref(_) => ("INTEGER", "0"), TKind::Real(_) => ("REAL", "0.0"), TKind::Text(..) => ("TEXT", "''"), TKind::Blob(..) => ("BLOB", "x''") } }
     /// The runtime's type code (0 INTEGER, 1 REAL, 2 TEXT, 3 BLOB).
-    pub fn code(&self) -> u32 { match self { TKind::Int(_) => 0, TKind::Real(_) => 1, TKind::Text(..) => 2, TKind::Blob(..) => 3 } }
+    pub fn code(&self) -> u32 { match self { TKind::Int(_) | TKind::Ref(_) => 0, TKind::Real(_) => 1, TKind::Text(..) => 2, TKind::Blob(..) => 3 } }
 }
 
 fn contains_coll(p: &Program, t: &Ty) -> bool {

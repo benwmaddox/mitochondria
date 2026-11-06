@@ -107,6 +107,7 @@ struct H {
     int (*tnext)(Ctx *, u32, u32 *, int *);                      /* the cursor's next row id, or none */
     int (*tclose)(Ctx *, u32);                                   /* the end of the loop: the cursor given back */
     int (*tclear)(Ctx *, u32, u32);                              /* remove every row of a table (of one owner) */
+    int (*texists)(Ctx *, u32, u32, u32 *);                      /* is there a row with this id (a stored id from working state) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -399,7 +400,7 @@ struct Spec { key: String, name: String, ret: K, proto: String, body: Option<Str
 
 /// A table is collection TBASE + its index (in `Program::tables`) for the code that handles items: a row is an item whose index is its
 /// row id (u32), a table of one owner's rows a collection whose instance is the owner's row id (0 for a top-level table).
-const TBASE: usize = 1 << 24;
+const TBASE: usize = crate::layout::TABLE_BASE;
 fn tab(c: usize) -> Option<usize> { if c >= TBASE { Some(c - TBASE) } else { None } }
 /// A collection's name (a pool's or list's, or a table's path).
 fn coll_name(prog: &Program, c: usize) -> String { match tab(c) { Some(t) => prog.tables[t].name.clone(), None => prog.colls[c].name.clone() } }
@@ -782,9 +783,10 @@ fn store_tables_c(prog: &Program) -> String {
             let (has, lo, hi) = match c.range { Some((a, b)) if matches!(c.kind, crate::layout::TKind::Int(_)) => (1, a, b), _ => (0, 0, 0) };
             let max = match &c.kind { crate::layout::TKind::Text(m, _) => *m, crate::layout::TKind::Blob(sc, n) => sc.size() * n, _ => 0 };
             let ascii = matches!(c.kind, crate::layout::TKind::Text(_, true)) as u32;
-            o += &format!(" {{ {}, {}, {}, {}, {}, {}, {} }},", c_lit(c.path.as_bytes()), c.kind.code(), has, i64_lit(lo), i64_lit(hi), max, ascii);
+            let refers = match c.kind { crate::layout::TKind::Ref(t) => t as i64, _ => -1 };
+            o += &format!(" {{ {}, {}, {}, {}, {}, {}, {}, {}, {} }},", c_lit(c.path.as_bytes()), c.kind.code(), has, i64_lit(lo), i64_lit(hi), max, ascii, c_lit(prog.col_decl(c).as_bytes()), refers);
         }
-        o += " { 0, 0, 0, 0, 0, 0, 0 } };\n";
+        o += " { 0, 0, 0, 0, 0, 0, 0, 0, -1 } };\n";
     }
     o += "static const StoreTable mito_tables[] = {\n";
     for (t, tb) in prog.tables.iter().enumerate() {
@@ -2490,6 +2492,13 @@ impl<'p> G<'p> {
     }
     /// A stored id (the C expression of its 8 bytes) read back as a `T?` of pool `target`.
     fn id_value(&mut self, target: usize, v: String) -> CV {
+        if let Some(t) = tab(target) {
+            // a row's id kept in working state: null when 0, or when the row has gone since (row ids are never reused)
+            let (s, i, x) = (self.tmp("r"), self.tmp("i"), self.tmp("v"));
+            self.line(&format!("i64 {} = {}; u32 {} = {} > 0 && {} <= 4294967295LL, {} = (u32){};", x, v, s, x, x, i, x));
+            self.line(&format!("if ({}) {{ CALL(c->h->texists(c, {}, {}, &{})); }}", s, t, i, s));
+            return CV::Ref(target, s, i);
+        }
         let (s, i) = (self.tmp("r"), self.tmp("i"));
         self.line(&format!("u32 {} = 0, {} = 0;", s, i));
         self.call(&format!("c->h->id_get(c, {}, {}, &{}, &{})", target, v, s, i));
@@ -2497,6 +2506,15 @@ impl<'p> G<'p> {
     }
     /// A value stored into an id field of pool `target`: an item, a `T?` or null, as its id (0 for null).
     fn id_store_value(&mut self, target: usize, v: CV, what: &str) -> R<CV> {
+        if tab(target).is_some() {
+            // a row's id (0 for null)
+            return Ok(match v {
+                CV::Null => CV::Int("0LL".into()),
+                CV::Item(c, e) if c == target => CV::Int(format!("(i64)({})", e)),
+                CV::Ref(c, s, e) if c == target => CV::Int(format!("({} ? (i64)({}) : 0LL)", s, e)),
+                _ => return no(format!("`{}` holds a row of {}: give it a row, a value that may be null, or `null`", what, coll_name(self.prog, target))),
+            });
+        }
         let wrong = |g: &Self, c: usize| no(format!("`{}` holds an id of {}, given an item of {}", what, g.prog.colls[target].name, g.prog.colls[c].name));
         Ok(match v {
             CV::Null => CV::Int("0LL".into()),
@@ -2777,6 +2795,8 @@ impl<'p> G<'p> {
                 TKind::Int(_) => { let x = CV::Int(format!("{}.i", v)); self.with_field_range(x, col.range) }
                 TKind::Real(_) => CV::Flt(format!("{}.f", v)),
                 TKind::Text(..) => { let tt = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", tt, v, v)); CV::Txt(tt) }
+                // a reference: null, or a row (SQLite makes it null when its row goes, so it names a live row)
+                TKind::Ref(target) => { let (s, k) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}.tag != 0, {} = (u32){}.i;", s, v, k, v)); CV::Ref(TBASE + target, s, k) }
                 TKind::Blob(..) => unreachable!(),
             });
         }
@@ -2817,6 +2837,11 @@ impl<'p> G<'p> {
                 CV::Txt(tt)
             }
             TKind::Blob(..) => return no(format!("`{}` is a fixed array in a table's row: writing it is not compiled yet", path)),
+            TKind::Ref(target) => match v {
+                CV::Null => CV::Null,
+                CV::Item(c, _) | CV::Ref(c, ..) if c == TBASE + *target => v,
+                v => return no(format!("`{}` names a row of {}, given {}", path, self.prog.tables[*target].name, kind(&v).map_or("a value of another kind".to_string(), |k| kname(self.prog, k)))),
+            },
         };
         let vv = self.val(v)?;
         self.call(&format!("c->h->tset(c, {}, {}, {}, &{})", t, idx, ci, vv));
@@ -3891,6 +3916,7 @@ impl<'p> G<'p> {
             CV::Any(v) => self.call(&format!("c->h->json_val(c, &{})", v)),
             CV::StateStr(c, idx, ci) => self.call(&format!("c->h->json_col(c, {}, {}, {})", c, idx, ci)),
             CV::Null => self.out("null"),
+            CV::Ref(t, s, k) if tab(t).is_some() => { self.line(&format!("if ({} == 0) {{ CALL(c->h->out(c, \"null\", 4)); }}", s)); self.line(&format!("else CALL(c->h->json_i64(c, (i64)({})));", k)); }
             CV::Ref(t, s, k) => {
                 if self.prog.colls[t].parent.is_some() { return no("an item of a collection inside another's items has no id; write `slot(x)`"); }
                 self.line(&format!("if ({} == 0) {{ CALL(c->h->out(c, \"null\", 4)); }}", s));

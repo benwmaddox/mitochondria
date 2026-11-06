@@ -1,0 +1,44 @@
+// references to rows: a row's `assignee: User?` (a column that SQLite sets to null when the user's row goes), and working state's
+// `lead: User?` (the row's id, null once the row is gone); written from a row, a maybe-null row or null; read as a maybe-null row
+--- program
+struct User { name: ascii<16>; }
+struct Task { title: utf8<20>; assignee: User?; }
+struct App { users: table<User>; tasks: table<Task>; lead: User?; }
+state app: App;
+
+@post("/users/{name}")
+fn add_user(name: ascii<16>) -> Response<{ id: User }> { let u = app.users.add(); u.name = name; return created({ id: u }); }
+@post("/tasks/{title}")
+fn add_task(title: utf8<20>) -> Response<{ id: Task }> { let t = app.tasks.add(); t.title = title; return created({ id: t }); }
+@post("/tasks/{t}/assign/{u}")
+fn assign(t: i64, u: i64) -> Response<{}> { let task = app.tasks[t]; task.assignee = app.users[u]; return ok({}); }
+@post("/tasks/{t}/unassign")
+fn unassign(t: i64) -> Response<{}> { let task = app.tasks[t]; task.assignee = null; return ok({}); }
+@post("/lead/{u}")
+fn lead(u: i64) -> Response<{}> { app.lead = app.users[u]; return ok({}); }
+@post("/users/{u}/delete")
+fn drop_user(u: i64) -> Response<{}> { app.users.remove(app.users[u]); return ok({}); }
+@get("/tasks")
+fn tasks() -> Response<{ tasks: [{ title: string, who: string }], lead: string }> {
+    return ok({ tasks: [foreach t in app.tasks { title: t.title, who: or(t.assignee.name, "nobody") }], lead: or(app.lead.name, "nobody") });
+}
+@get("/tasks/{t}/assignee")
+fn assignee(t: i64) -> Response<{ id: User? }> { return ok({ id: app.tasks[t].assignee }); }
+--- requests
+POST /users/ann
+POST /users/bob
+POST /tasks/write
+POST /tasks/test
+POST /tasks/1/assign/2
+POST /tasks/2/assign/1
+POST /lead/2
+GET /tasks
+GET /tasks/1/assignee
+POST /tasks/9/assign/1
+POST /tasks/1/assign/9
+POST /users/2/delete
+GET /tasks
+GET /tasks/1/assignee
+POST /tasks/2/unassign
+restart
+GET /tasks

@@ -1685,7 +1685,7 @@ static int t_bind(Mito *m, sqlite3_stmt *s, int at, const Val *v) {
         case 2: return sqlite3_bind_double(s, at, v->f);
         case 4: return sqlite3_bind_text(s, at, (const char *)m->text.p + v->a, (int)v->b, (void (*)(void *))0);
         case 5: return sqlite3_bind_int64(s, at, (i64)v->b);
-        default: return sqlite3_bind_int64(s, at, 0);
+        default: return sqlite3_bind_null(s, at); /* a reference set to null */
     }
 }
 /* column `col` of row `rowid` of table `t`, through the row cache (a loop's cursor or the last row read) */
@@ -1720,6 +1720,10 @@ static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) {
 }
 static int h_tdel(Ctx *c, u32 t, u32 rowid) { Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].del; sqlite3_bind_int64(s, 1, (i64)rowid); return t_run(m, s); }
 static int h_tclear(Ctx *c, u32 t, u32 parent) { Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].clr; if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent); return t_run(m, s); }
+static int h_texists(Ctx *c, u32 t, u32 rowid, u32 *out) {
+    Mito *m = M_(c); Store *st = T_ST(c); sqlite3_stmt *s = st->ts[t].has; sqlite3_bind_int64(s, 1, (i64)rowid);
+    int r = sqlite3_step(s); sqlite3_reset(s); *out = r == SQ_ROW; return r == SQ_ROW || r == SQ_DONE ? 0 : t_dbfail(m);
+}
 static int h_tcount(Ctx *c, u32 t, u32 parent, i64 *out) {
     Mito *m = M_(c); Store *st = T_ST(c); sqlite3_stmt *s = st->ts[t].cnt;
     if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent);
@@ -1781,6 +1785,7 @@ static int h_titer(Ctx *c, const char *sql, u32 t, const Val *p, u32 n, u32 *cur
 static int h_tnext(Ctx *c, u32 cur, u32 *rowid, int *more) { (void)cur; (void)rowid; (void)more; return fail(M_(c), 500, "no tables"); }
 static int h_tclose(Ctx *c, u32 cur) { (void)c; (void)cur; return 0; }
 static int h_tclear(Ctx *c, u32 t, u32 parent) { (void)t; (void)parent; return fail(M_(c), 500, "no tables"); }
+static int h_texists(Ctx *c, u32 t, u32 rowid, u32 *out) { (void)t; (void)rowid; (void)out; return fail(M_(c), 500, "no tables"); }
 #endif
 
 /* ---- answers other than JSON ---- */
@@ -1852,7 +1857,7 @@ static const H mito_h = {
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

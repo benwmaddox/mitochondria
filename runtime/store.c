@@ -16,6 +16,7 @@ int sqlite3_reset(sqlite3_stmt *);
 int sqlite3_finalize(sqlite3_stmt *);
 int sqlite3_bind_text(sqlite3_stmt *, int, const char *, int, void (*)(void *));
 int sqlite3_bind_int64(sqlite3_stmt *, int, i64);
+int sqlite3_bind_null(sqlite3_stmt *, int);
 int sqlite3_bind_double(sqlite3_stmt *, int, double);
 int sqlite3_column_type(sqlite3_stmt *, int);
 double sqlite3_column_double(sqlite3_stmt *, int);
@@ -32,13 +33,14 @@ const char *sqlite3_errmsg(sqlite3 *);
 
 /* A column as the program declares it: SQLite type (0 INTEGER, 1 REAL, 2 TEXT, 3 BLOB), a range to check (when has_range), the most
    bytes of text, or the exact bytes of a fixed array (a BLOB of 0 bytes is the array's zeros). */
-typedef struct { const char *name; u32 type; int has_range; i64 lo, hi; u32 max; int ascii; } StoreCol; /* ascii: text of bytes 0..127 only */
+/* ascii: text of bytes 0..127 only; decl: the column's declaration after its name; refers: the table a reference names (-1 none) */
+typedef struct { const char *name; u32 type; int has_range; i64 lo, hi; u32 max; int ascii; const char *decl; int refers; } StoreCol;
 /* A table: its quoted SQL name, its CREATE TABLE, its owner (-1 none), its columns, its indexes (CREATE INDEX statements) */
 typedef struct { const char *sql; const char *create; int parent; u32 ncols; const StoreCol *cols; const char *indexes; } StoreTable;
 
 /* A table's statements, prepared once after migration: its row's columns by id, insert (with the owner's id for a nested table), delete,
    count (of one owner's rows), find (a row of one owner), and one update per column. `secret`: the column a session token checks, or -1. */
-typedef struct { sqlite3_stmt *row, *ins, *del, *cnt, *find, *clr, **upd; int secret; } TStmts;
+typedef struct { sqlite3_stmt *row, *ins, *del, *cnt, *find, *clr, *has, **upd; int secret; } TStmts;
 /* A loop's cursor: its statement (a cached one, or its own when the cached one is in use by an enclosing loop), the table of its rows. */
 typedef struct { sqlite3_stmt *s; int own, on; u32 t; } SqCursor;
 typedef struct { const char *sql; sqlite3_stmt *s; int busy; } SqCached;
@@ -144,7 +146,7 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         for (u32 k = 0; k < ndrop; k++) { SqBuf a = { sqlb, sizeof sqlb, 0 }; sb_s(&a, "ALTER TABLE "); sb_s(&a, tb->sql); sb_s(&a, " DROP COLUMN "); sb_q(&a, drop[k]); if (!st_exec(st, sqlb)) return 0; }
         for (u32 k = 0; k < tb->ncols; k++) if (k >= 256 || !seen[k]) {
             SqBuf a = { sqlb, sizeof sqlb, 0 }; sb_s(&a, "ALTER TABLE "); sb_s(&a, tb->sql); sb_s(&a, " ADD COLUMN "); sb_q(&a, tb->cols[k].name);
-            sb_s(&a, " "); sb_s(&a, sq_types[tb->cols[k].type]); sb_s(&a, " NOT NULL DEFAULT "); sb_s(&a, sq_defaults[tb->cols[k].type]);
+            sb_s(&a, " "); sb_s(&a, tb->cols[k].decl);
             if (!st_exec(st, sqlb)) return 0;
         }
     }
@@ -185,6 +187,19 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
             return st_fail(st, "the database does not fit the program (--db-fit drop drops what does not fit)", msg);
         }
     }
+    /* references to rows that are not there (written while the server was stopped): refused, or (dropping) set to null */
+    for (u32 t = 0; t < ntabs; t++) for (u32 k = 0; k < tabs[t].ncols; k++) {
+        const StoreCol *c = &tabs[t].cols[k]; if (c->refers < 0) continue;
+        SqBuf a = { sqlb, sizeof sqlb, 0 }; sb_s(&a, " WHERE "); sb_q(&a, c->name); sb_s(&a, " IS NOT NULL AND "); sb_q(&a, c->name); sb_s(&a, " NOT IN (SELECT id FROM "); sb_s(&a, tabs[c->refers].sql); sb_s(&a, ")");
+        char q[4400]; SqBuf b2 = { q, sizeof q, 0 }; sb_s(&b2, "SELECT count(*) FROM "); sb_s(&b2, tabs[t].sql); sb_s(&b2, sqlb);
+        i64 bad = st_int(st, q, 0);
+        if (bad <= 0) continue;
+        SqBuf m = { msg, sizeof msg, 0 }; sb_i(&m, bad); sb_s(&m, bad == 1 ? " row of " : " rows of "); sb_s(&m, tabs[t].sql); sb_s(&m, bad == 1 ? " names a row of " : " name a row of "); sb_s(&m, tabs[c->refers].sql); sb_s(&m, " that is not there ("); sb_s(&m, c->name); sb_s(&m, ")");
+        if (!dropmis) return st_fail(st, "the database does not fit the program (--db-fit drop drops what does not fit)", msg);
+        st_dropped(msg);
+        b2.n = 0; sb_s(&b2, "UPDATE "); sb_s(&b2, tabs[t].sql); sb_s(&b2, " SET "); sb_q(&b2, c->name); sb_s(&b2, " = NULL"); sb_s(&b2, sqlb);
+        if (!st_exec(st, q)) return 0;
+    }
     /* rows whose owner is gone (deleted above while foreign keys are off during migration): deleted, owners before what they own */
     if (dropmis) for (u32 t = 0; t < ntabs; t++) if (tabs[t].parent >= 0) {
         SqBuf a = { sqlb, sizeof sqlb, 0 }; sb_s(&a, "DELETE FROM "); sb_s(&a, tabs[t].sql); sb_s(&a, " WHERE parent_id NOT IN (SELECT id FROM "); sb_s(&a, tabs[tabs[t].parent].sql); sb_s(&a, ")");
@@ -217,6 +232,8 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->find, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
         a.n = 0; sb_s(&a, "DELETE FROM "); sb_s(&a, tb->sql); if (tb->parent >= 0) sb_s(&a, " WHERE parent_id = ?1");
         if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->clr, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
+        a.n = 0; sb_s(&a, "SELECT 1 FROM "); sb_s(&a, tb->sql); sb_s(&a, " WHERE id = ?1");
+        if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->has, 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));
         for (u32 k = 0; k < tb->ncols; k++) {
             a.n = 0; sb_s(&a, "UPDATE "); sb_s(&a, tb->sql); sb_s(&a, " SET "); sb_q(&a, tb->cols[k].name); sb_s(&a, " = ?1 WHERE id = ?2");
             if (sqlite3_prepare_v2(st->db, sqlb, -1, &x->upd[k], 0) != SQ_OK) return st_fail(st, sqlb, sqlite3_errmsg(st->db));

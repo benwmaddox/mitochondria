@@ -32,6 +32,7 @@ pub enum Ty {
     Arr(Box<Ty>, usize),        // T[N]: exactly N elements
     List(Box<Ty>, usize, Full), // list<T, N> [drop_oldest]
     Pool(Box<Ty>, usize, bool), // pool<T, N> [checked]
+    Table(Box<Ty>, Vec<Vec<String>>, Vec<Vec<String>>), // table<T> [index(f, ...)]... [unique(f, ...)]...: rows in SQLite, no capacity
     Struct(usize),
     Named(String),              // only before resolution
 }
@@ -84,6 +85,18 @@ impl Coll {
 
 pub struct Global { pub name: String, pub ty: Ty, pub off: usize, pub coll: Option<usize> }
 
+/// A table's column: an item field (a plain struct inside the item flattened to `inner.x`), stored as SQLite's INTEGER (integers, bools,
+/// enums, stored ids), REAL, TEXT (with its maximum bytes, and whether it is ascii) or BLOB (a fixed array of `n` bytes).
+#[derive(Clone, Debug, PartialEq)]
+pub enum TKind { Int(Scalar), Real(Scalar), Text(usize, bool), Blob(Scalar, usize) }
+#[derive(Clone, Debug)]
+pub struct TCol { pub path: String, pub kind: TKind, pub range: Option<(i64, i64)> }
+/// A table: its path from the state (`app.boards`, `app.boards.todos`), its name in SQLite (the path after the state's name, quoted:
+/// `"boards"`, `"boards.todos"`), the struct of its rows, the table whose rows own its rows (a `parent_id` column names one), its
+/// columns, the nested tables of its rows, and its indexes.
+#[derive(Clone, Debug)]
+pub struct Table { pub name: String, pub sql: String, pub item: usize, pub parent: Option<usize>, pub cols: Vec<TCol>, pub children: Vec<(String, usize)>, pub index: Vec<Vec<String>>, pub unique: Vec<Vec<String>> }
+
 /// A module instance (`global scores: sorted<Score, 100, points>;`, expanded by `modules::expand`): its state is the
 /// plain global `name`; `key` is the field of its items it keeps ordered, if any.
 #[derive(Clone, Debug)]
@@ -112,6 +125,8 @@ pub struct Program {
     pub globals: Vec<Global>,
     pub colls: Vec<Coll>,
     pub plain_colls: Vec<(usize, usize, String, usize)>, // (offset of a plain struct, its struct id, field name, collection)
+    /// The tables (`table<T>`): kept in SQLite, outside the fixed reservation; a nested table's rows each name a row of its parent.
+    pub tables: Vec<Table>,
     pub plain_end: usize,
     pub total: usize,
 }
@@ -128,7 +143,7 @@ impl Program {
             Ty::Str(n) => (up(4 + n, 4), 4),
             Ty::Arr(e, n) => { let (s, a) = self.plain_size(e); (s * n, a) }
             Ty::Struct(i) => (self.structs[*i].size, self.structs[*i].align),
-            Ty::List(..) | Ty::Pool(..) => (0, 1),
+            Ty::List(..) | Ty::Pool(..) | Ty::Table(..) => (0, 1),
             Ty::Named(_) => unreachable!(),
         }
     }
@@ -139,6 +154,7 @@ impl Program {
             Ty::Arr(e, n) => format!("{}[{}]", self.show(e), n),
             Ty::List(e, n, f) => format!("list<{}, {}>{}", self.show(e), n, if *f == Full::DropOldest { " drop_oldest" } else { "" }),
             Ty::Pool(e, n, c) => format!("pool<{}, {}>{}", self.show(e), n, if *c { " checked" } else { "" }),
+            Ty::Table(e, ix, un) => format!("table<{}>{}{}", self.show(e), ix.iter().map(|f| format!(" index({})", f.join(", "))).collect::<String>(), un.iter().map(|f| format!(" unique({})", f.join(", "))).collect::<String>()),
             Ty::Struct(i) => self.structs[*i].name.clone(),
             Ty::Named(n) => n.clone(),
         }
@@ -283,7 +299,7 @@ impl Program {
                 else { sd.fields[k].1 = Ty::Scalar(en.base); if sd.ranges[k].is_none() { sd.ranges[k] = Some((lo, hi)); } }
             }
         }
-        let mut prog = Program { ids: Vec::new(), enums, request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), plain_end: 0, total: 0 };
+        let mut prog = Program { ids: Vec::new(), enums, request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), tables: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
             let fs = std::mem::take(&mut prog.structs[i].fields);
@@ -433,7 +449,10 @@ impl Program {
         for (k, (n, t)) in fields.iter().enumerate() {
             let p = format!("{}.{}", path, n);
             let unl = all || self.structs[s].unlogged[k];
-            if t.is_coll() {
+            if let Ty::Table(..) = t {
+                if unl { return Err(format!("`{}`: a table is kept in its database, so it cannot be `unlogged`", p)); }
+                self.build_table(&p, t, None, 0)?;
+            } else if t.is_coll() {
                 let cid = self.build_coll(&p, t, 1, None, unl, cur, 0)?;
                 self.plain_colls.push((base, s, n.clone(), cid));
             } else if let Ty::Struct(c) = t {
@@ -493,14 +512,80 @@ impl Program {
             Ty::Scalar(_) | Ty::Str(_) => leaves.push((prefix.to_string(), t.clone(), range)),
             Ty::Arr(e, _) if matches!(**e, Ty::Scalar(_)) => leaves.push((prefix.to_string(), t.clone(), None)),
             Ty::List(..) | Ty::Pool(..) => kids.push((prefix.to_string(), t.clone())),
+            Ty::Table(..) => return Err(format!("`{}`: a table inside an item of a pool or list is not supported (its rows would belong to memory that is not kept); put the table in the state or in another table's rows", name)),
             _ => return Err(format!("`{}`: items cannot hold `{}` at `{}`; use a nested list instead of a fixed array of structs", name, self.show(t), prefix)),
         }
         Ok(())
     }
 }
 
+impl Program {
+    /// A table and the tables nested in its rows. Rows hold plain fields (numbers, bools, text, enums, fixed arrays, plain structs
+    /// flattened) and nested tables; a pool or list there would be memory per row, so it is refused.
+    fn build_table(&mut self, path: &str, ty: &Ty, parent: Option<usize>, depth: usize) -> Result<usize, String> {
+        if depth > 8 { return Err(format!("`{}`: tables nested more than 8 deep (a struct that contains itself?)", path)); }
+        let Ty::Table(elem, index, unique) = ty else { unreachable!() };
+        let Ty::Struct(item) = **elem else { return Err(format!("`{}`: a table's rows are a struct (`table<Todo>`), not `{}`", path, self.show(elem))) };
+        let sql = format!("\"{}\"", path.split_once('.').map_or(path, |x| x.1));
+        let t = self.tables.len();
+        self.tables.push(Table { name: path.to_string(), sql, item, parent, cols: Vec::new(), children: Vec::new(), index: index.clone(), unique: unique.clone() });
+        let (mut leaves, mut kids) = (Vec::new(), Vec::new());
+        self.table_fields(item, "", &mut leaves, &mut kids, path)?;
+        for (p, kind, range) in leaves {
+            if p == "id" || p == "parent_id" { return Err(format!("`{}`: a row's `{}` is its table's own column (the row id{}); name the field otherwise", path, p, if p == "id" { "" } else { " of the row that owns it" })); }
+            self.tables[t].cols.push(TCol { path: p, kind, range });
+        }
+        for fs in index.iter().chain(unique.iter()) {
+            for f in fs { if !self.tables[t].cols.iter().any(|c| c.path == *f) { return Err(format!("`{}`: an index names `{}`, which is not a column of its rows", path, f)); } }
+        }
+        for (f, kt) in kids {
+            let k = self.build_table(&format!("{}.{}", path, f), &kt, Some(t), depth + 1)?;
+            self.tables[t].children.push((f, k));
+        }
+        Ok(t)
+    }
+    fn table_fields(&self, s: usize, prefix: &str, leaves: &mut Vec<(String, TKind, Option<(i64, i64)>)>, kids: &mut Vec<(String, Ty)>, name: &str) -> Result<(), String> {
+        for (k, (f, t)) in self.structs[s].fields.iter().enumerate() {
+            let p = if prefix.is_empty() { f.clone() } else { format!("{}.{}", prefix, f) };
+            let range = self.structs[s].ranges[k];
+            if self.structs[s].unlogged[k] { return Err(format!("`{}`: `{}` is declared unlogged, but a table's rows are kept in its database", name, p)); }
+            match t {
+                Ty::Scalar(sc) if matches!(sc, Scalar::F32 | Scalar::F64) => leaves.push((p, TKind::Real(*sc), None)),
+                Ty::Scalar(sc) => leaves.push((p, TKind::Int(*sc), range)),
+                Ty::Str(m) => leaves.push((p, TKind::Text(*m, range == Some((0, 127))), None)),
+                Ty::Arr(e, n) => match **e { Ty::Scalar(sc) => leaves.push((p, TKind::Blob(sc, *n), None)), _ => return Err(format!("`{}`: a row holds a fixed array of numbers at `{}`, not of `{}`; use a nested table", name, p, self.show(e))) },
+                Ty::Struct(i) => { if prefix.matches('.').count() > 6 { return Err(format!("`{}`: plain structs nested too deep at `{}`", name, p)); } self.table_fields(*i, &p, leaves, kids, name)?; }
+                Ty::Table(..) => kids.push((p, t.clone())),
+                Ty::List(..) | Ty::Pool(..) => return Err(format!("`{}`: a row holds plain fields and nested tables; `{}` is a {} (memory for every row): make it a `table<...>`", name, p, if matches!(t, Ty::List(..)) { "list" } else { "pool" })),
+                Ty::Named(_) => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+    /// The SQL that creates the tables (if absent) and their indexes: STRICT tables, so SQLite checks each value's type; a row id that is
+    /// never reused (AUTOINCREMENT); a nested table's rows deleted with the row that owns them.
+    pub fn schema_sql(&self) -> String {
+        let mut o = String::new();
+        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        for t in &self.tables {
+            o += &format!("CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY AUTOINCREMENT", t.sql);
+            if let Some(p) = t.parent { o += &format!(", parent_id INTEGER NOT NULL REFERENCES {}(id) ON DELETE CASCADE", self.tables[p].sql); }
+            for c in &t.cols {
+                let (ty, def) = match &c.kind { TKind::Int(_) => ("INTEGER", "0"), TKind::Real(_) => ("REAL", "0.0"), TKind::Text(..) => ("TEXT", "''"), TKind::Blob(..) => ("BLOB", "x''") };
+                o += &format!(", {} {} NOT NULL DEFAULT {}", q(&c.path), ty, def);
+            }
+            o += ") STRICT;\n";
+            let base = t.sql.trim_matches('"');
+            if t.parent.is_some() { o += &format!("CREATE INDEX IF NOT EXISTS {} ON {}(parent_id, id);\n", q(&format!("{} by parent", base)), t.sql); }
+            for (k, fs) in t.index.iter().enumerate() { o += &format!("CREATE INDEX IF NOT EXISTS {} ON {}({});\n", q(&format!("{} index {}", base, k)), t.sql, fs.iter().map(|f| q(f)).collect::<Vec<_>>().join(", ")); }
+            for (k, fs) in t.unique.iter().enumerate() { o += &format!("CREATE UNIQUE INDEX IF NOT EXISTS {} ON {}({});\n", q(&format!("{} unique {}", base, k)), t.sql, fs.iter().map(|f| q(f)).collect::<Vec<_>>().join(", ")); }
+        }
+        o
+    }
+}
+
 fn contains_coll(p: &Program, t: &Ty) -> bool {
-    match t { Ty::List(..) | Ty::Pool(..) => true, Ty::Arr(e, _) => contains_coll(p, e), Ty::Struct(i) => p.structs[*i].fields.iter().any(|f| contains_coll(p, &f.1)), _ => false }
+    match t { Ty::List(..) | Ty::Pool(..) | Ty::Table(..) => true, Ty::Arr(e, _) => contains_coll(p, e), Ty::Struct(i) => p.structs[*i].fields.iter().any(|f| contains_coll(p, &f.1)), _ => false }
 }
 
 fn resolve(t: Ty, names: &HashMap<String, usize>) -> Result<Ty, String> {
@@ -509,6 +594,7 @@ fn resolve(t: Ty, names: &HashMap<String, usize>) -> Result<Ty, String> {
         Ty::Arr(e, n) => Ty::Arr(Box::new(resolve(*e, names)?), n),
         Ty::List(e, n, f) => Ty::List(Box::new(resolve(*e, names)?), n, f),
         Ty::Pool(e, n, c) => Ty::Pool(Box::new(resolve(*e, names)?), n, c),
+        Ty::Table(e, ix, un) => Ty::Table(Box::new(resolve(*e, names)?), ix, un),
         o => o,
     })
 }
@@ -583,6 +669,22 @@ impl P {
         else if n == "string" || n == "utf8" || n == "ascii" { self.eat("<")?; let k = self.count()?; self.eat(">")?; Ty::Str(k) }
         else if n == "ref" { return Err("`ref<...>` was removed: keep the item's slot (`slot(item)`) in an integer field and read it back with `pool[slot]` (inside `or(...)` for a fallback when it is gone)".into()); }
         else if n == "list" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let f = if self.word("drop_oldest") { Full::DropOldest } else { Full::Fail }; Ty::List(Box::new(e), k, f) }
+        else if n == "table" {
+            // `table<T> index(f, ...) unique(f, ...)`: rows in SQLite, as many as are added (no capacity)
+            self.eat("<")?; let e = self.ty()?;
+            if self.peek() == Some(",") { return Err("a table has no capacity: it holds as many rows as are added (`table<T>`)".into()); }
+            self.eat(">")?;
+            let (mut ix, mut un) = (Vec::new(), Vec::new());
+            loop {
+                let which = if self.word("index") { 0 } else if self.word("unique") { 1 } else { break };
+                self.eat("(")?;
+                let mut fs = vec![self.ident()?];
+                while self.peek() == Some(",") { self.eat(",")?; fs.push(self.ident()?); }
+                self.eat(")")?;
+                if which == 0 { ix.push(fs) } else { un.push(fs) }
+            }
+            Ty::Table(Box::new(e), ix, un)
+        }
         else if n == "pool" { self.eat("<")?; let e = self.ty()?; self.eat(",")?; let k = self.count()?; self.eat(">")?; let c = self.word("checked"); Ty::Pool(Box::new(e), k, c) }
         else { Ty::Named(n) };
         while self.peek() == Some("[") { self.i += 1; let k = self.count()?; self.eat("]")?; t = Ty::Arr(Box::new(t), k); }
@@ -606,5 +708,37 @@ mod tests {
         assert!(Program::parse("struct M { t: i32; }").err().unwrap_or_default().contains("has none"));
         assert!(Program::parse("struct M { t: i32; } state a: M; state b: M;").err().unwrap_or_default().contains("one state"));
         assert!(Program::parse("struct M { t: i32; } global a: M;").err().unwrap_or_default().contains("replaced by `state`"));
+    }
+
+    /// Tables: kept outside the reservation, with the schema SQLite is given; what a row may not hold is refused.
+    #[test]
+    fn tables_and_their_schema() {
+        let p = Program::parse("enum Kind { A, B } struct Todo { title: utf8<1000>; done: bool; rank: i64 in 0..9; kind: Kind; }
+            struct Board { secret: i64; name: ascii<32>; todos: table<Todo> index(done); }
+            struct App { boards: table<Board> unique(name) index(secret, name); n: i64; }
+state app: App;").unwrap();
+        assert_eq!(p.tables.len(), 2);
+        assert_eq!((p.tables[0].sql.as_str(), p.tables[1].sql.as_str(), p.tables[1].parent), ("\"boards\"", "\"boards.todos\"", Some(0)));
+        assert_eq!(p.total, 4096); // the plain `n` only: no table takes room in the reservation
+        let sql = p.schema_sql();
+        for want in ["CREATE TABLE IF NOT EXISTS \"boards\" (id INTEGER PRIMARY KEY AUTOINCREMENT, \"secret\" INTEGER NOT NULL DEFAULT 0, \"name\" TEXT NOT NULL DEFAULT '') STRICT;",
+                     "CREATE TABLE IF NOT EXISTS \"boards.todos\" (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL REFERENCES \"boards\"(id) ON DELETE CASCADE, \"title\" TEXT NOT NULL DEFAULT '', \"done\" INTEGER NOT NULL DEFAULT 0, \"rank\" INTEGER NOT NULL DEFAULT 0, \"kind\" INTEGER NOT NULL DEFAULT 0) STRICT;",
+                     "CREATE INDEX IF NOT EXISTS \"boards.todos by parent\" ON \"boards.todos\"(parent_id, id);",
+                     "CREATE INDEX IF NOT EXISTS \"boards index 0\" ON \"boards\"(\"secret\", \"name\");",
+                     "CREATE UNIQUE INDEX IF NOT EXISTS \"boards unique 0\" ON \"boards\"(\"name\");",
+                     "CREATE INDEX IF NOT EXISTS \"boards.todos index 0\" ON \"boards.todos\"(\"done\");"] {
+            assert!(sql.contains(want), "missing {}
+in
+{}", want, sql);
+        }
+        assert_eq!(p.tables[1].cols[2].range, Some((0, 9)));
+        assert_eq!(p.tables[0].cols[1].kind, TKind::Text(32, true));
+        let err = |src: &str| Program::parse(src).err().unwrap_or_default();
+        assert!(err("struct T { a: i64; } struct S { t: table<T, 10>; } state s: S;").contains("no capacity"));
+        assert!(err("struct I { a: i64; } struct T { xs: list<I, 4>; } struct S { t: table<T>; } state s: S;").contains("make it a `table<...>`"));
+        assert!(err("struct T { a: i64; } struct I { t: table<T>; } struct S { p: pool<I, 4>; } state s: S;").contains("inside an item of a pool or list"));
+        assert!(err("struct T { a: i64; } struct S { t: table<T> index(b); } state s: S;").contains("not a column"));
+        assert!(err("struct T { id: i64; } struct S { t: table<T>; } state s: S;").contains("own column"));
+        assert!(err("struct T { a: i64; } struct S { t: table<T> unlogged; } state s: S;").contains("cannot be `unlogged`"));
     }
 }

@@ -740,6 +740,11 @@ pub fn layout_table(prog: &Program) -> String {
             o += &format!("     col {:<2} {:<22} {:<40} at {} + idx * {}\n", ci, col.path, t, col.off, col.kind.size());
         }
     }
+    // tables: in SQLite, not in the reservation
+    for (k, t) in prog.tables.iter().enumerate() {
+        o += &format!("   table {} {} (SQLite {}){}\n", k, t.name, t.sql, t.parent.map_or(String::new(), |p| format!(", each row owned by a row of table {}", p)));
+    }
+    if !prog.tables.is_empty() { o += "   Schema:\n"; for line in prog.schema_sql().lines() { o += &format!("     {}\n", line); } }
     o
 }
 
@@ -2644,6 +2649,7 @@ impl<'p> G<'p> {
                 let Some(k) = sd.fields.iter().position(|x| x.0 == f) else { return no(format!("no field `{}`{}", f, crate::lang::suggest(f, sd.fields.iter().map(|x| x.0.as_str())))) };
                 let ty = sd.fields[k].1.clone();
                 let range = sd.ranges[k];
+                if let Ty::Table(..) = ty { return no(format!("`{}` is a table: reading and writing tables is not compiled yet", f)); }
                 if ty.is_coll() { return Ok(CV::Coll(self.prog.plain_coll(off, sid, f).ok_or("plain collection")?, "0".into())); }
                 let v = self.plain(off + sd.offs[k], &ty, dead)?;
                 let range = range.or_else(|| FIELD_RANGES.with(|fr| fr.borrow().0.get(&(off + sd.offs[k])).copied()));

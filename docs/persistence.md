@@ -16,14 +16,64 @@ how data will be kept, and how programs reach outside C libraries. Nothing here 
 | Where files live | A directory named on the command line, `--data dir` (default `./data` where the server runs): the database there, one per program, and per worker in a system. |
 | Outside libraries | Both layers: a general way to declare C functions with typed signatures and the library to link, checked at the boundary; and curated modules on top that wrap common libraries safely (SQLite is used by the compiler directly for stored data; `lib/` wrappers for others as needed). |
 
-## Still to decide (an interview once there is a sketch)
+## Stored data: `table<T>` (decided 2026-11-05)
 
-- How stored data is declared (a keyword on a collection or struct field), and what a stored collection's limits are (unbounded, or an
-  optional maximum the program checks).
-- How loops, `where`, counts and lookups over stored collections compile to SQL, and which are refused for being slow (a scan with no index).
-- Ids of stored items (SQLite's row id), and references between stored items and from working state to stored items.
-- Text and arrays in stored items: maximum lengths kept as checks, or unbounded.
-- How a request's view of stored data stays consistent with its writes (one transaction per request makes this SQLite's job).
+A table is a collection kind beside `list` and `pool`, and it lives in SQLite. Everything else stays in memory as now.
+
+| Question | Decision |
+| --- | --- |
+| Declaring | `boards: table<Board>;` a collection kind; a table can be a field of the working state or of another table's items. |
+| Limits | None: a table never takes a capacity (`table<Board, 64>` is an error). Text keeps its maximum (`utf8<1000>` is a checked limit, 413 when longer), arrays their length. |
+| What a table's items hold | Plain fields (numbers, bools, text, enums, fixed arrays) and nested tables (a board's todos: a child table whose rows name their board). A `pool` or `list` inside a table's item is refused: it would be memory per row. |
+| Indexes | Declared on the collection, so the struct stays reusable: `users: table<User> index(email) unique(name);`. |
+| Slow scans | A `where` over a whole top-level table on a field without an index is refused when compiling, with the index to declare; loops over one parent's children (a board's todos) are always allowed. |
+| Order | Insertion order by default (row ids are never reused); `foreach u in data.users by name` walks an indexed field's order, refused without that index. |
+| Ids | An item's id is its row id, never reused, so a stored id or a session token (`rowid.secret`) cannot name a later item. |
+
+### Sketch: TodoMVC
+
+```
+struct Todo { title: utf8<1000>; done: bool; }
+struct Board { secret: i64; todos: table<Todo>; }    // a child table: each todo row names its board
+struct App { boards: table<Board>; }
+state app: App;                                      // app.boards is in SQLite (--data dir); nothing of it in memory
+
+@post("/todos/{id}/toggle")
+fn toggle(board: Board from cookie("todos"), id: Todo in board.todos) -> Response<html> {
+    id.done = !id.done;                              // UPDATE todo SET done = ?1 WHERE id = ?2
+    return see_other("/");
+}
+fn lists(b: Board, show: i64) -> html {
+    foreach t in b.todos where !t.done { ... }       // SELECT id, title FROM todo WHERE board = ?1 AND done = 0 ORDER BY id
+}
+```
+
+How the program's operations become SQL (statements prepared once at start, typed, no SQL text built per request):
+
+| In the program | In SQLite |
+| --- | --- |
+| an item struct of a table | a table; each plain field a column; a nested `table` a child table with a column naming the parent |
+| `app.boards.add() { secret: s }`, `b.todos.add() { title: t }` | one `INSERT`; the item's id is its row id |
+| `t.done = !t.done` | `UPDATE ... WHERE id = ?` (the writes of one statement to one row merged into one `UPDATE`) |
+| `foreach t in b.todos where ...` | one `SELECT` of the columns the loop reads, `ORDER BY id` (or the `by` field) |
+| `b.todos.count()`, `count(... where ...)` | `SELECT COUNT(*) ...` |
+| `b.todos.remove(t)` | `DELETE` (and the rows that belong to it) |
+| an item from the path or a cookie | a lookup by row id (plus the `secret` check for a session token) |
+| the request | one transaction: committed before the answer, rolled back with the working state's undo log on a failure |
+
+Every read of a table is a query (fast for one row by id or an indexed field, a scan otherwise); in exchange a table has no fixed size,
+and removing any item keeps the others in insertion order (TodoMVC's `order` array goes away).
+
+## Build order
+
+1. SQLite's amalgamation vendored (`third_party/sqlite`), compiled into programs that have a table, given a fixed memory pool.
+2. `table<T>` in the layout: parsed with `index(...)` and `unique(...)`, kept out of the fixed reservation; the schema generated from it.
+3. The runtime: the database opened in `--data` at start, the schema created or migrated by name (refusing what does not fit), one
+   transaction per request committed before the answer.
+4. Code: `add`, field reads and writes, `remove`, `count`, `foreach ... where ... by ...`, items from the path or a cookie, nested tables,
+   compiled to prepared statements; the slow-scan check.
+5. TodoMVC on tables (kept across restarts), its browser checks, and the benchmark against crudspec again.
+6. Declared C functions for other outside libraries.
 
 ## Future option: keeping the in-memory state itself
 

@@ -1,0 +1,13 @@
+POST /users/ann%40example.com/Ann -> 201 {"id":1}
+POST /users/bob%40example.com/Bob -> 201 {"id":2}
+GET /users/by-email/bob%40example.com -> 200 {"name":"Bob"}
+GET /users/by-email/cy%40example.com -> 404 {"error":"no user with that email","line":11}
+GET /users/newest -> 200 {"name":"Bob"}
+GET /notes/pinned -> 200 {"first":"none"}
+POST /notes/a/false -> 200 {}
+POST /notes/b/true -> 200 {}
+POST /notes/c/true -> 200 {}
+GET /notes/pinned -> 200 {"first":"b"}
+state <plain values> 1
+state app.notes 42
+memory reserved=8192 committed=8192 live=43

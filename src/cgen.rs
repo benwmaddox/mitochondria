@@ -2385,7 +2385,9 @@ impl<'p> G<'p> {
             CV::PlainStr(off) if !mutable => CV::PlainStr(off),
             v @ CV::Sub(..) if !mutable => v,
             CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => { let t = self.txt_of(v)?; self.var_names.insert(t.clone()); CV::Txt(t) }
-            CV::Null if mutable => { let t = self.tmp("v"); self.line(&format!("Val {} = {{ 0, 0, 0, 0, 0 }};", t)); self.var_names.insert(t.clone()); CV::Any(t) }
+            // `var x = null`: its kind is the first value given it later (a row makes it `T?`, text a text that may be null); the endpoint is
+            // generated again with that kind, never a value whose kind is known only at run time
+            CV::Null if mutable => CV::Null,
             CV::Ref(c, s, k) if mutable || self.var_names.contains(&s) || self.var_names.contains(&k) => { let (s2, k2) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}, {} = {};", s2, s, k2, k)); if mutable { self.var_names.insert(s2.clone()); self.var_names.insert(k2.clone()); } CV::Ref(c, s2, k2) }
             o => o,
         })
@@ -2910,6 +2912,8 @@ impl<'p> G<'p> {
             } else { in_c = Some(w); }
         }
         if !conds.is_empty() { sql += &format!(" WHERE {}", conds.join(" AND ")); }
+        // a constant `limit` with every condition in the query: SQLite stops there too
+        let sql_limit = match (&it.limit, in_c.is_none() && !collect) { (Some(Expr::Int(n)), true) if *n >= 0 => Some(*n), _ => None };
         // order: insertion (row ids), or `by` an indexed field (ties in insertion order)
         match &it.by {
             Some(f) => {
@@ -2922,6 +2926,7 @@ impl<'p> G<'p> {
             }
             None => sql += if it.reverse { " ORDER BY id DESC" } else { " ORDER BY id" },
         }
+        if let Some(n) = sql_limit { sql += &format!(" LIMIT {}", n); }
         self.loop_enter();
         self.open("{");
         // the query's values: the owner, then the `where`'s

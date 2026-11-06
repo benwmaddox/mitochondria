@@ -946,6 +946,20 @@ impl P {
             Some(Tok::Id(n)) => {
                 self.i += 1;
                 match n.as_str() { "true" => return Ok(Expr::Bool(true)), "false" => return Ok(Expr::Bool(false)), "null" => return Ok(Expr::Null), _ => {} }
+                // `first u in app.users where u.email == x`: the first item the loop would visit, or null; a hidden `var` and a loop with
+                // `limit 1` before this statement (for a table, one SELECT ... LIMIT 1)
+                if n == "first" && matches!(self.peek(), Some(Tok::Id(_))) && matches!(self.t.get(self.i + 1), Some(Tok::Id(k)) if k == "in") {
+                    if !self.init_ok { return Err("`first ... in ...` cannot be used here (a condition or a loop's clauses run at another time): name it first, `let x = first ...;`".into()); }
+                    let mut it = self.iter()?;
+                    if it.hi.is_some() { return Err("`first` takes a collection (`first u in app.users where ...`), not a range".into()); }
+                    if it.index.is_some() { return Err("`first x, i in ...`: the index of the first is 0".into()); }
+                    if it.limit.is_none() { it.limit = Some(Expr::Int(1)); }
+                    let t = format!("__mito__first{}", self.tmp); self.tmp += 1;
+                    let var = it.var.clone();
+                    self.pre.push(Stmt::Var(t.clone(), 0, Expr::Null));
+                    self.pre.push(Stmt::Each(it, vec![Stmt::Assign(Expr::Var(t.clone(), VarRes::Unbound), Expr::Var(var, VarRes::Unbound))]));
+                    return Ok(Expr::Var(t, VarRes::Unbound));
+                }
                 // `file("assets/app.css")`: the file's text, read when compiling, as a literal
                 if n == "file" && matches!(self.peek(), Some(Tok::Sym(s)) if s == "(") {
                     if let (Some(Tok::Str(name)), Some(Tok::Sym(close))) = (self.t.get(self.i + 1).cloned(), self.t.get(self.i + 2).cloned()) {

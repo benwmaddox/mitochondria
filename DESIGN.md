@@ -136,7 +136,9 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   and `{piece(x);}` are statements, in which a bare string writes itself. The compiler checks that tags match (void elements such
   as `<input>` need no closing tag), that text has no raw `<`, and that markup is written only into an HTML answer. It is lowered
   to plain statements that append to the answer, fixed text merged into one copy per run; text across lines is joined by one
-  space and comments are dropped.
+  space and comments are dropped. Two ways to write markup that is not code: `{include_html("fragments/head.html");}` writes one of
+  the program's files as it is (read when compiling, relative to the program: generated asset lists, fixed blocks), and
+  `{html_raw(t)}` writes text the program trusts unescaped (an administrator's stylesheet in a `<style>`), as Rails' `html_safe`.
 - For browsers: a request other than GET or HEAD whose `Origin` is not this `Host` (a form posted from another site's page) is
   refused 403; a request without `Origin` (an API client) is not a browser's cross-site one. Every answer says
   `X-Content-Type-Options: nosniff`, and a page adds a Content-Security-Policy allowing scripts, styles, images and form

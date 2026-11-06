@@ -1,0 +1,18 @@
+// `include_html("file")`: a file of the program's written into markup as it is (read when compiling); `html_raw(t)`: text the program
+// trusts written unescaped (here a stylesheet, whose `>` must stay `>`), where `{t}` escapes it
+--- program
+struct A { styles: utf8<100>; }
+state a: A;
+
+@post("/styles")
+fn set_styles(css: utf8<100>) -> Response<{}> { a.styles = css; return ok({}); }
+@get("/")
+fn page() -> Response<html> {
+    return ok(<html><head>{include_html("head.html");}<style>{html_raw(a.styles)}</style></head><body><p>{a.styles}</p></body></html>);
+}
+--- file head.html
+<script type="importmap">{ "imports": { "app": "/app-1.js" } }</script>
+<link rel="modulepreload" href="/app-1.js">
+--- requests
+POST /styles {"css":"nav > a { color: red }"}
+GET /

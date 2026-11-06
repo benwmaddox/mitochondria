@@ -3417,12 +3417,21 @@ impl<'p> G<'p> {
             self.call(&format!("c->h->log(c, AT_, {}, {})", argv, names.len()));
             return Ok(CV::Null);
         }
-        if matches!(bi, B::HtmlLit | B::HtmlEsc | B::HtmlEscAttr | B::HtmlAttr) {
+        if matches!(bi, B::HtmlLit | B::HtmlEsc | B::HtmlEscAttr | B::HtmlAttr | B::HtmlRaw) {
             // markup written into the answer (see lang.rs `html`): only in an endpoint that answers HTML, and the `-> html` functions it calls
             if !self.html_answer() { return no("markup is written only into an HTML answer: an endpoint returning `Response<html>`, or a `-> html` function it calls"); }
             let mut a = a.into_iter();
             match bi {
                 B::HtmlLit => { let Some(CV::Lit(s)) = a.next() else { return no("bad markup") }; self.out(&s); }
+                // `html_raw(t)`: text the program trusts as markup, written unescaped (a stylesheet an administrator wrote, as Rails' html_safe)
+                B::HtmlRaw => match a.next() {
+                    Some(CV::Lit(s)) => self.out(&s),
+                    Some(CV::Txt(t)) => self.line(&format!("if ({}.present) CALL(c->h->raw_txt(c, &{}));", t, t)),
+                    Some(CV::StateStr(cc, idx, ci)) => self.call(&format!("c->h->raw_col(c, {}, {}, {})", cc, idx, ci)),
+                    Some(CV::PlainStr(off)) => { let at = self.sub_bytes_at(&CV::PlainStr(off), "0"); let n = self.field_len(&CV::PlainStr(off)); self.call(&format!("c->h->raw_at(c, {}, (u32)({}))", at, n)); }
+                    Some(CV::Null) => {}
+                    _ => return no("`html_raw` takes text: `{html_raw(styles)}`"),
+                },
                 B::HtmlEsc | B::HtmlEscAttr => { let v = a.next().unwrap_or(CV::Null); self.html_esc(v, bi == B::HtmlEscAttr)?; }
                 _ => {
                     let (Some(CV::Lit(name)), Some(v)) = (a.next(), a.next()) else { return no("bad markup") };

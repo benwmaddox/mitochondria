@@ -1,0 +1,6 @@
+POST /styles -> 200 {}
+GET / -> 200 <Content-Type: text/html; charset=utf-8> <html><head><script type="importmap">{ "imports": { "app": "/app-1.js" } }</script>
+<link rel="modulepreload" href="/app-1.js">
+<style>nav > a { color: red }</style></head><body><p>nav &gt; a { color: red }</p></body></html>
+state <plain values> 104
+memory reserved=4096 committed=4096 live=104

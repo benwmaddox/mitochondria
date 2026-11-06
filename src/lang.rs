@@ -60,7 +60,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, Trim,
+pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
     Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime }
 impl B {
     fn from(n: &str) -> Option<B> {
@@ -68,7 +68,7 @@ impl B {
         Some(match n {
             "body" => Body, "param" => Param, "query" => Query, "header" => Header, "fwd" => Fwd, "int" => Int, "str" => Str, "len" => Len, "now" => Now,
             "random" => Random, "min" => Min, "max" => Max, "count" => Count, "capacity" => Capacity, "slot" => Slot, "stat" => Stat, "token" => Token,
-            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie, "set_header" => SetHeader, "__html_lit" => HtmlLit, "__html_esc" => HtmlEsc, "__html_esc_attr" => HtmlEscAttr, "__html_attr" => HtmlAttr, "trim" => Trim,
+            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie, "set_header" => SetHeader, "__html_lit" => HtmlLit, "__html_esc" => HtmlEsc, "__html_esc_attr" => HtmlEscAttr, "__html_attr" => HtmlAttr, "html_raw" => HtmlRaw, "trim" => Trim,
             "base64" => Base64, "base64_url" => Base64Url, "unbase64" => Unbase64, "hex" => Hex, "sha1" => Sha1, "sha256" => Sha256,
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
@@ -704,6 +704,14 @@ impl P {
     }
 
     fn stmt(&mut self) -> R<Stmt> {
+        // `include_html("fragments/head.html");` in markup: a file of the program's (read when compiling, relative to the program) written as
+        // it is, for fixed markup that is not worth writing as code (generated asset lists, another app's templates' output)
+        if self.markup == Some(false) && matches!(self.peek(), Some(Tok::Id(n)) if n == "include_html") {
+            if let (Some(Tok::Sym(o)), Some(Tok::Str(name)), Some(Tok::Sym(c))) = (self.t.get(self.i + 1).cloned(), self.t.get(self.i + 2).cloned(), self.t.get(self.i + 3).cloned()) {
+                if o == "(" && c == ")" { self.i += 4; self.sym(";"); return Ok(Stmt::Do(Expr::Call("__html_lit".into(), vec![Expr::Str(read_file(&name)?)], CallRes::Unbound))); }
+            }
+            return Err("`include_html` takes the file's path as a literal: `include_html(\"fragments/head.html\");`".into());
+        }
         // in code inside markup, a bare string writes itself: `{if left == 1 { "item" } else { "items" }}`
         if let (Some(attr), Some(Tok::Str(s))) = (self.markup, self.peek().cloned()) {
             if matches!(self.t.get(self.i + 1), Some(Tok::Sym(x)) if x == ";" || x == "}") {

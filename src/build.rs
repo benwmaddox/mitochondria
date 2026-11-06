@@ -218,7 +218,7 @@ int main(int argc, char **argv) {
         let bin: Vec<u8> = (0..=255u8).collect();
         std::fs::write(dir.join("pub/assets/b.png"), &bin).unwrap();
         std::fs::write(dir.join("pub/robots.txt"), "User-agent: *\n").unwrap();
-        let src = "struct A { n: i64; }\nstate a: A;\nweb {\n    headers { \"X-Frame-Options\": \"SAMEORIGIN\"; \"Vary\": \"Accept\"; \"Cache-Control\": \"no-cache\"; }\n    etag \"max-age=0, private, must-revalidate\";\n    gzip;\n    static \"/\" from \"pub\" { \"Cache-Control\": \"public, max-age=60\"; }\n}\n@get(\"/p\") fn p() -> Response<html> { return ok(<p>{\"hello \" + str(a.n)}</p>); }\n@get(\"/deny\") fn deny() -> Response<html> { set_header(\"X-Frame-Options\", \"DENY\"); return ok(<p>no frames</p>); }\n";
+        let src = "struct A { n: i64; }\nstate a: A;\nweb {\n    headers { \"X-Frame-Options\": \"SAMEORIGIN\"; \"Vary\": \"Accept\"; \"Cache-Control\": \"no-cache\"; }\n    writes { \"Vary\": \"Accept-Encoding\"; }\n    etag \"max-age=0, private, must-revalidate\";\n    gzip;\n    static \"/\" from \"pub\" { \"Cache-Control\": \"public, max-age=60\"; }\n}\n@get(\"/p\") fn p() -> Response<html> { return ok(<p>{\"hello \" + str(a.n)}</p>); }\n@post(\"/p\") fn post_p() -> Response<html> { return ok(<p>posted</p>); }\n@get(\"/deny\") fn deny() -> Response<html> { set_header(\"X-Frame-Options\", \"DENY\"); return ok(<p>no frames</p>); }\n";
         let (st, code) = crate::source::load(src).unwrap();
         let prog = crate::layout::Program::parse(&st).unwrap();
         let api = crate::cgen::check(&prog, &code).unwrap();
@@ -248,6 +248,9 @@ int main(int argc, char **argv) {
         assert!(lines(&h, "content-security-policy").is_empty() && lines(&h, "content-encoding").is_empty());
         let tag = lines(&h, "etag")[0].clone();
         assert!(tag.starts_with("W/\"") && tag.len() == 36, "{}", tag);
+        // a write's answer: the block's `writes` lines added as they are
+        let (h, _) = ask("POST /p HTTP/1.1\r\nContent-Length: 0");
+        assert_eq!(lines(&h, "vary"), vec!["Accept,Accept-Encoding", "Accept-Encoding"], "{}", h);
         // an endpoint's own line replaces the block's
         let (h, _) = ask("GET /deny HTTP/1.1");
         assert_eq!(lines(&h, "x-frame-options"), vec!["DENY"]);

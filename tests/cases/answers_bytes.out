@@ -3,7 +3,7 @@ GET /icon -> 200 <Content-Type: image/png> PNG
 GET /raw -> 200 <Content-Type: application/octet-stream> PNG
 
 GET /json?name=a%26b%3C%22%27 -> 200 <Content-Type: application/json; charset=utf-8> {"name": "a&amp;b&lt;&quot;&#39;"}
-GET /texts?t=text%2Fhtml%2C*%2F*%3Bq%3D0.8 -> 200 {"has":true,"starts":true,"ends":true,"field":"{\"pur\":\"cookie.x\"}","missing":null}
-GET /texts?t=application%2Fjson -> 200 {"has":false,"starts":false,"ends":false,"field":"{\"pur\":\"cookie.x\"}","missing":null}
+GET /texts?t=text%2Fhtml%2C*%2F*%3Bq%3D0.8 -> 200 {"first":9,"last":9,"has":true,"starts":true,"ends":true,"field":"{\"pur\":\"cookie.x\"}","missing":null}
+GET /texts?t=application%2Fjson -> 200 {"first":-1,"last":-1,"has":false,"starts":false,"ends":false,"field":"{\"pur\":\"cookie.x\"}","missing":null}
 state <plain values> 68
 memory reserved=4096 committed=4096 live=68

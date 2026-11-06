@@ -443,8 +443,12 @@ static int serve_one(Conn *x, Sock c, int first) {
               HPUT("\r\n");
           }
         }
+#ifdef MITO_WEB_WRITES
+        /* a request that changes state: the block's `writes` lines, as they are (a proxy's lines on answers it does not cache) */
+        if (!get && !bare) HPUT(mito_web_writes);
+#endif
 #ifdef MITO_WEB_GZIP
-        if (rn > 0 && accepts_gzip(pairs, np)) {
+        if (code != 204 && code != 304 && accepts_gzip(pairs, np)) { /* as Thruster: every answer that may have a body, an empty one too */
             u64 zn = mito_gzip_with(x->zs, (const u8 *)resp, rn, x->gz, mito_gzip_bound(OUT_CAP));
             if (zn) { resp = (const char *)x->gz; rn = (u32)zn; HPUT("Content-Encoding: gzip\r\n"); }
         }

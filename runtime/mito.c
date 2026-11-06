@@ -1560,6 +1560,14 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
             memcpy(w + o, src, len); o += len;
         }
         return t_done(m, start, o, out); }
+    case 44: case 45: { /* index_of(t, part), last_index_of(t, part): the byte offset of the first (last) place part is in t, or -1 */
+        if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y)) return -1;
+        const u8 *p = t_ptr(m, x), *q = t_ptr(m, y); i64 at = -1;
+        if (y.len <= x.len) {
+            if (code == 44) { for (u32 i = 0; i + y.len <= x.len; i++) if (b_eq(p + i, y.len, q, y.len)) { at = i; break; } }
+            else { for (u32 i = x.len - y.len + 1; i-- > 0;) if (b_eq(p + i, y.len, q, y.len)) { at = i; break; } }
+        }
+        *out = v_int(at); return 0; }
     case 37: case 38: case 39: { /* contains(t, part), starts_with(t, part), ends_with(t, part): bytes compared */
         if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y)) return -1;
         const u8 *p = t_ptr(m, x), *q = t_ptr(m, y); int found = 0;

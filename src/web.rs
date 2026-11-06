@@ -18,7 +18,9 @@
 /// A `static` block: the URL prefix, the directory (relative to the program), its header lines, and its files (URL path,
 /// content type, bytes), sorted by path.
 pub struct Static { pub prefix: String, pub dir: String, pub headers: Vec<(String, String)>, pub files: Vec<(String, String, Vec<u8>)> }
-pub struct Web { pub headers: Option<Vec<(String, String)>>, pub etag: Option<String>, pub gzip: bool, pub statics: Vec<Static> }
+/// `writes`: lines added as they are to the answers of requests that change state (other than GET and HEAD): what a proxy in front adds
+/// to answers it does not cache (Thruster's second `Vary: Accept-Encoding`).
+pub struct Web { pub headers: Option<Vec<(String, String)>>, pub writes: Vec<(String, String)>, pub etag: Option<String>, pub gzip: bool, pub statics: Vec<Static> }
 
 /// Content types by extension: the usual ones; a `types { }` block adds or replaces them.
 const TYPES: &[(&str, &str)] = &[
@@ -155,13 +157,17 @@ pub fn parse(text: &str, line0: usize, dir: &std::path::Path) -> Result<Web, Str
     let mut p = P { t: lex(text, line0)?, i: 0 };
     match p.next() { Some(T::Word(w)) if w == "web" => {} _ => return Err(format!("line {}: expected `web {{`", line0)) }
     p.eat('{')?;
-    let mut w = Web { headers: None, etag: None, gzip: false, statics: Vec::new() };
+    let mut w = Web { headers: None, writes: Vec::new(), etag: None, gzip: false, statics: Vec::new() };
     while !p.at_sym('}') {
         let l = p.line();
         match p.next() {
             Some(T::Word(k)) if k == "headers" => {
                 if w.headers.is_some() { return Err(format!("line {}: one `headers` block", l)); }
                 p.eat('{')?; w.headers = Some(p.pairs(None)?);
+            }
+            Some(T::Word(k)) if k == "writes" => {
+                if !w.writes.is_empty() { return Err(format!("line {}: one `writes` block", l)); }
+                p.eat('{')?; w.writes = p.pairs(None)?;
             }
             Some(T::Word(k)) if k == "etag" => {
                 let cc = if matches!(p.t.get(p.i), Some((T::Str(_), _))) { p.str("a Cache-Control value")? } else { String::new() };
@@ -182,7 +188,7 @@ pub fn parse(text: &str, line0: usize, dir: &std::path::Path) -> Result<Web, Str
                 let files = read_dir(&dir.join(&d), &prefix, &types).map_err(|e| format!("line {}: static \"{}\": {}", l, d, e))?;
                 w.statics.push(Static { prefix, dir: d, headers, files });
             }
-            _ => return Err(format!("line {}: a web block holds `headers {{ }}`, `etag [\"cache control\"];`, `gzip;` and `static \"/prefix/\" from \"dir\" {{ }}`", l)),
+            _ => return Err(format!("line {}: a web block holds `headers {{ }}`, `writes {{ }}`, `etag [\"cache control\"];`, `gzip;` and `static \"/prefix/\" from \"dir\" {{ }}`", l)),
         }
     }
     p.eat('}')?;
@@ -230,6 +236,9 @@ fn lines(h: &[(String, String)]) -> String { h.iter().map(|(k, v)| format!("{}: 
 pub fn c(w: &Web) -> String {
     let mut o = String::from("/* ---- the program's web block (generated) ---- */\n#define MITO_WEB 1\n");
     if let Some(h) = &w.headers { o += &format!("#define MITO_WEB_HEADERS 1\nstatic const char mito_web_headers[] = {};\n", c_str(&lines(h))); }
+    if !w.writes.is_empty() { o += &format!("#define MITO_WEB_WRITES 1
+static const char mito_web_writes[] = {};
+", c_str(&lines(&w.writes))); }
     if let Some(cc) = &w.etag { o += &format!("#define MITO_WEB_ETAG 1\nstatic const char mito_web_etag_cc[] = {};\n", c_str(cc)); }
     if w.gzip { o += "#define MITO_WEB_GZIP 1\n#define MITO_USES_ZLIB 1\n"; }
     let mut files: Vec<(String, String, usize, usize)> = Vec::new(); // path, type, block, file index

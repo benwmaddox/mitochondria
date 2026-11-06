@@ -1,6 +1,6 @@
 // `Response<bytes>`: any bytes, with the content type the endpoint sets (application/octet-stream otherwise); `file_base64` embeds a
 // file's bytes when compiling; `no_default_headers()` marks an answer to go without the web block's lines (the front end's business);
-// `escape_html`, `contains` / `starts_with` / `ends_with`, `json_field` outside tests, and an endpoint's own Content-Type on text
+// `escape_html`, `contains` / `starts_with` / `ends_with`, `index_of` / `last_index_of`, `json_field` outside tests, and an endpoint's own Content-Type on text
 --- program
 struct A { icon: utf8<64>; }
 state a: A;
@@ -18,8 +18,8 @@ fn json(name: utf8<64>) -> Response<text> {
     return ok("{\"name\": \"" + escape_html(name) + "\"}");
 }
 @get("/texts")
-fn texts(t: utf8<64>) -> Response<{ has: bool; starts: bool; ends: bool; field: string?; missing: string? }> {
-    return ok({ has: contains(t, "*/*"), starts: starts_with(t, "text/"), ends: ends_with(t, "q=0.8"),
+fn texts(t: utf8<64>) -> Response<{ has: bool; starts: bool; ends: bool; field: string?; missing: string?; first: i64; last: i64 }> {
+    return ok({ first: index_of(t, ","), last: last_index_of(t, ","), has: contains(t, "*/*"), starts: starts_with(t, "text/"), ends: ends_with(t, "q=0.8"),
         field: json_field("{\"_rails\":{\"pur\":\"cookie.x\"}}", "_rails"), missing: json_field("{\"a\":1}", "b") });
 }
 --- file icon.bin

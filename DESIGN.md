@@ -179,7 +179,8 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
       }
   }
   ```
-  `headers` replaces the built-in `nosniff`, Content-Security-Policy and Referrer-Policy lines; an endpoint's own line of the same
+  `writes { ... }` lines are added as they are to the answers of requests other than GET and HEAD (what a caching proxy in front adds to
+  answers it does not cache). `headers` replaces the built-in `nosniff`, Content-Security-Policy and Referrer-Policy lines; an endpoint's own line of the same
   name (`set_header`) wins over the block's. `etag`: the tag is two 64-bit hashes of the body; `If-None-Match` naming it answers 304
   without a body or content type; its Cache-Control (if given) replaces the block's on tagged answers unless the endpoint set one.
   `gzip` compresses every answer with a body, whatever its type, at zlib's default level (third_party/zlib, linked only into such a
@@ -195,7 +196,7 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   `set_header`, which replaces the kind's for any answer); `file_base64("logos/icon.png")` is a file's bytes read when compiling, as
   base64 (`unbase64` it once, in `@start`). `no_default_headers()` sends the answer without the `web` block's header lines (as a
   file Rails sends). `escape_html(t)` is text with `& < > " '` as entities (ERB's escaping, for JSON or markup built as text);
-  `contains`, `starts_with` and `ends_with` compare bytes; `random_text(n, alphabet)` draws characters uniformly with the system's
+  `contains`, `starts_with` and `ends_with` compare bytes, `index_of` and `last_index_of` give where (or -1); `random_text(n, alphabet)` draws characters uniformly with the system's
   generator (session tokens: base58); `json_field(text, "name")` reads a field of a JSON object (null if absent).
   A loop's `scan where ...` accepts that a `where` over a whole table reads every row (a schema that cannot have the index).
 - `Response<html>`, `<text>`, `<css>`, `<js>` and `<svg>` answer text as it is with that content type (UTF-8). `file("assets/app.css")`

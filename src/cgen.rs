@@ -228,7 +228,7 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 44] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 46] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
     B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
@@ -236,8 +236,8 @@ pub const BUILTINS: [B; 44] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B
     B::Env, B::FormatTime, B::Contains, B::StartsWith, B::EndsWith,
     // the answer without the web block's header lines: 40; text escaped as markup: 41; random characters: 42
     B::NoDefaultHeaders, B::EscapeHtml, B::RandomText,
-    // a time plus calendar years: 43
-    B::AddYears];
+    // a time plus calendar years: 43; where a text is in a text: 44, 45
+    B::AddYears, B::IndexOf, B::LastIndexOf];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
 const CRYPTO_BUILTINS: [B; 11] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::RandomText];
 
@@ -3625,7 +3625,7 @@ impl<'p> G<'p> {
         // arity of the byte and crypto built-ins, checked when compiling
         let want = match bi {
             B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml => Some((1, "one argument")),
-            B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime | B::Contains | B::StartsWith | B::EndsWith | B::RandomText | B::AddYears => Some((2, "two arguments")),
+            B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime | B::Contains | B::StartsWith | B::EndsWith | B::RandomText | B::AddYears | B::IndexOf | B::LastIndexOf => Some((2, "two arguments")),
             B::GcmSeal | B::GcmOpen => Some((3, "the key, the 12-byte nonce and the text")),
             B::Pbkdf2Sha256 => Some((4, "the password, the salt, the iterations and the length")),
             _ => None,
@@ -3633,7 +3633,7 @@ impl<'p> G<'p> {
         if let Some((k, what)) = want {
             if a.len() != k {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
-                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::RandomText => "random_text", B::AddYears => "add_years", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
+                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
                     B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time", B::Contains => "contains", B::StartsWith => "starts_with", B::EndsWith => "ends_with",
                     B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));
@@ -3653,7 +3653,7 @@ impl<'p> G<'p> {
             let _ = n;
             let _ = int_out;
             return Ok(match bi {
-                B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot | B::AddYears => CV::Int(format!("{}.i", r)),
+                B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot | B::AddYears | B::IndexOf | B::LastIndexOf => CV::Int(format!("{}.i", r)),
                 B::SecretEqual | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith => CV::Bool(format!("({}.i != 0)", r)),
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
                     | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }

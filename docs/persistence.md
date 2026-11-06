@@ -1,4 +1,4 @@
-# Persistence: options (draft, 2026-11-05)
+# Persistence and outside libraries (design, 2026-11-05)
 
 Today a program's state lives only in its process: a restart, a crash or `serve --watch` rebuilding it starts from empty. This page lays out
 the ways to keep it, what each costs, and a recommendation. Nothing here is built yet.
@@ -82,8 +82,25 @@ an enum value that no longer exists is an error. Items keep their slots, so ids 
    or the outside world changed, and the undo log already collects exactly what to write.
 3. **B as an option later:** a request log for audit and for reproducing bugs, not for recovery.
 
-Decisions for you:
-- Is losing the last few seconds acceptable by default (A), with durable logging (C) opt-in per program, or should every answered request
-  be durable by default?
-- Should migration errors (a collection that no longer fits, a string too long) refuse to start, or start and report what was dropped?
-- Where should state files live: beside the program (`app.mito.state`), or in a directory named on the command line (`--data dir`)?
+## Decisions (Ben, 2026-11-05)
+
+| Question | Decision |
+| --- | --- |
+| Durable by default? | Yes. A request is answered only after its changes are flushed to the log (C); requests that arrive together share one flush, so it costs a few milliseconds of latency, not throughput. A program can opt out to snapshots only (A). |
+| Migration that does not fit | Refuse to start, naming each thing that does not fit (a collection now too small, a string too long, an enum value gone). Nothing is dropped silently; a flag drops it deliberately. |
+| Where state files live | A directory named on the command line, `--data dir` (default `./data` where the server runs): snapshots and logs there, one set per program, and per worker in a system. |
+| Outside libraries | Both layers: a general way to declare C functions with typed signatures and the library to link, checked at the boundary; and curated modules on top (`lib/sqlite` first) that wrap common libraries safely, the library's memory given from a declared fixed pool (SQLite's `SQLITE_CONFIG_HEAP`), so peak memory is still known before the program runs. |
+
+How the parts fit: the program's own state (one fixed reservation, atomic requests) is kept by snapshots plus the change log; outside
+libraries are for what fixed state holds poorly (data of unknown size, ad-hoc queries), not for keeping the state itself.
+
+## Build order
+
+1. The layout's description saved with a snapshot; snapshot on clean shutdown and load on start from `--data`; migration by name,
+   refusing what does not fit.
+2. The change log: after each successful request, the new contents of the lines it wrote appended; answers wait for their group's
+   flush; recovery is the last snapshot plus the log; a snapshot now and then starts a new log.
+3. `serve --watch` keeps state across rebuilds (snapshot, rebuild, migrate, load); systems keep one set of files per worker.
+4. Declared C functions: signatures with the language's kinds (integers, floats, bools, text in and out through declared storage),
+   the library named for the build to link.
+5. `lib/sqlite`: SQLite through those declarations, given a fixed memory pool.

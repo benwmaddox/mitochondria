@@ -1,0 +1,51 @@
+// paging a table: `after x` continues after row x in the loop's order (by id, or by an indexed field then id; backwards with
+// `reverse`), with `limit` the page size; null starts from the beginning. With a `where` and an owner's rows too.
+--- program
+struct Item { name: utf8<10>; price: i64; sold: bool; }
+struct Shop { items: table<Item> index(price); }
+struct App { shops: table<Shop>; }
+state app: App;
+
+@post("/shops")
+fn shop() -> Response<{ id: Shop }> { let s = app.shops.add(); return created({ id: s }); }
+@post("/shops/{s}/items/{name}/{price}")
+fn add(s: i64, name: utf8<10>, price: i64) -> Response<{ id: i64 }> { let i = app.shops[s].items.add(); i.name = name; i.price = price; return created({ id: slot(i) }); }
+@get("/shops/{s}/page")
+fn page(s: i64, after: i64 = 0) -> Response<{ names: [string] }> {
+    let shop = app.shops[s];
+    var from = null;
+    if after > 0 { from = shop.items[after]; }
+    return ok({ names: [foreach i in shop.items after from limit 2 i.name] });
+}
+@get("/shops/{s}/cheapest")
+fn cheapest(s: i64, after: i64 = 0) -> Response<{ names: [string] }> {
+    let shop = app.shops[s];
+    var from = null;
+    if after > 0 { from = shop.items[after]; }
+    return ok({ names: [foreach i in shop.items by price after from where !i.sold limit 2 i.name] });
+}
+@get("/shops/{s}/dearest")
+fn dearest(s: i64, after: i64) -> Response<{ names: [string] }> {
+    let shop = app.shops[s];
+    return ok({ names: [foreach i in shop.items by price after shop.items[after] reverse limit 2 i.name] });
+}
+@post("/items/{s}/{i}/sold")
+fn sold(s: i64, i: i64) -> Response<{}> { app.shops[s].items[i].sold = true; return ok({}); }
+--- requests
+POST /shops
+POST /shops/1/items/pen/3
+POST /shops/1/items/ink/9
+POST /shops/1/items/cup/3
+POST /shops/1/items/mug/5
+POST /shops/1/items/box/1
+GET /shops/1/page
+GET /shops/1/page?after=2
+GET /shops/1/page?after=4
+GET /shops/1/page?after=5
+GET /shops/1/cheapest
+GET /shops/1/cheapest?after=3
+GET /shops/1/cheapest?after=4
+POST /items/1/1/sold
+GET /shops/1/cheapest?after=5
+GET /shops/1/dearest?after=2
+GET /shops/1/dearest?after=3

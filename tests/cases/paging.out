@@ -1,0 +1,19 @@
+POST /shops -> 201 {"id":1}
+POST /shops/1/items/pen/3 -> 201 {"id":1}
+POST /shops/1/items/ink/9 -> 201 {"id":2}
+POST /shops/1/items/cup/3 -> 201 {"id":3}
+POST /shops/1/items/mug/5 -> 201 {"id":4}
+POST /shops/1/items/box/1 -> 201 {"id":5}
+GET /shops/1/page -> 200 {"names":["pen","ink"]}
+GET /shops/1/page?after=2 -> 200 {"names":["cup","mug"]}
+GET /shops/1/page?after=4 -> 200 {"names":["box"]}
+GET /shops/1/page?after=5 -> 200 {"names":[]}
+GET /shops/1/cheapest -> 200 {"names":["box","pen"]}
+GET /shops/1/cheapest?after=3 -> 200 {"names":["mug","ink"]}
+GET /shops/1/cheapest?after=4 -> 200 {"names":["ink"]}
+POST /items/1/1/sold -> 200 {}
+GET /shops/1/cheapest?after=5 -> 200 {"names":["cup","mug"]}
+GET /shops/1/dearest?after=2 -> 200 {"names":["mug","cup"]}
+GET /shops/1/dearest?after=3 -> 200 {"names":["pen","box"]}
+state <plain values> 1
+memory reserved=4096 committed=4096 live=1

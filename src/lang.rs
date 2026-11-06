@@ -93,8 +93,9 @@ pub enum Expr {
 /// up to `hi` included; `hi` here is one past it, as the parser excludes the end internally).
 /// `from`: where a loop over a module instance starts. `via`: that instance's iteration functions (set by the binder).
 /// `whil`: `while cond` ends the loop as soon as `cond` is false (tested before `where` and the body).
-/// `by`: a table walked in the order of one of its rows' fields (an indexed one).
-pub struct Iter { pub index: Option<(String, u32)>, pub budget: bool, pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub by: Option<String>, pub whil: Option<Expr>, pub wher: Option<Expr>, pub limit: Option<Expr>, pub via: Option<Via> }
+/// `by`: a table walked in the order of one of its rows' fields (an indexed one). `after`: a table's rows after this row (or id) in the
+/// loop's order, for paging (null: from the start).
+pub struct Iter { pub index: Option<(String, u32)>, pub budget: bool, pub var: String, pub slot: u32, pub coll: Expr, pub hi: Option<Expr>, pub from: Option<Expr>, pub reverse: bool, pub by: Option<String>, pub after: Option<Expr>, pub whil: Option<Expr>, pub wher: Option<Expr>, pub limit: Option<Expr>, pub via: Option<Via> }
 
 /// A module instance's iteration functions: a cursor from `first(from)` (or `last(from)` for reverse), the next from
 /// `next(cur)` (or `prev`), the item at it from `item(cur)`; a null cursor ends the loop.
@@ -571,7 +572,7 @@ impl P {
     fn no_init<T>(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> { let was = self.init_ok; self.init_ok = false; let r = f(self); self.init_ok = was; r }
 
     fn iter(&mut self) -> R<Iter> { self.no_init(|p| p.iter_inner()) }
-    /// `item[, i] in coll [from k] [by field] [reverse] [while c] [where c] [limit n]`, or `i in lo..hi` (both ends included).
+    /// `item[, i] in coll [from k] [by field] [after x] [reverse] [while c] [where c] [limit n]`, or `i in lo..hi` (both ends included).
     fn iter_inner(&mut self) -> R<Iter> {
         let var = self.id()?;
         let index = if self.sym(",") { Some((self.id()?, 0)) } else { None };
@@ -584,12 +585,13 @@ impl P {
         }) } else { None };
         let from = if self.is_kw("from") { self.i += 1; Some(self.expr()?) } else { None };
         let by = if self.is_kw("by") { self.i += 1; Some(self.id()?) } else { None };
+        let after = if self.is_kw("after") { self.i += 1; Some(self.expr()?) } else { None };
         let reverse = if self.is_kw("reverse") { self.i += 1; true } else { false };
         let whil = if self.is_kw("while") { self.i += 1; Some(self.expr()?) } else { None };
         let wher = if self.is_kw("where") { self.i += 1; Some(self.expr()?) } else { None };
         if self.is_kw("order") { return Err("`order by` was removed: keep the data in order with a sorted collection (lib/sorted.mito)".into()); }
         let limit = if self.is_kw("limit") { self.i += 1; Some(self.expr()?) } else { None };
-        Ok(Iter { index, budget: false, var, slot: 0, coll, hi, from, reverse, by, whil, wher, limit, via: None })
+        Ok(Iter { index, budget: false, var, slot: 0, coll, hi, from, reverse, by, after, whil, wher, limit, via: None })
     }
 
     /// Markup (an HTML literal), lowered to ordinary statements that write it into the answer: its fixed text as `__html_lit("...")`
@@ -808,7 +810,7 @@ impl P {
             _ => None,
         };
         if let Some(hi) = counted {
-            let it = Iter { index: None, budget: false, var: v, slot: 0, coll: init, hi: Some(hi), from: None, reverse: false, by: None, whil: None, wher: None, limit: None, via: None };
+            let it = Iter { index: None, budget: false, var: v, slot: 0, coll: init, hi: Some(hi), from: None, reverse: false, by: None, after: None, whil: None, wher: None, limit: None, via: None };
             return Ok(Stmt::Each(it, body));
         }
         let mut b = body;
@@ -1071,6 +1073,7 @@ impl Binder<'_> {
         }
         if let Some(fr) = &mut it.from { if it.via.is_none() { return self.err(format!("`foreach {} in ... from`: only a module instance can start a loop from a key", it.var)); } self.expr(fr)?; }
         if let Some(l) = &mut it.limit { self.expr(l)?; }
+        if let Some(a) = &mut it.after { self.expr(a)?; }
         it.slot = self.declare(&it.var, false);
         if let Some((n, slot)) = &mut it.index { *slot = self.declare(n, false); }
         if let Some(w) = &mut it.whil { if it.hi.is_none() && it.via.is_none() { return self.err(format!("`foreach {} in ... while`: only ranges and module instances stop early; a list or pool is walked whole", it.var)); } self.expr(w)?; }
@@ -1318,7 +1321,7 @@ pub const BUILTIN_NAMES: &[&str] = &["int", "str", "len", "now", "random", "min"
 /// A loop without a fixed extent (`while`, a `for` that is not counted): a range as long as it needs, stopped by `cond`, and
 /// counted against the request's step budget.
 fn unbounded(cond: Option<Expr>) -> Iter {
-    Iter { index: None, budget: true, var: "__mito__round".into(), slot: 0, coll: Expr::Int(0), hi: Some(Expr::Int(i64::MAX)), from: None, reverse: false, by: None, whil: cond, wher: None, limit: None, via: None }
+    Iter { index: None, budget: true, var: "__mito__round".into(), slot: 0, coll: Expr::Int(0), hi: Some(Expr::Int(i64::MAX)), from: None, reverse: false, by: None, after: None, whil: cond, wher: None, limit: None, via: None }
 }
 /// Is the variable `name` assigned anywhere in these statements?
 fn assigns_name(stmts: &[Stmt], name: &str) -> bool {

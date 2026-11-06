@@ -967,7 +967,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); calls(t, out); calls(e, out); }
-                Stmt::Each(it, b) => { ex(&it.coll, out); if let Some(h) = &it.hi { ex(h, out); } if let Some(w) = &it.wher { ex(w, out); } if let Some(l) = &it.limit { ex(l, out); } calls(b, out); }
+                Stmt::Each(it, b) => { ex(&it.coll, out); if let Some(h) = &it.hi { ex(h, out); } if let Some(w) = &it.wher { ex(w, out); } if let Some(l) = &it.limit { ex(l, out); } if let Some(a) = &it.after { ex(a, out); } calls(b, out); }
                 Stmt::Respond(_, j) => json_calls(j, out),
                 Stmt::Forward { key, fields, .. } => { ex(key, out); for f in fields { ex(&f.1, out); } }
                 _ => {}
@@ -2911,6 +2911,17 @@ impl<'p> G<'p> {
                 return no(format!("`where` over the whole table {} is compiled to SQL only when it compares the row's indexed fields with values (joined by `&&`); this one would read every row", tb.name));
             } else { in_c = Some(w); }
         }
+        // `after x`: the rows after row x in the loop's order (by id, or by the `by` field then id; backwards with `reverse`); null: all
+        let mut after_val = None;
+        if let Some(a) = &it.after {
+            let n = nested as usize + wvals.len() + 1; // after the owner's and the `where`'s values
+            let op = if it.reverse { "<" } else { ">" };
+            conds.push(match &it.by {
+                Some(f) => format!("(?{n} IS NULL OR ({}, id) {op} ((SELECT {} FROM {} WHERE id = ?{n}), ?{n}))", crate::layout::sql_ident(f), crate::layout::sql_ident(f), tb.sql),
+                None => format!("(?{n} IS NULL OR id {op} ?{n})"),
+            });
+            after_val = Some(a);
+        }
         if !conds.is_empty() { sql += &format!(" WHERE {}", conds.join(" AND ")); }
         // a constant `limit` with every condition in the query: SQLite stops there too
         let sql_limit = match (&it.limit, in_c.is_none() && !collect) { (Some(Expr::Int(n)), true) if *n >= 0 => Some(*n), _ => None };
@@ -2933,6 +2944,14 @@ impl<'p> G<'p> {
         let mut names = Vec::new();
         if nested { names.push(format!("{{ 1, 0, 0, (i64)({}), 0 }}", inst)); }
         for e in wvals { let v = self.expr(e, env, None)?; let v = self.hold(v, false)?; names.push(self.val(v)?); }
+        if let Some(a) = after_val {
+            // a row of this table, a row that may be null, null, or a row id
+            let v = self.expr(a, env, None)?;
+            let ok = match &v { CV::Item(c, _) | CV::Ref(c, ..) => *c == TBASE + t, CV::Null | CV::Int(_) => true, _ => false };
+            if !ok { return no(format!("`after` takes a row of {} (or its id, or null)", tb.name)); }
+            let v = self.hold(v, false)?;
+            names.push(self.val(v)?);
+        }
         let (tp, cur, hits) = (self.tmp("argv"), self.tmp("cur"), self.tmp("hits"));
         if names.is_empty() { self.line(&format!("Val {}[1];", tp)); } else { self.line(&format!("Val {}[{}] = {{ {} }};", tp, names.len(), names.join(", "))); }
         self.line(&format!("u32 {};", cur));
@@ -3637,6 +3656,7 @@ impl<'p> G<'p> {
         let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
         if let Some(t) = tab(c) { return self.table_loop(it, t, inst, env, collect, body); }
         if let Some(f) = &it.by { return no(format!("`by {}`: only a table is walked in a field's order (a list keeps insertion order; keep other orders in the data)", f)); }
+        if it.after.is_some() { return no("`after`: only a table's rows are paged this way"); }
         self.loop_enter();
         let coll = self.prog.colls[c].clone();
         let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };

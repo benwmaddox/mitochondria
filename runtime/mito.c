@@ -1019,6 +1019,14 @@ static int h_set_header(Ctx *c, const char *name, u32 nn, const Txt *t) {
     Mito *m = M_(c); const u8 *p = m->text.p + t->off; u32 n = t->present ? t->len : 0;
     if (n > 8000) return fail(m, 500, "set_header: a value is at most 8000 bytes");
     for (u32 i = 0; i < n; i++) if ((p[i] < 0x20 && p[i] != '\t') || p[i] >= 0x7F) return fail(m, 500, "set_header: a value is printable ASCII");
+    /* a header set again replaces the earlier line of that name (as a headers hash); Set-Cookie lines are set_cookie's, each kept */
+    for (u32 i = 0; i < m->head.len;) {
+        u32 e = i; while (e < m->head.len && m->head.p[e] != '\n') e++;
+        int same = e - i > nn && m->head.p[i + nn] == ':';
+        for (u32 k = 0; same && k < nn; k++) { u8 x = m->head.p[i + k], y = (u8)name[k]; if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) same = 0; }
+        if (same) { u32 next = e < m->head.len ? e + 1 : e; memmove(m->head.p + i, m->head.p + next, m->head.len - next); m->head.len -= next - i; continue; }
+        i = e < m->head.len ? e + 1 : e;
+    }
     if (!(a_put(&m->head, name, nn) && a_str(&m->head, ": ") && a_put(&m->head, p, n) && a_str(&m->head, "\r\n"))) return fail(m, 500, "too many header lines on the answer");
     return 0;
 }
@@ -1520,6 +1528,16 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
             else w[o++] = s[i];
         }
         return t_done(m, start, o, out); }
+    case 43: { /* add_years(t, n): a time n calendar years later (or earlier), the same day and time of day; Feb 29 becomes Feb 28 in a
+                  year without one (as Ruby's `20.years.from_now`) */
+        if (n < 2 || a[0].tag != 1 || a[1].tag != 1 || a[1].i < -9000 || a[1].i > 9000) return fail(m, 500, "add_years(time, years)");
+        char tx[40]; u32 tn = time_text(a[0].i, tx); i64 y = ((tx[0] - '0') * 1000 + (tx[1] - '0') * 100 + (tx[2] - '0') * 10 + (tx[3] - '0')) + a[1].i, us;
+        if (y < 0 || y > 9999) return fail(m, 500, "add_years: past the year 9999");
+        tx[0] = (char)('0' + y / 1000); tx[1] = (char)('0' + y / 100 % 10); tx[2] = (char)('0' + y / 10 % 10); tx[3] = (char)('0' + y % 10);
+        int leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        if (tx[5] == '0' && tx[6] == '2' && tx[8] == '2' && tx[9] == '9' && !leap) tx[9] = '8';
+        if (!time_parse((const u8 *)tx, tn, &us)) return fail(m, 500, "add_years: not a time");
+        *out = v_int(us); return 0; }
     case 36: { /* format_time(t, "%Y-%m-%d"): a time (microseconds since 1970, UTC) written by the pattern: %Y %m %d %H %M %S, %L milliseconds,
                   %N microseconds (6 digits), %s seconds since 1970, %%; other characters as they are */
         if (n < 2 || a[0].tag != 1 || arg_txt(m, a, n, 1, &x)) return fail(m, 500, "format_time(time, \"pattern\")");

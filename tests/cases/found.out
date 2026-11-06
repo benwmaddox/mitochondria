@@ -1,4 +1,4 @@
-POST /session -> 302 <Location: http://campfire.test:3000/rooms/7> 
+POST /session -> 302 <Content-Type: text/html; charset=utf-8 | Location: http://campfire.test:3000/rooms/7> 
 POST /session -> 400 <Content-Type: text/html; charset=utf-8> <!doctype html><meta charset="utf-8"><title>Error</title><p>the request's Host is not a host name</p>
 POST /session -> 400 <Content-Type: text/html; charset=utf-8> <!doctype html><meta charset="utf-8"><title>Error</title><p>a redirect needs the request's Host</p>
 POST /session -> 401 <Content-Type: text/html; charset=utf-8> <p>Too many requests or unauthorized.</p>

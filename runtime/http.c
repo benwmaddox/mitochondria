@@ -435,7 +435,7 @@ static int serve_one(Conn *x, Sock c, int first) {
 #endif
           int ae = 0;
 #ifdef MITO_WEB_GZIP
-          ae = rn > 0;
+          ae = code != 204 && code != 304; /* as Thruster: every answer that may have a body, an empty one too */
 #endif
           if (v || ae) {
               HPUT("Vary: "); if (v) HPUTN(v, vn);

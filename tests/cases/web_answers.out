@@ -4,7 +4,7 @@ GET /plain -> 200 <Content-Type: text/plain; charset=utf-8 | ETag: "531633b6512f
 POST /title/caf%C3%A9 -> 303 <Location: /title> 
 GET /title -> 200 <Content-Type: text/html; charset=utf-8> café
 POST /next/%2Factive%3Fx%3D1 -> 200 {}
-POST /go -> 303 <Location: /active?x=1> 
+POST /go -> 303 <Content-Type: text/html; charset=utf-8 | Location: /active?x=1> 
 POST /next/%2F%2Fevil.example -> 200 {}
 POST /go -> 500 <Content-Type: text/html; charset=utf-8> <!doctype html><meta charset="utf-8"><title>Error</title><p>see_other takes a path on this server: one leading /, printable ASCII, no spaces</p>
 POST /next/%2Fa%20b -> 200 {}

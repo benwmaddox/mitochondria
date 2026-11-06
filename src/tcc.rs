@@ -37,10 +37,11 @@ type AddSymbol = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_void)
 type Relocate = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
 type GetSymbol = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
 type AddLibrary = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
+type AddFile = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type ErrorFunc = unsafe extern "C" fn(*mut c_void, *const c_char);
 type SetErrorFunc = unsafe extern "C" fn(*mut c_void, *mut c_void, ErrorFunc);
 
-struct Lib { new: New, delete: Delete, set_lib_path: SetPath, set_options: SetOptions, set_output: SetOutput, compile: Compile, add_symbol: AddSymbol, relocate: Relocate, get_symbol: GetSymbol, set_error: SetErrorFunc, add_library: AddLibrary, dir: String }
+struct Lib { new: New, delete: Delete, set_lib_path: SetPath, set_options: SetOptions, set_output: SetOutput, compile: Compile, add_symbol: AddSymbol, relocate: Relocate, get_symbol: GetSymbol, set_error: SetErrorFunc, add_library: AddLibrary, add_file: AddFile, dir: String }
 unsafe impl Send for Lib {}
 unsafe impl Sync for Lib {}
 
@@ -59,7 +60,7 @@ fn lib() -> Result<&'static Lib, String> {
             new: std::mem::transmute(f("tcc_new")?), delete: std::mem::transmute(f("tcc_delete")?), set_lib_path: std::mem::transmute(f("tcc_set_lib_path")?),
             set_options: std::mem::transmute(f("tcc_set_options")?), set_output: std::mem::transmute(f("tcc_set_output_type")?), compile: std::mem::transmute(f("tcc_compile_string")?),
             add_symbol: std::mem::transmute(f("tcc_add_symbol")?), relocate: std::mem::transmute(f("tcc_relocate")?), get_symbol: std::mem::transmute(f("tcc_get_symbol")?),
-            set_error: std::mem::transmute(f("tcc_set_error_func")?), add_library: std::mem::transmute(f("tcc_add_library")?), dir: d,
+            set_error: std::mem::transmute(f("tcc_set_error_func")?), add_library: std::mem::transmute(f("tcc_add_library")?), add_file: std::mem::transmute(f("tcc_add_file")?), dir: d,
         })
     }).as_ref().map_err(|e| e.clone())
 }
@@ -137,6 +138,12 @@ impl Unit {
                 let c = CString::new(*src).map_err(|_| "source contains a NUL byte".to_string())?;
                 if (l.compile)(s, c.as_ptr()) != 0 { return Err(format!("C compile failed:\n{}", u.errors)); }
             }
+            // a program with tables: SQLite, compiled by TinyCC once (src/build.rs), added as its object
+            if srcs.iter().any(|x| x.contains("#define MITO_USES_SQLITE")) {
+                let o = crate::build::sqlite_object(true, "")?;
+                let c = CString::new(o.to_string_lossy().into_owned()).unwrap();
+                if (l.add_file)(s, c.as_ptr()) != 0 { return Err(format!("tcc: could not add {}:\n{}", o.display(), u.errors)); }
+            }
             if (l.relocate)(s, 1 as *mut c_void) < 0 { return Err(format!("C relocation failed:\n{}", u.errors)); } // TCC_RELOCATE_AUTO
             Ok(u)
         }
@@ -151,6 +158,7 @@ impl Unit {
         let lib = dir.join(format!("{}.{}", stem, std::env::consts::DLL_EXTENSION));
         let mut cs = Vec::new();
         for (k, src) in srcs.iter().enumerate() { let c = dir.join(format!("{}-{}.c", stem, k)); std::fs::write(&c, src).map_err(|e| e.to_string())?; cs.push(c); }
+        if srcs.iter().any(|x| x.contains("#define MITO_USES_SQLITE")) { cs.push(crate::build::sqlite_object(false, "-O2")?); }
         let out = std::process::Command::new(cc).args(["-O1", "-shared", "-fPIC", "-fno-strict-aliasing", "-w", "-o"]).arg(&lib).args(&cs).args(LIBS.iter().map(|l| format!("-l{}", l)))
             .output().map_err(|e| e.to_string())?;
         if !out.status.success() { return Err(format!("C compile failed:

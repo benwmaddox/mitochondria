@@ -564,24 +564,35 @@ impl Program {
     }
     /// The SQL that creates the tables (if absent) and their indexes: STRICT tables, so SQLite checks each value's type; a row id that is
     /// never reused (AUTOINCREMENT); a nested table's rows deleted with the row that owns them.
-    pub fn schema_sql(&self) -> String {
+    pub fn schema_sql(&self) -> String { (0..self.tables.len()).map(|t| format!("{}\n{}", self.table_create_sql(t), self.table_index_sql(t))).collect() }
+    /// One table's CREATE TABLE.
+    pub fn table_create_sql(&self, t: usize) -> String {
+        let tb = &self.tables[t];
+        let mut o = format!("CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY AUTOINCREMENT", tb.sql);
+        if let Some(p) = tb.parent { o += &format!(", parent_id INTEGER NOT NULL REFERENCES {}(id) ON DELETE CASCADE", self.tables[p].sql); }
+        for c in &tb.cols { let (ty, def) = c.kind.sql(); o += &format!(", {} {} NOT NULL DEFAULT {}", sql_ident(&c.path), ty, def); }
+        o + ") STRICT;"
+    }
+    /// One table's indexes (one statement per line): by owner for a nested table, then the declared `index(...)` and `unique(...)`.
+    pub fn table_index_sql(&self, t: usize) -> String {
+        let tb = &self.tables[t];
+        let base = tb.sql.trim_matches('"');
+        let cols = |fs: &Vec<String>| fs.iter().map(|f| sql_ident(f)).collect::<Vec<_>>().join(", ");
         let mut o = String::new();
-        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-        for t in &self.tables {
-            o += &format!("CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY AUTOINCREMENT", t.sql);
-            if let Some(p) = t.parent { o += &format!(", parent_id INTEGER NOT NULL REFERENCES {}(id) ON DELETE CASCADE", self.tables[p].sql); }
-            for c in &t.cols {
-                let (ty, def) = match &c.kind { TKind::Int(_) => ("INTEGER", "0"), TKind::Real(_) => ("REAL", "0.0"), TKind::Text(..) => ("TEXT", "''"), TKind::Blob(..) => ("BLOB", "x''") };
-                o += &format!(", {} {} NOT NULL DEFAULT {}", q(&c.path), ty, def);
-            }
-            o += ") STRICT;\n";
-            let base = t.sql.trim_matches('"');
-            if t.parent.is_some() { o += &format!("CREATE INDEX IF NOT EXISTS {} ON {}(parent_id, id);\n", q(&format!("{} by parent", base)), t.sql); }
-            for (k, fs) in t.index.iter().enumerate() { o += &format!("CREATE INDEX IF NOT EXISTS {} ON {}({});\n", q(&format!("{} index {}", base, k)), t.sql, fs.iter().map(|f| q(f)).collect::<Vec<_>>().join(", ")); }
-            for (k, fs) in t.unique.iter().enumerate() { o += &format!("CREATE UNIQUE INDEX IF NOT EXISTS {} ON {}({});\n", q(&format!("{} unique {}", base, k)), t.sql, fs.iter().map(|f| q(f)).collect::<Vec<_>>().join(", ")); }
-        }
+        if tb.parent.is_some() { o += &format!("CREATE INDEX IF NOT EXISTS {} ON {}(parent_id, id);\n", sql_ident(&format!("{} by parent", base)), tb.sql); }
+        for (k, fs) in tb.index.iter().enumerate() { o += &format!("CREATE INDEX IF NOT EXISTS {} ON {}({});\n", sql_ident(&format!("{} index {}", base, k)), tb.sql, cols(fs)); }
+        for (k, fs) in tb.unique.iter().enumerate() { o += &format!("CREATE UNIQUE INDEX IF NOT EXISTS {} ON {}({});\n", sql_ident(&format!("{} unique {}", base, k)), tb.sql, cols(fs)); }
         o
     }
+}
+
+/// A name quoted for SQL ("a.b", a quote doubled).
+pub fn sql_ident(s: &str) -> String { format!("\"{}\"", s.replace('"', "\"\"")) }
+impl TKind {
+    /// SQLite's type for the column and the value a new row (or a column added later) starts with.
+    pub fn sql(&self) -> (&'static str, &'static str) { match self { TKind::Int(_) => ("INTEGER", "0"), TKind::Real(_) => ("REAL", "0.0"), TKind::Text(..) => ("TEXT", "''"), TKind::Blob(..) => ("BLOB", "x''") } }
+    /// The runtime's type code (0 INTEGER, 1 REAL, 2 TEXT, 3 BLOB).
+    pub fn code(&self) -> u32 { match self { TKind::Int(_) => 0, TKind::Real(_) => 1, TKind::Text(..) => 2, TKind::Blob(..) => 3 } }
 }
 
 fn contains_coll(p: &Program, t: &Ty) -> bool {

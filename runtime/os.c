@@ -36,6 +36,8 @@ int WriteFile(void *h, const void *b, u32 n, u32 *done, void *ov);
 void *CreateThread(void *attr, u64 stack, u32 (*fn)(void *), void *arg, u32 flags, u32 *id);
 u32 WaitForSingleObject(void *h, u32 ms);
 int CloseHandle(void *h);
+int CreateDirectoryA(const char *path, void *attr);
+u32 GetLastError(void);
 static void *os_reserve(u64 n) { return VirtualAlloc(0, n, 0x2000, 1); }                 /* MEM_RESERVE, PAGE_NOACCESS */
 static int os_commit(void *p, u64 n) { return VirtualAlloc(p, n, 0x1000, 4) != 0; }      /* MEM_COMMIT, PAGE_READWRITE */
 static void os_decommit(void *p, u64 n) { VirtualFree(p, n, 0x4000); }                   /* MEM_DECOMMIT */
@@ -46,6 +48,8 @@ static u64 os_ticks_ms(void) { return GetTickCount64(); }
 static u64 os_perf_ns(void) { i64 t = 0, f = 1; QueryPerformanceCounter(&t); QueryPerformanceFrequency(&f); return (u64)((double)t * 1e9 / (double)f); }
 static u64 os_random(void) { u64 v = 0; BCryptGenRandom(0, (u8 *)&v, 8, 2); return v; } /* BCRYPT_USE_SYSTEM_PREFERRED_RNG */
 static void os_err(const void *p, u32 n) { u32 done = 0; WriteFile(GetStdHandle((u32)-12), p, n, &done, 0); } /* STD_ERROR_HANDLE */
+/* make a directory (one level); 1 when it exists afterwards */
+static int os_mkdir(const char *path) { return CreateDirectoryA(path, 0) || GetLastError() == 183; } /* ERROR_ALREADY_EXISTS */
 
 /* threads: a record that lives as long as the thread (the caller's) */
 typedef struct { void *h; } OsThread;
@@ -135,6 +139,8 @@ i64 getrandom(void *b, u64 n, u32 flags);
 i64 write(int fd, const void *b, u64 n);
 i64 read(int fd, void *b, u64 n);
 int close(int fd);
+int mkdir(const char *path, u32 mode);
+int *__errno_location(void);
 #define OS_MAP (0x02 | 0x20) /* MAP_PRIVATE | MAP_ANONYMOUS */
 static void *os_reserve(u64 n) { void *p = mmap(0, n, 0, OS_MAP | 0x4000, -1, 0); return p == (void *)-1 ? 0 : p; } /* PROT_NONE, MAP_NORESERVE */
 static int os_commit(void *p, u64 n) { return mprotect(p, n, 3) == 0; }                                             /* PROT_READ | PROT_WRITE */
@@ -146,6 +152,7 @@ static u64 os_ticks_ms(void) { OsTime t; clock_gettime(1, &t); return (u64)t.sec
 static u64 os_perf_ns(void) { OsTime t; clock_gettime(1, &t); return (u64)t.sec * 1000000000ULL + (u64)t.nsec; }
 static u64 os_random(void) { u64 v = 0; while (getrandom(&v, 8, 0) != 8) {} return v; }
 static void os_err(const void *p, u32 n) { while (n) { i64 k = write(2, p, n); if (k <= 0) return; p = (const u8 *)p + k; n -= (u32)k; } }
+static int os_mkdir(const char *path) { return mkdir(path, 0755) == 0 || *__errno_location() == 17; } /* EEXIST */
 
 /* threads, locks and condition variables (pthreads; the types are opaque blocks of glibc's sizes) */
 typedef struct { u64 id; u32 (*fn)(void *); void *arg; } OsThread; /* lives as long as the thread: the thread reads fn and arg from it */

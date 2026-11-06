@@ -56,11 +56,15 @@ pub trait Backend {
     fn state(&self) -> Vec<String>;
     /// Pressure counters, as one log line.
     fn stats(&self) -> String;
+    /// Stop the program and start it again on the same data (`restart` in a case): working state starts empty, tables are kept.
+    fn restart(&mut self) -> String { "restart: not supported by this backend".into() }
 }
 
 /// The C runtime (runtime/mito.c) and the program's generated C compiled together, driven through `mito_*`: in memory
 /// by TinyCC, or by clang (-O2) into a DLL.
-pub struct CBackend { _code: Code, m: *mut std::ffi::c_void, f: CFns, pairs: Vec<MitoPair> }
+/// `data`: the folder of a program's tables (fresh for each backend of a case); None without tables.
+pub struct CBackend { _code: Code, m: *mut std::ffi::c_void, f: CFns, pairs: Vec<MitoPair>, start: unsafe extern "C" fn(u64, u64) -> *mut std::ffi::c_void,
+    open: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, *const u8, u64) -> i32, data_error: unsafe extern "C" fn(*mut std::ffi::c_void) -> *const u8, data: Option<std::path::PathBuf> }
 /// A header or forwarded field, as runtime/types.h declares it.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -83,6 +87,7 @@ pub fn clang_dll_units(srcs: &[&str], name: &str, extra: &[&str]) -> Result<*mut
     let dll = dir.join(format!("{}.{}", stem, std::env::consts::DLL_EXTENSION));
     let mut cs = Vec::new();
     for (k, src) in srcs.iter().enumerate() { let c = dir.join(format!("{}-{}.c", stem, k)); std::fs::write(&c, src).map_err(|e| e.to_string())?; cs.push(c); }
+    if srcs.iter().any(|x| x.contains("#define MITO_USES_SQLITE")) { cs.push(crate::build::sqlite_object(false, "-O2")?); } // SQLite, from its cache
     let out = std::process::Command::new(cc).args(["-O2", "-shared", "-fno-strict-aliasing", "-w"]).args(if cfg!(windows) { &[][..] } else { &["-fPIC"][..] }).args(extra).arg("-o").arg(&dll).args(&cs).args(if cfg!(windows) { &["-lkernel32"][..] } else { &[][..] }).args(crate::tcc::LIBS.iter().map(|l| format!("-l{}", l)))
         .output().map_err(|e| e.to_string())?;
     if !out.status.success() { return Err(format!("clang failed:\n{}", String::from_utf8_lossy(&out.stderr))); }
@@ -132,8 +137,27 @@ impl CBackend {
             let m = start(1 << 30, 0x1234_5678_9abc_def0);
             assert!(!m.is_null(), "{}: mito_start failed", case.name);
             (f.set_clock)(m, 1000, 1);
-            CBackend { _code: code, m, f, pairs: Vec::with_capacity(64) }
+            let has: unsafe extern "C" fn() -> i32 = std::mem::transmute(sym("mito_has_tables"));
+            static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let data = if has() != 0 {
+                let d = std::env::temp_dir().join(format!("mito-case-{}-{}-{}", case.name, std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+                let _ = std::fs::remove_dir_all(&d);
+                Some(d)
+            } else { None };
+            let (open, data_error) = (std::mem::transmute(sym("mito_open_data")), std::mem::transmute(sym("mito_data_error")));
+            let mut be = CBackend { _code: code, m, f, pairs: Vec::with_capacity(64), start, open, data_error, data };
+            if let Err(e) = be.open_data() { panic!("{}: {}", case.name, e); }
+            be
         }
+    }
+    /// Open the tables in the backend's folder (a program without tables has none).
+    fn open_data(&mut self) -> Result<(), String> {
+        let Some(d) = &self.data else { return Ok(()) };
+        let dir = format!("{}\0", d.display());
+        unsafe {
+            if (self.open)(self.m, dir.as_ptr(), "data.db\0".as_ptr(), 16) == 0 { return Err(std::ffi::CStr::from_ptr((self.data_error)(self.m) as *const std::ffi::c_char).to_string_lossy().into_owned()); }
+        }
+        Ok(())
     }
     fn call(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> i32 {
         self.pairs.clear();
@@ -146,7 +170,7 @@ impl CBackend {
         String::from_utf8_lossy(&b[..n]).into_owned()
     }
 }
-impl Drop for CBackend { fn drop(&mut self) { unsafe { (self.f.stop)(self.m) } } }
+impl Drop for CBackend { fn drop(&mut self) { unsafe { (self.f.stop)(self.m) } if let Some(d) = &self.data { let _ = std::fs::remove_dir_all(d); } } }
 impl Backend for CBackend {
     fn handle(&mut self, m: &str, t: &str, h: &[(String, String)], b: &str) -> (u16, String) {
         let code = self.call(m, t, h, b);
@@ -163,6 +187,14 @@ impl Backend for CBackend {
     fn set_marks(&mut self, soft: usize, hard: usize) { unsafe { (self.f.set_marks)(self.m, soft as u64, hard as u64) } }
     fn state(&self) -> Vec<String> { self.text(self.f.state).lines().map(str::to_string).collect() }
     fn stats(&self) -> String { self.text(self.f.stats) }
+    fn restart(&mut self) -> String {
+        unsafe {
+            (self.f.stop)(self.m);
+            self.m = (self.start)(1 << 30, 0x1234_5678_9abc_def0);
+            (self.f.set_clock)(self.m, 1000, 1);
+        }
+        match self.open_data() { Ok(()) => "restart".into(), Err(e) => format!("restart refused: {}", e) }
+    }
 }
 
 /// A system of worker threads in C (runtime/system.c with each kind's program), built by TinyCC or clang.
@@ -227,6 +259,7 @@ pub fn run(case: &Case, be: &mut dyn Backend) -> Vec<String> {
         if let Some(t) = line.strip_prefix("clock ") { be.set_clock(t.trim().parse().unwrap()); continue; }
         if let Some(t) = line.strip_prefix("marks ") { let (a, b) = t.trim().split_once(' ').unwrap(); be.set_marks(a.parse().unwrap(), b.parse().unwrap()); continue; }
         if line == "stats" { log.push(be.stats()); continue; }
+        if line == "restart" { log.push(be.restart()); continue; }
         let (times, line) = match line.strip_prefix('*') { Some(r) => { let (n, rest) = r.split_once(' ').unwrap(); (n.parse::<usize>().unwrap(), rest.to_string()) } None => (1, line) };
         let (line, capture) = match line.rsplit_once(" => ") { Some((l, n)) => (l.to_string(), Some(n.trim().to_string())), None => (line, None) };
         let (m, rest) = line.split_once(' ').unwrap();

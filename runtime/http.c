@@ -8,7 +8,7 @@
    ones (poll) and hands a connection back to the threads when its next request arrives; an idle connection is closed
    after 10 s. One program's handler runs for one request at a time (a lock); a system has its own workers.
    Sockets, threads, locks and timers are runtime/os.c's (Windows and Linux). Flags: --port N, --conns N (a system's connection threads), --budget MB, --soft MB,
-   --hard MB (one program's memory), and for tests --seed N and --clock MS. */
+   --hard MB (one program's memory), --data DIR and --db-memory MB (a program's tables, in SQLite), and for tests --seed N and --clock MS. */
 
 static int g_timing; /* --timing: every answer carries X-Handler-Ns, the time the handler took (for benchmarks; off, the answers are byte for byte as recorded) */
 
@@ -20,8 +20,14 @@ void mito_set_marks(void *m, u64 soft, u64 hard);
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 const char *mito_response_head(void *m, u32 *len);
+int mito_open_data(void *m, const char *dir, const char *file, u64 pool_mb);
+const char *mito_data_error(void *m);
+int mito_has_tables(void);
+void mito_stop(void *m);
 #else
 void *mito_system_start(u64 seed, int seeded);
+void mito_system_set_data(const char *dir, u64 pool_mb);
+const char *mito_system_data_error(void);
 void mito_system_set_clock(void *s, i64 ms, int fixed);
 int mito_system_request(void *s, const char *m, u32 mn, const char *t, u32 tn, const MitoPair *h, u32 nh, const char *body, u32 bn, u32 timeout_ms, char *out, u32 cap, u32 *outlen, char *head, u32 *headlen);
 #endif
@@ -358,6 +364,11 @@ static int flag(int argc, char **argv, const char *name, u64 *out) {
     }
     return 0;
 }
+/* a flag's text value (`--data ./state`), or `def` */
+static const char *sflag(int argc, char **argv, const char *name, const char *def) {
+    for (int i = 1; i + 1 < argc; i++) { const char *a = argv[i]; u32 k = 0; while (name[k] && a[k] == name[k]) k++; if (!name[k] && !a[k]) return argv[i + 1]; }
+    return def;
+}
 int main(int argc, char **argv) {
     u64 port = 8080, conns = 16, budget = 1024, soft = 0, hard = 0, seed = 0, clock = 0, loop_budget = 0;
     g_timing = has_flag(argc, argv, "--timing");
@@ -373,13 +384,22 @@ int main(int argc, char **argv) {
     if (marks) mito_set_marks(app, soft << 20, hard << 20);
     if (clocked) mito_set_clock(app, (i64)clock, 1);
     if (flag(argc, argv, "--loop-budget", &loop_budget)) mito_set_loop_budget(app, (i64)loop_budget);
+    /* the program's tables: in --data (default ./data), data.db, SQLite's memory --db-memory MB (default 64); a database that does not fit
+       the program stops the server here, saying why */
+    if (mito_has_tables()) {
+        u64 dbmem = 64; flag(argc, argv, "--db-memory", &dbmem);
+        const char *dir = sflag(argc, argv, "--data", "data");
+        if (!mito_open_data(app, dir, "data.db", dbmem)) { printf("error: %s\n", mito_data_error(app)); mito_stop(app); return 1; }
+        printf("tables in %s/data.db\n", dir);
+    }
     u32 nt = conns > 256 ? 256 : conns < 1 ? 1 : (u32)conns;
     printf("listening on http://127.0.0.1:%u (one request at a time in the program, %u connection threads; Ctrl-C to stop)\n", (u32)port, nt); fflush(0);
     if (!start_threads(app, l, nt)) return 1;
 #else
     (void)marks; (void)budget;
+    { u64 dbmem = 64; flag(argc, argv, "--db-memory", &dbmem); mito_system_set_data(sflag(argc, argv, "--data", "data"), dbmem); }
     void *app = mito_system_start(seed, seeded);
-    if (!app) { printf("error: the system did not start\n"); return 1; }
+    if (!app) { const char *e = mito_system_data_error(); printf("error: %s\n", e[0] ? e : "the system did not start"); return 1; }
     if (clocked) mito_system_set_clock(app, (i64)clock, 1);
     printf("listening on http://127.0.0.1:%u (%u connection threads)\n", (u32)port, (u32)conns); fflush(0);
     u32 nt = conns > 256 ? 256 : conns < 1 ? 1 : (u32)conns;

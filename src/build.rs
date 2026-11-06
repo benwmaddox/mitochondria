@@ -154,4 +154,51 @@ int main(int argc, char **argv) {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A program's tables across builds, through the real server: created, then migrated by name (a column added, one dropped); a
+    /// column whose type changed, or a row written from outside past a declared limit, stops the server at start, saying why.
+    #[test]
+    fn tables_migrate_between_builds() {
+        let dir = std::env::temp_dir().join(format!("mito-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("data");
+        let build = |n: &str, todo: &str| -> std::path::PathBuf {
+            let src = format!("struct Todo {{ {} }}\nstruct Board {{ secret: i64; todos: table<Todo>; }}\nstruct App {{ boards: table<Board>; }}\nstate app: App;\n@get(\"/\") fn home() -> Response<{{}}> {{ return ok({{}}); }}\n", todo);
+            let (st, api) = crate::source::load(&src).unwrap();
+            let prog = crate::layout::Program::parse(&st).unwrap();
+            let mut api = crate::lang::parse(&api).unwrap();
+            crate::lang::bind_with(&mut api, &|g| prog.global(g), &prog.enum_table()).unwrap();
+            let exe = dir.join(format!("{}{}", n, std::env::consts::EXE_SUFFIX));
+            // clang: Windows Defender's machine-learning heuristics now and then take a small unsigned TinyCC executable for malware
+            // (Sabsik/Wacatac "!ml"), which would make this test about Defender instead of about migration
+            super::exe(&crate::cgen::program_exe(&prog, &api, None).unwrap(), &exe, false, &["-O0"]).unwrap();
+            exe
+        };
+        // a server that opened its tables keeps running: read its first line, then stop it; one that refused exits with the reason
+        let run = |exe: &std::path::Path| -> String {
+            use std::io::BufRead;
+            let mut c = std::process::Command::new(exe).args(["--port", "18131", "--data"]).arg(&data).stdout(std::process::Stdio::piped()).spawn().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(c.stdout.take().unwrap()).read_line(&mut line).unwrap();
+            let _ = c.kill(); let _ = c.wait();
+            line.trim().to_string()
+        };
+        assert!(run(&build("v1", "title: utf8<1000>; done: bool;")).starts_with("tables in"));
+        assert!(run(&build("v2", "title: utf8<1000>; done: bool; due: i64;")).starts_with("tables in"));
+        // a row from outside: a title of 10 bytes
+        let insert = format!("#define MITO_USES_SQLITE\n{}\n{}", super::SQLITE_H, r#"
+static unsigned char pool[4 << 20];
+int main(int argc, char **argv) { sqlite3 *db; sqlite3_config(SQLITE_CONFIG_HEAP, pool, (int)sizeof pool, 64);
+    if (sqlite3_open(argv[1], &db) != SQLITE_OK) return 1;
+    return sqlite3_exec(db, "INSERT INTO boards(secret) VALUES (1); INSERT INTO \"boards.todos\"(parent_id, title) VALUES (1, 'ten bytes!');", 0, 0, 0) == SQLITE_OK ? 0 : 2; }
+"#);
+        let ins = dir.join(format!("insert{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&[insert], &ins, false, &["-O0"]).unwrap();
+        assert!(std::process::Command::new(&ins).arg(data.join("data.db")).status().unwrap().success());
+        assert_eq!(run(&build("v3", "title: utf8<1000>; done: f64; due: i64;")), "error: the database does not fit the program: column \"boards.todos\".done is INTEGER in the database, REAL in the program");
+        assert_eq!(run(&build("v4", "title: utf8<5>; done: bool; due: i64;")), "error: the database does not fit the program: 1 row of \"boards.todos\" holds a title longer than 5 bytes");
+        assert!(run(&build("v5", "title: utf8<10>; done: bool;")).starts_with("tables in")); // fits again; `due` dropped
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

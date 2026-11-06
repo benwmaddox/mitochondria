@@ -566,6 +566,8 @@ pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
 pub const RUNTIME: &str = include_str!("../runtime/mito.c");
 /// The operating system's part (runtime/os.c: Windows and Linux), first in every translation unit after the prelude's types.
 pub const OS: &str = include_str!("../runtime/os.c");
+/// Stored data (runtime/store.c): tables in SQLite, for a program that has one.
+pub const STORE: &str = include_str!("../runtime/store.c");
 /// The runtime's types for the layout tables, ahead of them.
 pub const RUNTIME_TYPES: &str = include_str!("../runtime/types.h");
 
@@ -610,6 +612,12 @@ fn program_c_full(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefi
 #define MITO_LITS_LEN {}
 static const unsigned char mito_lits[] = {{ {} }};
 ", g.lits.len(), if g.lits.is_empty() { "0".to_string() } else { g.lits.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",") });
+    if !prog.tables.is_empty() {
+        // tables: SQLite linked in (the build sees this line), the store runtime, and what the program declares of each table
+        o += "#define MITO_USES_SQLITE 1\n";
+        o += STORE;
+        o += &store_tables_c(prog);
+    }
     o += RUNTIME;
     o += &direct(&g.src[PRELUDE.len()..]);
     Ok(o)
@@ -640,11 +648,11 @@ pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
     let mut table = String::from("/* ---- the system's worker kinds (generated) ---- */\ntypedef unsigned char u8; typedef unsigned short u16; typedef unsigned int u32; typedef unsigned long long u64; typedef long long i64;\n");
     table += OS;
     table += "typedef struct { const char *k; u32 kn; const char *v; u32 vn; } MitoPair;\n";
-    table += "typedef struct { const char *name; u32 count, mailbox, slot; u64 soft, hard; int marks;\n    void *(*start)(u64, u64); void (*stop)(void *); void (*set_clock)(void *, i64, int); void (*set_marks)(void *, u64, u64);\n    int (*handle)(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);\n    const char *(*response)(void *, u32 *); void (*set_system)(void *, u32, const char *const *, const u32 *, u32, u32);\n    u32 (*forward_to)(void *, u32 *, i64 *, MitoPair *, u32); void (*finish_forward)(void *, int); int (*crashed)(void *);\n    const char *(*response_head)(void *, u32 *); } SysKind;\n";
-    let fns = ["start", "stop", "set_clock", "set_marks", "handle", "response", "set_system", "forward_to", "finish_forward", "crashed", "response_head"];
+    table += "typedef struct { const char *name; u32 count, mailbox, slot; u64 soft, hard; int marks;\n    void *(*start)(u64, u64); void (*stop)(void *); void (*set_clock)(void *, i64, int); void (*set_marks)(void *, u64, u64);\n    int (*handle)(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);\n    const char *(*response)(void *, u32 *); void (*set_system)(void *, u32, const char *const *, const u32 *, u32, u32);\n    u32 (*forward_to)(void *, u32 *, i64 *, MitoPair *, u32); void (*finish_forward)(void *, int); int (*crashed)(void *);\n    const char *(*response_head)(void *, u32 *); int (*has_tables)(void); int (*open_data)(void *, const char *, const char *, u64); const char *(*data_error)(void *); } SysKind;\n";
+    let fns = ["start", "stop", "set_clock", "set_marks", "handle", "response", "set_system", "forward_to", "finish_forward", "crashed", "response_head", "has_tables", "open_data", "data_error"];
     let sigs = ["void *{}start(u64, u64);", "void {}stop(void *);", "void {}set_clock(void *, i64, int);", "void {}set_marks(void *, u64, u64);",
         "int {}handle(void *, const char *, u32, const char *, u32, const MitoPair *, u32, const MitoPair *, u32, const char *, u32);", "const char *{}response(void *, u32 *);",
-        "void {}set_system(void *, u32, const char *const *, const u32 *, u32, u32);", "u32 {}forward_to(void *, u32 *, i64 *, MitoPair *, u32);", "void {}finish_forward(void *, int);", "int {}crashed(void *);", "const char *{}response_head(void *, u32 *);"];
+        "void {}set_system(void *, u32, const char *const *, const u32 *, u32, u32);", "u32 {}forward_to(void *, u32 *, i64 *, MitoPair *, u32);", "void {}finish_forward(void *, int);", "int {}crashed(void *);", "const char *{}response_head(void *, u32 *);", "int {}has_tables(void);", "int {}open_data(void *, const char *, const char *, u64);", "const char *{}data_error(void *);"];
     let mut rows = Vec::new();
     let mut total = 0usize;
     for (i, k) in spec.kinds.iter().enumerate() {
@@ -657,7 +665,7 @@ pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
         for s in &sigs { table += &s.replace("{}", &pre); table.push('\n'); }
         let f: Vec<String> = fns.iter().map(|f| format!("{}{}", pre, f)).collect();
         rows.push(format!("    {{ {}, {}, {}, {}, {}ULL, {}ULL, {}, {} }}", c_lit(k.name.as_bytes()), k.count, k.mailbox, k.slot, k.soft.unwrap_or(0), k.hard.unwrap_or(usize::MAX), k.soft.is_some() as i32,
-            f.iter().zip(["(void *(*)(u64, u64))", "", "", "", "", "", "", "", "", "", ""]).map(|(n, c)| format!("{}{}", c, n)).collect::<Vec<_>>().join(", ")));
+            f.iter().zip(["(void *(*)(u64, u64))", "", "", "", "", "", "", "", "", "", "", "", "", ""]).map(|(n, c)| format!("{}{}", c, n)).collect::<Vec<_>>().join(", ")));
     }
     const MB: usize = 1 << 20;
     if total > spec.budget { return Err(format!("over budget: {} workers need {} MB, budget is {} MB", spec.kinds.iter().map(|k| k.count).sum::<usize>(), total / MB, spec.budget / MB)); }
@@ -745,6 +753,26 @@ pub fn layout_table(prog: &Program) -> String {
         o += &format!("   table {} {} (SQLite {}){}\n", k, t.name, t.sql, t.parent.map_or(String::new(), |p| format!(", each row owned by a row of table {}", p)));
     }
     if !prog.tables.is_empty() { o += "   Schema:\n"; for line in prog.schema_sql().lines() { o += &format!("     {}\n", line); } }
+    o
+}
+
+/// The program's tables for the store runtime: each column's name, type and limits, each table's CREATE TABLE and indexes.
+fn store_tables_c(prog: &Program) -> String {
+    let mut o = String::from("/* the program's tables (see the layout description at the top) */\n");
+    for (t, tb) in prog.tables.iter().enumerate() {
+        o += &format!("static const StoreCol mito_tcols{}[] = {{", t);
+        for c in &tb.cols {
+            let (has, lo, hi) = match c.range { Some((a, b)) if matches!(c.kind, crate::layout::TKind::Int(_)) => (1, a, b), _ => (0, 0, 0) };
+            let max = match &c.kind { crate::layout::TKind::Text(m, _) => *m, crate::layout::TKind::Blob(sc, n) => sc.size() * n, _ => 0 };
+            o += &format!(" {{ {}, {}, {}, {}, {}, {} }},", c_lit(c.path.as_bytes()), c.kind.code(), has, i64_lit(lo), i64_lit(hi), max);
+        }
+        o += " { 0, 0, 0, 0, 0, 0 } };\n";
+    }
+    o += "static const StoreTable mito_tables[] = {\n";
+    for (t, tb) in prog.tables.iter().enumerate() {
+        o += &format!("    {{ {}, {}, {}, {}, mito_tcols{}, {} }},\n", c_lit(tb.sql.as_bytes()), c_lit(prog.table_create_sql(t).as_bytes()), tb.parent.map_or(-1, |p| p as i64), tb.cols.len(), t, c_lit(prog.table_index_sql(t).as_bytes()));
+    }
+    o += &format!("}};\n#define MITO_NTABLES {}\n", prog.tables.len());
     o
 }
 

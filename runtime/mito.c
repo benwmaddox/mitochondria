@@ -597,6 +597,9 @@ typedef struct Mito {
     int ekind; int ecode; Area emsg; u8 ebuf[4096];
     /* the answer's head: its content type (0 JSON, 1 HTML, 2 plain text) and header lines after it (`Location: ...\r\n`) */
     u32 ctype; Area head; u8 hbuf[4096]; u8 hout[4096 + 64];
+#ifdef MITO_USES_SQLITE
+    Store store; /* the program's tables, in SQLite (runtime/store.c) */
+#endif
     int html_err; /* the endpoint answers HTML: an error is a small page, not JSON */
     Grow frees; /* (collection, item) pairs, u32 each */
     Grow sel;   /* items collected by loops (u32 each) */
@@ -1766,7 +1769,11 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     }
     return m;
 }
-MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return; os_release(m->mem.base, m->mem.reserved); os_release(m->mem.committed, m->small); os_release(m->mem.dirty, up(m->mem.npages * (PAGE / 64 / 8), PAGE)); os_release(m->mem.jb.p, m->mem.jb.reserved); os_release(m->frees.p, m->frees.reserved); os_release(m->sel.p, m->sel.reserved); os_release(m->areas, TEXT_CAP + RESPONSE_CAP); os_release(m, sizeof(Mito)); }
+MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return;
+#ifdef MITO_USES_SQLITE
+    store_close(&m->store);
+#endif
+    os_release(m->mem.base, m->mem.reserved); os_release(m->mem.committed, m->small); os_release(m->mem.dirty, up(m->mem.npages * (PAGE / 64 / 8), PAGE)); os_release(m->mem.jb.p, m->mem.jb.reserved); os_release(m->frees.p, m->frees.reserved); os_release(m->sel.p, m->sel.reserved); os_release(m->areas, TEXT_CAP + RESPONSE_CAP); os_release(m, sizeof(Mito)); }
 MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n; }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
 MITO_API void MITO(set_marks)(void *mp_, u64 soft, u64 hard) { Mito *m = (Mito *)mp_;
@@ -1855,6 +1862,9 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     m->frees.len = 0; m->sel.len = 0;
     if (mito_prog.req_size) memset(m->mem.base + mito_prog.req_off, 0, mito_prog.req_size); /* the request struct starts empty */
     Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p, 0, m->loop_budget };
+#ifdef MITO_USES_SQLITE
+    if (!store_begin(&m->store)) { rollback(&m->mem); out_err_c(m, "the database could not start a transaction"); return 500; }
+#endif
     int res = mito_eps[ei](&ctx);
     if (res < 0 && m->ekind == E_FORWARD) { m->out.len = 0; m->pending = 1; return 0; } /* committed or rolled back by MITO(finish_forward) */
     int code, ok;
@@ -1872,6 +1882,11 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
         /* the source line of the statement that failed, when the compiled code knew it */
         if (ctx.at && m->out.len && m->out.p[m->out.len - 1] == '}') { m->out.len--; a_str(&m->out, ",\"line\":"); a_u64(&m->out, ctx.at); a_str(&m->out, "}"); }
     }
+#ifdef MITO_USES_SQLITE
+    /* the tables first: a request whose commit fails (a full disk) fails, and the working state is rolled back with it */
+    if (ok && !store_commit(&m->store)) { ok = 0; m->ctype = 0; m->head.len = 0; out_err(m, (const u8 *)m->store.err, c_len(m->store.err)); code = 500; }
+    else if (!ok) store_rollback(&m->store);
+#endif
     if (ok) { u32 *f = (u32 *)m->frees.p; for (u64 i = 0; i < m->frees.len; i += 2) free_item(&m->mem, f[i], f[i + 1]); commit_changes(&m->mem); }
     else rollback(&m->mem);
     if (m->pr.on) relieve(&m->mem, &m->pr);
@@ -1902,6 +1917,29 @@ MITO_API int MITO(run_test)(void *mp_, u32 k, char *msg, u32 cap, u32 *line) { M
 MITO_API u32 MITO(test_count)(void) { return MITO_NTESTS; }
 MITO_API const char *MITO(test_name)(u32 k) { return mito_test_names[k]; }
 #endif
+/* Open the program's tables in `dir` (the database file `file`, SQLite's memory pool `pool_mb` MB): 1, or 0 with MITO(data_error) saying why.
+   A program without tables has nothing to open. */
+MITO_API int MITO(open_data)(void *mp_, const char *dir, const char *file, u64 pool_mb) {
+#ifdef MITO_USES_SQLITE
+    Mito *m = (Mito *)mp_; return store_open(&m->store, mito_tables, MITO_NTABLES, dir, file, pool_mb);
+#else
+    (void)mp_; (void)dir; (void)file; (void)pool_mb; return 1;
+#endif
+}
+MITO_API const char *MITO(data_error)(void *mp_) {
+#ifdef MITO_USES_SQLITE
+    return ((Mito *)mp_)->store.err;
+#else
+    (void)mp_; return "";
+#endif
+}
+MITO_API int MITO(has_tables)(void) {
+#ifdef MITO_USES_SQLITE
+    return 1;
+#else
+    return 0;
+#endif
+}
 MITO_API const char *MITO(response)(void *mp_, u32 *len) { Mito *m = (Mito *)mp_; *len = m->out.len; return (const char *)m->out.p; }
 /* The answer's header lines, each ending in CRLF: its content type, then any the program set (Location). */
 static const char *const ctypes[] = { "application/json", "text/html; charset=utf-8", "text/plain; charset=utf-8", "text/css; charset=utf-8", "text/javascript; charset=utf-8", "image/svg+xml" };

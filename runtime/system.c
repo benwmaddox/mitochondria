@@ -93,12 +93,25 @@ static void reply_put(Sys *s, u32 id, u32 code, const char *head, u32 hn, const 
 static void reply_c(Sys *s, u32 id, u32 code, const char *msg) { u32 n = 0; while (msg[n]) n++; reply_put(s, id, code, json_head, sizeof json_head - 1, msg, n); }
 
 /* ---- a worker ---- */
+/* where workers keep their tables (mito_system_set_data): one database per worker, <dir>/<kind>-<index>.db */
+static const char *sys_data_dir = "data"; static u64 sys_db_mem = 64; static char sys_data_err[1200];
+MITO_API void mito_system_set_data(const char *dir, u64 pool_mb) { sys_data_dir = dir; sys_db_mem = pool_mb; }
+MITO_API const char *mito_system_data_error(void) { return sys_data_err; }
 static void *make(Worker *w) {
     const SysKind *k = &SYS_KINDS[w->kind];
     u64 seed = w->sys->seeded ? (w->sys->seed ^ ((u64)w->me + 1) * 0x9E3779B97F4A7C15ULL) | 1 : 0; /* as the Rust system, per worker */
     void *p = k->start(~0ULL, seed);
     if (!p) return 0;
     k->set_system(p, SYS_NKINDS, w->sys->names, w->sys->counts, w->kind, w->index);
+    if (k->has_tables()) {
+        char file[160]; u32 n = 0; const char *nm = k->name; while (*nm && n < 140) file[n++] = *nm++;
+        file[n++] = '-'; { char d[12]; int j = 0; u32 v = w->index; do { d[j++] = (char)('0' + v % 10); v /= 10; } while (v); while (j) file[n++] = d[--j]; }
+        const char *ext = ".db"; while (*ext) file[n++] = *ext++; file[n] = 0;
+        if (!k->open_data(p, sys_data_dir, file, sys_db_mem)) {
+            const char *e = k->data_error(p); u32 i = 0; while (e[i] && i + 1 < sizeof sys_data_err) { sys_data_err[i] = e[i]; i++; } sys_data_err[i] = 0;
+            k->stop(p); return 0;
+        }
+    }
     if (k->marks) k->set_marks(p, k->soft, k->hard);
     return p;
 }

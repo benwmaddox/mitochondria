@@ -20,7 +20,9 @@
 pub struct Static { pub prefix: String, pub dir: String, pub headers: Vec<(String, String)>, pub files: Vec<(String, String, Vec<u8>)> }
 /// `writes`: lines added as they are to the answers of requests that change state (other than GET and HEAD): what a proxy in front adds
 /// to answers it does not cache (Thruster's second `Vary: Accept-Encoding`).
-pub struct Web { pub headers: Option<Vec<(String, String)>>, pub writes: Vec<(String, String)>, pub etag: Option<String>, pub gzip: bool, pub statics: Vec<Static> }
+/// `assets`: from `manifest "public/assets/.manifest.json" at "/assets/";`, each asset's name and its digested URL (Propshaft's
+/// manifest: `{"name": {"digested_path": ...}}`), for `asset("name")` in the code.
+pub struct Web { pub headers: Option<Vec<(String, String)>>, pub writes: Vec<(String, String)>, pub assets: Vec<(String, String)>, pub etag: Option<String>, pub gzip: bool, pub statics: Vec<Static> }
 
 /// Content types by extension: the usual ones; a `types { }` block adds or replaces them.
 const TYPES: &[(&str, &str)] = &[
@@ -157,13 +159,21 @@ pub fn parse(text: &str, line0: usize, dir: &std::path::Path) -> Result<Web, Str
     let mut p = P { t: lex(text, line0)?, i: 0 };
     match p.next() { Some(T::Word(w)) if w == "web" => {} _ => return Err(format!("line {}: expected `web {{`", line0)) }
     p.eat('{')?;
-    let mut w = Web { headers: None, writes: Vec::new(), etag: None, gzip: false, statics: Vec::new() };
+    let mut w = Web { headers: None, writes: Vec::new(), assets: Vec::new(), etag: None, gzip: false, statics: Vec::new() };
     while !p.at_sym('}') {
         let l = p.line();
         match p.next() {
             Some(T::Word(k)) if k == "headers" => {
                 if w.headers.is_some() { return Err(format!("line {}: one `headers` block", l)); }
                 p.eat('{')?; w.headers = Some(p.pairs(None)?);
+            }
+            Some(T::Word(k)) if k == "manifest" => {
+                let file = p.str("the manifest's path")?;
+                match p.next() { Some(T::Word(a)) if a == "at" => {} _ => return Err(format!("line {}: expected `manifest \"path\" at \"/assets/\";`", l)) }
+                let prefix = p.str("the URL prefix the assets are served at")?;
+                p.eat(';')?;
+                let text = std::fs::read_to_string(dir.join(&file)).map_err(|e| format!("line {}: manifest \"{}\": {}", l, file, e))?;
+                w.assets = propshaft_manifest(&text).map_err(|e| format!("line {}: manifest \"{}\": {}", l, file, e))?.into_iter().map(|(n, d)| (n, format!("{}{}", prefix, d))).collect();
             }
             Some(T::Word(k)) if k == "writes" => {
                 if !w.writes.is_empty() { return Err(format!("line {}: one `writes` block", l)); }
@@ -197,6 +207,34 @@ pub fn parse(text: &str, line0: usize, dir: &std::path::Path) -> Result<Web, Str
     all.sort();
     if let Some(d) = all.windows(2).find(|x| x[0] == x[1]) { return Err(format!("line {}: two static directories hold {}", line0, d[0])); }
     Ok(w)
+}
+
+/// Propshaft's `.manifest.json`: each logical name and its `digested_path` (a flat object of objects; nothing else is read).
+fn propshaft_manifest(text: &str) -> Result<Vec<(String, String)>, String> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let s = |i: &mut usize| -> Result<String, String> {
+        if b.get(*i) != Some(&b'"') { return Err(format!("expected a string at byte {}", *i)); }
+        *i += 1; let st = *i;
+        while *i < b.len() && b[*i] != b'"' { if b[*i] == b'\\' { *i += 1; } *i += 1; }
+        let v = text[st..*i].replace("\\/", "/"); *i += 1; Ok(v)
+    };
+    let ws = |i: &mut usize| { while *i < b.len() && b[*i].is_ascii_whitespace() { *i += 1; } };
+    ws(&mut i); if b.get(i) != Some(&b'{') { return Err("not a JSON object".into()); } i += 1;
+    loop {
+        ws(&mut i);
+        if b.get(i) == Some(&b'}') { break; }
+        let name = s(&mut i)?; ws(&mut i); if b.get(i) != Some(&b':') { return Err("expected `:`".into()); } i += 1; ws(&mut i);
+        if b.get(i) != Some(&b'{') { return Err(format!("{}: expected an object", name)); }
+        let end = text[i..].find('}').map(|k| i + k).ok_or("unclosed object")?;
+        let inner = &text[i..end];
+        let digested = inner.find("\"digested_path\"").and_then(|k| { let r = &inner[k + 15..]; let q = r.find('"')?; let r2 = &r[q + 1..]; Some(r2[..r2.find('"')?].to_string()) }).ok_or(format!("{}: no digested_path", name))?;
+        out.push((name, digested));
+        i = end + 1; ws(&mut i);
+        if b.get(i) == Some(&b',') { i += 1; }
+    }
+    Ok(out)
 }
 
 /// Every file under `root` (following no links), as (URL path, content type, bytes), sorted by path.
@@ -281,10 +319,12 @@ mod tests {
         std::fs::write(d.join("pub/robots.txt"), "User-agent: *\n").unwrap();
         std::fs::write(d.join("pub/assets/app.css"), "a{}").unwrap();
         std::fs::write(d.join("pub/assets/app.js.map"), "{}").unwrap();
-        let src = "struct A { n: i64; }\nstate a: A;\n\nweb {\n    headers { \"X-Frame-Options\": \"SAMEORIGIN\"; }\n    etag;\n    gzip;\n    static \"/\" from \"pub\" {\n        \"Cache-Control\": \"public\";\n        types { \".map\": \"text/plain\"; }\n    }\n}\n";
+        std::fs::write(d.join("manifest.json"), "{\"app.css\":{\"digested_path\":\"app-1f2e.css\",\"integrity\":null},\"icons/x.svg\":{\"digested_path\":\"icons/x-9a.svg\",\"integrity\":null}}").unwrap();
+        let src = "struct A { n: i64; }\nstate a: A;\n\nweb {\n    headers { \"X-Frame-Options\": \"SAMEORIGIN\"; }\n    etag;\n    gzip;\n    manifest \"manifest.json\" at \"/assets/\";\n    static \"/\" from \"pub\" {\n        \"Cache-Control\": \"public\";\n        types { \".map\": \"text/plain\"; }\n    }\n}\n";
         let (text, line) = find(src).unwrap();
         assert_eq!(line, 4);
         let w = parse(&text, line, &d).unwrap();
+        assert_eq!(w.assets, vec![("app.css".to_string(), "/assets/app-1f2e.css".to_string()), ("icons/x.svg".to_string(), "/assets/icons/x-9a.svg".to_string())]);
         assert!(w.etag == Some(String::new()) && w.gzip && w.headers.as_ref().unwrap()[0].0 == "X-Frame-Options");
         let f: Vec<(&str, &str)> = w.statics[0].files.iter().map(|f| (f.0.as_str(), f.1.as_str())).collect();
         assert_eq!(f, vec![("/assets/app.css", "text/css"), ("/assets/app.js.map", "text/plain"), ("/robots.txt", "text/plain")]);

@@ -33,6 +33,12 @@ thread_local! {
     /// Where `file("...")` reads: the program's directory, and files given by name first (a test case's `--- file` sections).
     static FILES: std::cell::RefCell<(Option<std::path::PathBuf>, Vec<(String, String)>)> = std::cell::RefCell::new((None, Vec::new()));
 }
+thread_local! {
+    /// `asset("name")`: the web block's manifest, each asset's name and URL.
+    static ASSETS: std::cell::RefCell<Vec<(String, String)>> = std::cell::RefCell::new(Vec::new());
+}
+/// The assets `asset("name")` resolves (the web block's `manifest`).
+pub fn set_assets(a: Vec<(String, String)>) { ASSETS.with(|x| *x.borrow_mut() = a); }
 /// `file("...")` reads relative to `dir` (the program's directory).
 pub fn set_file_dir(dir: &std::path::Path) { FILES.with(|f| f.borrow_mut().0 = Some(dir.to_path_buf())); }
 /// `file("...")` finds these by name before looking on disk.
@@ -1019,6 +1025,18 @@ impl P {
                     self.pre.push(Stmt::Var(t.clone(), 0, Expr::Null));
                     self.pre.push(Stmt::Each(it, vec![Stmt::Assign(Expr::Var(t.clone(), VarRes::Unbound), Expr::Var(var, VarRes::Unbound))]));
                     return Ok(Expr::Var(t, VarRes::Unbound));
+                }
+                // `asset("email.svg")`: the asset's digested URL from the web block's manifest (`/assets/email-6c595bc5.svg`); a name the
+                // manifest does not have stops the build
+                if n == "asset" && matches!(self.peek(), Some(Tok::Sym(s)) if s == "(") {
+                    if let (Some(Tok::Str(name)), Some(Tok::Sym(close))) = (self.t.get(self.i + 1).cloned(), self.t.get(self.i + 2).cloned()) {
+                        if close == ")" {
+                            self.i += 3;
+                            return ASSETS.with(|a| a.borrow().iter().find(|x| x.0 == name).map(|x| Expr::Str(x.1.clone())))
+                                .ok_or_else(|| format!("`asset(\"{}\")`: the web block's manifest has no such asset", name));
+                        }
+                    }
+                    return Err("`asset` takes the asset's name as a literal: `asset(\"email.svg\")`".into());
                 }
                 // `file_base64("logos/icon.png")`: any file's bytes, read when compiling, as a base64 literal (`unbase64` gives the bytes)
                 if n == "file_base64" && matches!(self.peek(), Some(Tok::Sym(s)) if s == "(") {

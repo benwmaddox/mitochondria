@@ -179,6 +179,8 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
       }
   }
   ```
+  `manifest "public/assets/.manifest.json" at "/assets/";` reads Propshaft's manifest when compiling, so `asset("email.svg")` in the code
+  is that asset's digested URL (`/assets/email-6c595bc5.svg`) and a name the manifest lacks stops the build.
   `writes { ... }` lines are added as they are to the answers of requests other than GET and HEAD (what a caching proxy in front adds to
   answers it does not cache). `headers` replaces the built-in `nosniff`, Content-Security-Policy and Referrer-Policy lines; an endpoint's own line of the same
   name (`set_header`) wins over the block's. `etag`: the tag is two 64-bit hashes of the body; `If-None-Match` naming it answers 304

@@ -99,14 +99,16 @@ fn compile(f: &str, text: &str, system: bool) -> Result<(Vec<String>, String), S
         return Ok((cgen::system_exe(&spec)?, name));
     }
     let file = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    // the `web` block (src/web.rs) first: its manifest names the assets `asset("...")` in the code resolves
+    let web = match web::find(text) {
+        Some((w, line)) => Some(web::parse(&w, line, path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))).map_err(|e| report(f, text, &e))?),
+        None => None,
+    };
+    lang::set_assets(web.as_ref().map_or(Vec::new(), |w| w.assets.clone()));
     let (s, code) = source::load(text).map_err(|e| report(f, text, &e))?;
     let prog = layout::Program::parse(&s).map_err(|e| report(f, text, &e))?;
     let a = cgen::check(&prog, &code).map_err(|e| report(f, text, &e))?;
-    // the `web` block (src/web.rs), as data ahead of the HTTP front end
-    let web = match web::find(text) {
-        Some((w, line)) => web::c(&web::parse(&w, line, path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))).map_err(|e| report(f, text, &e))?),
-        None => String::new(),
-    };
+    let web = web.map_or(String::new(), |w| web::c(&w));
     Ok((cgen::program_exe(&prog, &a, Some((&file, &code)), &web)?, name))
 }
 

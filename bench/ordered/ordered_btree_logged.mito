@@ -1,0 +1,127 @@
+// An ordered-map benchmark: the same workloads and key sequence as bench/btree-rust (Rust's BTreeMap), on lib/sorted.mito.
+// Keys: r = MINSTD sequence from seed 20261104, unique; a present key is 2r, an absent key 2r + 1. Every workload is one
+// request looping inside the program (a request costs hundreds of microseconds of connection handling), timed by the
+// driver (bench/ordered/run.py). `now()` is the request's start time, not a clock.
+struct KV { k: i64; v: i64; }
+struct Bench { m: btree<KV, 1048576, k>; sum: i64; } // the map kept out of the undo log, as a Rust map has no rollback
+state b: Bench;
+
+@post("/insert/{n}")
+fn insert(n: i64 in 1..1048576) -> Response<{ size: i64 }> {
+    var x = 20261104;
+    foreach i in 0..n - 1 { x = x * 48271 % 2147483647; let e = b.m.add(x * 2); e.v = x; }
+    return ok({ "size": b.m.size() });
+}
+@get("/hit/{n}/{ops}")
+fn hit(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        let e = b.m.find(x * 2);
+        if e != null { s = s + e.v; }
+    }
+    return ok({ "sum": s });
+}
+@get("/miss/{n}/{ops}")
+fn miss(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        let e = b.m.find(x * 2 + 1);
+        if e != null { s = s + e.v; }
+    }
+    return ok({ "sum": s });
+}
+@get("/mixed/{n}/{ops}")
+fn mixed(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        let e = b.m.find(x * 2 + j % 2);
+        if e != null { s = s + e.v; }
+    }
+    return ok({ "sum": s });
+}
+@post("/increment/{n}/{ops}")
+fn increment(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        let e = b.m.find(x * 2);
+        if e != null { e.v = e.v + 1; }
+    }
+    return ok({ "sum": 0 });
+}
+@get("/range/{n}/{ops}")
+fn range(n: i64 in 1..1048576, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var x = 20261104; var s = 0;
+    foreach j in 0..ops - 1 {
+        if j % n == 0 { x = 20261104; }
+        x = x * 48271 % 2147483647;
+        foreach e in b.m from x * 2 limit 100 { s = s + e.v; }
+    }
+    return ok({ "sum": s });
+}
+// a request may free at most 65536 slots and a remove frees two, so delete runs in batches: `x` is the sequence's state
+// where the last batch stopped (the first batch starts at 20261104), and the answer is where this one stopped
+@delete("/delete/{x}/{count}")
+fn delete(x: i64, count: i64 in 1..16384) -> Response<{ x: i64, size: i64 }> {
+    var y = x;
+    foreach i in 0..count - 1 {
+        y = y * 48271 % 2147483647;
+        b.m.remove_key(y * 2);
+    }
+    return ok({ "x": y, "size": b.m.size() });
+}
+@get("/stats")
+fn stats() -> Response<{ committed_kb: i64, live_kb: i64, reserved_kb: i64 }> {
+    return ok({ "committed_kb": stat("committed_kb"), "live_kb": stat("live_kb"), "reserved_kb": stat("reserved_kb") });
+}
+
+// Steady-state churn: a FIFO window of live keys. `y` is the sequence state of the oldest key, `x` of the newest; each
+// step deletes the oldest key and inserts the next new one (a random position in the order). Both states are returned.
+@post("/churn/{x}/{y}/{count}")
+fn churn(x: i64, y: i64, count: i64 in 1..8192) -> Response<{ x: i64, y: i64, size: i64 }> {
+    var nx = x; var ny = y;
+    foreach i in 0..count - 1 {
+        ny = ny * 48271 % 2147483647;
+        var hit = -1;
+        foreach e in b.m from ny * 2 limit 1 { if e.k == ny * 2 { hit = slot(e); } }
+        if hit >= 0 { b.m.remove(b.m.get(hit)); }
+        nx = nx * 48271 % 2147483647;
+        let it = b.m.add(nx * 2); it.v = nx;
+    }
+    return ok({ "x": nx, "y": ny, "size": b.m.size() });
+}
+// where the first key stands: how far a lookup of the oldest keys must go (the cost of lookups after churn)
+@get("/probe/{y}/{ops}")
+fn probe(y: i64, ops: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    var ny = y; var s = 0;
+    foreach i in 0..ops - 1 {
+        ny = ny * 48271 % 2147483647;
+        foreach e in b.m from ny * 2 limit 1 { if e.k == ny * 2 { s = s + e.v; } }
+    }
+    return ok({ "sum": s });
+}
+@get("/shape")
+fn shape() -> Response<{ leaves: i64, inners: i64, height: i64, size: i64 }> { return ok({ "leaves": b.m.leaf_count(), "inners": b.m.inner_count(), "height": b.m.height(), "size": b.m.size() }); }
+
+// Fill with the keys that follow sequence state `x`, in sequence order: the live window of a churned run, laid out fresh.
+@post("/insert_from/{x}/{n}")
+fn insert_from(x: i64, n: i64 in 1..1048576) -> Response<{ x: i64, size: i64 }> {
+    var nx = x;
+    foreach i in 0..n - 1 { nx = nx * 48271 % 2147483647; let e = b.m.add(nx * 2); e.v = nx; }
+    return ok({ "x": nx, "size": b.m.size() });
+}
+
+// the whole order walked from the start: what memory layout costs when nothing is searched
+@get("/scan/{limit}")
+fn scan(limit: i64 in 1..2000000) -> Response<{ sum: i64 }> {
+    var s = 0;
+    foreach e in b.m limit limit { s = s + e.v; }
+    return ok({ "sum": s });
+}

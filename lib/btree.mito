@@ -16,12 +16,11 @@
 module btree<T: struct, N: count, key: field of T>
 struct Leaf { count: u32; keys: i64[17]; slots: u32[17]; next: u32; prev: u32; parent: u32; }
 struct Inner { count: u32; keys: i64[16]; kids: u32[17]; parent: u32; }
-struct Loc { leaf: u32; }
 struct Head { root: u32; height: u32; first: u32; last: u32; }
 // what an instance holds
 state {
     items: pool<T, N> checked;
-    locs: pool<Loc, N>;
+    locs: u32[N]; // the leaf of the item in each pool slot, 0 when it is in none
     leaves: pool<Leaf, N / 2 + 8>;
     inners: pool<Inner, N / 4 + 8>;
     head: Head;
@@ -29,19 +28,16 @@ state {
 
 pub fn add(new_key: T.key) -> T {
     let item = self.items.add();
-    let loc = self.locs.add();
-    if slot(loc) != slot(item) { fail 500 "btree: items and locations out of step"; }
     item.key = new_key;
     self.place(slot(item));
     return item;
 }
 pub fn remove(item: T) {
     self.unplace(slot(item));
-    self.locs.remove(self.locs[slot(item)]);
     self.items.remove(item);
 }
 pub fn set_key(item: T, new_key: T.key) {
-    if self.locs[slot(item)].leaf == 0 { fail 404 "this item was removed"; }
+    if self.locs[slot(item)] == 0 { fail 404 "this item was removed"; }
     self.unplace(slot(item));
     item.key = new_key;
     self.place(slot(item));
@@ -85,7 +81,6 @@ pub fn remove_key(target: T.key) {
     let found = self.find(target);
     if found != null {
         self.unplace(slot(found));
-        self.locs.remove(self.locs[slot(found)]);
         self.items.remove(found);
     }
 }
@@ -134,7 +129,7 @@ fn place(item_slot: i64) {
     node.keys[pos] = new_key;
     node.slots[pos] = item_slot;
     node.count = count + 1;
-    self.locs[item_slot].leaf = leaf;
+    self.locs[item_slot] = leaf;
     if count + 1 == 17 { self.split_leaf(leaf); }
 }
 // leaf `leaf` holds 17: the first 9 stay, the last 8 move to a new leaf after it
@@ -144,7 +139,7 @@ fn split_leaf(leaf: i64) {
         let moved = self.leaves[leaf - 1].slots[9 + offset];
         self.leaves[right - 1].keys[offset] = self.leaves[leaf - 1].keys[9 + offset];
         self.leaves[right - 1].slots[offset] = moved;
-        self.locs[moved].leaf = right;
+        self.locs[moved] = right;
     }
     self.leaves[right - 1].count = 8;
     self.leaves[leaf - 1].count = 9;
@@ -224,7 +219,7 @@ fn kid_index(node: i64, child: i64) -> i64 {
 // ---- removing
 // take item slot item_slot out of the tree
 fn unplace(item_slot: i64) {
-    let leaf = self.locs[item_slot].leaf;
+    let leaf = self.locs[item_slot];
     var index = 0;
     foreach step in 0..16 while self.leaves[leaf - 1].slots[index] != item_slot { index = index + 1; }
     let node = self.leaves[leaf - 1];
@@ -232,7 +227,7 @@ fn unplace(item_slot: i64) {
     node.keys.move(index + 1, index, count - index - 1);
     node.slots.move(index + 1, index, count - index - 1);
     node.count = count - 1;
-    self.locs[item_slot].leaf = 0;
+    self.locs[item_slot] = 0;
     if count == 1 { self.drop_leaf(leaf); } else { self.merge_leaf(leaf); }
 }
 // leaf `leaf` is empty: out of the list and the tree
@@ -305,7 +300,7 @@ fn absorb(earlier: i64, later: i64) {
         let moved = self.leaves[later - 1].slots[offset];
         self.leaves[earlier - 1].keys[earlier_count + offset] = self.leaves[later - 1].keys[offset];
         self.leaves[earlier - 1].slots[earlier_count + offset] = moved;
-        self.locs[moved].leaf = earlier;
+        self.locs[moved] = earlier;
     }
     self.leaves[earlier - 1].count = earlier_count + later_count;
     self.leaves[later - 1].count = 0;

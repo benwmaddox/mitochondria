@@ -95,7 +95,7 @@ impl B {
         Some(match n {
             "body" => Body, "param" => Param, "query" => Query, "header" => Header, "fwd" => Fwd, "int" => Int, "str" => Str, "len" => Len, "now" => Now,
             "random" => Random, "min" => Min, "max" => Max, "count" => Count, "capacity" => Capacity, "slot" => Slot, "stat" => Stat, "token" => Token,
-            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie, "set_header" => SetHeader, "__html_lit" => HtmlLit, "__html_esc" => HtmlEsc, "__html_esc_attr" => HtmlEscAttr, "__html_attr" => HtmlAttr, "html_raw" => HtmlRaw, "trim" => Trim,
+            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie, "set_header" => SetHeader, "__html_lit" => HtmlLit, "__html_esc" => HtmlEsc, "__html_esc_attr" => HtmlEscAttr, "__html_attr" => HtmlAttr, "html_raw" => HtmlRaw, "html_text" => HtmlEsc, "trim" => Trim,
             "base64" => Base64, "base64_url" => Base64Url, "unbase64" => Unbase64, "hex" => Hex, "sha1" => Sha1, "sha256" => Sha256,
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
@@ -357,14 +357,14 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
             else { out.push(Tok::Int(c[s..i].iter().collect::<String>().parse().map_err(|_| "number too large".to_string())?)); }
         }
         else if ch == '"' {
-            i += 1; let mut s = String::new();
+            i += 1; let mut s = String::new(); let open = i;
             while i < c.len() && c[i] != '"' {
                 if c[i] == '\\' && i + 1 < c.len() { i += 1; s.push(match c[i] { 'n' => '\n', 't' => '\t', o => o }); } else { s.push(c[i]); }
                 i += 1;
             }
             if i >= c.len() { return Err(format!("{}:{}: a text that is never closed (a `\"` is missing)", tl, tc)); }
             if let Some(k) = c[..i].iter().rposition(|x| *x == '\n') { if k + 1 > line_start { line_start = k + 1; } }
-            line += s.matches('\n').count() as u32;
+            line += c[open..i].iter().filter(|x| **x == '\n').count() as u32; // the source's lines, not a `\n` escape's
             i += 1; out.push(Tok::Str(s));
         }
         else {
@@ -779,6 +779,19 @@ impl P {
                 self.i += 1; self.sym(";");
                 return Ok(Stmt::Do(Expr::Call(if attr { "__html_esc_attr" } else { "__html_esc" }.into(), vec![Expr::Str(s)], CallRes::Unbound)));
             }
+        }
+        // `{...}` between markup in code inside markup: the same as in the markup, `{if p { <h2>..</h2> {steps(p);} }}`
+        if let (Some(attr), Some(Tok::Sym(s))) = (self.markup, self.peek()) {
+            if s == "{" {
+                let mut v = Vec::new();
+                self.markup_code(&mut v, attr)?;
+                let last = v.pop().unwrap_or(Stmt::Do(Expr::Null));
+                self.pre.extend(v);
+                return Ok(last);
+            }
+        }
+        if self.markup.is_none() && matches!(self.peek(), Some(Tok::Sym(s)) if s == "{") {
+            return Err("`{` here is code, not markup: write the statement itself (`bell(r);`, `html_text(x);`); `{...}` is for code inside an element".into());
         }
         // markup as a statement (in a `-> html` function, or in `{if ...}` / `{foreach ...}` inside markup): it writes itself
         if matches!(self.peek(), Some(Tok::HOpen(_) | Tok::HText(_))) {

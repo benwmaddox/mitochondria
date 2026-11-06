@@ -1,0 +1,9 @@
+// expect: 7:5: `{` here is code, not markup: write the statement itself
+struct S { n: i64; } state s: S;
+fn note() -> html { "a\nb\nc"; }
+fn bell() -> html { <b>bell</b> }
+fn nav() -> html {
+    <span>nav</span>
+    {bell();}
+}
+@get("/a") fn a() -> Response<html> { return ok(<div>{nav();}{note();}</div>); }

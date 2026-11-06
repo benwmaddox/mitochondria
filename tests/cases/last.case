@@ -1,0 +1,32 @@
+// `room: Room` from the path: a table row by id (404 when it is not there); `last n`: the last n rows of a table loop's order, walked in that order (Rails' `.last(40)`); `by` a field no index starts with is
+// allowed when an index leads the `where` (SQLite sorts what the index found); `last` elsewhere is refused
+--- program
+struct Room { name: ascii<16>; }
+struct Message { room: Room?; ts: i64; text: ascii<16>; }
+struct App { rooms: table<Room>; messages: table<Message> index(room); }
+state app: App;
+
+@post("/rooms/{name}")
+fn add_room(name: ascii<16>) -> Response<{ id: Room }> { let r = app.rooms.add { name: name }; return created({ id: r }); }
+@post("/rooms/{room}/messages")
+fn post(room: Room, ts: i64, text: ascii<16>) -> Response<{}> { app.messages.add { room: room, ts: ts, text: text }; return ok({}); }
+@get("/rooms/{room}/newest")
+fn newest(room: Room, n: i64 = 0) -> Response<{ texts: [string] }> {
+    return ok({ texts: [foreach m in app.messages by ts where m.room == room last 3 m.text] });
+}
+@get("/rooms/{room}/oldest_first_reversed")
+fn reversed(room: Room) -> Response<{ texts: [string] }> {
+    return ok({ texts: [foreach m in app.messages by ts reverse where m.room == room last 2 m.text] });
+}
+--- requests
+POST /rooms/a
+POST /rooms/b
+POST /rooms/1/messages {"ts":30,"text":"third"}
+POST /rooms/1/messages {"ts":10,"text":"first"}
+POST /rooms/2/messages {"ts":15,"text":"other room"}
+POST /rooms/1/messages {"ts":40,"text":"fourth"}
+POST /rooms/1/messages {"ts":20,"text":"second"}
+GET /rooms/1/newest
+GET /rooms/1/oldest_first_reversed
+GET /rooms/2/newest
+GET /rooms/9/newest

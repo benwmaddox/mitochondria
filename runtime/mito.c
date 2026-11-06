@@ -1055,6 +1055,7 @@ static int text_f64(const u8 *s, u64 n, double *out) {
    1 an integer in lo..hi, 2 a number, 3 a bool, 4 a string of lo..hi bytes, 5 the item of top-level pool `lo` that the
    X-Session token names (as auth), 6 the item of pool `lo` that an id names ("slot", or "slot.generation" for a checked
    pool). *out is null when the input is absent; the generated code applies its default or answers 400. */
+static int h_texists(Ctx *c, u32 t, u32 rowid, u32 *out);
 static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, i64 hi, Val *out) {
     Mito *m = M_(c);
     *out = v_null();
@@ -1123,6 +1124,16 @@ static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, 
         case 6: {
             /* an id: "slot" (a pool without generations), or "slot.generation" (a checked pool) */
             if (!text) { if (v.tag == 4) { tp = t_ptr(m, (T){ v.a, v.b }); tn = v.b; } else if (v.tag == 1 && v.i >= 0) { char d[24]; int dn = 0; u64 x = (u64)v.i; do { d[dn++] = (char)('0' + x % 10); x /= 10; } while (x); T t; u32 st = m->text.len; while (dn) { char ch = d[--dn]; if (!a_put(&m->text, &ch, 1)) return text_full(m); } t = t_since(m, st); tp = t_ptr(m, t); tn = t.len; } else return in_bad(m, 400, name, nn, ": expected an id"); }
+#ifdef MITO_USES_SQLITE
+            /* a table's row: its id (row ids are never reused), and the row must be there */
+            if ((u32)lo >= MITO_TBASE) {
+                u64 id; u32 t = (u32)lo - MITO_TBASE, has = 0;
+                if (!parse_u64_radix(tp, tn, 10, &id) || id == 0 || id > 0xFFFFFFFFULL) return in_bad(m, 404, name, nn, ": expected a row id");
+                if (h_texists(c, t, (u32)id, &has)) return -1;
+                if (!has) { in_bad(m, 404, name, nn, ": no row "); a_put(&m->emsg, tp, tn); a_str(&m->emsg, " in "); a_str(&m->emsg, m->store.tabs[t].sql); return -1; }
+                *out = v_item((u32)lo, (u32)id); return 0;
+            }
+#endif
             const MitoColl *k = coll(&m->mem, (u32)lo);
             u64 dot = tn; for (u64 i = 0; i < tn; i++) if (tp[i] == '.') { dot = i; break; }
             u64 slot, gen = 0;

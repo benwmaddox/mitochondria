@@ -1,0 +1,13 @@
+POST /rooms/a -> 201 {"id":1}
+POST /rooms/b -> 201 {"id":2}
+POST /rooms/1/messages -> 200 {}
+POST /rooms/1/messages -> 200 {}
+POST /rooms/2/messages -> 200 {}
+POST /rooms/1/messages -> 200 {}
+POST /rooms/1/messages -> 200 {}
+GET /rooms/1/newest -> 200 {"texts":["second","third","fourth"]}
+GET /rooms/1/oldest_first_reversed -> 200 {"texts":["second","first"]}
+GET /rooms/2/newest -> 200 {"texts":["other room"]}
+GET /rooms/9/newest -> 404 {"error":"`room`: no row 9 in \"rooms\""}
+state <plain values> 1
+memory reserved=4096 committed=4096 live=1

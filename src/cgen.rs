@@ -3016,6 +3016,7 @@ impl<'p> G<'p> {
         }
         self.loop_enter();
         self.open("{");
+        if it.last { return no("`last n` is for a loop over a table (the last n rows of its order)"); }
         let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
         let lim = lim.map(|l| self.hold_int(l));
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
@@ -3124,19 +3125,26 @@ impl<'p> G<'p> {
         if !conds.is_empty() { sql += &format!(" WHERE {}", conds.join(" AND ")); }
         // a constant `limit` with every condition in the query: SQLite stops there too
         let sql_limit = match (&it.limit, in_c.is_none() && !collect) { (Some(Expr::Int(n)), true) if *n >= 0 => Some(*n), _ => None };
-        // order: insertion (row ids), or `by` an indexed field (ties in insertion order)
-        match &it.by {
+        // `last n`: the last n rows in the loop's order, walked in that order (one query: the order turned round, n taken, turned back)
+        if it.last && (sql_limit.is_none() || in_c.is_some()) { return no("`last n` takes a constant count, with the whole `where` compiled to SQL (comparisons of the row's fields with values)"); }
+        // order: insertion (row ids), or `by` a field: one an index starts with, or any field when an index leads the `where` (SQLite
+        // sorts the rows it found, as Rails' `where(room: r).order(:created_at)` does); ties in insertion order
+        let led = !nested && wcols.iter().any(|f| tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)));
+        let rev = it.reverse != it.last;
+        let order = match &it.by {
             Some(f) => {
                 if !tb.cols.iter().any(|c| c.path == *f && !matches!(c.kind, crate::layout::TKind::Blob(..))) { return no(format!("`by {}`: not a field of a row of {}", f, tb.name)); }
-                if !tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)) {
-                    return no(format!("`by {}` walks an index, and {} has none on `{}`: declare one (`{}: table<{}> index({})`)", f, tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
+                if !tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)) && !led && !nested {
+                    return no(format!("`by {}` walks an index, and {} has none on `{}`: declare one (`{}: table<{}> index({})`), or narrow the loop with a `where` an index leads", f, tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
                 }
-                let d = if it.reverse { " DESC" } else { "" };
-                sql += &format!(" ORDER BY {}{}, id{}", self.csql(t, f), d, d);
+                let c = self.csql(t, f);
+                (format!("{c}{d}, id{d}", d = if rev { " DESC" } else { "" }), format!("{c}{d}, id{d}", d = if it.reverse { " DESC" } else { "" }))
             }
-            None => sql += if it.reverse { " ORDER BY id DESC" } else { " ORDER BY id" },
-        }
+            None => ((if rev { "id DESC" } else { "id" }).to_string(), (if it.reverse { "id DESC" } else { "id" }).to_string()),
+        };
+        sql += &format!(" ORDER BY {}", order.0);
         if let Some(n) = sql_limit { sql += &format!(" LIMIT {}", n); }
+        if it.last { sql = format!("SELECT * FROM ({}) ORDER BY {}", sql, order.1); }
         self.loop_enter();
         self.open("{");
         // the query's values: the owner, then the `where`'s
@@ -3937,6 +3945,7 @@ impl<'p> G<'p> {
         if it.after.is_some() { return no("`after`: only a table's rows are paged this way"); }
         self.loop_enter();
         let coll = self.prog.colls[c].clone();
+        if it.last { return no("`last n` is for a loop over a table (the last n rows of its order)"); }
         let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
         let (k, m, hits, h) = (self.tmp("k"), self.tmp("m"), self.tmp("hits"), self.tmp("h"));
@@ -4003,6 +4012,7 @@ impl<'p> G<'p> {
         let Some(n) = crate::lang::path_of(&it.coll) else { return no("walking something other than a module instance") };
         let steps = self.prog.colls.iter().find(|c| c.name == format!("{}.items", n)).map_or(0, |c| c.cap);
         let from = match &it.from { Some(e) => { let x = self.expr(e, env, None)?; self.hold(x, false)? } None => CV::Null };
+        if it.last { return no("`last n` is for a loop over a table (the last n rows of its order)"); }
         let lim = match &it.limit { Some(e) => { let x = self.expr(e, env, None)?; Some(self.int_or(x, 400, "bad limit")) } None => None };
         let lim = lim.map(|l| self.hold_int(l));
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
@@ -4045,6 +4055,7 @@ impl<'p> G<'p> {
         let v = self.expr(hi, env, None)?;
         let hi = self.int_or(v, 500, "a range needs integers");
         let hi = self.hold_int(hi);
+        if it.last { return no("`last n` is for a loop over a table (the last n rows of its order)"); }
         let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
         let lim = lim.map(|l| self.hold_int(l));
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }

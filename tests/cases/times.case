@@ -1,0 +1,23 @@
+// `time` and `time?` columns: microseconds since 1970 in the program, Rails' text in the column; a nullable time reads as null until set,
+// and `= null` clears it; format_time and add_years (Feb 29 to Feb 28)
+--- program
+struct Event { at: time; until: time?; }
+struct App { events: table<Event>; }
+state app: App;
+
+@post("/events")
+fn add(at: i64) -> Response<{ id: Event }> { let e = app.events.add { at: at }; return created({ id: e }); }
+@post("/events/{e}/until")
+fn until(e: Event, at: i64 = -1) -> Response<{}> { if at < 0 { e.until = null; } else { e.until = at; } return ok({}); }
+@get("/events/{e}")
+fn show(e: Event) -> Response<{ at: string; until: string?; leap: string }> {
+    if exists(e.until) { return ok({ at: format_time(e.at, "%Y-%m-%d %H:%M:%S.%N"), until: format_time(e.until, "%Y-%m-%d %H:%M"), leap: format_time(add_years(e.at, 1), "%Y-%m-%d") }); }
+    return ok({ at: format_time(e.at, "%Y-%m-%d %H:%M:%S.%N"), until: null, leap: format_time(add_years(e.at, 1), "%Y-%m-%d") });
+}
+--- requests
+POST /events {"at":1709164800123456}
+GET /events/1
+POST /events/1/until {"at":1772467200000000}
+GET /events/1
+POST /events/1/until {}
+GET /events/1

@@ -88,7 +88,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
-    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored }
+    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored, SocketSend, SocketClose, SocketSubscribe, SocketUnsubscribe, Broadcast, SocketSendAll, SocketTag }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -99,7 +99,8 @@ impl B {
             "base64" => Base64, "base64_url" => Base64Url, "unbase64" => Unbase64, "hex" => Hex, "sha1" => Sha1, "sha256" => Sha256,
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
-            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml, "random_text" => RandomText, "add_years" => AddYears, "index_of" => IndexOf, "last_index_of" => LastIndexOf, "json_quote" => JsonQuote, "json_unquote" => JsonUnquote, "request_target" => RequestTarget, "crc32" => Crc32, "read_stored" => ReadStored,
+            "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml, "random_text" => RandomText, "add_years" => AddYears, "index_of" => IndexOf, "last_index_of" => LastIndexOf, "json_quote" => JsonQuote, "json_unquote" => JsonUnquote, "request_target" => RequestTarget, "crc32" => Crc32, "read_stored" => ReadStored, "socket_send" => SocketSend, "socket_close" => SocketClose, "socket_subscribe" => SocketSubscribe,
+            "socket_unsubscribe" => SocketUnsubscribe, "broadcast" => Broadcast, "socket_send_all" => SocketSendAll, "socket_tag" => SocketTag,
             _ => return None,
         })
     }
@@ -465,7 +466,35 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             api.eps.push(Endpoint { method: "START".into(), segs: Vec::new(), body, text: "START".into(), slots: 0, lines: (first, last), name, resp: RType::Name("null".into()), inputs: Vec::new() });
             continue;
         }
-        let method = match verb.as_str() { "get" | "post" | "put" | "patch" | "delete" => verb.to_uppercase(), v => return Err(format!("`@{}`: an endpoint is `@get`, `@post`, `@put`, `@patch` or `@delete`", v)) };
+        // `@every(3000) fn tick() { ... }`: run every 3000 ms while the server runs (one such function), as a request without inputs; for
+        // what is sent to sockets on a clock (Action Cable's pings)
+        if verb == "every" {
+            if api.eps.iter().any(|e| e.method == "EVERY") { return Err("a program has one `@every` function".into()); }
+            p.eat("(")?;
+            let ms = p.int()?;
+            if !(10..=86_400_000).contains(&ms) { return Err(format!("`@every({})`: from 10 ms to a day", ms)); }
+            p.eat(")")?;
+            p.kw("fn")?;
+            let name = p.id()?;
+            p.eat("(")?;
+            if !p.sym(")") { return Err(format!("`@every fn {}()` takes no inputs", name)); }
+            if p.sym("->") { return Err(format!("`@every fn {}()` returns nothing", name)); }
+            p.in_endpoint = true;
+            let body = p.block();
+            p.in_endpoint = false;
+            let mut body = body?;
+            body.push(Stmt::Respond(204, Json::Empty));
+            let last = p.lines.get(p.i.saturating_sub(1)).map_or(first, |x| x.0);
+            api.eps.push(Endpoint { method: "EVERY".into(), segs: Vec::new(), body, text: format!("EVERY {}", ms), slots: 0, lines: (first, last), name, resp: RType::Name("null".into()), inputs: Vec::new() });
+            continue;
+        }
+        // `@socket("/cable")`: a WebSocket upgrade to that path (a 2xx answer accepts it); `@socket_message("/cable")` each text message on
+        // such a socket, `@socket_close("/cable")` its end; they read `:socket`, `:tag` and `:message` as headers (docs: DESIGN.md, Sockets)
+        let method = match verb.as_str() {
+            "get" | "post" | "put" | "patch" | "delete" => verb.to_uppercase(),
+            "socket" => "SOCKET".into(), "socket_message" => "SOCKETMSG".into(), "socket_close" => "SOCKETCLOSE".into(),
+            v => return Err(format!("`@{}`: an endpoint is `@get`, `@post`, `@put`, `@patch`, `@delete`, `@socket`, `@socket_message` or `@socket_close`", v)),
+        };
         p.eat("(")?;
         let path = match p.t.get(p.i) { Some(Tok::Str(s)) => { p.i += 1; s.clone() } _ => return Err(format!("`@{}(...)` takes the path as a string, as in `@{}(\"/players/{{p}}\")`", verb, verb)) };
         p.eat(")")?;

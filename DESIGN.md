@@ -156,6 +156,16 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   keeps what it derives from it (a key from 1000 rounds of PBKDF2 is computed once, not per request).
 - **Times.** A `time` field is an i64 of microseconds since 1970 (UTC); in a table's row it is kept as text (docs/persistence.md).
   `format_time(t, "%Y-%m-%d %H:%M:%S")` writes one out (%Y %m %d %H %M %S, %L milliseconds, %N microseconds, %s seconds, %%).
+- **Sockets** (WebSocket, RFC 6455). `@socket("/cable") fn open(socket: i64 from header(":socket")) -> Response<null>` runs on an
+  upgrade request to that path, with the request's headers and cookies: a 2xx answer accepts it (the runtime answers 101 with the
+  accept key and the endpoint's own lines, such as `Sec-WebSocket-Protocol`), anything else is answered as it is. `@socket_message`
+  runs for each text message (`text: utf8<N> from header(":message")`), `@socket_close` when the socket ends; both read the socket's id
+  (`:socket`) and the integer the program tagged it with (`:tag`, set by `socket_tag(id, n)`: whom the socket belongs to). What a
+  request asks of sockets is applied once it succeeds, under the program's lock: `socket_send(id, t)`, `socket_close(id)`,
+  `socket_send_all(t)`, `socket_subscribe(id, stream, before, after)` and `broadcast(stream, t)` (each subscriber gets its own
+  `before` + t + `after`: Action Cable's identifier around a stream's message), `socket_unsubscribe(id, before)`. `@every(3000) fn
+  tick()` runs on a clock (one such function), for pings. A socket's id never names a later one; client frames are masked and at most
+  1 MB; pings are answered. The network can never send these requests itself. One program only (not yet a system of workers).
 - **Bytes, encodings and cryptography.** A text holds any bytes, so these work on texts and give texts (in the request's text area):
   `base64(t)` (padded), `base64_url(t)` (URL alphabet, no padding), `unbase64(t)` (either alphabet, padding optional; null if not
   base64), `hex(t)`, `form_encode(t)` / `form_decode(t)` (as `URI.encode_www_form_component`; null for a bad `%`), `xor_bytes(a, b)`

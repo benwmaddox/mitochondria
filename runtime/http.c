@@ -243,6 +243,208 @@ static int none_match(const MitoPair *p, u32 np, const char *tag) {
 
 /* the lock around one program's handler (HTTP_SINGLE): several connection threads, one request in the program at a time */
 static Lock g_app_lock;
+
+#ifdef MITO_SOCKETS
+#ifndef HTTP_SINGLE
+#error "sockets are served by one program, not yet by a system of workers"
+#endif
+int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
+const u8 *mito_socket_ops(void *m, u32 *len);
+/* ---- sockets (WebSocket, RFC 6455): a connection upgraded by an `@socket` endpoint stays open; each text message it sends runs the
+   `@socket_message` endpoint, its end `@socket_close`; what a request asks of sockets (sends, subscriptions, broadcasts) is applied here
+   once it succeeds, under the program's lock, so every socket sees the same order. A socket is named by its id: generation * WS_CAP +
+   slot + 1, so an id of a closed socket names no later one. */
+#define WS_CAP 4096
+typedef struct { Sock fd; u32 gen; int live; i64 tag; Lock wlk; char path[256]; u32 pathn;
+    Res in; u32 inlen;     /* bytes read that are not yet a whole frame */
+    Res msg; u32 msgn;     /* a message in fragments being put together */
+    Res subs; u32 subsn;   /* subscriptions: [u32 n][stream][u32 n][before][u32 n][after] */
+} Ws;
+static Ws g_ws[WS_CAP]; static Lock g_ws_lk; static int g_ws_ready;
+static Res g_bcast; /* a broadcast's frame being built (under the program's lock) */
+static void ws_init(void) {
+    lk_init(&g_ws_lk);
+    for (u32 i = 0; i < WS_CAP; i++) lk_init(&g_ws[i].wlk);
+    res_init(&g_bcast, (u64)RESPONSE_CAP_ + 1024 * 1024);
+    g_ws_ready = 1;
+}
+static u32 ws_id(u32 slot) { return g_ws[slot].gen * WS_CAP + slot + 1; }
+static Ws *ws_by_id(u32 id) { if (!id) return 0; u32 slot = (id - 1) % WS_CAP; Ws *w = &g_ws[slot]; return w->live && ws_id(slot) == id ? w : 0; }
+/* a free slot, reserved (not yet live), or WS_CAP when all are taken */
+static u32 ws_reserve(void) {
+    lk_on(&g_ws_lk);
+    u32 k = 0; while (k < WS_CAP && (g_ws[k].live || g_ws[k].pathn == 0xFFFFFFFFu)) k++;
+    if (k < WS_CAP) { g_ws[k].pathn = 0xFFFFFFFFu; g_ws[k].gen++; }
+    lk_off(&g_ws_lk);
+    if (k < WS_CAP && !g_ws[k].in.p && !(res_init(&g_ws[k].in, (u64)1 << 21) && res_init(&g_ws[k].msg, (u64)1 << 21) && res_init(&g_ws[k].subs, (u64)1 << 20))) return WS_CAP;
+    return k;
+}
+static void ws_release(u32 slot) { lk_on(&g_ws_lk); g_ws[slot].live = 0; g_ws[slot].pathn = 0; g_ws[slot].subsn = 0; g_ws[slot].inlen = 0; g_ws[slot].msgn = 0; lk_off(&g_ws_lk); }
+/* one frame from the server (never masked): FIN, the opcode, the length, the payload */
+static void ws_frame(Ws *w, u8 op, const u8 *a, u32 an, const u8 *b, u32 bn, const u8 *c3, u32 cn) {
+    u64 n = (u64)an + bn + cn; u8 h[10]; u32 hn = 2; h[0] = (u8)(0x80 | op);
+    if (n < 126) h[1] = (u8)n; else if (n < 65536) { h[1] = 126; h[2] = (u8)(n >> 8); h[3] = (u8)n; hn = 4; }
+    else { h[1] = 127; for (int k = 0; k < 8; k++) h[2 + k] = (u8)(n >> (56 - 8 * k)); hn = 10; }
+    lk_on(&w->wlk);
+    send_all(w->fd, (const char *)h, hn); if (an) send_all(w->fd, (const char *)a, an); if (bn) send_all(w->fd, (const char *)b, bn); if (cn) send_all(w->fd, (const char *)c3, cn);
+    lk_off(&w->wlk);
+}
+static u32 rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return v; }
+/* apply what a request asked of sockets (MITO(socket_ops)); `self` is the socket the request came from (its close is the reader's) */
+static void ws_apply(void *app) {
+    u32 len; const u8 *p = mito_socket_ops(app, &len), *e = p + len;
+    while (p + 14 <= e) {
+        u8 op = p[0]; u32 id = rd32(p + 1); i64 iv; memcpy(&iv, p + 5, 8); u32 np = p[13]; p += 14;
+        const u8 *part[3] = { 0, 0, 0 }; u32 pn[3] = { 0, 0, 0 };
+        for (u32 k = 0; k < np && k < 3; k++) { pn[k] = rd32(p); part[k] = p + 4; p += 4 + pn[k]; }
+        Ws *w = (op == 5 || op == 6) ? 0 : ws_by_id(id);
+        switch (op) {
+            case 1: if (w) ws_frame(w, 1, part[0], pn[0], 0, 0, 0, 0); break;
+            case 2: if (w) { u8 code[2] = { 0x03, 0xE8 }; ws_frame(w, 8, code, 2, 0, 0, 0, 0); os_shutdown(w->fd); } break; /* 1000: normal */
+            case 3: if (w) { u64 need = (u64)w->subsn + 12 + pn[0] + pn[1] + pn[2];
+                        if (res_ensure(&w->subs, need)) { u8 *q = w->subs.p + w->subsn; for (u32 k = 0; k < 3; k++) { memcpy(q, &pn[k], 4); memcpy(q + 4, part[k], pn[k]); q += 4 + pn[k]; } w->subsn = (u32)need; } }
+                    break;
+            case 4: if (w) { /* the subscriptions whose `before` is this */
+                        u32 i = 0;
+                        while (i < w->subsn) {
+                            u8 *q = w->subs.p + i; u32 a0 = rd32(q), b0 = rd32(q + 4 + a0), c0 = rd32(q + 8 + a0 + b0), sz = 12 + a0 + b0 + c0;
+                            if (b0 == pn[0] && !memcmp(q + 8 + a0, part[0], b0)) { memmove(q, q + sz, w->subsn - i - sz); w->subsn -= sz; } else i += sz;
+                        } }
+                    break;
+            case 5: case 6: /* a broadcast to a stream's subscribers (each its own before and after), or a text to every socket */
+                for (u32 k = 0; k < WS_CAP; k++) {
+                    Ws *x = &g_ws[k]; if (!x->live) continue;
+                    if (op == 6) { ws_frame(x, 1, part[0], pn[0], 0, 0, 0, 0); continue; }
+                    for (u32 i = 0; i < x->subsn;) {
+                        u8 *q = x->subs.p + i; u32 a0 = rd32(q), b0 = rd32(q + 4 + a0), c0 = rd32(q + 8 + a0 + b0);
+                        if (a0 == pn[0] && !memcmp(q + 4, part[0], a0)) ws_frame(x, 1, q + 8 + a0, b0, part[1], pn[1], q + 12 + a0 + b0, c0);
+                        i += 12 + a0 + b0 + c0;
+                    }
+                }
+                break;
+            case 7: if (w) w->tag = iv; break;
+        }
+    }
+}
+/* run a socket endpoint (SOCKET, SOCKETMSG, SOCKETCLOSE) for socket `slot`: its id, tag and the message as the headers :socket, :tag,
+   :message beside the request's own (an upgrade's); what it asks of sockets applied when it succeeds. The answer's status. */
+static int ws_call(void *app, const char *method, u32 slot, const char *path, u32 pathn, MitoPair *pairs, u32 np, const u8 *msg, u32 msgn) {
+    char ids[24], tags[24]; u32 idn = 0, tagn = 0; u64 v = ws_id(slot); i64 tg = g_ws[slot].tag;
+    { char r[24]; int k = 0; do { r[k++] = (char)('0' + v % 10); v /= 10; } while (v); while (k) ids[idn++] = r[--k]; }
+    { u64 t = tg < 0 ? (u64)0 - (u64)tg : (u64)tg; char r[24]; int k = 0; do { r[k++] = (char)('0' + t % 10); t /= 10; } while (t); if (tg < 0) tags[tagn++] = '-'; while (k) tags[tagn++] = r[--k]; }
+    pairs[np].k = ":socket"; pairs[np].kn = 7; pairs[np].v = ids; pairs[np].vn = idn;
+    pairs[np + 1].k = ":tag"; pairs[np + 1].kn = 4; pairs[np + 1].v = tags; pairs[np + 1].vn = tagn;
+    pairs[np + 2].k = ":message"; pairs[np + 2].kn = 8; pairs[np + 2].v = (const char *)msg; pairs[np + 2].vn = msgn;
+    u32 mn = 0; while (method[mn]) mn++;
+    lk_on(&g_app_lock);
+    int code = mito_handle(app, method, mn, path, pathn, pairs, np + 3, 0, 0, "", 0);
+    if (code < 300) ws_apply(app);
+    lk_off(&g_app_lock);
+    return code;
+}
+static const char ws_b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/* An upgrade request (GET with Upgrade: websocket): the program's `@socket` endpoint decides; accepted, the 101 answer (Sec-WebSocket-Accept:
+   base64 of SHA-1 of the key and RFC 6455's GUID, and the program's own lines such as Sec-WebSocket-Protocol) and the socket is live: 2.
+   Refused, its answer and the connection closed: 0. */
+static int ws_upgrade(Conn *x, Sock c, const char *target, u32 tn, u32 np, const MitoPair *key) {
+    if (!g_ws_ready) ws_init();
+    u32 slot = ws_reserve();
+    const char *full = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    if (slot == WS_CAP || !res_ensure(&x->pairs, (u64)(np + 3) * sizeof(MitoPair))) { u32 n = 0; while (full[n]) n++; send_all(c, full, n); return 0; }
+    u32 pn = 0; while (pn < tn && target[pn] != '?' && pn < sizeof g_ws[slot].path) pn++;
+    memcpy(g_ws[slot].path, target, pn);
+    g_ws[slot].tag = 0;
+    MitoPair *pairs = (MitoPair *)x->pairs.p;
+    int code = ws_call(x->app, "SOCKET", slot, target, tn, pairs, np, (const u8 *)"", 0);
+    char *hd = x->hd; u32 n = 0;
+    #define WPUT(s) do { const char *s_ = (s); while (*s_ && n < sizeof x->hd) hd[n++] = *s_++; } while (0)
+    if (code >= 300) {
+        u32 rn; const char *resp = mito_response(x->app, &rn);
+        WPUT("HTTP/1.1 "); { char d[8]; int k = 0; u32 v = (u32)code; do { d[k++] = (char)('0' + v % 10); v /= 10; } while (v); while (k) hd[n++] = d[--k]; }
+        WPUT(" "); WPUT(reason(code)); WPUT("\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ");
+        { char d[16]; int k = 0; u32 v = rn; do { d[k++] = (char)('0' + v % 10); v /= 10; } while (v); while (k) hd[n++] = d[--k]; }
+        WPUT("\r\n\r\n"); send_two(c, hd, n, resp, rn);
+        ws_release(slot); return 0;
+    }
+    /* the accept key */
+    char kb[128]; u32 kn = key->vn < 64 ? key->vn : 64; memcpy(kb, key->v, kn); memcpy(kb + kn, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11", 36); kn += 36;
+    u8 dg[20]; char acc[32]; u32 an = 0;
+    if (!cr_sha(1, (const u8 *)kb, kn, dg)) { ws_release(slot); return 0; }
+    for (u32 i = 0; i < 21; i += 3) { u32 v = (u32)dg[i] << 16 | (i + 1 < 20 ? (u32)dg[i + 1] << 8 : 0) | (i + 2 < 20 ? dg[i + 2] : 0);
+        acc[an++] = ws_b64[v >> 18]; acc[an++] = ws_b64[v >> 12 & 63]; acc[an++] = i + 1 < 20 ? ws_b64[v >> 6 & 63] : '='; acc[an++] = i + 2 < 20 ? ws_b64[v & 63] : '='; }
+    acc[an] = 0;
+    WPUT("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "); WPUT(acc); WPUT("\r\n");
+    /* the program's lines, but its content type (an upgrade has no body) */
+    { u32 hn; const char *h = mito_response_head(x->app, &hn);
+      for (u32 i = 0; i < hn;) { u32 e = i; while (e < hn && h[e] != '\r') e++; int ct = e - i > 13 && lower_(h[i]) == 'c' && lower_(h[i + 8]) == 't' && h[i + 12] == ':'; if (!ct) for (u32 k = i; k < e + 2 && k < hn && n < sizeof x->hd; k++) hd[n++] = h[k]; i = e + 2; } }
+    WPUT("\r\n");
+    #undef WPUT
+    /* live before what the endpoint asked is applied (its welcome goes out after the 101) */
+    lk_on(&g_app_lock);
+    g_ws[slot].fd = c; g_ws[slot].pathn = pn; g_ws[slot].inlen = 0; g_ws[slot].msgn = 0;
+    send_all(c, hd, n);
+    g_ws[slot].live = 1;
+    ws_apply(x->app);
+    lk_off(&g_app_lock);
+    return 2;
+}
+/* A socket the poller found readable: its bytes read, each whole frame handled (a text message to the program, a ping answered, a close
+   ended). 1 while it stays open, 0 when it ended (the program told, the slot freed, the connection closed). */
+static int ws_read(Conn *x, u32 slot) {
+    Ws *w = &g_ws[slot];
+    if (!res_ensure(&w->in, (u64)w->inlen + 65536) || !res_ensure(&x->pairs, 3 * (u64)sizeof(MitoPair))) return 0; /* room for :socket, :tag, :message */
+    int k = os_recv(w->fd, w->in.p + w->inlen, 65536);
+    int ended = k <= 0;
+    if (k > 0) w->inlen += (u32)k;
+    u32 at = 0;
+    while (!ended) {
+        u8 *f = w->in.p + at; u32 have = w->inlen - at;
+        if (have < 2) break;
+        int fin = f[0] & 0x80, op = f[0] & 0x0F, masked = f[1] & 0x80; u64 n = f[1] & 0x7F; u32 h = 2;
+        if (n == 126) { if (have < 4) break; n = (u64)f[2] << 8 | f[3]; h = 4; }
+        else if (n == 127) { if (have < 10) break; n = 0; for (int i = 0; i < 8; i++) n = n << 8 | f[2 + i]; h = 10; }
+        if (!masked || n > (1u << 20)) { ended = 1; break; } /* a client's frames are masked, and at most 1 MB */
+        if (have < h + 4 + n) break;
+        u8 *mk = f + h, *data = f + h + 4;
+        for (u64 i = 0; i < n; i++) data[i] ^= mk[i & 3];
+        at += h + 4 + (u32)n;
+        if (op == 8) { ws_frame(w, 8, data, n >= 2 ? 2 : 0, 0, 0, 0, 0); ended = 1; break; }
+        if (op == 9) { ws_frame(w, 10, data, (u32)n, 0, 0, 0, 0); continue; }
+        if (op == 10) continue;
+        if (op == 1 || op == 2 || op == 0) {
+            if (op != 0) w->msgn = 0;
+            if (!res_ensure(&w->msg, (u64)w->msgn + n) || (u64)w->msgn + n > (1u << 20)) { ended = 1; break; }
+            memcpy(w->msg.p + w->msgn, data, n); w->msgn += (u32)n;
+            if (fin) { ws_call(x->app, "SOCKETMSG", slot, w->path, w->pathn, (MitoPair *)x->pairs.p, 0, w->msg.p, w->msgn); w->msgn = 0; }
+        }
+    }
+    if (at) { memmove(w->in.p, w->in.p + at, w->inlen - at); w->inlen -= at; }
+    if (ended) {
+        ws_call(x->app, "SOCKETCLOSE", slot, w->path, w->pathn, (MitoPair *)x->pairs.p, 0, (const u8 *)"", 0);
+        lk_on(&g_app_lock); os_close(w->fd); ws_release(slot); lk_off(&g_app_lock);
+        return 0;
+    }
+    return 1;
+}
+#endif
+#ifdef MITO_EVERY_MS
+/* the program's `@every` function, on its clock, under the program's lock (with what it asks of sockets) */
+static u32 every_loop(void *app) {
+    Lock lk; Cond cv; lk_init(&lk); cv_init(&cv);
+    for (;;) {
+        lk_on(&lk); cv_wait(&cv, &lk, MITO_EVERY_MS); lk_off(&lk);
+        lk_on(&g_app_lock);
+        int code = mito_handle(app, "EVERY", 5, "/", 1, 0, 0, 0, 0, "", 0);
+#ifdef MITO_SOCKETS
+        if (code < 300 && g_ws_ready) ws_apply(app);
+#endif
+        (void)code;
+        lk_off(&g_app_lock);
+    }
+    return 0;
+}
+#endif
+
 /* Read one request from connection c and answer it. `first`: the connection's first request (an empty one is answered 400;
    later, the client closing the connection between requests ends it quietly). Returns 1 when the connection stays open. */
 static int serve_one(Conn *x, Sock c, int first) {
@@ -333,6 +535,20 @@ static int serve_one(Conn *x, Sock c, int first) {
     /* HEAD: answered as GET, with the same head and no body */
     int head_only = mn == 4 && method[0] == 'H' && method[1] == 'E' && method[2] == 'A' && method[3] == 'D';
     if (head_only) { method = "GET"; mn = 3; }
+    /* the program's own requests (its start, its clock, its sockets' messages) never come from the network */
+    { static const char *const inner[] = { "START", "EVERY", "SOCKET", "SOCKETMSG", "SOCKETCLOSE" };
+      for (u32 k = 0; k < 5; k++) { u32 q = 0; while (inner[k][q] && q < mn && method[q] == inner[k][q]) q++; if (!inner[k][q] && q == mn) {
+          const char *r = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; u32 rn = 0; while (r[rn]) rn++; send_all(c, r, rn); return 0; } } }
+#ifdef MITO_SOCKETS
+    /* a WebSocket upgrade: the program's `@socket` endpoint for the path decides */
+    if (mn == 3 && method[0] == 'G' && !head_only) {
+        const MitoPair *up = req_header((const MitoPair *)x->pairs.p, np, "upgrade"), *key = req_header((const MitoPair *)x->pairs.p, np, "sec-websocket-key");
+        if (up && key && up->vn == 9) {
+            u32 q = 0; while (q < 9 && lower_(up->v[q]) == "websocket"[q]) q++;
+            if (q == 9) { (void)rest; return ws_upgrade(x, c, target, tn, np, key); }
+        }
+    }
+#endif
     char *hd = x->hd; u32 n = 0; char num[24]; int dn;
     #define HPUT(s) do { const char *s_ = (s); while (*s_ && n < sizeof x->hd) hd[n++] = *s_++; } while (0)
     #define HPUTN(s, k) do { const char *s_ = (s); u32 k_ = (k); for (u32 i_ = 0; i_ < k_ && n < sizeof x->hd; i_++) hd[n++] = s_[i_]; } while (0)
@@ -494,7 +710,7 @@ static void ready_push(u64 c) {
     int ok = g_ready_len < READY_CAP;
     if (ok) { g_ready[(g_ready_head + g_ready_len) % READY_CAP] = c; g_ready_len++; cv_one(&g_q_cv); }
     lk_off(&g_q_lock);
-    if (!ok) os_close(c >> 1);
+    if (!ok) os_close(c >> 14);
 }
 static u64 ready_pop(void) {
     lk_on(&g_q_lock);
@@ -503,21 +719,30 @@ static u64 ready_pop(void) {
     lk_off(&g_q_lock);
     return c;
 }
-static void give_back(Sock c) {
+static u32 g_back_ws[IDLE_CAP]; /* a socket's slot + 1, 0 for an HTTP connection */
+static void give_back_ws(Sock c, u32 ws) {
     lk_on(&g_q_lock);
-    int ok = g_back_len < IDLE_CAP; if (ok) g_back[g_back_len++] = c;
+    int ok = g_back_len < IDLE_CAP; if (ok) { g_back_ws[g_back_len] = ws; g_back[g_back_len++] = c; }
     lk_off(&g_q_lock);
     if (!ok) { os_close(c); return; }
     os_wake_ping();
 }
+static void give_back(Sock c) { give_back_ws(c, 0); }
 /* a connection thread: answer the requests waiting on a connection (back to back ones too), then give it to the poller */
 static u32 conn_loop(void *arg) {
     Conn *x = (Conn *)arg;
     for (;;) {
         u64 rc = ready_pop();
-        Sock c = rc >> 1; int first = (int)(rc & 1); /* a new connection's first request */
+        Sock c = rc >> 14; int first = (int)(rc & 1); u32 wslot = (u32)(rc >> 1 & 0x1FFF); /* a new connection's first request; a socket's slot + 1 */
         x->carry = 0;
+#ifdef MITO_SOCKETS
+        if (wslot) { if (ws_read(x, wslot - 1)) give_back_ws(c, wslot); continue; }
+#endif
+        (void)wslot;
         int keep = serve_one(x, c, first);
+#ifdef MITO_SOCKETS
+        if (keep == 2) { u32 sl = 0; while (sl < WS_CAP && !(g_ws[sl].live && g_ws[sl].fd == c)) sl++; if (sl < WS_CAP) give_back_ws(c, sl + 1); else os_close(c); continue; }
+#endif
         for (;;) {
             while (keep && x->carry) keep = serve_one(x, c, 0);
             if (!keep) break;
@@ -532,13 +757,13 @@ static u32 conn_loop(void *arg) {
     return 0;
 }
 /* the poller: accepts new connections and watches idle ones; one with data (or closed) goes to the connection threads */
-static Sock g_idle[IDLE_CAP]; static u64 g_since[IDLE_CAP]; static u8 g_new[IDLE_CAP]; static OsPoll g_fds[IDLE_CAP + 2];
+static Sock g_idle[IDLE_CAP]; static u64 g_since[IDLE_CAP]; static u8 g_new[IDLE_CAP]; static u32 g_iws[IDLE_CAP]; static OsPoll g_fds[IDLE_CAP + 2];
 static u32 poll_loop(void *arg) {
     Sock listener = *(Sock *)arg; u32 ni = 0;
     for (;;) {
         lk_on(&g_q_lock);
         u64 now = os_ticks_ms();
-        for (u32 i = 0; i < g_back_len; i++) { if (ni < IDLE_CAP) { g_idle[ni] = g_back[i]; g_since[ni] = now; g_new[ni] = 0; ni++; } else os_close(g_back[i]); }
+        for (u32 i = 0; i < g_back_len; i++) { if (ni < IDLE_CAP) { g_idle[ni] = g_back[i]; g_since[ni] = now; g_new[ni] = 0; g_iws[ni] = g_back_ws[i]; ni++; } else os_close(g_back[i]); }
         g_back_len = 0;
         lk_off(&g_q_lock);
         g_fds[0].fd = listener; g_fds[0].events = OS_POLLIN; g_fds[0].revents = 0;
@@ -551,15 +776,16 @@ static u32 poll_loop(void *arg) {
         if (g_fds[0].revents & OS_POLLIN) {
             /* a new connection waits here, like an idle one, until its first request arrives: no thread blocks on a client that has not sent anything */
             Sock c = os_accept(listener);
-            if (c != OS_BAD_SOCK) { if (ni < IDLE_CAP) { g_idle[ni] = c; g_since[ni] = os_ticks_ms(); g_new[ni] = 1; ni++; } else os_close(c); }
+            if (c != OS_BAD_SOCK) { if (ni < IDLE_CAP) { g_idle[ni] = c; g_since[ni] = os_ticks_ms(); g_new[ni] = 1; g_iws[ni] = 0; ni++; } else os_close(c); }
         }
         now = os_ticks_ms();
         u32 kept = 0;
         for (u32 i = 0; i < ni; i++) {
             short ev = i < polled ? g_fds[i + 2].revents : 0;
-            if (ev) ready_push(g_idle[i] * 2 + g_new[i]); /* a request (or the client closed: the thread finds out); + 1 marks a first request */
-            else if (now - g_since[i] > IDLE_MS) os_close(g_idle[i]);
-            else { g_idle[kept] = g_idle[i]; g_since[kept] = g_since[i]; g_new[kept] = g_new[i]; kept++; }
+            /* a request (or the client closed: the thread finds out); + 1 marks a first request; a socket carries its slot and never idles out */
+            if (ev) ready_push(g_idle[i] << 14 | (u64)g_iws[i] << 1 | g_new[i]);
+            else if (!g_iws[i] && now - g_since[i] > IDLE_MS) os_close(g_idle[i]);
+            else { g_idle[kept] = g_idle[i]; g_since[kept] = g_since[i]; g_new[kept] = g_new[i]; g_iws[kept] = g_iws[i]; kept++; }
         }
         ni = kept;
     }
@@ -572,6 +798,9 @@ static int start_threads(void *app, Sock listener, u32 nt) {
     if (g_wake == OS_BAD_SOCK) return 0;
     g_listener = listener;
     for (u32 i = 0; i < nt; i++) { Conn *x = conn_new(app, listener); if (!x) return 0; if (!os_thread_start(&g_threads[i], conn_loop, x)) return 0; }
+#ifdef MITO_EVERY_MS
+    { static OsThread every; if (!os_thread_start(&every, every_loop, app)) return 0; }
+#endif
     if (!os_thread_start(&g_threads[256], poll_loop, &g_listener)) return 0;
     os_thread_join(&g_threads[256]);
     return 1;

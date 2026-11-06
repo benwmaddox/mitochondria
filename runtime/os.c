@@ -17,6 +17,7 @@
 void *memcpy(void *d, const void *s, u64 n);
 void *memmove(void *d, const void *s, u64 n);
 void *memset(void *d, int c, u64 n);
+int memcmp(const void *a, const void *b, u64 n);
 int printf(const char *f, ...);
 char *getenv(const char *name);
 int fflush(void *f);
@@ -125,6 +126,9 @@ static int os_send(Sock s, const u8 *b, u32 n) { return send(s, (const char *)b,
 /* two buffers in one call (two small sends can wait on the client's delayed acknowledgement of the first): the bytes sent (0 on error) */
 static u64 os_send2(Sock s, const u8 *a, u32 an, const u8 *b, u32 bn) { OsBuf v[2] = { { an, (char *)a }, { bn, (char *)b } }; u32 sent = 0; return WSASend(s, v, bn ? 2 : 1, &sent, 0, 0, 0) == 0 ? sent : 0; }
 static void os_close(Sock s) { closesocket(s); }
+int shutdown(u64 s, int how);
+/* both directions ended (the peer sees the end; the socket is closed later by its reader) */
+static void os_shutdown(Sock s) { shutdown(s, 2); } /* SD_BOTH */
 static int os_poll(OsPoll *p, u32 n, int ms) { return WSAPoll(p, n, ms); }
 /* the poller's wake-up channel: a UDP socket on 127.0.0.1 that sends to itself */
 static Sock g_os_wake = OS_BAD_SOCK; static u8 g_os_wake_addr[16];
@@ -251,6 +255,8 @@ static u64 os_send2(Sock s, const u8 *a, u32 an, const u8 *b, u32 bn) {
     return k > 0 ? (u64)k : 0;
 }
 static void os_close(Sock s) { close((int)s); }
+int shutdown(int fd, int how);
+static void os_shutdown(Sock s) { shutdown((int)s, 2); } /* SHUT_RDWR */
 static int os_poll(OsPoll *p, u32 n, int ms) { return poll(p, n, ms); }
 /* the poller's wake-up channel: a pipe; its read end is polled */
 static int g_os_wake[2] = { -1, -1 };

@@ -251,8 +251,8 @@ impl Program {
                         // `time`: an i64 of microseconds since 1970 (UTC); in a table's row, text in the column (`2026-03-02 16:00:00.123456`)
                         let time = p.peek() == Some("time");
                         let ty = if time { p.i += 1; Ty::Scalar(Scalar::I64) } else { p.ty()? };
-                        // `utf8<N>?`: a nullable text column (table rows)
-                        let null = matches!(ty, Ty::Str(_)) && p.peek() == Some("?");
+                        // `utf8<N>?`, `time?`: a nullable text or time column (table rows)
+                        let null = (matches!(ty, Ty::Str(_)) || time) && p.peek() == Some("?");
                         if null { p.i += 1; }
                         // `T?` / `T in path?`: a stored id of an item, read back as a `T?` (8 bytes: slot + 1, then its generation)
                         let mut idref = None;
@@ -384,7 +384,7 @@ impl Program {
         let in_rows: Vec<usize> = prog.tables.iter().map(|t| t.item).collect();
         for (i, sd) in prog.structs.iter().enumerate() {
             if let Some(k) = sd.cols.iter().position(|c| c.null) {
-                if !in_rows.contains(&i) { return Err(format!("`{}.{}`: a nullable text field (`?`) is a column that may be NULL, so it belongs in a table's rows; elsewhere use the empty text", sd.name, sd.fields[k].0)); }
+                if !in_rows.contains(&i) { return Err(format!("`{}.{}`: a nullable field (`utf8<N>?`, `time?`) is a column that may be NULL, so it belongs in a table's rows; elsewhere use the empty text", sd.name, sd.fields[k].0)); }
             }
         }
         prog.resolve_ids()?;
@@ -604,7 +604,7 @@ impl Program {
             if let Some(r) = &self.structs[s].ids[k] { leaves.push((p, TKind::Ref(usize::MAX), None, Some(r.clone()), true)); continue; }
             let opt = self.structs[s].cols[k];
             match t {
-                Ty::Scalar(_) if opt.time => leaves.push((p, TKind::Time, None, None, false)),
+                Ty::Scalar(_) if opt.time => leaves.push((p, TKind::Time, None, None, opt.null)),
                 Ty::Scalar(sc) if matches!(sc, Scalar::F32 | Scalar::F64) => leaves.push((p, TKind::Real(*sc), None, None, false)),
                 Ty::Scalar(sc) => leaves.push((p, TKind::Int(*sc), range, None, false)),
                 Ty::Str(m) => leaves.push((p, TKind::Text(*m, range == Some((0, 127))), None, None, opt.null)),

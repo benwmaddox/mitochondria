@@ -1,0 +1,8 @@
+POST /events -> 201 {"id":1}
+GET /events/1 -> 200 {"at":"2024-02-29 00:00:00.123456","until":null,"leap":"2025-02-28"}
+POST /events/1/until -> 200 {}
+GET /events/1 -> 200 {"at":"2024-02-29 00:00:00.123456","until":"2026-03-02 16:00","leap":"2025-02-28"}
+POST /events/1/until -> 200 {}
+GET /events/1 -> 200 {"at":"2024-02-29 00:00:00.123456","until":null,"leap":"2025-02-28"}
+state <plain values> 1
+memory reserved=4096 committed=4096 live=1

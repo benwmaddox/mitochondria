@@ -589,6 +589,7 @@ typedef struct Mito {
     int starting; /* MITO(begin) is running the program's `@start` function */
     int bare; /* the answer leaves out the web block's header lines (`no_default_headers()`) */
     const u8 *target; u32 target_n; /* the request's target (path and query) as sent */
+    Area ops; /* what the request asks of sockets (runtime/http.c applies it once the request succeeds): records, see sock_op */
     i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
     u64 small;       /* bytes of the block holding the page flags (released with the instance) */
     u32 text_base;   /* where a request's text starts: after the literals, or after a running test's own text */
@@ -1461,6 +1462,15 @@ static u32 time_text(i64 us, char *o) {
     if (frac) { o[n++] = '.'; for (i64 dv = 100000; dv; dv /= 10) o[n++] = (char)('0' + frac / dv % 10); }
     return n;
 }
+/* A socket operation for runtime/http.c: op (1 send, 2 close, 3 subscribe, 4 unsubscribe, 5 broadcast, 6 send to all, 7 tag), the socket's
+   id, an integer, then up to three texts, each its length (4 bytes) and bytes. */
+static int sock_op(Mito *m, u8 op, u32 id, i64 i, const T *parts, u32 np) {
+    u8 hdr[14]; hdr[0] = op; memcpy(hdr + 1, &id, 4); memcpy(hdr + 5, &i, 8); hdr[13] = (u8)np;
+    if (!a_put(&m->ops, hdr, 14)) return fail(m, 507, "too many socket operations in one request");
+    for (u32 k = 0; k < np; k++) { u32 n = parts[k].len; if (!a_put(&m->ops, &n, 4) || !a_put(&m->ops, t_ptr(m, parts[k]), n)) return fail(m, 507, "too many socket operations in one request"); }
+    return 0;
+}
+MITO_API const u8 *MITO(socket_ops)(void *mp_, u32 *len) { Mito *m = (Mito *)mp_; *len = m->ops.len; return m->ops.p; }
 /* the directory read_stored reads (the server's --files DIR), empty when none */
 static char g_files_dir[600];
 MITO_API void MITO(set_files)(const char *dir) { u32 k = 0; while (dir[k] && k + 1 < sizeof g_files_dir) { g_files_dir[k] = dir[k]; k++; } g_files_dir[k] = 0; }
@@ -1575,6 +1585,15 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
             memcpy(w + o, src, len); o += len;
         }
         return t_done(m, start, o, out); }
+    case 51: case 52: case 53: case 54: case 55: case 56: case 57: { /* sockets: socket_send(id, t), socket_close(id), socket_subscribe(id, stream,
+        before, after), socket_unsubscribe(id, before), broadcast(stream, t), socket_send_all(t), socket_tag(id, tag): recorded, applied when
+        the request succeeds */
+        T parts[3]; u32 np = 0; u32 id = 0; i64 iv = 0; u32 first = 0;
+        if (code == 51 || code == 52 || code == 53 || code == 54 || code == 57) { if (n < 1 || a[0].tag != 1 || a[0].i < 0 || a[0].i > 0xFFFFFFFFLL) return fail(m, 500, "a socket is named by its id (an integer)"); id = (u32)a[0].i; first = 1; }
+        if (code == 57) { if (n < 2 || a[1].tag != 1) return fail(m, 500, "socket_tag(socket, tag): the tag is an integer"); iv = a[1].i; }
+        else for (u32 k = first; k < n && np < 3; k++) { if (arg_txt(m, a, n, k, &parts[np])) return -1; np++; }
+        if (sock_op(m, (u8)(code - 50), id, iv, parts, np)) return -1;
+        *out = v_null(); return 0; }
     case 49: { /* crc32(t): zlib's CRC-32 (IEEE) of the bytes, as Zlib.crc32 */
         if (arg_txt(m, a, n, 0, &x)) return -1;
         const u8 *s = t_ptr(m, x); u32 c = 0xFFFFFFFFu;
@@ -2327,6 +2346,8 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     m->pr.stuck = mem->shrinks + pg->ncolls + 1;
     if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
     m->areas = (u8 *)os_alloc(TEXT_CAP + RESPONSE_CAP);
+    m->ops.p = (u8 *)os_alloc(1 << 20); m->ops.cap = 1 << 20; m->ops.len = 0; /* socket operations: 1 MB a request */
+    if (!m->ops.p) return 0;
     if (!m->areas) return 0;
     m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
     m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf; m->head.p = m->hbuf; m->head.cap = sizeof m->hbuf;
@@ -2408,7 +2429,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
     m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0; m->bare = 0;
-    m->target = (const u8 *)target; m->target_n = tn;
+    m->target = (const u8 *)target; m->target_n = tn; m->ops.len = 0;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     /* the `@start` function only through MITO(begin), never as a request */

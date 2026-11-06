@@ -402,6 +402,102 @@ fn app_user(id: i64) -> User {{ return db.users[id]; }}
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Sockets through the real server: the upgrade (RFC 6455's sample key and accept), the program's welcome, a tag read back in a message,
+    /// subscriptions and a broadcast (each subscriber its own text around the message), unsubscribing, close, and the `@every` clock.
+    #[test]
+    fn sockets_upgrade_subscribe_and_broadcast() {
+        use std::io::{BufRead, Read, Write};
+        if super::clang().is_none() { return; }
+        let dir = std::env::temp_dir().join(format!("mito-sockets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = r#"struct A { opened: i64; }
+state a: A;
+@socket("/cable")
+fn open(socket: i64 from header(":socket")) -> Response<null> {
+    socket_tag(socket, 40 + a.opened);
+    set_header("Sec-WebSocket-Protocol", "actioncable-v1-json");
+    socket_send(socket, "welcome");
+    a.opened += 1;
+    return no_content();
+}
+@socket_message("/cable")
+fn message(socket: i64 from header(":socket"), tag: i64 from header(":tag"), text: utf8<4096> from header(":message")) -> Response<null> {
+    if text == "sub" { socket_subscribe(socket, "room", "{\"tag\":" + str(tag) + ",\"m\":", "}"); socket_send(socket, "subscribed"); }
+    else if text == "unsub" { socket_unsubscribe(socket, "{\"tag\":" + str(tag) + ",\"m\":"); socket_send(socket, "unsubscribed"); }
+    else { broadcast("room", "\"" + text + "\""); }
+    return no_content();
+}
+@socket_close("/cable")
+fn closed() -> Response<null> { a.opened -= 1; return no_content(); }
+@get("/opened") fn opened() -> Response<{ n: i64 }> { return ok({ n: a.opened }); }
+@every(100) fn tick() { socket_send_all("ping"); }
+"#;
+        let (st, code) = crate::source::load(src).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap();
+        let exe = dir.join(format!("ws{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O0"]).unwrap();
+        let port = 16000 + (std::process::id() % 1000) as u16;
+        let mut srv = std::process::Command::new(&exe).args(["--port", &port.to_string()]).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        { let mut l = String::new(); std::io::BufReader::new(srv.stdout.take().unwrap()).read_line(&mut l).unwrap(); }
+        // a client: the upgrade, then frames (its own masked; the server's not); pings from the clock are counted and skipped
+        struct Ws { s: std::net::TcpStream, pings: u32 }
+        impl Ws {
+            fn send(&mut self, t: &str) { let b = t.as_bytes(); let mut f = vec![0x81u8, 0x80 | b.len() as u8, 1, 2, 3, 4]; f.extend(b.iter().enumerate().map(|(i, c)| c ^ [1u8, 2, 3, 4][i % 4])); self.s.write_all(&f).unwrap(); }
+            fn read(&mut self) -> String {
+                loop {
+                    let mut h = [0u8; 2]; self.s.read_exact(&mut h).unwrap();
+                    let mut n = (h[1] & 0x7F) as usize;
+                    if n == 126 { let mut x = [0u8; 2]; self.s.read_exact(&mut x).unwrap(); n = u16::from_be_bytes(x) as usize; }
+                    let mut d = vec![0u8; n]; self.s.read_exact(&mut d).unwrap();
+                    let t = String::from_utf8(d).unwrap();
+                    if h[0] & 0x0F == 1 && t == "ping" { self.pings += 1; continue; }
+                    return t;
+                }
+            }
+        }
+        let connect = || -> (Ws, String) {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            s.write_all(b"GET /cable HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").unwrap();
+            let mut head = Vec::new(); let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") { s.read_exact(&mut b).unwrap(); head.push(b[0]); }
+            (Ws { s, pings: 0 }, String::from_utf8_lossy(&head).into_owned())
+        };
+        let (mut one, head) = connect();
+        assert!(head.starts_with("HTTP/1.1 101") && head.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n") && head.contains("Sec-WebSocket-Protocol: actioncable-v1-json\r\n") && !head.contains("Content-Type"), "{}", head);
+        assert_eq!(one.read(), "welcome");
+        let (mut two, _) = connect();
+        assert_eq!(two.read(), "welcome");
+        one.send("sub"); assert_eq!(one.read(), "subscribed");
+        two.send("sub"); assert_eq!(two.read(), "subscribed");
+        one.send("hello");
+        assert_eq!(one.read(), "{\"tag\":40,\"m\":\"hello\"}");
+        assert_eq!(two.read(), "{\"tag\":41,\"m\":\"hello\"}");
+        two.send("unsub"); assert_eq!(two.read(), "unsubscribed");
+        two.send("again");
+        assert_eq!(one.read(), "{\"tag\":40,\"m\":\"again\"}");
+        // the clock's pings reached the sockets
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        two.send("sub"); assert_eq!(two.read(), "subscribed");
+        assert!(two.pings >= 2, "pings: {}", two.pings);
+        // a close: the program is told
+        let opened = |p: u16| -> String { let mut s = std::net::TcpStream::connect(("127.0.0.1", p)).unwrap(); s.write_all(b"GET /opened HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap(); let mut r = String::new(); s.read_to_string(&mut r).unwrap(); r.split("\r\n\r\n").nth(1).unwrap_or("").to_string() };
+        assert_eq!(opened(port), "{\"n\":2}");
+        two.s.write_all(&[0x88, 0x82, 1, 2, 3, 4, 0x03 ^ 1, 0xE8 ^ 2]).unwrap();
+        let mut rest = Vec::new(); let _ = two.s.read_to_end(&mut rest);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(opened(port), "{\"n\":1}");
+        // the program's own requests never come from the network
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(b"SOCKETMSG /cable HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut r = String::new(); let _ = s.read_to_string(&mut r);
+        assert!(r.starts_with("HTTP/1.1 405"), "{}", r);
+        let _ = srv.kill(); let _ = srv.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A program's tables across builds, through the real server: created, then migrated by name (a column added, one dropped); a
     /// column whose type changed, or a row written from outside past a declared limit, stops the server at start, saying why.
     #[test]

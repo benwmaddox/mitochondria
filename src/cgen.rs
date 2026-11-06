@@ -228,7 +228,7 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 51] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 58] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
     B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
@@ -241,7 +241,9 @@ pub const BUILTINS: [B; 51] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B
     // a text as a JSON string and back: 46, 47
     B::JsonQuote, B::JsonUnquote,
     // the request's path and query as sent: 48; CRC-32: 49; a stored file's bytes: 50
-    B::RequestTarget, B::Crc32, B::ReadStored];
+    B::RequestTarget, B::Crc32, B::ReadStored,
+    // sockets (runtime/http.c applies what a request asks once it succeeds): 51 to 57
+    B::SocketSend, B::SocketClose, B::SocketSubscribe, B::SocketUnsubscribe, B::Broadcast, B::SocketSendAll, B::SocketTag];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
 const CRYPTO_BUILTINS: [B; 11] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::RandomText];
 
@@ -703,7 +705,11 @@ static const unsigned char mito_lits[] = {{ {} }};
         o += &store_tables_c(prog);
     }
     o += &format!("#define MITO_HAS_START {}\n", api.eps.iter().any(|e| e.method == "START") as u8); // a `@start` function (MITO(begin))
-    if g.src.contains("/*crypto*/") {
+    // sockets (`@socket`): the front end upgrades connections; the handshake's SHA-1 is the system library's (crypto linked in)
+    let sockets = api.eps.iter().any(|e| e.method == "SOCKET");
+    if sockets { o += "#define MITO_SOCKETS 1\n"; }
+    if let Some(e) = api.eps.iter().find(|e| e.method == "EVERY") { o += &format!("#define MITO_EVERY_MS {}\n", e.text.trim_start_matches("EVERY ")); }
+    if g.src.contains("/*crypto*/") || sockets {
         // a crypto built-in: the system library's primitives (the build sees this line and links libcrypto and crypt_blowfish)
         o += "#define MITO_USES_CRYPTO 1\n";
         o += CRYPTO;
@@ -2940,6 +2946,8 @@ impl<'p> G<'p> {
                 TKind::Int(_) => { let x = CV::Int(format!("{}.i", v)); self.with_field_range(x, col.range) }
                 TKind::Real(_) => CV::Flt(format!("{}.f", v)),
                 // a time: the runtime reads the column's text as microseconds since 1970
+                // a nullable time (`time?`): the value, or null
+                TKind::Time if col.null => CV::Any(v),
                 TKind::Time => CV::Int(format!("{}.i", v)),
                 // a nullable column (`utf8<N>?`): null when the column is NULL
                 TKind::Text(..) if col.null => { let tt = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", tt, v, v, v)); CV::Txt(tt) }
@@ -2987,6 +2995,7 @@ impl<'p> G<'p> {
             }
             TKind::Real(_) => match v { CV::Int(e) => CV::Flt(format!("(double)({})", e)), CV::Flt(e) => CV::Flt(e), _ => return no(format!("`{}` takes a number", path)) },
             // a time: microseconds since 1970, written as text by the runtime
+            TKind::Time if col.null && matches!(v, CV::Null) => CV::Null,
             TKind::Time => { let x = self.int_or(v, 400, "a time field takes microseconds since 1970 (an integer)"); CV::Int(self.hold_int(x)) }
             TKind::Text(..) if col.null && matches!(v, CV::Null) => CV::Null,
             TKind::Text(max, _) => {
@@ -3643,6 +3652,9 @@ impl<'p> G<'p> {
         let want = match bi {
             B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml | B::JsonQuote | B::JsonUnquote | B::Crc32 | B::ReadStored => Some((1, "one argument")),
             B::RequestTarget => Some((0, "no arguments")),
+            B::SocketClose | B::SocketSendAll => Some((1, "one argument")),
+            B::SocketSend | B::SocketUnsubscribe | B::Broadcast | B::SocketTag => Some((2, "two arguments")),
+            B::SocketSubscribe => Some((4, "the socket, the stream, and the text before and after each message broadcast to it")),
             B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime | B::Contains | B::StartsWith | B::EndsWith | B::RandomText | B::AddYears | B::IndexOf | B::LastIndexOf => Some((2, "two arguments")),
             B::GcmSeal | B::GcmOpen => Some((3, "the key, the 12-byte nonce and the text")),
             B::Pbkdf2Sha256 => Some((4, "the password, the salt, the iterations and the length")),
@@ -3651,7 +3663,7 @@ impl<'p> G<'p> {
         if let Some((k, what)) = want {
             if a.len() != k {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
-                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::JsonQuote => "json_quote", B::JsonUnquote => "json_unquote", B::RequestTarget => "request_target", B::Crc32 => "crc32", B::ReadStored => "read_stored", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
+                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::JsonQuote => "json_quote", B::JsonUnquote => "json_unquote", B::RequestTarget => "request_target", B::Crc32 => "crc32", B::ReadStored => "read_stored", B::SocketSend => "socket_send", B::SocketClose => "socket_close", B::SocketSubscribe => "socket_subscribe", B::SocketUnsubscribe => "socket_unsubscribe", B::Broadcast => "broadcast", B::SocketSendAll => "socket_send_all", B::SocketTag => "socket_tag", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
                     B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time", B::Contains => "contains", B::StartsWith => "starts_with", B::EndsWith => "ends_with",
                     B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));

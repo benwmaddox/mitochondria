@@ -72,6 +72,7 @@ and removing any item keeps the others in insertion order (TodoMVC's `order` arr
 | --- | --- |
 | `owner: User?` (a reference) | `owner_id INTEGER`, NULL when unset, set to NULL when its row goes |
 | `bio: utf8<4000>?` (nullable text; table rows only) | `bio TEXT` that may be NULL: read as null, written with `= null` |
+| `connected_at: time?` (a nullable time) | the same, NULL when unset: read as null, cleared with `= null` |
 | `created_at: time` | text as Rails and SQLite's date functions write it, `2026-03-02 16:00:00` with `.ffffff` only when there are microseconds; in the program an i64 of microseconds since 1970 (UTC); `format_time(t, "%Y%m%d%H%M%S")` writes one out |
 
 ### Another program's database: `table<T> extern` (2026-11-06)

@@ -11,8 +11,8 @@ what it needs is added to the language as general features.
 | Whose list | One list per browser. A cookie holds the list's token; the browser's first todo creates the list. |
 | Writing HTML | HTML literals in functions (`<li class={c}>{t.title}</li>`, with `foreach` and `if` inside), checked for well-formedness when compiling, escaped automatically, compiled to appends straight into the response. |
 | Script | Pages and forms work with none. A tiny script (about 20 lines) adds double-click to edit, Escape to cancel, save on blur. |
-| Persistence | In memory for now; persistence (docs/persistence.md) is its own step afterwards. |
-| Pool of lists full | Refuse with a message on the page; nobody loses a list. |
+| Persistence | In memory at first; since 2026-11-05 the lists are tables in SQLite (docs/persistence.md), kept across restarts. |
+| Pool of lists full | Refuse with a message on the page; nobody loses a list. (Moot since the lists became tables, which have no fixed size.) |
 | Filter addresses | `/`, `/active`, `/completed`. |
 | Look | The official TodoMVC CSS (todomvc-app-css, MIT), vendored; the markup is what it expects. |
 | Tests | crudspec's app-spec checks (e2e.mjs, Playwright) ported and run against the server. |

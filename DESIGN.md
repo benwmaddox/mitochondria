@@ -44,6 +44,17 @@ full, `add` fails. `checked` adds a generation per slot, so an id from a request
 slot is detected (`Stale`). Use it
 for things that are referred to and come and go: sessions, users, rooms.
 
+**`table<T>`** keeps its rows in SQLite (the bundled amalgamation, in `--data dir`, default `./data`): kept across restarts,
+readable by any SQLite tool while the server runs, and with no fixed number of rows (it takes no capacity). Rows hold plain fields
+(text keeps its maximum) and nested tables, a board's `todos: table<Todo>` being the rows each board owns, removed with it. Code
+reads the same as for other collections: `add`, field reads and writes, `remove`, `count()`, `t[id]` (404 when it is not this
+table's, or this owner's, row), `foreach ... where ... reverse limit`, a row from a cookie (`board: Board? from cookie("list")`,
+named by `token(b)`). A row's id is its SQLite row id, never reused. `index(f)` and `unique(f)` on the collection declare
+indexes; a `where` over a whole top-level table is compiled to SQL and must use indexed fields (one that would read every row is
+refused), while a loop over one owner's rows may filter on anything. Each request is one transaction, committed before its
+answer. At start the database is created or migrated by field name; a column whose type changed, or rows that break a declared
+limit, stop the server with the reason (docs/persistence.md).
+
 **Naming another item.** A field `best: Player?` holds an item's id (its slot and generation, 8 bytes) and reads back as a
 `T?`: null when the item was removed, also after its slot was reused by another item, so it is handled as every `T?` is (`if
 exists(b)` on a local, or `or(game.best.name, "-")`). It is set from an item, a `T?` or `null`, and an answer writes it as the

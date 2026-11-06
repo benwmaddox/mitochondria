@@ -1,0 +1,53 @@
+// a loop over each row's children inside a loop over the rows (`foreach t in b.todos` in `foreach b in app.boards`) is one query for
+// every row's children, walked in step with the outer loop: the same answers as one query per row, with the outer loop's `where` and
+// `limit`, the inner loop's `where` (in the query, or tested here) and `limit`, and inner loops some rows skip
+--- program
+struct Todo { title: utf8<12>; done: bool; rank: i64; }
+struct Board { name: ascii<12>; open: bool; todos: table<Todo>; }
+struct App { boards: table<Board> index(open); }
+state app: App;
+
+@post("/boards/{name}/{open}")
+fn board(name: ascii<12>, open: bool) -> Response<{ id: Board }> { let b = app.boards.add(); b.name = name; b.open = open; return created({ id: b }); }
+@post("/boards/{b}/todos/{title}/{rank}")
+fn todo(b: i64, title: utf8<12>, rank: i64) -> Response<{}> { let t = app.boards[b].todos.add(); t.title = title; t.rank = rank; return ok({}); }
+@post("/todos/{b}/{t}/done")
+fn done(b: i64, t: i64) -> Response<{}> { app.boards[b].todos[t].done = true; return ok({}); }
+@get("/all")
+fn all() -> Response<{ boards: [{ name: string, todos: [string] }] }> {
+    return ok({ boards: [foreach b in app.boards { name: b.name, todos: [foreach t in b.todos t.title] }] });
+}
+@get("/open/{min}")
+fn open(min: i64) -> Response<{ boards: [{ name: string, todos: [string] }] }> {
+    return ok({ boards: [foreach b in app.boards where b.open limit 2 { name: b.name, todos: [foreach t in b.todos where t.rank >= min && t.title != "skip" limit 2 t.title] }] });
+}
+@get("/count")
+fn count() -> Response<{ open: i64, every: i64 }> {
+    var n = 0;
+    var every = 0;
+    foreach b in app.boards {
+        if b.name != "quiet" {
+            foreach t in b.todos where !t.done { n += 1; }
+        }
+        every += 1;
+    }
+    return ok({ open: n, every: every });
+}
+--- requests
+POST /boards/home/true
+POST /boards/quiet/true
+POST /boards/work/false
+POST /boards/empty/true
+POST /boards/last/true
+POST /boards/1/todos/milk/1
+POST /boards/1/todos/eggs/5
+POST /boards/1/todos/skip/9
+POST /boards/1/todos/bread/7
+POST /boards/2/todos/hush/3
+POST /boards/3/todos/report/8
+POST /boards/5/todos/end/6
+POST /todos/1/2/done
+GET /all
+GET /open/5
+GET /open/0
+GET /count

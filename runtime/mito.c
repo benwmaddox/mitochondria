@@ -1754,6 +1754,30 @@ static int h_tnext(Ctx *c, u32 cur, u32 *rowid, int *more) {
     if (r != SQ_DONE) return t_dbfail(m);
     return 0;
 }
+/* A merged loop over one owner's rows (the inner loop of a loop over the owners): the cursor holds every owner's rows, ordered by owner
+   then id (columns: owner id, row id, the row's columns); the next row of owner `parent`, skipping rows of owners before it (ones the
+   outer loop filtered out or whose inner loop did not run) and keeping a row of a later owner for that owner's turn. */
+static int h_tmerge(Ctx *c, u32 cur, u32 parent, u32 *rowid, int *more) {
+    Mito *m = M_(c); Store *st = T_ST(c); SqCursor *k = &st->cur[cur];
+    *more = 0;
+    for (;;) {
+        if (k->done) return 0;
+        if (!k->pending) {
+            int r = sqlite3_step(k->s);
+            if (r == SQ_DONE) { k->done = 1; if (st->row == k->s) st->row = 0; return 0; }
+            if (r != SQ_ROW) return t_dbfail(m);
+            k->pending = 1;
+        }
+        i64 owner = sqlite3_column_int64(k->s, 0);
+        if (owner < (i64)parent) { k->pending = 0; continue; }
+        if (owner > (i64)parent) return 0; /* kept for its owner */
+        k->pending = 0;
+        *rowid = (u32)sqlite3_column_int64(k->s, 1); *more = 1;
+        if (st->row != k->s) store_forget_row(st);
+        st->row = k->s; st->row_t = k->t; st->row_id = *rowid; st->row_off = 2;
+        return 0;
+    }
+}
 /* the end of a loop (finished or left by `break`): its cursor given back */
 static int h_tclose(Ctx *c, u32 cur) {
     Store *st = T_ST(c); SqCursor *k = &st->cur[cur];
@@ -1784,6 +1808,7 @@ static int h_tfind(Ctx *c, u32 t, u32 rowid, u32 parent) { (void)t; (void)rowid;
 static int h_titer(Ctx *c, const char *sql, u32 t, const Val *p, u32 n, u32 *cur) { (void)sql; (void)t; (void)p; (void)n; (void)cur; return fail(M_(c), 500, "no tables"); }
 static int h_tnext(Ctx *c, u32 cur, u32 *rowid, int *more) { (void)cur; (void)rowid; (void)more; return fail(M_(c), 500, "no tables"); }
 static int h_tclose(Ctx *c, u32 cur) { (void)c; (void)cur; return 0; }
+static int h_tmerge(Ctx *c, u32 cur, u32 parent, u32 *rowid, int *more) { (void)cur; (void)parent; (void)rowid; (void)more; return fail(M_(c), 500, "no tables"); }
 static int h_tclear(Ctx *c, u32 t, u32 parent) { (void)t; (void)parent; return fail(M_(c), 500, "no tables"); }
 static int h_texists(Ctx *c, u32 t, u32 rowid, u32 *out) { (void)t; (void)rowid; (void)out; return fail(M_(c), 500, "no tables"); }
 #endif
@@ -1857,7 +1882,7 @@ static const H mito_h = {
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

@@ -51,7 +51,13 @@ reads the same as for other collections: `add`, field reads and writes, `remove`
 table's, or this owner's, row), `foreach ... where ... reverse limit`, a row from a cookie (`board: Board? from cookie("list")`,
 named by `token(b)`). A row's id is its SQLite row id, never reused. `index(f)` and `unique(f)` on the collection declare
 indexes; a `where` over a whole top-level table is compiled to SQL and must use indexed fields (one that would read every row is
-refused), while a loop over one owner's rows may filter on anything. Each request is one transaction, committed before its
+refused), while a loop over one owner's rows may filter on anything. `foreach u in app.users by name` walks an indexed field's order; `after x` continues
+after row x in the loop's order (keyset paging: `foreach t in b.todos after last limit 20`, null starting at the beginning);
+`let u = first u in app.users where u.email == x;` is the first row a loop would visit, or null (one `SELECT ... LIMIT 1`; `first`
+works on every collection). A row's field `assignee: User?` references a row of another table (a column `REFERENCES users(id)`,
+set null when that row goes); working state can hold one too (the row id, null once the row is gone). A loop over each row's
+children inside a loop over the rows (`foreach t in b.todos` in `foreach b in app.boards`) is one query for all the children,
+walked in step with the outer loop, not one query per row. Each request is one transaction, committed before its
 answer and synced to disk first (`--db-sync full`, the default; `--db-sync normal` syncs at checkpoints instead, losing nothing on a
 process crash but possibly the last moments on an OS crash or power cut). At start the database is created or migrated by field name; a column whose type changed, or rows that break a declared
 limit, stop the server with the reason; `--db-fit drop` drops them instead (the column's values, or the rows and what they

@@ -42,7 +42,8 @@ typedef struct { const char *sql; const char *create; int parent; u32 ncols; con
    count (of one owner's rows), find (a row of one owner), and one update per column. `secret`: the column a session token checks, or -1. */
 typedef struct { sqlite3_stmt *row, *ins, *del, *cnt, *find, *clr, *has, **upd; int secret; } TStmts;
 /* A loop's cursor: its statement (a cached one, or its own when the cached one is in use by an enclosing loop), the table of its rows. */
-typedef struct { sqlite3_stmt *s; int own, on; u32 t; } SqCursor;
+/* `pending`: a merge cursor's row already stepped to, kept for the owner it belongs to (see h_tmerge in runtime/mito.c) */
+typedef struct { sqlite3_stmt *s; int own, on, pending, done; u32 t; } SqCursor;
 typedef struct { const char *sql; sqlite3_stmt *s; int busy; } SqCached;
 #define SQ_CURSORS 32
 #define SQ_CACHED 128
@@ -259,7 +260,7 @@ static int store_cursor(Store *st, const char *sql, u32 t, u32 *out) {
     if (!c && st->ncached < SQ_CACHED) { c = &st->cached[st->ncached]; c->sql = sql; c->busy = 0; if (sqlite3_prepare_v2(st->db, sql, -1, &c->s, 0) != SQ_OK) { st_fail(st, sql, sqlite3_errmsg(st->db)); return -1; } st->ncached++; }
     if (c && !c->busy) { c->busy = 1; st->cur[k].s = c->s; st->cur[k].own = 0; }
     else { if (sqlite3_prepare_v2(st->db, sql, -1, &st->cur[k].s, 0) != SQ_OK) { st_fail(st, sql, sqlite3_errmsg(st->db)); return -1; } st->cur[k].own = 1; }
-    st->cur[k].on = 1; st->cur[k].t = t; *out = k;
+    st->cur[k].on = 1; st->cur[k].t = t; st->cur[k].pending = 0; st->cur[k].done = 0; *out = k;
     return 0;
 }
 static void store_close(Store *st) {

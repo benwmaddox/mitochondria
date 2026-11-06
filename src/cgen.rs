@@ -108,6 +108,7 @@ struct H {
     int (*tclose)(Ctx *, u32);                                   /* the end of the loop: the cursor given back */
     int (*tclear)(Ctx *, u32, u32);                              /* remove every row of a table (of one owner) */
     int (*texists)(Ctx *, u32, u32, u32 *);                      /* is there a row with this id (a stored id from working state) */
+    int (*tmerge)(Ctx *, u32, u32, u32 *, int *);                /* a merged inner loop: the next row of this owner from the merge cursor */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -398,6 +399,45 @@ enum PK { V(K), Coll(usize), Plain(usize, usize) }
 #[derive(Clone)]
 struct Spec { key: String, name: String, ret: K, proto: String, body: Option<String> }
 
+/// A loop's body, as the code generator sees it before generating it.
+#[derive(Clone, Copy)]
+enum LoopBody<'p> { Stmts(&'p [Stmt]), Json(&'p Json) }
+/// The loops in a body over a child table of the row in `slot` (`foreach t in b.todos` inside a loop over `b`), not inside another
+/// loop (each runs at most once per round of the outer loop), and walked plainly (id order, no `by`, `reverse` or `after`).
+fn child_loops<'p>(b: LoopBody<'p>, slot: u32, out: &mut Vec<&'p Iter>) {
+    fn is_child(it: &Iter, slot: u32) -> bool {
+        matches!(&it.coll, Expr::Field(base, _) if matches!(&**base, Expr::Var(_, VarRes::Local(s)) if *s == slot))
+            && it.hi.is_none() && it.via.is_none() && it.by.is_none() && !it.reverse && it.after.is_none()
+    }
+    fn st<'p>(s: &'p Stmt, slot: u32, out: &mut Vec<&'p Iter>) {
+        match s {
+            Stmt::If(_, t, e) => for x in t.iter().chain(e.iter()) { st(x, slot, out); },
+            Stmt::Each(it, _) => if is_child(it, slot) { out.push(it); },
+            Stmt::Respond(_, j) => js(j, slot, out),
+            _ => {}
+        }
+    }
+    fn js<'p>(j: &'p Json, slot: u32, out: &mut Vec<&'p Iter>) {
+        match j {
+            Json::Obj(f) => for (_, v) in f { js(v, slot, out); },
+            Json::Arr(it, _) => if is_child(it, slot) { out.push(it); },
+            _ => {}
+        }
+    }
+    match b { LoopBody::Stmts(ss) => for s in ss { st(s, slot, out); }, LoopBody::Json(j) => js(j, slot, out) }
+}
+/// A value a merged inner loop's `where` compares with, worked out before the outer loop: built from literals and locals bound before
+/// it and not assigned in its body.
+fn bound_before(e: &Expr, env: &[Option<CV>], assigned: &std::collections::HashSet<u32>) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => true,
+        Expr::Var(_, VarRes::Local(s)) => env.get(*s as usize).map_or(false, |v| v.is_some()) && !assigned.contains(s),
+        Expr::Un(_, a) => bound_before(a, env, assigned),
+        Expr::Bin(_, a, b) => bound_before(a, env, assigned) && bound_before(b, env, assigned),
+        _ => false,
+    }
+}
+
 /// A table is collection TBASE + its index (in `Program::tables`) for the code that handles items: a row is an item whose index is its
 /// row id (u32), a table of one owner's rows a collection whose instance is the owner's row id (0 for a top-level table).
 const TBASE: usize = crate::layout::TABLE_BASE;
@@ -521,6 +561,11 @@ struct G<'p> {
     inl: u32,                                            // inlined calls the code being generated is nested in
     ranges: std::collections::HashMap<String, (i64, i64)>, // C names that never change after they are set (inputs, loop counters, results of arithmetic) with an inclusive interval their value is proven to lie in
     or_dead: Option<String>,                             // inside or()/exists(): where a dead reference or slot not live goes
+    /// The body of the loop about to be generated (statements or a JSON element), for a table loop looking for a loop over its rows'
+    /// children to merge (see `table_loop`); taken by the next loop.
+    loop_body: Option<LoopBody<'p>>,
+    /// Inner loops merged into their outer loop's query: the inner loop, the merge cursor's C name.
+    merged: Vec<(*const Iter, String)>,
 }
 type R<T> = Result<T, String>;
 fn no<T>(what: impl Into<String>) -> R<T> { Err(what.into()) }
@@ -1179,7 +1224,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None }
+        G { prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1542,6 +1587,7 @@ impl<'p> G<'p> {
     }
     /// Generate a loop statement (the loop, its body, and the text-area mark and cut when the body can build a string).
     fn loop_stmt(&mut self, it: &'p Iter, body: &'p [Stmt], env: &mut Vec<Option<CV>>, collect: bool) -> R<()> {
+        self.loop_body = Some(LoopBody::Stmts(body));
         self.each(it, env, collect, |g, env, _| {
             // strings built in an iteration are dropped at its end unless the body hands one to a variable declared before the loop;
             // the mark and the cut are only emitted for a body whose code can build a string
@@ -2849,6 +2895,38 @@ impl<'p> G<'p> {
         self.call(&format!("c->h->tset(c, {}, {}, {}, &{})", t, idx, ci, vv));
         Ok(())
     }
+    /// A loop over one owner's rows merged into its outer loop: the rows of owner `inst` from the merge cursor `mcur` (its query holds the
+    /// `where` that is SQL; the rest is tested here), with `limit` counted here.
+    fn merged_loop(&mut self, it: &'p Iter, t: usize, inst: String, mcur: String, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+        let mut in_c = None;
+        if let Some(w) = &it.wher {
+            let (mut c, mut v, mut f) = (Vec::new(), Vec::new(), Vec::new());
+            if !self.sql_where(w, it.slot, t, 0, &mut c, &mut v, &mut f) { in_c = Some(w); }
+        }
+        self.loop_enter();
+        self.open("{");
+        let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
+        let lim = lim.map(|l| self.hold_int(l));
+        if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
+        let (hits, rid, more, k) = (self.tmp("hits"), self.tmp("i"), self.tmp("more"), self.tmp("k"));
+        self.line(&format!("u32 {} = 0;", hits));
+        self.open(&format!("for (i64 {k} = 0LL; {k} < 9223372036854775807LL; {k}++) {{"));
+        self.line(&format!("ROUND_({});", k));
+        self.line(&format!("u32 {}; int {};", rid, more));
+        self.call(&format!("c->h->tmerge(c, {}, (u32)({}), &{}, &{})", mcur, inst, rid, more));
+        self.line(&format!("if (!{}) break;", more));
+        env[it.slot as usize] = Some(CV::Item(TBASE + t, rid.clone()));
+        if let Some(w) = in_c { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) continue;", wc)); }
+        if let Some(l) = &lim { self.line(&format!("if ((i64){} >= {}) break;", hits, l)); }
+        self.line(&format!("{}++;", hits));
+        self.round_start(it, env, &hits);
+        body(self, env, &hits)?;
+        self.loop_round_end();
+        self.close("}");
+        self.loop_exit();
+        self.close("}");
+        Ok(())
+    }
     /// `where` as SQL, when it is comparisons of the loop's row's fields with values the loop does not change, joined by `&&`
     /// (`t.done == false && t.rank > n`, `!t.done`): its conditions (`?n` for each value, numbered from `first`), the values, and the
     /// columns it uses. False when it is anything else.
@@ -2889,7 +2967,12 @@ impl<'p> G<'p> {
     /// and columns; a field of the loop's row is read from the cursor. A `where` that is comparisons with values goes into the query;
     /// over a whole top-level table it must be, on indexed fields (a scan of every row is refused). Over one owner's rows anything goes:
     /// what is not SQL is tested here. A body that adds, removes or writes collects the ids first, so its changes cannot feed the loop.
-    fn table_loop(&mut self, it: &'p Iter, t: usize, inst: String, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+    fn table_loop(&mut self, it: &'p Iter, t: usize, inst: String, env: &mut Vec<Option<CV>>, collect: bool, loop_body: Option<LoopBody<'p>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+        // an inner loop merged into its outer loop's query: its rows come from the outer loop's merge cursor, owner by owner
+        if let Some(k) = self.merged.iter().position(|m| std::ptr::eq(m.0, it)) {
+            let mcur = self.merged.remove(k).1;
+            return self.merged_loop(it, t, inst, mcur, env, body);
+        }
         let tb = self.prog.tables[t].clone();
         let nested = tb.parent.is_some();
         let mut sql = format!("SELECT id{} FROM {}", tb.cols.iter().map(|c| format!(", {}", crate::layout::sql_ident(&c.path))).collect::<String>(), tb.sql);
@@ -2956,6 +3039,38 @@ impl<'p> G<'p> {
         if names.is_empty() { self.line(&format!("Val {}[1];", tp)); } else { self.line(&format!("Val {}[{}] = {{ {} }};", tp, names.len(), names.join(", "))); }
         self.line(&format!("u32 {};", cur));
         self.call(&format!("c->h->titer(c, {}, {}, {}, {}, &{})", c_lit(sql.as_bytes()), t, tp, names.len(), cur));
+        // one loop over each row's children in the body (`foreach t in b.todos` inside `foreach b in ...`): one query for every row's
+        // children, walked in step with this loop (a merge), instead of one query per row
+        let mut mcur = None;
+        if let (Some(lb), false, None, false) = (loop_body, collect, &it.by, it.reverse) {
+            let mut kids = Vec::new();
+            child_loops(lb, it.slot, &mut kids);
+            let writes_any = match lb { LoopBody::Stmts(ss) => writes(self.api, ss, &mut Vec::new()) || allocates(self.api, ss, &mut Vec::new()), LoopBody::Json(_) => false };
+            if let ([inner], false) = (kids.as_slice(), writes_any) {
+                let Expr::Field(_, f) = &inner.coll else { unreachable!() };
+                if let Some(&(_, ct)) = tb.children.iter().find(|x| x.0 == *f) {
+                    let ctb = self.prog.tables[ct].clone();
+                    let assigned = match lb { LoopBody::Stmts(ss) => assigned_slots(ss), LoopBody::Json(_) => Default::default() };
+                    let (mut iconds, mut ivals, mut icols) = (Vec::new(), Vec::new(), Vec::new());
+                    let inner_ok = match &inner.wher { None => true, Some(w) => self.sql_where(w, inner.slot, ct, names.len(), &mut iconds, &mut ivals, &mut icols) && ivals.iter().all(|e| bound_before(e, env, &assigned)) };
+                    if inner_ok {
+                        let sub_limit = sql_limit.map_or(String::new(), |n| format!(" ORDER BY id LIMIT {}", n));
+                        let outer_where = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+                        let mut msql = format!("SELECT parent_id, id{} FROM {} WHERE parent_id IN (SELECT id FROM {}{}{})", ctb.cols.iter().map(|c| format!(", {}", crate::layout::sql_ident(&c.path))).collect::<String>(), ctb.sql, tb.sql, outer_where, sub_limit);
+                        for c in &iconds { msql += &format!(" AND {}", c); }
+                        msql += " ORDER BY parent_id, id";
+                        let mut mnames = names.clone();
+                        for e in ivals { let v = self.expr(e, env, None)?; let v = self.hold(v, false)?; mnames.push(self.val(v)?); }
+                        let (ma, mc) = (self.tmp("argv"), self.tmp("mcur"));
+                        if mnames.is_empty() { self.line(&format!("Val {}[1];", ma)); } else { self.line(&format!("Val {}[{}] = {{ {} }};", ma, mnames.len(), mnames.join(", "))); }
+                        self.line(&format!("u32 {};", mc));
+                        self.call(&format!("c->h->titer(c, {}, {}, {}, {}, &{})", c_lit(msql.as_bytes()), ct, ma, mnames.len(), mc));
+                        self.merged.push((*inner as *const Iter, mc.clone()));
+                        mcur = Some(mc);
+                    }
+                }
+            }
+        }
         let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
         let lim = lim.map(|l| self.hold_int(l));
         if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
@@ -2980,6 +3095,7 @@ impl<'p> G<'p> {
             self.close("}");
             self.loop_exit();
             self.call(&format!("c->h->tclose(c, {})", cur));
+            if let Some(mc) = &mcur { self.call(&format!("c->h->tclose(c, {})", mc)); self.merged.retain(|m| m.1 != *mc); }
             self.close("}");
             return Ok(());
         }
@@ -3651,10 +3767,11 @@ impl<'p> G<'p> {
     }
 
     fn each(&mut self, it: &'p Iter, env: &mut Vec<Option<CV>>, collect: bool, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+        let loop_body = self.loop_body.take();
         if let Some(v) = it.via { return self.walk(it, v, env, body); }
         if let Some(hi) = &it.hi { return self.range_loop(it, hi, env, body); }
         let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
-        if let Some(t) = tab(c) { return self.table_loop(it, t, inst, env, collect, body); }
+        if let Some(t) = tab(c) { return self.table_loop(it, t, inst, env, collect, loop_body, body); }
         if let Some(f) = &it.by { return no(format!("`by {}`: only a table is walked in a field's order (a list keeps insertion order; keep other orders in the data)", f)); }
         if it.after.is_some() { return no("`after`: only a table's rows are paged this way"); }
         self.loop_enter();
@@ -3855,6 +3972,7 @@ impl<'p> G<'p> {
                 }
                 let mut elem = Shape::Any;
                 let ew = match want { Some(crate::lang::RType::Arr(t)) => Some((**t).clone()), _ => None };
+                self.loop_body = Some(LoopBody::Json(inner));
                 self.each(it, env, false, |g, env, hits| {
                     g.line(&format!("if ({} > 1) {{ CALL(c->h->out(c, \",\", 1)); }}", hits));
                     elem = g.json(inner, env, ew.as_ref())?;

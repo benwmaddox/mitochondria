@@ -776,3 +776,5 @@ WakeConditionVariable
 WakeAllConditionVariable
 SleepConditionVariableSRW
 GetTickCount64
+TryAcquireSRWLockExclusive
+GetFileSizeEx

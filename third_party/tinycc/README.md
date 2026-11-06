@@ -9,11 +9,13 @@ from the official TinyCC 0.9.27 Windows binary release:
   before being compiled in memory, because the 0.9.27 library crashes when it reports a compile error to a host built
   with MSVC/rustc.
 - `lib/libtcc1-64.a`, `lib/msvcrt.def`, `lib/kernel32.def`: TinyCC's runtime support library and import definitions.
+- `include/`: its C and Windows headers, for compiling the bundled SQLite (third_party/sqlite) with TinyCC. A few declarations SQLite
+  needs that these headers predate are given by Mitochondria before SQLite (`SQLITE_TCC_SHIM` in src/build.rs); the headers are unmodified.
 
 Changed or added here (import lists only, so generated programs import system functions normally instead of looking
 them up by name at run time, which Windows Defender's heuristics took for malware):
-- `lib/kernel32.def`: eight names appended at the end (`InitializeSRWLock` through `GetTickCount64`), which the 0.9.27
-  list predates.
+- `lib/kernel32.def`: ten names appended at the end (`InitializeSRWLock` through `GetFileSizeEx`), which the 0.9.27
+  list predates (the last two for SQLite).
 - `lib/ws2_32.def`, `lib/bcrypt.def`: generated with `tcc -impdef C:\Windows\System32\<name>.dll` (Windows 11).
 
 Licence: GNU Lesser General Public License 2.1 (`COPYING`). TinyCC is not covered by Mitochondria's Apache-2.0 licence.

@@ -26,23 +26,54 @@ pub const SQLITE_H: &str = include_str!("../third_party/sqlite/sqlite3.h");
 pub const SQLITE_FLAGS: &[&str] = &["-DSQLITE_THREADSAFE=2", "-DSQLITE_ENABLE_MEMSYS5", "-DSQLITE_DEFAULT_MEMSTATUS=0", "-DSQLITE_OMIT_LOAD_EXTENSION",
     "-DSQLITE_OMIT_DEPRECATED", "-DSQLITE_OMIT_SHARED_CACHE", "-DSQLITE_DQS=0", "-DSQLITE_LIKE_DOESNT_MATCH_BLOBS"];
 
-/// SQLite compiled to an object file (by clang: see `exe`), once per compiler and flags, then reused from a cache in the temp directory (the clang build takes
+/// TinyCC 0.9.27's Windows headers predate a few things SQLite uses (slim reader/writer locks, GetTickCount64, the UTF-8 conversions), and
+/// MSVC's intrinsics are not TinyCC's:
+/// declared here, before SQLite, so TinyCC compiles it unmodified. Elsewhere SQLite is compiled as it is.
+const SQLITE_TCC_SHIM: &str = "#ifdef _WIN32
+#include <windows.h>
+#ifndef SRWLOCK_INIT
+typedef struct _RTL_SRWLOCK { PVOID Ptr; } RTL_SRWLOCK, SRWLOCK, *PSRWLOCK;
+#define SRWLOCK_INIT {0}
+WINBASEAPI VOID WINAPI InitializeSRWLock(PSRWLOCK);
+WINBASEAPI VOID WINAPI AcquireSRWLockExclusive(PSRWLOCK);
+WINBASEAPI VOID WINAPI ReleaseSRWLockExclusive(PSRWLOCK);
+WINBASEAPI BOOLEAN WINAPI TryAcquireSRWLockExclusive(PSRWLOCK);
+WINBASEAPI ULONGLONG WINAPI GetTickCount64(VOID);
+WINBASEAPI int WINAPI MultiByteToWideChar(UINT, DWORD, LPCSTR, int, LPWSTR, int);
+WINBASEAPI int WINAPI WideCharToMultiByte(UINT, DWORD, LPCWSTR, int, LPSTR, int, LPCSTR, LPBOOL);
+#define CP_ACP 0
+#define CP_OEMCP 1
+#define CP_UTF8 65001
+#endif
+/* MSVC's intrinsics are not TinyCC's: SQLite's own options turn them off and give the memory barrier as one instruction */
+#define SQLITE_DISABLE_INTRINSIC 1
+#define SQLITE_MEMORY_BARRIER __asm__ __volatile__(\"mfence\" ::: \"memory\")
+#endif
+#include \"sqlite3.c\"
+";
+
+/// SQLite compiled to an object file by the compiler building the program (TinyCC or clang), once per compiler and flags, then reused from a cache in the temp directory (the clang build takes
 /// tens of seconds; nothing needs it twice). The file name carries a hash of what it was built from.
 pub fn sqlite_object(tcc: bool, opt: &str) -> Result<std::path::PathBuf, String> {
     let cc = if tcc { tcc_exe() } else { clang().ok_or("clang not found (install LLVM, set MITO_CLANG, or build with --tcc)")? };
     let mut args: Vec<String> = SQLITE_FLAGS.iter().map(|s| s.to_string()).collect();
-    if !tcc { args.push(opt.to_string()); args.push("-w".into()); if !cfg!(windows) { args.push("-fPIC".into()); } } else { args.push("-w".into()); }
+    if !tcc { args.push(opt.to_string()); args.push("-w".into()); if !cfg!(windows) { args.push("-fPIC".into()); } }
+    else { args.push("-w".into()); if cfg!(windows) { let d = crate::tcc::dir(); args.push(format!("-I{}/include", d)); args.push(format!("-I{}/include/winapi", d)); } }
     let key = { let mut h: u64 = 0xcbf29ce484222325; for b in cc.bytes().chain(args.join(" ").bytes()).chain(SQLITE_C.len().to_string().bytes()) { h = (h ^ b as u64).wrapping_mul(0x100000001b3); } h };
     let dir = std::env::temp_dir().join("mitochondria-cache");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     let obj = dir.join(format!("sqlite-3540100-{:016x}.o", key));
     if obj.exists() { return Ok(obj); }
-    let src = dir.join(format!("sqlite3-{}.c", std::process::id()));
-    std::fs::write(&src, SQLITE_C).map_err(|e| format!("{}: {}", src.display(), e))?;
-    let _ = std::fs::write(dir.join("sqlite3.h"), SQLITE_H);
+    // sqlite3.c beside a unit that includes it (after the shim, for TinyCC)
+    let sub = dir.join(format!("src-{}", std::process::id()));
+    std::fs::create_dir_all(&sub).map_err(|e| format!("{}: {}", sub.display(), e))?;
+    std::fs::write(sub.join("sqlite3.c"), SQLITE_C).map_err(|e| format!("{}: {}", sub.display(), e))?;
+    let _ = std::fs::write(sub.join("sqlite3.h"), SQLITE_H);
+    let src = sub.join("unit.c");
+    std::fs::write(&src, if tcc { SQLITE_TCC_SHIM } else { "#include \"sqlite3.c\"\n" }).map_err(|e| format!("{}: {}", src.display(), e))?;
     let part = dir.join(format!("sqlite-{:016x}-{}.o.part", key, std::process::id()));
     let r = std::process::Command::new(&cc).args(&args).arg("-c").arg(&src).arg("-o").arg(&part).output().map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_dir_all(&sub);
     if !r.status.success() { let _ = std::fs::remove_file(&part); return Err(format!("compiling SQLite failed:\n{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr))); }
     if std::fs::rename(&part, &obj).is_err() && !obj.exists() { return Err(format!("{}: could not be kept", obj.display())); }
     let _ = std::fs::remove_file(&part);
@@ -51,12 +82,8 @@ pub fn sqlite_object(tcc: bool, opt: &str) -> Result<std::path::PathBuf, String>
 
 /// Build C translation units into the executable `out`: with TinyCC (`tcc`), or else clang with `flags` (default -O3, the optimisation level of Rust's release profile, which the benchmarks compare with).
 pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -> Result<(), String> {
-    // a program with tables links SQLite, which TinyCC's bundle cannot compile (no system headers) or link (clang's objects): clang builds
-    // it, without optimising when TinyCC was asked for (still quick: SQLite itself comes from the cache)
-    let sqlite = units.iter().any(|u| u.contains("#define MITO_USES_SQLITE"));
-    let quick_sqlite = sqlite && tcc && flags.is_empty();
-    let tcc = tcc && !sqlite;
-    let tcc_wanted = tcc || quick_sqlite;
+    let sqlite = units.iter().any(|u| u.contains("#define MITO_USES_SQLITE")); // a program with tables links SQLite
+    let tcc_wanted = tcc;
     let dir = std::env::temp_dir().join(format!("mito-build-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -81,7 +108,7 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
         c
     };
     cmd.arg("-o").arg(out).args(&cs);
-    if sqlite { cmd.arg(sqlite_object(false, "-O2")?); } // SQLite, from its cache
+    if sqlite { cmd.arg(sqlite_object(tcc, "-O2")?); } // SQLite, compiled by the same compiler, from its cache
     if !tcc && cfg!(windows) { cmd.arg("-lkernel32"); }
     for l in crate::tcc::LIBS { cmd.arg(format!("-l{}", l)); } // after the sources: system DLLs imported normally
     let r = cmd.output().map_err(|e| e.to_string())?;

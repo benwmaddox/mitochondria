@@ -317,7 +317,7 @@ int main(int argc, char **argv) { sqlite3 *db; sqlite3_config(SQLITE_CONFIG_HEAP
             INSERT INTO sessions VALUES (481019661, 127326141, 'tok3n', '2026-03-02 14:00:00.123456', '2026-01-07 16:00:00', '2026-01-07 16:00:00');");
         let program = |extra: &str| format!("struct Account {{ name: utf8<255>; custom_styles: utf8<65536>?; join_code: utf8<64>; updated_at: time; }}
 struct User {{ name: utf8<255>; email_address: utf8<255>?; role: i64; {} }}
-struct Session {{ user: User?; token: utf8<64>; last_active_at: time; }}
+struct Session {{ user: User?; token: utf8<64>; last_active_at: time; created_at: time; updated_at: time; }}
 struct Db {{ accounts: table<Account> extern; users: table<User> unique(email_address) extern; sessions: table<Session> unique(token) index(user) extern; }}
 state db: Db;
 @get(\"/account\") fn account() -> Response<html> {{
@@ -331,6 +331,12 @@ state db: Db;
     if !exists(u) {{ return ok(<p>no user</p>); }}
     return ok(<p>{{u.name}} {{format_time(s.last_active_at, \"%Y-%m-%d %H:%M:%S.%N\")}}</p>);
 }}
+@post(\"/users/{{id}}/sessions/{{token}}\") fn start(id: i64, token: ascii<64>) -> Response<html> {{
+    let u = app_user(id);
+    let s = db.sessions.add {{ user: u, token: token, last_active_at: 1772467200000000, created_at: 1772467200000000, updated_at: 1772467200000000 }};
+    return ok(<p>{{s.token}}</p>);
+}}
+fn app_user(id: i64) -> User {{ return db.users[id]; }}
 @post(\"/sessions/{{token}}/touch\") fn touch(token: ascii<64>) -> Response<html> {{
     let s = first s in db.sessions where s.token == token;
     if exists(s) {{ s.last_active_at = 1772467200000005; }}
@@ -364,8 +370,11 @@ state db: Db;
         assert_eq!(ask("GET /sessions/tok3n HTTP/1.1"), "<p>David 2026-03-02 14:00:00.123456</p>");
         assert_eq!(ask("GET /sessions/nope HTTP/1.1"), "<p>signed out</p>");
         assert_eq!(ask("POST /sessions/tok3n/touch HTTP/1.1"), "<p>ok</p>");
+        // a row added with every NOT NULL column in one INSERT (Rails' sessions have no defaults)
+        assert_eq!(ask("POST /users/127326141/sessions/n3w HTTP/1.1"), "<p>n3w</p>");
         let _ = srv.kill(); let _ = srv.wait();
-        assert_eq!(sql("SELECT last_active_at FROM sessions"), "2026-03-02 16:00:00.000005"); // as Rails writes it
+        assert_eq!(sql("SELECT last_active_at FROM sessions WHERE token = 'tok3n'"), "2026-03-02 16:00:00.000005"); // as Rails writes it
+        assert_eq!(sql("SELECT user_id, token, created_at FROM sessions WHERE token = 'n3w'"), "127326141|n3w|2026-03-02 16:00:00");
         sql("UPDATE accounts SET custom_styles = 'body {}'");
         let (mut srv, _) = start(&good);
         assert_eq!(ask("GET /account HTTP/1.1"), "<p>37signals 20260101160000 styled</p>");

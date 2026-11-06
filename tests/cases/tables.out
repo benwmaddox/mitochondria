@@ -1,6 +1,6 @@
 POST /boards/home -> 201 {"id":1,"token":"1.beef"}
 POST /boards/work -> 201 {"id":2,"token":"2.beef"}
-POST /boards/home -> 409 {"error":"a row with those values already exists (a unique index)","line":9}
+POST /boards/home -> 409 {"error":"a row with those values already exists (a unique index)","line":8}
 POST /todos/milk -> 201 {"id":1,"count":1}
 POST /todos/eggs -> 201 {"id":2,"count":2}
 POST /todos/bread -> 201 {"id":3,"count":3}

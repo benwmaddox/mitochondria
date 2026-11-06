@@ -110,6 +110,7 @@ struct H {
     int (*texists)(Ctx *, u32, u32, u32 *);                      /* is there a row with this id (a stored id from working state) */
     int (*tmerge)(Ctx *, u32, u32, u32 *, int *);                /* a merged inner loop: the next row of this owner from the merge cursor */
     int (*set_header)(Ctx *, const char *, u32, const Txt *);   /* a header line on the answer: name (checked when compiling), value (checked) */
+    int (*tinsert)(Ctx *, u32, u32, const char *, const u32 *, const Val *, u32, u32 *); /* a row added with its fields' values: one INSERT */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -872,6 +873,17 @@ fn source_comment(ep: &Endpoint, (name, text): (&str, &str)) -> String {
         o += &format!("//   | {}\n", l);
     }
     o
+}
+
+/// Does this expression read local `slot`?
+fn expr_uses_slot(e: &Expr, slot: u32) -> bool {
+    match e {
+        Expr::Var(_, VarRes::Local(s)) => *s == slot,
+        Expr::Field(b, _) | Expr::Un(_, b) => expr_uses_slot(b, slot),
+        Expr::Index(a, b) | Expr::Bin(_, a, b) => expr_uses_slot(a, slot) || expr_uses_slot(b, slot),
+        Expr::Call(_, args, _) => args.iter().any(|a| expr_uses_slot(a, slot)),
+        _ => false,
+    }
 }
 
 /// Do these statements call (directly or through other functions) one of instance `inst`'s functions that changes state?
@@ -1874,9 +1886,47 @@ impl<'p> G<'p> {
 
     fn block(&mut self, stmts: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<()> {
         let mut restore: Vec<(u32, CV)> = Vec::new();
+        let mut skip = 0usize;
         for (i, s) in stmts.iter().enumerate() {
+            if skip > 0 { skip -= 1; continue; }
             // a test of a plain C variable stays good into the next statement until a line writes that variable (see `line`)
             self.checked.retain(|(x, _)| is_ident(x));
+            // `let r = table.add { a: x, b: y }`: the assignments to the new row that follow its `add` (as `add { ... }` is written) become
+            // one INSERT with those columns
+            if let Stmt::Alloc { slot, coll, .. } = s {
+                let mut inits: Vec<(&'p str, &'p Expr)> = Vec::new();
+                let mut k = i + 1;
+                while k < stmts.len() {
+                    match &stmts[k] {
+                        Stmt::At(..) => {}
+                        Stmt::Assign(Expr::Field(b, f), rhs) if matches!(&**b, Expr::Var(_, VarRes::Local(x)) if x == slot) && !expr_uses_slot(rhs, *slot) && !inits.iter().any(|x| x.0 == f) => inits.push((f.as_str(), rhs)),
+                        _ => break,
+                    }
+                    k += 1;
+                }
+                if !inits.is_empty() {
+                    if let CV::Coll(c, inst) = self.expr(coll, env, None)? {
+                        if let Some(t) = tab(c) {
+                            // the line markers among them are kept for errors' places; the assignments are compiled here
+                            let tb = self.prog.tables[t].clone();
+                            let mut cols = Vec::new(); let mut vals = Vec::new();
+                            for (f, rhs) in &inits { let (ci, vv) = self.table_value(t, f, rhs, env)?; cols.push(ci); vals.push(vv); }
+                            let names: Vec<String> = cols.iter().map(|ci| crate::layout::sql_ident(&tb.cols[*ci].sql)).collect();
+                            let parent = tb.parent.is_some();
+                            let marks: Vec<String> = (1..=names.len() + parent as usize).map(|n| format!("?{}", n)).collect();
+                            let sql = format!("INSERT INTO {} ({}{}) VALUES ({})", tb.sql, if parent { "parent_id, " } else { "" }, names.join(", "), marks.join(", "));
+                            let (cs, vs, r) = (self.tmp("argv"), self.tmp("argv"), self.tmp("i")); // argument arrays (the safety profile's name for them)
+                            self.line(&format!("const u32 {}[{}] = {{ {} }};", cs, cols.len(), cols.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")));
+                            self.line(&format!("Val {}[{}] = {{ {} }};", vs, vals.len(), vals.join(", ")));
+                            self.line(&format!("u32 {};", r));
+                            self.call(&format!("c->h->tinsert(c, {}, (u32)({}), {}, {}, {}, {}, &{})", t, inst, c_lit(sql.as_bytes()), cs, vs, cols.len(), r));
+                            env[*slot as usize] = Some(CV::Item(c, r));
+                            skip = k - i - 1;
+                            continue;
+                        }
+                    }
+                }
+            }
             self.stmt(s, env)?;
             // `if !exists(x) { ... }` (or `if x == null`) whose branch always leaves: x is a plain item for the rest of this block
             if let Stmt::If(c, t, e) = s {
@@ -2881,6 +2931,13 @@ impl<'p> G<'p> {
     /// Writing a field of a table's row: the value checked as a field of working state is (an integer's type and range, a text's most
     /// bytes), then one UPDATE.
     fn table_set(&mut self, t: usize, idx: &str, path: &str, rhs: &'p Expr, env: &mut Vec<Option<CV>>) -> R<()> {
+        let (ci, vv) = self.table_value(t, path, rhs, env)?;
+        self.call(&format!("c->h->tset(c, {}, {}, {}, &{})", t, idx, ci, vv));
+        Ok(())
+    }
+    /// The value for a field of a table's row, checked as a field of working state is (an integer's type and range, a text's most bytes,
+    /// a reference's table): the column and the C name of the value (a Val).
+    fn table_value(&mut self, t: usize, path: &str, rhs: &'p Expr, env: &mut Vec<Option<CV>>) -> R<(usize, String)> {
         use crate::layout::TKind;
         let cols = self.prog.tables[t].cols.clone();
         let Some(ci) = cols.iter().position(|x| x.path == path) else {
@@ -2922,8 +2979,7 @@ impl<'p> G<'p> {
             },
         };
         let vv = self.val(v)?;
-        self.call(&format!("c->h->tset(c, {}, {}, {}, &{})", t, idx, ci, vv));
-        Ok(())
+        Ok((ci, vv))
     }
     /// A loop over one owner's rows merged into its outer loop: the rows of owner `inst` from the merge cursor `mcur` (its query holds the
     /// `where` that is SQL; the rest is tested here), with `limit` counted here.
@@ -4232,7 +4288,7 @@ pub fn check_profile(body: &str) -> Result<(), String> {
                 if !ok { return err(i, "indexing (only constant-size argument arrays are allowed)"); }
             }
             "=" => {
-                let argv_decl = prev == "]" && i >= 4 && t[i - 4].starts_with("argv") && i >= 5 && t[i - 5] == "Val";
+                let argv_decl = prev == "]" && i >= 4 && t[i - 4].starts_with("argv") && i >= 5 && (t[i - 5] == "Val" || t[i - 5] == "u32");
                 let ok = argv_decl || is_id(prev) && (i < 2 || t[i - 2] != "->") && (i < 2 || t[i - 2] != "." || (i >= 3 && is_id(&t[i - 3]) && (i < 4 || (t[i - 4] != "." && t[i - 4] != "->"))));
                 if !ok { return err(i, "assignment to something other than a local"); }
             }

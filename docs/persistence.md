@@ -54,7 +54,7 @@ How the program's operations become SQL (statements prepared once at start, type
 | In the program | In SQLite |
 | --- | --- |
 | an item struct of a table | a table; each plain field a column; a nested `table` a child table with a column naming the parent |
-| `app.boards.add() { secret: s }`, `b.todos.add() { title: t }` | one `INSERT`; the item's id is its row id |
+| `app.boards.add() { secret: s }`, `b.todos.add() { title: t }` | one `INSERT` naming those columns (the assignments to the new row right after an `add` count as its fields), so NOT NULL columns without defaults get their values at once; the item's id is its row id |
 | `t.done = !t.done` | `UPDATE ... WHERE id = ?` (the writes of one statement to one row merged into one `UPDATE`) |
 | `foreach t in b.todos where ...` | one `SELECT` of the columns the loop reads, `ORDER BY id` (or the `by` field) |
 | `b.todos.count()`, `count(... where ...)` | `SELECT COUNT(*) ...` |

@@ -1992,6 +1992,32 @@ static int h_tfind(Ctx *c, u32 t, u32 rowid, u32 parent) {
     err(m, E_FAIL, 404); a_str(&m->emsg, "no row "); a_u64(&m->emsg, rowid); a_str(&m->emsg, " in "); a_str(&m->emsg, st->tabs[t].sql); return -1;
 }
 /* a loop over a table: its statement (written by the compiler; column 0 the row id, then the row's columns) with its parameters bound */
+/* `coll.add { field: value, ... }` on a table: one INSERT naming those columns (the owner's id first for a nested table), so another
+   program's NOT NULL columns get their values at once; each value bound as its column is kept (a time as text). Its statement (`sql`, a
+   literal of the program) is prepared once. */
+static int h_tinsert(Ctx *c, u32 t, u32 parent, const char *sql, const u32 *cols, const Val *vals, u32 n, u32 *out) {
+    Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
+    SqCached *k = 0;
+    for (u32 i = 0; i < st->ncached && !k; i++) if (st->cached[i].sql == sql) k = &st->cached[i];
+    if (!k) {
+        if (st->ncached == SQ_CACHED) return fail(m, 500, "more than 128 table statements");
+        k = &st->cached[st->ncached]; k->sql = sql; k->busy = 0;
+        if (sqlite3_prepare_v2(st->db, sql, -1, &k->s, 0) != SQ_OK) return t_dbfail(m);
+        st->ncached++;
+    }
+    int at = 1;
+    if (st->tabs[t].parent >= 0) sqlite3_bind_int64(k->s, at++, (i64)parent);
+    for (u32 i = 0; i < n; i++, at++) {
+        const StoreCol *col = &st->tabs[t].cols[cols[i]]; const Val *v = &vals[i];
+        if (v->tag == 4 && col->ascii && not_ascii(m, t_ptr(m, (T){ v->a, v->b }), v->b)) { sqlite3_reset(k->s); return -1; }
+        if (col->type == 4 && v->tag == 1) { char tx[40]; u32 tn = time_text(v->i, tx); sqlite3_bind_text(k->s, at, tx, (int)tn, (void (*)(void *))-1); }
+        else t_bind(m, k->s, at, v);
+    }
+    if (t_run(m, k->s)) return -1;
+    i64 id = sqlite3_last_insert_rowid(st->db);
+    if (id <= 0 || id > 0xFFFFFFFFLL) return fail(m, 507, "a table's row ids reached 2^32");
+    *out = (u32)id; return 0;
+}
 static int h_titer(Ctx *c, const char *sql, u32 t, const Val *p, u32 n, u32 *cur) {
     Mito *m = M_(c); Store *st = T_ST(c);
     if (store_cursor(st, sql, t, cur)) { err(m, E_FAIL, 500); a_str(&m->emsg, st->err); return -1; }
@@ -2059,6 +2085,7 @@ static int h_tdel(Ctx *c, u32 t, u32 rowid) { (void)t; (void)rowid; return fail(
 static int h_tcount(Ctx *c, u32 t, u32 parent, i64 *out) { (void)t; (void)parent; (void)out; return fail(M_(c), 500, "no tables"); }
 static int h_tfind(Ctx *c, u32 t, u32 rowid, u32 parent) { (void)t; (void)rowid; (void)parent; return fail(M_(c), 500, "no tables"); }
 static int h_titer(Ctx *c, const char *sql, u32 t, const Val *p, u32 n, u32 *cur) { (void)sql; (void)t; (void)p; (void)n; (void)cur; return fail(M_(c), 500, "no tables"); }
+static int h_tinsert(Ctx *c, u32 t, u32 parent, const char *sql, const u32 *cols, const Val *vals, u32 n, u32 *out) { (void)t; (void)parent; (void)sql; (void)cols; (void)vals; (void)n; (void)out; return fail(M_(c), 500, "no tables"); }
 static int h_tnext(Ctx *c, u32 cur, u32 *rowid, int *more) { (void)cur; (void)rowid; (void)more; return fail(M_(c), 500, "no tables"); }
 static int h_tclose(Ctx *c, u32 cur) { (void)c; (void)cur; return 0; }
 static int h_tmerge(Ctx *c, u32 cur, u32 parent, u32 *rowid, int *more) { (void)cur; (void)parent; (void)rowid; (void)more; return fail(M_(c), 500, "no tables"); }
@@ -2136,7 +2163,7 @@ static const H mito_h = {
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header, h_tinsert,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

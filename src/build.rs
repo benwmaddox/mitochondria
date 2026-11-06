@@ -616,4 +616,79 @@ state a: A;
         let _ = srv.kill(); let _ = srv.wait();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn answer_cache_keeps_pieces_and_fills_holes() {
+        use std::io::{BufRead, Read, Write};
+        if super::clang().is_none() { return; }
+        let dir = std::env::temp_dir().join(format!("mito-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // the page: a part with a random word made once (kept), a hole filled each time with a fresh one, keyed by the data's version
+        let src = r#"struct Work { key: utf8<64>; }
+request work: Work;
+struct A { title: utf8<32>; }
+state a: A;
+@post("/title/{t}") fn set(t: utf8<32>) -> Response<{}> { a.title = t; return ok({}); }
+fn page_body() -> html { <p>{a.title} {random_text(6, "abcdef")}</p> "token:"; cache_hole("token", random_text(6, "uvwxyz")); <p>end</p> }
+@get("/page") fn page() -> Response<html> {
+    work.key = "page:" + str(data_version());
+    let holes = cache_get(work.key);
+    if holes >= 0 {
+        foreach i in 0..holes { cache_part(i); if i < holes { html_text(random_text(6, "uvwxyz")); } }
+        return ok(<b>hit</b>);
+    }
+    cache_start();
+    page_body();
+    cache_put(work.key);
+    return ok(<b>miss</b>);
+}
+"#;
+        let (st, code) = crate::source::load(src).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap();
+        let exe = dir.join(format!("cache{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O1"]).unwrap();
+        let start = |port: u16, extra: &[&str]| -> std::process::Child {
+            let mut srv = std::process::Command::new(&exe).args(["--port", &port.to_string()]).args(extra).stdout(std::process::Stdio::piped()).spawn().unwrap();
+            let mut first = String::new();
+            std::io::BufReader::new(srv.stdout.take().unwrap()).read_line(&mut first).unwrap();
+            assert!(first.contains("listening"), "{}", first);
+            srv
+        };
+        let call = |port: u16, method: &str, path: &str| -> String {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(format!("{} {} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", method, path).as_bytes()).unwrap();
+            let mut r = String::new(); s.read_to_string(&mut r).unwrap();
+            r.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+        };
+        // (kept part, hole's word, hit or miss)
+        let parts = |b: &str| -> (String, String, String) {
+            let p = b[..b.find("token:").unwrap()].to_string();
+            let w = b[b.find("token:").unwrap() + 6..][..6].to_string();
+            (p, w, if b.ends_with("<b>hit</b>") { "hit".into() } else { "miss".into() })
+        };
+        let port = 18500 + (std::process::id() % 500) as u16;
+        let mut srv = start(port, &[]);
+        let (b1, b2) = (call(port, "GET", "/page"), call(port, "GET", "/page"));
+        // the same bytes but the hole's six and the last word: nothing of the first fill kept in the entry
+        assert_eq!(b1.len(), b2.len() + 1, "{}\n{}", b1, b2); // "miss" / "hit"
+        let (p1, w1, m1) = parts(&b1);
+        let (p2, w2, m2) = parts(&b2);
+        assert!(b2[b2.find("token:").unwrap() + 12..].starts_with("<p>end</p>"), "{}", b2);
+        assert_eq!((m1.as_str(), m2.as_str()), ("miss", "hit"));
+        assert_eq!(p1, p2); // the kept part, as it was made
+        assert_ne!(w1, w2); // the hole, filled fresh
+        assert!(w2.chars().all(|c| "uvwxyz".contains(c)));
+        call(port, "POST", "/title/new");
+        let (p3, _, m3) = parts(&call(port, "GET", "/page"));
+        assert_eq!(m3, "miss"); // a change commits: the data version moved, the old entry is not found
+        assert!(p3.starts_with("<p>new "), "{}", p3);
+        let _ = srv.kill(); let _ = srv.wait();
+        // no cache: every request makes the page
+        let mut srv = start(port + 1, &["--cache-mb", "0"]);
+        for _ in 0..3 { assert_eq!(parts(&call(port + 1, "GET", "/page")).2, "miss"); }
+        let _ = srv.kill(); let _ = srv.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

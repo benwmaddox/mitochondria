@@ -22,7 +22,7 @@ int mito_begin(void *m);
 int mito_response_binary(void *m);
 int mito_response_bare(void *m);
 void mito_set_files(const char *dir);
-void *mito_reader(void *m, u32 k, char *why, u32 cap); int mito_wants_write(void *m); int mito_share_state(int on); void mito_db_system_alloc(int on);
+void *mito_reader(void *m, u32 k, char *why, u32 cap); int mito_wants_write(void *m); int mito_share_state(int on); void mito_db_system_alloc(int on); int mito_set_cache(u64 bytes);
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 const char *mito_response_head(void *m, u32 *len);
@@ -67,6 +67,9 @@ static void b_lossy(Buf *o, const u8 *s, u32 n) {
 }
 static int utf8_valid(const u8 *s, u32 n) {
     for (u32 i = 0; i < n;) {
+        /* ASCII, 8 bytes at a time (most of a page) */
+        while (i + 8 <= n) { u64 w; memcpy(&w, s + i, 8); if (w & 0x8080808080808080ULL) break; i += 8; }
+        if (i >= n) break;
         u8 c = s[i]; u32 need; u8 lo = 0x80, hi = 0xBF;
         if (c < 0x80) { i++; continue; }
         if (c >= 0xC2 && c <= 0xDF) need = 1; else if (c >= 0xE0 && c <= 0xEF) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
@@ -128,10 +131,12 @@ static void send_two(Sock c, const char *a, u32 an, const char *b, u32 bn) {
 /* ---- the program's `web` block (src/web.rs): its header lines, ETags, gzip and static files ---- */
 static char lower_(char ch) { return ch >= 'A' && ch <= 'Z' ? (char)(ch + 32) : ch; }
 /* header lines s[0..n) (each ending CRLF): the value of the line named `name` (lowercase), and its length, or 0 */
+/* where the line starting at i ends (its CR), or n */
+static u32 line_end(const char *s, u32 n, u32 i) { const char *r = i < n ? (const char *)memchr(s + i, '\r', n - i) : 0; return r ? (u32)(r - s) : n; }
 static const char *line_value(const char *s, u32 n, const char *name, u32 *vn) {
     u32 nl = 0; while (name[nl]) nl++;
     for (u32 i = 0; i < n;) {
-        u32 e = i; while (e < n && s[e] != '\r') e++;
+        u32 e = line_end(s, n, i);
         if (e - i > nl && s[i + nl] == ':') {
             u32 k = 0; while (k < nl && lower_(s[i + k]) == name[k]) k++;
             if (k == nl) { u32 v = i + nl + 1; while (v < e && s[v] == ' ') v++; *vn = e - v; return s + v; }
@@ -217,6 +222,12 @@ static u8 *g_static_gz[MITO_NSTATIC]; static u64 g_static_gzn[MITO_NSTATIC];
 static void body_tag(const u8 *p, u32 n, char *o) {
     u64 a = 0x9E3779B97F4A7C15ULL ^ n, b = 0xC2B2AE3D27D4EB4FULL + n;
     u32 i = 0;
+    /* 32 bytes at a time in four lanes (independent, so they overlap), folded into the two */
+    if (n >= 64) {
+        u64 l[4] = { a, b, a ^ 0x165667B19E3779F9ULL, b ^ 0x27D4EB2F165667C5ULL };
+        for (; i + 32 <= n; i += 32) for (int k = 0; k < 4; k++) { u64 w; memcpy(&w, p + i + 8 * k, 8); l[k] = (l[k] ^ w) * 0x100000001B3ULL; l[k] ^= l[k] >> 29; }
+        a = l[0] ^ (l[2] * 0xFF51AFD7ED558CCDULL); b = l[1] ^ (l[3] * 0xC4CEB9FE1A85EC53ULL);
+    }
     for (; i + 8 <= n; i += 8) { u64 w; memcpy(&w, p + i, 8); a = (a ^ w) * 0x100000001B3ULL; a ^= a >> 29; b = (b + w) * 0xFF51AFD7ED558CCDULL; b ^= b >> 32; }
     for (; i < n; i++) { a = (a ^ p[i]) * 0x100000001B3ULL; b = (b + p[i]) * 0xFF51AFD7ED558CCDULL; }
     a ^= a >> 33; a *= 0xC4CEB9FE1A85EC53ULL; a ^= a >> 33; b ^= b >> 31; b *= 0x94D049BB133111EBULL; b ^= b >> 29;
@@ -652,7 +663,7 @@ static int serve_one(Conn *x, Sock c, int first) {
         HPUT("HTTP/1.1 "); HNUM(code); HPUT(" "); HPUT(reason(code)); HPUT("\r\n");
         /* the program's lines, but Vary (merged below) and, on a 304, the content type */
         for (u32 i = 0; i < x->rhn;) {
-            u32 e = i; while (e < x->rhn && x->rh[e] != '\r') e++;
+            u32 e = line_end(x->rh, x->rhn, i);
             int vary = e - i > 5 && lower_(x->rh[i]) == 'v' && lower_(x->rh[i + 1]) == 'a' && lower_(x->rh[i + 2]) == 'r' && lower_(x->rh[i + 3]) == 'y' && x->rh[i + 4] == ':';
             int ctype = code == 304 && e - i > 13 && lower_(x->rh[i]) == 'c' && lower_(x->rh[i + 8]) == 't' && x->rh[i + 12] == ':';
             if (!vary && !ctype) HPUTN(x->rh + i, e - i + 2);
@@ -875,12 +886,16 @@ int main(int argc, char **argv) {
     Sock l = os_listen((u32)port);
     if (l == OS_BAD_SOCK) { printf("error: cannot listen on port %u\n", (u32)port); return 1; }
 #ifdef HTTP_SINGLE
-    /* --workers N: requests that only read run on N readers at once (default: the CPUs this process may use); 1, one request at a time */
+    /* --workers N: requests that only read run on N readers at once; 1, one request at a time. Default: twice the CPUs this process may
+       use (a connection thread holding a reader is sometimes descheduled, doing its I/O, while another waits for one: as many readers as
+       CPUs left a fifth of them idle) */
     u64 workers = 0; int asked = flag(argc, argv, "--workers", &workers);
-    if (!asked) workers = os_cpu_count();
+    if (!asked) { workers = os_cpu_count(); if (workers > 1) workers *= 2; }
     if (workers > READERS_CAP) workers = READERS_CAP;
     if (workers > 1 && marks) { if (asked) { printf("error: --workers above 1 needs all of the state committed at start, which --soft/--hard marks turn off\n"); return 1; } workers = 1; }
     if (workers > 1 && !mito_share_state(1)) { if (asked) { printf("error: --workers above 1: this system cannot share the state with readers (Linux only for now)\n"); return 1; } workers = 1; }
+    /* --cache-mb N: the answer cache (cache_get / cache_put) holds N MB, shared by the program's instances (default 64; 0: none) */
+    { u64 cmb = 64; flag(argc, argv, "--cache-mb", &cmb); if (!mito_set_cache(cmb << 20)) { printf("error: no memory for a %u MB answer cache\n", (u32)cmb); return 1; } }
     void *app = mito_start(budget << 20, seeded ? seed : 0);
     if (!app) { printf("error: over budget (%u MB) or out of address space\n", (u32)budget); return 1; }
     if (marks) mito_set_marks(app, soft << 20, hard << 20);

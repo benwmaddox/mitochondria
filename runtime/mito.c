@@ -621,6 +621,10 @@ typedef struct Mito {
        mapped read-only, its own request struct, text, answer and database connection. A request that would change anything else stops
        (wants_write) and runs again alone on the primary. */
     int reader, wants_write;
+    u32 tw; /* table writes of the request (with its undo log, whether it changed anything: the data version) */
+    /* the answer being cached (cache_start .. cache_put): where it starts in the answer, and its holes (where each ends, its label);
+       the entry cache_get found: its bytes in the text area */
+    u32 c_on, c_start, c_nholes; struct { u32 at, end; T label; } c_holes[64]; T c_entry;
     /* the state's shared memory (MITO(share_state) before MITO(start)): the handle readers map */
     i64 shared_fd;
 #ifdef MITO_USES_SQLITE
@@ -1039,7 +1043,7 @@ static int h_set_header(Ctx *c, const char *name, u32 nn, const Txt *t) {
     for (u32 i = 0; i < n; i++) if ((p[i] < 0x20 && p[i] != '\t') || p[i] >= 0x7F) return fail(m, 500, "set_header: a value is printable ASCII");
     /* a header set again replaces the earlier line of that name (as a headers hash); Set-Cookie lines are set_cookie's, each kept */
     for (u32 i = 0; i < m->head.len;) {
-        u32 e = i; while (e < m->head.len && m->head.p[e] != '\n') e++;
+        const u8 *nl = (const u8 *)memchr(m->head.p + i, '\n', m->head.len - i); u32 e = nl ? (u32)(nl - m->head.p) : m->head.len;
         int same = e - i > nn && m->head.p[i + nn] == ':';
         for (u32 k = 0; same && k < nn; k++) { u8 x = m->head.p[i + k], y = (u8)name[k]; if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) same = 0; }
         if (same) { u32 next = e < m->head.len ? e + 1 : e; memmove(m->head.p + i, m->head.p + next, m->head.len - next); m->head.len -= next - i; continue; }
@@ -1490,6 +1494,88 @@ MITO_API const u8 *MITO(socket_ops)(void *mp_, u32 *len) { Mito *m = (Mito *)mp_
 /* the directory read_stored reads (the server's --files DIR), empty when none */
 static char g_files_dir[600];
 MITO_API void MITO(set_files)(const char *dir) { u32 k = 0; while (dir[k] && k + 1 < sizeof g_files_dir) { g_files_dir[k] = dir[k]; k++; } g_files_dir[k] = 0; }
+/* ---- the answer cache (builtins 61 to 67): pieces of answers kept between requests, shared by every instance (readers too),
+   outside the state (not rolled back, not journaled; a reader may fill it). An entry is a key, its parts and the labels of the holes
+   between them (the request fills each hole, as with a fresh CSRF token). The program keys entries by what they show, with
+   data_version() for the data: it moves whenever a request that changed state or tables commits, so an entry from before a change
+   is never found again. Full (or its index half full), the cache starts empty again. */
+static int a_html(Area *o, const u8 *s, u64 n, u32 attr);
+static Lock g_cache_lk; static u8 *g_cache; static u64 g_cache_cap, g_cache_used; static u32 *g_cache_slots; static u32 g_cache_nslots, g_cache_count;
+static volatile u64 g_data_version;
+static u64 c_hash(const u8 *p, u32 n) { u64 h = 1469598103934665603ULL; for (u32 i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ULL; } return h; }
+/* an entry: u32 total, key length, parts, then key, each part's length, each hole label's length, then the parts' and labels' bytes */
+static u32 c_rd(const u8 *p) { u32 v; memcpy(&v, p, 4); return v; }
+MITO_API int MITO(set_cache)(u64 bytes) {
+    if (!bytes) return 1;
+    lk_init(&g_cache_lk);
+    g_cache_cap = bytes; g_cache = (u8 *)os_alloc(bytes);
+    g_cache_nslots = 1; while (g_cache_nslots < bytes / 2048 && g_cache_nslots < (1u << 24)) g_cache_nslots <<= 1; if (g_cache_nslots < 1024) g_cache_nslots = 1024;
+    g_cache_slots = (u32 *)os_alloc((u64)g_cache_nslots * 8);
+    return g_cache && g_cache_slots;
+}
+static void c_clear(void) { memset(g_cache_slots, 0, (u64)g_cache_nslots * 8); g_cache_used = 0; g_cache_count = 0; }
+static int c_find(const u8 *k, u32 kn, u64 h, u32 *slot) {
+    for (u32 i = (u32)h & (g_cache_nslots - 1);; i = (i + 1) & (g_cache_nslots - 1)) {
+        u32 off1 = g_cache_slots[2 * i], hh = g_cache_slots[2 * i + 1];
+        if (!off1) { *slot = i; return 0; }
+        const u8 *e = g_cache + (off1 - 1);
+        if (hh == (u32)(h >> 32) && c_rd(e + 4) == kn && b_eq(e + 12, kn, k, kn)) { *slot = i; return 1; }
+    }
+}
+/* cache_get(key): the number of holes of the entry (its parts are one more), now this request's; -1 when there is none */
+static int c_get(Mito *m, T key, Val *out) {
+    *out = v_int(-1); m->c_entry.len = 0;
+    if (!g_cache) return 0;
+    const u8 *k = t_ptr(m, key); u64 h = c_hash(k, key.len); u32 slot; int r = 0;
+    lk_on(&g_cache_lk);
+    if (c_find(k, key.len, h, &slot)) {
+        const u8 *e = g_cache + (g_cache_slots[2 * slot] - 1); u32 total = c_rd(e);
+        u32 at = m->text.len;
+        if (!a_put(&m->text, e, total)) r = text_full(m);
+        else { m->c_entry.off = at; m->c_entry.len = total; *out = v_int((i64)c_rd(e + 8) - 1); }
+    }
+    lk_off(&g_cache_lk);
+    return r;
+}
+/* the entry's part i (written into the answer) and hole i's label */
+static int c_part(Mito *m, i64 i, Val *out, int label) {
+    *out = v_null();
+    if (!m->c_entry.len) return fail(m, 500, "cache_part / cache_label: no entry (cache_get found none)");
+    const u8 *e = t_ptr(m, m->c_entry); u32 kn = c_rd(e + 4), np = c_rd(e + 8), nh = np - 1;
+    if (i < 0 || (u64)i >= (label ? nh : np)) return fail(m, 500, "cache_part / cache_label: no such part or hole");
+    u32 at = 12 + kn + 4 * (np + nh), n = 0;
+    for (u32 j = 0; j < np + nh; j++) { u32 len = c_rd(e + 12 + kn + 4 * j); if (j == (label ? np + (u32)i : (u32)i)) { n = len; break; } at += len; }
+    if (label) { T t = { m->c_entry.off + at, n }; *out = v_str(t); return 0; }
+    return a_put(&m->out, e + at, n) ? 0 : resp_full(m);
+}
+/* cache_put(key): the answer from cache_start to here, split at its holes, kept under the key */
+static int c_put(Mito *m, T key) {
+    if (!m->c_on) return fail(m, 500, "cache_put without cache_start");
+    m->c_on = 0;
+    if (!g_cache) return 0;
+    u32 np = m->c_nholes + 1, kn = key.len, lb = 0;
+    for (u32 j = 0; j < m->c_nholes; j++) lb += m->c_holes[j].label.len;
+    u64 kept = m->out.len - m->c_start; for (u32 j = 0; j < m->c_nholes; j++) kept -= m->c_holes[j].end - m->c_holes[j].at;
+    u64 total = 12 + (u64)kn + 4ULL * (np + m->c_nholes) + kept + lb;
+    if (total > g_cache_cap / 8) return 0; /* too big to keep */
+    const u8 *k = t_ptr(m, key); u64 h = c_hash(k, kn); u32 slot;
+    lk_on(&g_cache_lk);
+    if (c_find(k, kn, h, &slot)) { lk_off(&g_cache_lk); return 0; } /* another request kept it first */
+    if (g_cache_used + total > g_cache_cap || (u64)(g_cache_count + 1) * 2 > g_cache_nslots) { c_clear(); c_find(k, kn, h, &slot); }
+    u8 *e = g_cache + g_cache_used; u32 v;
+    v = (u32)total; memcpy(e, &v, 4); memcpy(e + 4, &kn, 4); memcpy(e + 8, &np, 4); memcpy(e + 12, k, kn);
+    u8 *lens = e + 12 + kn, *d = lens + 4 * (np + m->c_nholes); u32 from = m->c_start;
+    for (u32 j = 0; j < np; j++) {
+        u32 to = j < m->c_nholes ? m->c_holes[j].at : m->out.len; v = to - from; memcpy(lens + 4 * j, &v, 4);
+        memcpy(d, m->out.p + from, v); d += v; from = j < m->c_nholes ? m->c_holes[j].end : to; /* past the hole's value */
+    }
+    for (u32 j = 0; j < m->c_nholes; j++) { v = m->c_holes[j].label.len; memcpy(lens + 4 * (np + j), &v, 4); memcpy(d, t_ptr(m, m->c_holes[j].label), v); d += v; }
+    g_cache_slots[2 * slot] = (u32)(g_cache_used + 1); g_cache_slots[2 * slot + 1] = (u32)(h >> 32);
+    g_cache_used += (total + 7) & ~7ULL; g_cache_count++;
+    lk_off(&g_cache_lk);
+    return 0;
+}
+
 /* ---- bytes, encodings and cryptography: builtins 17 to 34 (the primitives in runtime/crypto.c) ----
    Texts here are bytes (any bytes; a utf8 field holds them as they are). Results go in the text area. */
 /* room for `need` more bytes at the end of the text area, or 0 (the request fails: 507) */
@@ -1697,6 +1783,20 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
             else for (u32 i = 0; i + y.len <= x.len && !found; i++) found = b_eq(p + i, y.len, q, y.len);
         }
         *out = v_int(found); return 0; }
+    case 61: /* cache_get(key) */ if (arg_txt(m, a, n, 0, &x)) return -1; return c_get(m, x, out);
+    case 62: /* cache_put(key) */ if (arg_txt(m, a, n, 0, &x)) return -1; *out = v_null(); return c_put(m, x);
+    case 63: /* cache_start(): what is written from here is what cache_put keeps */ m->c_on = 1; m->c_start = m->out.len; m->c_nholes = 0; *out = v_null(); return 0;
+    case 64: /* cache_hole(label, value): the value written here (escaped, as `{value}` writes it), and kept out of the entry: a hole a
+               later request fills (its label says with what) */
+        if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y)) return -1;
+        if (!m->c_on) return fail(m, 500, "cache_hole without cache_start");
+        if (m->c_nholes == 64) return fail(m, 500, "an answer cached with more than 64 holes");
+        m->c_holes[m->c_nholes].at = m->out.len;
+        if (!a_html(&m->out, t_ptr(m, y), y.len, 0)) return resp_full(m);
+        m->c_holes[m->c_nholes].end = m->out.len; m->c_holes[m->c_nholes].label = x; m->c_nholes++; *out = v_null(); return 0;
+    case 65: /* cache_part(i) */ if (n < 1 || a[0].tag != 1) return fail(m, 500, "cache_part(i)"); return c_part(m, a[0].i, out, 0);
+    case 66: /* cache_label(i) */ if (n < 1 || a[0].tag != 1) return fail(m, 500, "cache_label(i)"); return c_part(m, a[0].i, out, 1);
+    case 67: /* data_version() */ *out = v_int((i64)g_data_version); return 0;
     case 58: { /* byte_at(t, i): the byte at offset i (0 to 255), or -1 past either end */
         if (arg_txt(m, a, n, 0, &x)) return -1;
         if (n < 2 || a[1].tag != 1) return fail(m, 500, "byte_at(text, offset)");
@@ -2126,7 +2226,7 @@ static int t_run(Mito *m, sqlite3_stmt *s) { int r = sqlite3_step(s); sqlite3_re
 #ifdef MITO_USES_SQLITE
 #define T_ST(c) (&M_(c)->store)
 static int h_tget(Ctx *c, u32 t, u32 rowid, u32 col, Val *out) { return t_get(M_(c), t, rowid, col, out); }
-static int h_tset(Ctx *c, u32 t, u32 rowid, u32 col, const Val *v) { RD_ANY(M_(c));
+static int h_tset(Ctx *c, u32 t, u32 rowid, u32 col, const Val *v) { RD_ANY(M_(c)); M_(c)->tw++;
     Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
     if (v->tag == 4 && st->tabs[t].cols[col].ascii && not_ascii(m, t_ptr(m, (T){ v->a, v->b }), v->b)) return -1; /* an ascii<N> column */
     sqlite3_stmt *s = st->ts[t].upd[col];
@@ -2134,7 +2234,7 @@ static int h_tset(Ctx *c, u32 t, u32 rowid, u32 col, const Val *v) { RD_ANY(M_(c
     else t_bind(m, s, 1, v);
     sqlite3_bind_int64(s, 2, (i64)rowid); return t_run(m, s);
 }
-static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) { RD_ANY(M_(c));
+static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) { RD_ANY(M_(c)); M_(c)->tw++;
     Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
     if (st->noadd[t]) { err(m, E_FAIL, 500); a_str(&m->emsg, "cannot add a row: "); a_str(&m->emsg, st->noadd_msg[t]); return -1; }
     sqlite3_stmt *s = st->ts[t].ins; if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent);
@@ -2143,8 +2243,8 @@ static int h_tadd(Ctx *c, u32 t, u32 parent, u32 *out) { RD_ANY(M_(c));
     if (id <= 0 || id > 0xFFFFFFFFLL) return fail(m, 507, "a table's row ids reached 2^32");
     *out = (u32)id; return 0;
 }
-static int h_tdel(Ctx *c, u32 t, u32 rowid) { RD_ANY(M_(c)); Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].del; sqlite3_bind_int64(s, 1, (i64)rowid); return t_run(m, s); }
-static int h_tclear(Ctx *c, u32 t, u32 parent) { RD_ANY(M_(c)); Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].clr; if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent); return t_run(m, s); }
+static int h_tdel(Ctx *c, u32 t, u32 rowid) { RD_ANY(M_(c)); M_(c)->tw++; Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].del; sqlite3_bind_int64(s, 1, (i64)rowid); return t_run(m, s); }
+static int h_tclear(Ctx *c, u32 t, u32 parent) { RD_ANY(M_(c)); M_(c)->tw++; Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st); sqlite3_stmt *s = st->ts[t].clr; if (st->tabs[t].parent >= 0) sqlite3_bind_int64(s, 1, (i64)parent); return t_run(m, s); }
 static int h_texists(Ctx *c, u32 t, u32 rowid, u32 *out) {
     Mito *m = M_(c); Store *st = T_ST(c); sqlite3_stmt *s = st->ts[t].has; sqlite3_bind_int64(s, 1, (i64)rowid);
     int r = sqlite3_step(s); sqlite3_reset(s); *out = r == SQ_ROW; return r == SQ_ROW || r == SQ_DONE ? 0 : t_dbfail(m);
@@ -2167,7 +2267,7 @@ static int h_tfind(Ctx *c, u32 t, u32 rowid, u32 parent) {
 /* `coll.add { field: value, ... }` on a table: one INSERT naming those columns (the owner's id first for a nested table), so another
    program's NOT NULL columns get their values at once; each value bound as its column is kept (a time as text). Its statement (`sql`, a
    literal of the program) is prepared once. */
-static int h_tinsert(Ctx *c, u32 t, u32 parent, const char *sql, const u32 *cols, const Val *vals, u32 n, u32 *out) { RD_ANY(M_(c));
+static int h_tinsert(Ctx *c, u32 t, u32 parent, const char *sql, const u32 *cols, const Val *vals, u32 n, u32 *out) { RD_ANY(M_(c)); M_(c)->tw++;
     Mito *m = M_(c); Store *st = T_ST(c); store_forget_row(st);
     SqCached *k = 0;
     for (u32 i = 0; i < st->ncached && !k; i++) if (st->cached[i].sql == sql) k = &st->cached[i];
@@ -2508,7 +2608,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
     m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0; m->bare = 0;
-    m->target = (const u8 *)target; m->target_n = tn; m->ops.len = 0; m->wants_write = 0;
+    m->target = (const u8 *)target; m->target_n = tn; m->ops.len = 0; m->wants_write = 0; m->tw = 0; m->c_on = 0; m->c_entry.len = 0;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     /* the `@start` function only through MITO(begin), never as a request */
@@ -2595,7 +2695,7 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     if (ok && !store_commit(&m->store)) { ok = 0; m->ctype = 0; m->head.len = 0; out_err(m, (const u8 *)m->store.err, c_len(m->store.err)); code = 500; }
     else if (!ok) store_rollback(&m->store);
 #endif
-    if (ok) { u32 *f = (u32 *)m->frees.p; for (u64 i = 0; i < m->frees.len; i += 2) free_item(&m->mem, f[i], f[i + 1]); commit_changes(&m->mem); }
+    if (ok) { if (!m->reader && (m->mem.ja.len || m->tw || m->frees.len)) g_data_version++; u32 *f = (u32 *)m->frees.p; for (u64 i = 0; i < m->frees.len; i += 2) free_item(&m->mem, f[i], f[i + 1]); commit_changes(&m->mem); }
     else rollback(&m->mem);
     if (m->pr.on) relieve(&m->mem, &m->pr);
     return code;

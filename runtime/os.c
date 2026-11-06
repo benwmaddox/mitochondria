@@ -18,6 +18,7 @@ void *memcpy(void *d, const void *s, u64 n);
 void *memmove(void *d, const void *s, u64 n);
 void *memset(void *d, int c, u64 n);
 int memcmp(const void *a, const void *b, u64 n);
+void *memchr(const void *s, int c, u64 n);
 int printf(const char *f, ...);
 char *getenv(const char *name);
 int fflush(void *f);

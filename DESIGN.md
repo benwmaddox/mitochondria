@@ -293,8 +293,9 @@ system {
   transactions (a later worker's failure does not undo an earlier one's writes).
 
 ## Readers
-A program's GET and HEAD requests run at once on readers (`--workers N`, default the CPUs the process may use; Linux only for
-now): each reader is an instance with its own request struct, text, answer and database connection, over the primary instance's
+A program's GET and HEAD requests run at once on readers (`--workers N`, default twice the CPUs the process may use: a
+connection thread holding a reader is at times descheduled for its I/O, and with as many readers as CPUs a fifth of them idled;
+Linux only for now): each reader is an instance with its own request struct, text, answer and database connection, over the primary instance's
 state mapped read-only (the state lives in a shared memory file; the request struct is on whole pages, which each reader covers
 with pages of its own). Readers hold a readers-writer lock in shared mode; every other request, `@start`, `@every`, and socket
 events hold it alone, and a waiting writer holds back new readers. A reader's line map is clear, so its first write to any line
@@ -305,6 +306,15 @@ with unlogged state (whose writes skip the undo log, and so `save_line`), or wit
 whole at start), has no readers: asked for with `--workers`, the server refuses to start, saying why. With readers, SQLite takes
 its memory from the system's allocator (one pool's lock, taken for every allocation, held readers back), each connection's page
 cache keeping its bound; `--db-memory` then does not apply.
+
+## The answer cache
+Pieces of answers kept between requests (`--cache-mb N`, default 64, 0 none), shared by every instance (readers fill it too), outside
+the state: not journaled, not rolled back. `cache_start()` marks where the piece begins in the answer; `cache_hole(label, value)`
+writes a value (escaped) that is not kept; `cache_put(key)` keeps what was written from the start, minus the holes. `cache_get(key)`
+finds an entry: its number of holes (-1 when there is none); the request writes `cache_part(i)` and, between parts, a fresh value for
+each hole, `cache_label(i)` saying which (a form's CSRF token, freshly masked as Rails masks it on every page). `data_version()` moves
+whenever a request that changed the state or a table commits (unlogged state excepted), so a key that names it is never found after a
+change; keys name everything else the piece shows (the user, say). A full cache, or one whose index is half full, starts empty again.
 
 ## Failures
 | Failure | Meaning | HTTP |

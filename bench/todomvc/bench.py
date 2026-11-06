@@ -6,7 +6,7 @@ forms (the new-todo form, a todo's toggle form), so neither app's routes are wri
 crudspec multipart forms with its signed field. Per app and list size (10 and 100 todos): the time of one request on one kept-open
 connection (median and 99th percentile of the client's round trip: page render, add a todo, toggle a todo), the pages per second
 four client processes get, and the server's peak resident memory (VmHWM) at the end. Writes results.json and RESULTS.md here.
-Mitochondria keeps its state in memory; crudspec keeps it in SQLite (on disk, WAL): the comparison is of whole apps as built."""
+Both keep the lists in SQLite (WAL, on disk): Mitochondria as `table<T>`s, crudspec as its entities."""
 import http.client, json, multiprocessing, os, platform, re, shutil, socket, statistics, subprocess, sys, tempfile, time, urllib.parse, uuid
 from html.parser import HTMLParser
 
@@ -139,7 +139,8 @@ def measure():
     for rnd in range(ROUNDS):
         for name in (["mito", "crudspec"] if rnd % 2 == 0 else ["crudspec", "mito"]):
             if name == "mito":
-                r = run_app(name, [MITO, "--port", "18301"], 18301, lambda: None)
+                d = tempfile.mkdtemp(prefix="mito-todomvc-")
+                r = run_app(name, [MITO, "--port", "18301", "--data", d], 18301, lambda: shutil.rmtree(d, ignore_errors=True))
             else:
                 d = tempfile.mkdtemp(prefix="cs-todomvc-")
                 r = run_app(name, [CS, "--data", d, "--assets", CS_ASSETS, "--port", "18302"], 18302, lambda: shutil.rmtree(d, ignore_errors=True))
@@ -166,8 +167,11 @@ def markdown(b):
          "Both are TodoMVC rendered on the server, from this repository's `examples/todomvc` and crudspec's `apps/todomvc`, each server "
          "alone on one pinned CPU. The client submits each app's own forms (url-encoded for Mitochondria, multipart with a signed field for "
          "crudspec). Times are the client's round trip on one kept-open connection, in microseconds (Python's client adds its own share to both). "
-         "Mitochondria keeps state in memory; crudspec in SQLite on disk: whole apps as built, not storage engines. crudspec keeps a "
-         "rendered page until its data changes, so its page time barely grows with the list; Mitochondria renders every page.", "",
+         "Both keep the lists in SQLite on disk (WAL): Mitochondria as tables (`table<T>`), crudspec as its entities; Mitochondria syncs every "
+         "commit to disk before answering (`synchronous=FULL`: an answered change survives a power cut), crudspec runs `synchronous=NORMAL` "
+         "(WAL commits not synced one by one: a process crash loses nothing, an OS crash or power cut can lose the last moments), so the "
+         "changes' times measure that guarantee more than SQL. crudspec keeps a rendered page until its data changes, so its page time barely grows "
+         "with the list; Mitochondria renders every page.", "",
          "| Measure | Mitochondria | crudspec | Mitochondria / crudspec |", "|---|---:|---:|---:|"]
     for size in map(str, SIZES):
         for k, label in (("render", "page"), ("toggle", "toggle a todo")):

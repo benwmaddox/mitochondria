@@ -890,7 +890,7 @@ int main(int argc, char **argv) {
        use (a connection thread holding a reader is sometimes descheduled, doing its I/O, while another waits for one: as many readers as
        CPUs left a fifth of them idle) */
     u64 workers = 0; int asked = flag(argc, argv, "--workers", &workers);
-    if (!asked) { workers = os_cpu_count(); if (workers > 1) workers *= 2; }
+    if (!asked) { workers = os_cpu_count(); if (workers > 1) workers *= 2; if (workers > conns) workers = conns; } /* no more than threads to use them */
     if (workers > READERS_CAP) workers = READERS_CAP;
     if (workers > 1 && marks) { if (asked) { printf("error: --workers above 1 needs all of the state committed at start, which --soft/--hard marks turn off\n"); return 1; } workers = 1; }
     if (workers > 1 && !mito_share_state(1)) { if (asked) { printf("error: --workers above 1: this system cannot share the state with readers (Linux only for now)\n"); return 1; } workers = 1; }

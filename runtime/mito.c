@@ -219,7 +219,7 @@ typedef struct {
     u8 *livepg;          /* trim's scratch: one flag per page */
     u8 *scanned;         /* one flag per page: the undo log has looked for a page of zeros there (see save); cleared when it may be zeros again */
     u64 *shrinks;        /* per collection (top level): bumped whenever something in it is freed or cleared */
-    Grow jb; int jon;
+    Grow jb, ja; int jon;   /* the undo log: jb the saved lines (64 bytes each, in order), ja one address per entry (a "zeros" entry, low bit set, has no line in jb) */
     u8 *dirty;           /* one bit per 64-byte line of the reservation: set once the request has saved the line */
     int all;             /* all of the state was committed at start (no memory pressure, at most COMMIT_ALL_MAX): nothing needs committing, so ensure() returns at once */
 } Mem;
@@ -277,38 +277,40 @@ static void save(Mem *m, u64 a, u64 n) {
         if (zero_page(m, l / PAGE_LINES)) {
             u64 pl = l / PAGE_LINES * PAGE_LINES;
             memset(m->dirty + (pl >> 3), 0xff, PAGE_LINES / 8);
-            u64 pos = m->jb.len, end = pos + 8 + LINE;
-            if (UNLIKELY(end > m->jb.committed) && !grow_to(&m->jb, end)) fatal("journal full");
-            u64 at = pl * LINE | 1; memcpy(m->jb.p + pos, &at, 8);
-            m->jb.len = end;
+            u64 apos = m->ja.len, aend = apos + 8;
+            if (UNLIKELY(aend > m->ja.committed) && !grow_to(&m->ja, aend)) fatal("journal full");
+            u64 at = pl * LINE | 1; memcpy(m->ja.p + apos, &at, 8);
+            m->ja.len = aend;
             l = pl + PAGE_LINES - 1;
             continue;
         }
         m->dirty[l >> 3] |= bit;
-        u64 pos = m->jb.len, end = pos + 8 + LINE;
+        u64 pos = m->jb.len, end = pos + LINE, apos = m->ja.len, aend = apos + 8;
         if (UNLIKELY(end > m->jb.committed) && !grow_to(&m->jb, end)) fatal("journal full");
-        u64 at = l * LINE; memcpy(m->jb.p + pos, &at, 8); memcpy(m->jb.p + pos + 8, m->base + at, LINE);
-        m->jb.len = end;
+        if (UNLIKELY(aend > m->ja.committed) && !grow_to(&m->ja, aend)) fatal("journal full");
+        u64 at = l * LINE; memcpy(m->ja.p + apos, &at, 8); memcpy(m->jb.p + pos, m->base + at, LINE);
+        m->ja.len = aend; m->jb.len = end;
     }
 }
 static void wr(Mem *m, u64 off, u32 n, u64 v) { ensure(m, off, off + n); save(m, off, n); memcpy(m->base + off, &v, n); }
 static void put(Mem *m, u64 off, const u8 *b, u64 n) { ensure(m, off, off + n); save(m, off, n); if (n) memcpy(m->base + off, b, n); }
 static void zero(Mem *m, u64 off, u64 n) { if (!n) return; ensure(m, off, off + n); save(m, off, n); memset(m->base + off, 0, n); }
-static void begin(Mem *m) { m->jon = 1; m->jb.len = 0; }
+static void begin(Mem *m) { m->jon = 1; m->jb.len = 0; m->ja.len = 0; }
 static void commit_changes(Mem *m) {
-    for (u64 pos = 0; pos < m->jb.len; pos += 8 + LINE) {
-        u64 at; memcpy(&at, m->jb.p + pos, 8); u64 l = at / LINE;
+    for (u64 pos = 0; pos < m->ja.len; pos += 8) {
+        u64 at; memcpy(&at, m->ja.p + pos, 8); u64 l = at / LINE;
         if (at & 1) memset(m->dirty + (l >> 3), 0, PAGE_LINES / 8); /* a page of zeros: all of its lines */
         else m->dirty[l >> 3] &= (u8)~(1u << (l & 7));
     }
-    m->jon = 0; m->jb.len = 0;
+    m->jon = 0; m->jb.len = 0; m->ja.len = 0;
 }
 static void rollback(Mem *m) {
-    for (u64 pos = m->jb.len; pos > 0;) {
-        pos -= 8 + LINE;
-        u64 at; memcpy(&at, m->jb.p + pos, 8);
+    u64 dpos = m->jb.len;
+    for (u64 pos = m->ja.len; pos > 0;) {
+        pos -= 8;
+        u64 at; memcpy(&at, m->ja.p + pos, 8);
         if (at & 1) { u64 p = at / PAGE; if (m->committed[p]) memset(m->base + p * PAGE, 0, PAGE); m->scanned[p] = 0; } /* zeros again */
-        else memcpy(m->base + at, m->jb.p + pos + 8, LINE);
+        else { dpos -= LINE; memcpy(m->base + at, m->jb.p + dpos, LINE); }
     }
     commit_changes(m);
 }
@@ -2344,7 +2346,7 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     mem->committed = s; mem->livepg = s + mem->npages; mem->scanned = s + 2 * mem->npages;
     mem->shrinks = (u64 *)(s + up(mem->npages * 3, 8));
     m->pr.stuck = mem->shrinks + pg->ncolls + 1;
-    if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
+    if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&mem->ja, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
     m->areas = (u8 *)os_alloc(TEXT_CAP + RESPONSE_CAP);
     m->ops.p = (u8 *)os_alloc(1 << 20); m->ops.cap = 1 << 20; m->ops.len = 0; /* socket operations: 1 MB a request */
     if (!m->ops.p) return 0;
@@ -2379,7 +2381,7 @@ MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return;
 #ifdef MITO_USES_SQLITE
     store_close(&m->store);
 #endif
-    os_release(m->mem.base, m->mem.reserved); os_release(m->mem.committed, m->small); os_release(m->mem.dirty, up(m->mem.npages * (PAGE / 64 / 8), PAGE)); os_release(m->mem.jb.p, m->mem.jb.reserved); os_release(m->frees.p, m->frees.reserved); os_release(m->sel.p, m->sel.reserved); os_release(m->areas, TEXT_CAP + RESPONSE_CAP); os_release(m, sizeof(Mito)); }
+    os_release(m->mem.base, m->mem.reserved); os_release(m->mem.committed, m->small); os_release(m->mem.dirty, up(m->mem.npages * (PAGE / 64 / 8), PAGE)); os_release(m->mem.jb.p, m->mem.jb.reserved); os_release(m->mem.ja.p, m->mem.ja.reserved); os_release(m->frees.p, m->frees.reserved); os_release(m->sel.p, m->sel.reserved); os_release(m->areas, TEXT_CAP + RESPONSE_CAP); os_release(m, sizeof(Mito)); }
 MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n; }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
 MITO_API void MITO(set_web_etag)(void *mp_, int on) { ((Mito *)mp_)->web_etag = on; }

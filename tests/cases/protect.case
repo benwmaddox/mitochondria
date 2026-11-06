@@ -1,0 +1,27 @@
+// a page's protections: a change from another site's page (a POST whose Origin is not this Host) is refused 403; the same site, or
+// no Origin (not a browser), is accepted; an endpoint that answers HTML gets its errors as a small page (escaped), not JSON
+--- program
+struct S { n: i64; }
+state s: S;
+
+@post("/inc")
+fn inc() -> Response<{ n: i64 }> { s.n += 1; return ok({ n: s.n }); }
+@get("/page/{k}")
+fn page(k: i64 in 1..9) -> Response<html> { if k == 7 { fail 409 "seven <b>is</b> taken"; } return ok(<p>page {k}</p>); }
+--- requests
+@Origin: https://evil.example
+@Host: shop.example
+POST /inc
+@Origin: http://shop.example
+@Host: shop.example
+POST /inc
+@Origin: https://shop.example:8443
+@Host: shop.example:8443
+POST /inc
+@Origin: null
+@Host: shop.example
+POST /inc
+POST /inc
+GET /page/3
+GET /page/12
+GET /page/7

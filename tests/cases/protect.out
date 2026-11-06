@@ -1,0 +1,10 @@
+POST /inc -> 403 {"error":"cross-site request refused: its Origin is not this site"}
+POST /inc -> 200 {"n":1}
+POST /inc -> 200 {"n":2}
+POST /inc -> 403 {"error":"cross-site request refused: its Origin is not this site"}
+POST /inc -> 200 {"n":3}
+GET /page/3 -> 200 <Content-Type: text/html; charset=utf-8> <p>page 3</p>
+GET /page/12 -> 400 <Content-Type: text/html; charset=utf-8> <!doctype html><meta charset="utf-8"><title>Error</title><p>`k`: 12 is outside 1..9</p>
+GET /page/7 -> 409 <Content-Type: text/html; charset=utf-8> <!doctype html><meta charset="utf-8"><title>Error</title><p>seven &lt;b&gt;is&lt;/b&gt; taken</p>
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

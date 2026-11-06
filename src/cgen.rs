@@ -699,8 +699,8 @@ pub fn layout_c(prog: &Program, api: &Api) -> String {
         o += " { 0, 0 } };\n";
     }
     o += "static const MitoRoute mito_routes[] = {\n";
-    for (k, ep) in api.eps.iter().enumerate() { o += &format!("    {{ {}, {}, mito_segs{} }},\n", c_lit(ep.method.as_bytes()), ep.segs.len(), k); }
-    o += "    { 0, 0, 0 }\n};\n";
+    for (k, ep) in api.eps.iter().enumerate() { o += &format!("    {{ {}, {}, mito_segs{}, {} }},\n", c_lit(ep.method.as_bytes()), ep.segs.len(), k, matches!(&ep.resp, crate::lang::RType::Name(n) if n == "html") as u32); }
+    o += "    { 0, 0, 0, 0 }\n};\n";
     for k in 0..api.eps.len() { o += &format!("static int ep{}(Ctx *c);\n", k); }
     o += "typedef int (*EpFn)(Ctx *);\nstatic const EpFn mito_eps[] = {";
     for k in 0..api.eps.len() { o += &format!(" ep{},", k); }

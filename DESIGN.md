@@ -118,6 +118,12 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   as `<input>` need no closing tag), that text has no raw `<`, and that markup is written only into an HTML answer. It is lowered
   to plain statements that append to the answer, fixed text merged into one copy per run; text across lines is joined by one
   space and comments are dropped.
+- For browsers: a request other than GET or HEAD whose `Origin` is not this `Host` (a form posted from another site's page) is
+  refused 403; a request without `Origin` (an API client) is not a browser's cross-site one. Every answer says
+  `X-Content-Type-Options: nosniff`, and a page adds a Content-Security-Policy allowing scripts, styles, images and form
+  targets only from this site (`default-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri
+  'none'`) and `Referrer-Policy: same-origin`. `HEAD` is answered as `GET` without the body. An endpoint that answers HTML gets
+  its errors as a small page (the message escaped) instead of JSON.
 - `set_cookie("list", token(b), 31536000)` adds a Set-Cookie line to the answer (`Path=/; HttpOnly; SameSite=Lax`; max age 0
   deletes it). The value must be cookie characters (printable ASCII without spaces, quotes, commas, semicolons, backslashes).
 - `Response<T>` declares the answer's JSON shape, checked against every answer when compiling. `ok` 200, `created`

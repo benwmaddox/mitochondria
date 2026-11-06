@@ -597,6 +597,7 @@ typedef struct Mito {
     int ekind; int ecode; Area emsg; u8 ebuf[4096];
     /* the answer's head: its content type (0 JSON, 1 HTML, 2 plain text) and header lines after it (`Location: ...\r\n`) */
     u32 ctype; Area head; u8 hbuf[4096]; u8 hout[4096 + 64];
+    int html_err; /* the endpoint answers HTML: an error is a small page, not JSON */
     Grow frees; /* (collection, item) pairs, u32 each */
     Grow sel;   /* items collected by loops (u32 each) */
     int crashed;
@@ -1767,7 +1768,15 @@ MITO_API void MITO(set_marks)(void *mp_, u64 soft, u64 hard) { Mito *m = (Mito *
     if (m->mem.all) { m->mem.all = 0; trim_all(&m->mem); } /* pressure needs exact accounting: give back what is not live, commit on demand from here */
     for (u32 c = 0; c < m->mem.prog->ncolls; c++) m->pr.stuck[c] = ~0ULL;
 }
-static void out_err(Mito *m, const u8 *msg, u64 n) { m->out.len = 0; a_str(&m->out, "{\"error\":"); a_json_str(&m->out, msg, n); a_str(&m->out, "}"); }
+static void out_err(Mito *m, const u8 *msg, u64 n) {
+    m->out.len = 0;
+    if (m->html_err) { /* for a browser: a page that says what went wrong */
+        m->ctype = 1;
+        a_str(&m->out, "<!doctype html><meta charset=\"utf-8\"><title>Error</title><p>"); a_html(&m->out, msg, n, 0); a_str(&m->out, "</p>");
+        return;
+    }
+    a_str(&m->out, "{\"error\":"); a_json_str(&m->out, msg, n); a_str(&m->out, "}");
+}
 static void out_err_c(Mito *m, const char *msg) { out_err(m, (const u8 *)msg, c_len(msg)); }
 static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
     u64 n = 0; for (u64 i = 0; i < pn; ) { while (i < pn && path[i] == '/') i++; if (i < pn) n++; while (i < pn && path[i] != '/') i++; }
@@ -1792,9 +1801,21 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;
     u32 ei = route(m, (const u8 *)method, mn, t, q);
+    m->html_err = 0;
     if (ei == 0xFFFFFFFFu) { out_err_c(m, "no such endpoint"); return 404; }
+    m->html_err = (int)mito_prog.routes[ei].html;
     if (m->pr.on && m->pr.refusing && !c_eq("GET", (const u8 *)method, mn) && !c_eq("DELETE", (const u8 *)method, mn)) { out_err_c(m, "memory pressure: try again later"); return 503; }
     m->ei = ei; m->hdrs = hdrs; m->nhdrs = nh; m->fwd = fwd; m->nfwd = nf;
+    /* a change asked for by a page of another site (a browser sends Origin with every form post): refused. A request without Origin
+       (an API client, curl) is not a browser's cross-site one. */
+    if (!c_eq("GET", (const u8 *)method, mn) && !c_eq("HEAD", (const u8 *)method, mn)) {
+        const u8 *o, *hv; u64 on, hn;
+        if (header(m, (const u8 *)"origin", 6, &o, &on)) {
+            int same = header(m, (const u8 *)"host", 4, &hv, &hn) && hn > 0 &&
+                ((on == 7 + hn && b_eq(o, 7, (const u8 *)"http://", 7) && b_eq(o + 7, hn, hv, hn)) || (on == 8 + hn && b_eq(o, 8, (const u8 *)"https://", 8) && b_eq(o + 8, hn, hv, hn)));
+            if (!same) { out_err_c(m, "cross-site request refused: its Origin is not this site"); return 403; }
+        }
+    }
     const MitoRoute *r = &mito_prog.routes[ei];
     m->nparams = 0; m->nquery = 0; m->njson = 0;
     int fits = 1;

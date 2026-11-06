@@ -200,6 +200,9 @@ static int serve_one(Conn *x, Sock c, int first) {
     u32 rest = len - be;
     int code; const char *resp; u32 rn;
     u64 t_start = 0, t_end = 0;
+    /* HEAD: answered as GET, with the same head and no body */
+    int head_only = mn == 4 && method[0] == 'H' && method[1] == 'E' && method[2] == 'A' && method[3] == 'D';
+    if (head_only) { method = "GET"; mn = 3; }
     if (g_timing) t_start = os_perf_ns();
 #ifdef HTTP_SINGLE
     lk_on(&g_app_lock);
@@ -222,6 +225,10 @@ static int serve_one(Conn *x, Sock c, int first) {
     HPUT("HTTP/1.1 "); { u64 v = (u64)code; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
     HPUT(" "); HPUT(r); HPUT("\r\n");
     for (u32 i = 0; i < x->rhn && n < sizeof x->hd; i++) hd[n++] = x->rh[i]; /* Content-Type and any other lines, each ending CRLF */
+    /* every answer: the browser takes the content type as given; a page: scripts, styles and form targets only from this site */
+    HPUT("X-Content-Type-Options: nosniff\r\n");
+    { static const char html[] = "Content-Type: text/html"; u32 k = 0; while (html[k] && k < x->rhn && x->rh[k] == html[k]) k++;
+      if (!html[k]) HPUT("Content-Security-Policy: default-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\nReferrer-Policy: same-origin\r\n"); }
     HPUT("Content-Length: ");
     { u64 v = rn; dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn]; }
     if (g_timing) {
@@ -229,7 +236,7 @@ static int serve_one(Conn *x, Sock c, int first) {
         HPUT("\r\nX-Handler-Ns: "); dn = 0; do { num[dn++] = (char)('0' + v % 10); v /= 10; } while (v); while (dn) hd[n++] = num[--dn];
     }
     HPUT(keep ? "\r\nConnection: keep-alive\r\n\r\n" : "\r\nConnection: close\r\n\r\n");
-    send_two(c, hd, n, resp, rn);
+    send_two(c, hd, n, resp, head_only ? 0 : rn);
     #undef HPUT
     if (keep && rest) { memmove(x->data.p, x->data.p + be, rest); x->carry = rest; }
     return keep;

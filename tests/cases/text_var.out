@@ -1,0 +1,5 @@
+POST /t -> 200 {"list":"[x:2:4:6]","len":9,"swapped":"x:2|x","total":26214400,"kept":"x:2|x/[x:2:4:6]","again":"1,2,3"}
+POST /t -> 200 {"list":"[abc:2:4:6:8:10]","len":16,"swapped":"abc|x","total":26214400,"kept":"abc|x/[abc:2:4:6:8:10]","again":"1,2,3,4,5"}
+POST /t -> 413 {"error":"text of 65 bytes does not fit text<64>","line":13}
+state <plain values> 8192
+memory reserved=8192 committed=8192 live=8192

@@ -113,6 +113,8 @@ struct H {
     int (*tinsert)(Ctx *, u32, u32, const char *, const u32 *, const Val *, u32, u32 *); /* a row added with its fields' values: one INSERT */
     int (*found)(Ctx *, const Txt *);                            /* a 302 answer to a path on this server, Location absolute (this Host) */
     int (*split_next)(Ctx *, const Txt *, const Txt *, u32 *, Txt *, int *); /* `split`: the next piece of a text from *pos (by a separator, or whitespace when 0), or none */
+    int (*txt_cap)(Ctx *, u32, Txt *);                           /* `var t: text<cap>`: cap bytes reserved in the text area (the scope's region), empty */
+    int (*txt_set)(Ctx *, Txt *, u32, int, const Val *, u32);   /* pieces written to such a var (cap; from the start when the int is 1) */
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
@@ -600,6 +602,13 @@ struct G<'p> {
     txt_bounds: std::collections::HashMap<String, usize>,
     /// each `let` of text built here (in its scope's region): its most bytes, when known; `built_lets` counts them as compiled
     region_lets: Vec<Option<usize>>,
+    /// bytes of region text live now (lets and capped vars of the scopes open here), the most at once, and how many are unbounded (an
+    /// unbounded part, or a region kept across a loop's iterations)
+    region_live: usize,
+    region_peak: usize,
+    region_unbounded: u32,
+    /// the C names of capped `var`s of text (`var acc: text<N>`) and their caps
+    txt_caps: std::collections::HashMap<String, usize>,
     prog: &'p Program, api: &'p Api, ep: &'p Endpoint, body: String, n: usize, depth: usize, inlining: Vec<u32>, ret: Vec<Ret>,
     frame: Option<u32>,                                  // the function whose slots `env` holds (None: the endpoint)
     slot_kinds: &'p [((Option<u32>, u32), K)],           // widened kinds of `var` and `let` slots
@@ -1179,7 +1188,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
             let r = g.inputs(ep, &mut env).and_then(|_| g.block(&ep.body, &mut env));
             let (widen, body, at) = (g.widen, std::mem::take(&mut g.body), g.at);
-            lets = (g.region_lets.len() as u32, g.region_lets.iter().flatten().sum(), g.region_lets.iter().filter(|x| x.is_none()).count() as u32);
+            lets = (g.region_lets.len() as u32, g.region_peak, g.region_unbounded);
             touched = if g.uses_spec { None } else { let mut t = std::mem::take(&mut g.rq_touched); t.sort(); let mut m: Vec<(usize, usize)> = Vec::new(); for r in t { match m.last_mut() { Some(l) if r.0 <= l.1 => l.1 = l.1.max(r.1), _ => m.push(r) } } Some(m) };
             drop(g);
             let r = r.map_err(|e| place_err(at, e));
@@ -1339,7 +1348,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { rq_touched: Vec::new(), uses_spec: false, narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
+        G { rq_touched: Vec::new(), uses_spec: false, narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), region_live: 0, region_peak: 0, region_unbounded: 0, txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1967,7 +1976,7 @@ impl<'p> G<'p> {
     fn close(&mut self, tail: &str) { self.checked.clear(); self.depth -= 1; self.line(tail); }
 
     fn block(&mut self, stmts: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<()> {
-        let (start, lets0, esc0) = (self.body.len(), self.region_lets.len(), self.txt_escapes.len());
+        let (start, lets0, esc0, live0) = (self.body.len(), self.region_lets.len(), self.txt_escapes.len(), self.region_live);
         let bound_before: Vec<bool> = env.iter().map(|x| x.is_some()).collect();
         let mut live_from: Option<usize> = None; // where the first `let` of built text in this block was compiled
         self.block_inner(stmts, env, &mut live_from)?;
@@ -1977,7 +1986,7 @@ impl<'p> G<'p> {
             if let Some(at) = live_from {
                 let after = &self.body[at..];
                 if self.specs.borrow().iter().any(|sp| after.contains(&format!("{}(c", sp.name))) {
-                    return no("a `let` holding text built here is live at a recursive call: copy it into a field first, or build it after the call");
+                    return no("text a `let` built or a capped `var` holds is live at a recursive call here: copy it into a field first, or build it after the call");
                 }
             }
             // the scope's region released at its end, unless text built in it may outlive it: a `return` with a value, an outer
@@ -1993,9 +2002,18 @@ impl<'p> G<'p> {
                 let head = std::mem::replace(&mut self.body, kept);
                 self.body.insert_str(start, &head);
                 self.call(&format!("c->h->text_cut(c, {})", mark));
+                self.region_live = live0;
+            } else if !self.loops.is_empty() {
+                // kept past its scope inside a loop: it may add up over the iterations
+                self.region_unbounded += 1;
             }
         }
         Ok(())
+    }
+    /// A `let` or capped `var` of region text, of at most `b` bytes (None: not known)
+    fn region_add(&mut self, b: Option<usize>) {
+        self.region_lets.push(b);
+        match b { Some(b) => { self.region_live += b; self.region_peak = self.region_peak.max(self.region_live); } None => self.region_unbounded += 1 }
     }
     fn block_inner(&mut self, stmts: &'p [Stmt], env: &mut Vec<Option<CV>>, live_from: &mut Option<usize>) -> R<()> {
         let mut restore: Vec<(u32, CV)> = Vec::new();
@@ -2043,7 +2061,7 @@ impl<'p> G<'p> {
             }
             let lets = self.region_lets.len();
             self.stmt(s, env)?;
-            if matches!(s, Stmt::Let(..)) && self.region_lets.len() > lets && live_from.is_none() { *live_from = Some(self.body.len()); }
+            if matches!(s, Stmt::Let(..) | Stmt::Var(..)) && self.region_lets.len() > lets && live_from.is_none() { *live_from = Some(self.body.len()); }
             // `if !exists(x) { ... }` (or `if x == null`) whose branch always leaves (return, fail, break, continue), or `if exists(x)
             // { ... } else { ... }` whose else always leaves: x is a plain item for the rest of this block; the same for a field `m.f`
             if let Stmt::If(c, t, e) = s {
@@ -2103,6 +2121,30 @@ impl<'p> G<'p> {
             Stmt::Continue => { let l = self.loops.last_mut().ok_or("`continue` outside a loop")?; l.3 = true; let g = format!("goto {};", l.1); self.line(&g); }
             Stmt::MatchArms(..) => {}
             Stmt::ContinueHere => { let l = self.loops.last_mut().ok_or("misplaced loop step")?; l.3 = false; let g = format!("{}: ;", l.1); self.line(&g); }
+            Stmt::Var(n, slot, Expr::Call(f, args, _)) if f == "__mito__text_cap" => {
+                // `var acc: text<N> = ...`: N bytes reserved in its scope's region (block() gives them back at the scope's end), written
+                // in place by `=` and `+=`
+                let (Some(Expr::Int(cap)), Some(init)) = (args.first(), args.get(1)) else { return no("`var x: text<N> = ...` expected") };
+                let cap = *cap as usize;
+                let t = self.tmp("t");
+                self.line(&format!("Txt {} = {{ 0, 0, 1 }};", t));
+                self.call(&format!("c->h->txt_cap(c, {}, &{})", cap, t));
+                self.var_names.insert(t.clone());
+                self.txt_caps.insert(t.clone(), cap);
+                self.txt_bounds.insert(t.clone(), cap);
+                self.region_add(Some(cap));
+                self.txt_write(&t, cap, true, &[init], env)?;
+                let place = match self.inlining.last() { Some(k) => format!("fn {}", self.api.fns[*k as usize].name), None => self.ep.text.clone() };
+                KINDS.with(|k| k.borrow_mut().push((place, self.at.0, format!("var {}", n), format!("text (its own, up to {} bytes)", cap))));
+                env[*slot as usize] = Some(CV::Txt(t));
+            }
+            // `let w = acc` of a capped var: a window onto it (each use reads the var as it is then), as a `let` of a field is
+            Stmt::Let(n, slot, e @ Expr::Var(..)) if matches!(self.expr(e, env, None)?, CV::Txt(t) if self.txt_caps.contains_key(&t)) => {
+                let v = self.expr(e, env, None)?;
+                let place = match self.inlining.last() { Some(k) => format!("fn {}", self.api.fns[*k as usize].name), None => self.ep.text.clone() };
+                KINDS.with(|k| k.borrow_mut().push((place, self.at.0, format!("let {}", n), "text (a window onto a var)".to_string())));
+                env[*slot as usize] = Some(v);
+            }
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
                 let v = self.expr(e, env, None)?;
@@ -2110,11 +2152,11 @@ impl<'p> G<'p> {
                 // or text it builds (tests may: their messages are built text)
                 if !self.test && matches!(v, CV::Txt(_) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)) {
                     let n = match s { Stmt::Let(n, ..) | Stmt::Var(n, ..) => n.clone(), _ => String::new() };
-                    if mutable { return no(format!("`var {}` would hold its own text: text lives in fields. Name a field with `let` (a window onto it), or build the text in a field of the state or of a `request` struct (`work.line += ...`)", n)); }
+                    if mutable { return no(format!("`var {}` would hold its own text: declare its cap, `var {}: text<1024> = ...;` (its bytes in its scope's region), or name a field with `let` (a window onto it)", n, n)); }
                     // (text a function returns lives in the request's text area, as a builtin's does: a window onto it)
                     // text built here (`let k = a + ":" + b`): it lives in its scope's region (block() releases it at the scope's end)
                     let built = match e { Expr::Bin(op, ..) => op == "+", Expr::Call(f, _, _) => f == "str", _ => false };
-                    if built { let b = self.txt_bound(&v); self.region_lets.push(b); }
+                    if built { let b = self.txt_bound(&v); self.region_add(b); }
                 }
                 let v = match self.slot_kind(*slot) { Some(k) => self.coerce(v, k, mutable)?, None => self.hold(v, mutable)? };
                 {
@@ -2125,8 +2167,15 @@ impl<'p> G<'p> {
                 }
                 env[*slot as usize] = Some(v);
             }
-            Stmt::Assign(Expr::Var(n, VarRes::Local(slot)), rhs) => {
+            Stmt::Assign(target @ Expr::Var(n, VarRes::Local(slot)), rhs) => {
                 let cur = env[*slot as usize].clone().ok_or_else(|| format!("`{}` has no compiled value", n))?;
+                // a capped var of text: written in place (`acc += a + b`: the pieces after what it holds; `acc = ...`: from the start)
+                if let CV::Txt(t) = &cur {
+                    if let Some(cap) = self.txt_caps.get(t).copied() {
+                        let t = t.clone();
+                        return match str_pieces(target, rhs) { Some((clear, pieces)) => self.txt_write(&t, cap, clear, &pieces, env), None => self.txt_write(&t, cap, true, &[rhs], env) };
+                    }
+                }
                 let v = self.expr(rhs, env, None)?;
                 if matches!(cur, CV::Txt(_) | CV::Any(_)) { self.txt_escapes.push(*slot); }
                 if let Err(e) = self.assign_var(&cur, v.clone()) {
@@ -2761,6 +2810,21 @@ impl<'p> G<'p> {
             let vv = self.val(v)?;
             self.call(&format!("c->h->str_app(c, {}, {}, {}, {}, &{})", k, a, b, cc, vv));
         }
+        Ok(())
+    }
+
+    /// Write pieces to a capped var of text (C name `t`, `cap` bytes), after what it holds or from the start when `clear`: one call. A
+    /// piece that is not text is formatted as `+` would.
+    fn txt_write(&mut self, t: &str, cap: usize, clear: bool, pieces: &[&'p Expr], env: &mut Vec<Option<CV>>) -> R<()> {
+        let mut names = Vec::new();
+        for p in pieces {
+            let v = self.expr(p, env, None)?;
+            if matches!(v, CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) | CV::Resp(..)) { return no("only text, numbers and bools can be added to text"); }
+            names.push(self.val(v)?);
+        }
+        let argv = self.tmp("argv");
+        self.line(&format!("Val {}[{}] = {{ {} }};", argv, names.len(), names.join(", ")));
+        self.call(&format!("c->h->txt_set(c, &{}, {}, {}, {}, {})", t, cap, clear as i32, argv, names.len()));
         Ok(())
     }
 

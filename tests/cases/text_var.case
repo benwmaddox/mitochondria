@@ -1,0 +1,37 @@
+// `var acc: text<N>`: a var holding text of its own, up to its cap, in its scope's region: `+=` appends in place, `=` writes from the
+// start (its own text among the pieces is fine), more than the cap fails the request (413). A capped var in a loop body is given back
+// each iteration: 400 iterations of 64 KiB through the request's 4 MiB text area; a function returns one (the caller copies it); a `let`
+// of one is a window onto it (it reads the var as it is then)
+--- program
+struct Work { kept: utf8<64>; }
+request work: Work;
+struct App { n: i64; }
+state app: App;
+fn csv(n: i64) -> text {
+    var out: text<256> = "";
+    foreach i in 1..n { if i > 1 { out += ","; } out += i; }
+    return out;
+}
+@post("/t")
+fn t(a: utf8<16>, n: i64) -> Response<{ list: string; len: i64; swapped: string; total: i64; kept: string; again: string }> {
+    var acc: text<64> = "[" + a;
+    foreach i in 1..n { acc += ":" + str(i * 2); }
+    acc += "]";
+    var swapped: text<64> = "x";
+    let seen = swapped;
+    swapped = substr(acc, 1, 3) + "|" + swapped;
+    work.kept = seen;
+    var total = 0;
+    foreach k in 1..400 {
+        var big: text<65536> = "";
+        foreach j in 1..64 { big += "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; }
+        total += len(big);
+    }
+    work.kept += "/" + acc;
+    let again = csv(n);
+    return ok({ list: acc, len: len(acc), swapped: swapped, total: total, kept: work.kept, again: again });
+}
+--- requests
+POST /t {"a": "x", "n": 3}
+POST /t {"a": "abc", "n": 5}
+POST /t {"a": "y", "n": 30}

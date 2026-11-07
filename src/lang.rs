@@ -831,9 +831,20 @@ impl P {
         if self.is_kw("continue") { self.i += 1; self.eat(";")?; return Ok(Stmt::Continue); }
         if self.is_kw("let") || self.is_kw("var") {
             let is_var = self.is_kw("var");
-            self.i += 1; let n = self.id()?; self.eat("=")?;
+            self.i += 1; let n = self.id()?;
+            // `var acc: text<8192> = "";`: a var holding text of its own, up to its cap (its bytes in its scope's region)
+            let mut cap = None;
+            if self.sym(":") {
+                let t = self.id()?;
+                if !is_var || t != "text" { return Err(format!("`{} {}: {}`: only a `var` declares a type, and only `text<N>` (its cap in bytes: `var {}: text<1024> = \"\";`)", if is_var { "var" } else { "let" }, n, t, n)); }
+                self.eat("<")?; let k = self.int()?; self.eat(">")?;
+                if k < 1 || k > 1 << 24 { return Err(format!("`var {}: text<{}>`: the cap is 1 to 16777216 bytes", n, k)); }
+                cap = Some(k);
+            }
+            self.eat("=")?;
             if self.is_kw("alloc") || self.is_kw("try_alloc") { return Err(format!("`{}` was replaced by collection functions: `let {} = coll.add();` (or `coll.try_add()`)", self.here_word(), n)); }
             let e = self.expr()?; self.eat(";")?;
+            let e = match cap { Some(k) => Expr::Call("__mito__text_cap".into(), vec![Expr::Int(k), e], CallRes::Unbound), None => e };
             return Ok(if is_var { Stmt::Var(n, 0, e) } else { Stmt::Let(n, 0, e) });
         }
         if self.is_kw("if") { return self.if_stmt(); }
@@ -1410,7 +1421,7 @@ impl Binder<'_> {
                     CallRes::User(k as u32)
                 } else if let Some(b) = B::from(n) { CallRes::Builtin(b) }
                 // `split(...)`: what a loop walks (`foreach p in split(t, ", ")`); compiled there
-                else if n == "split" { CallRes::Unbound }
+                else if n == "split" || n == "__mito__text_cap" { CallRes::Unbound }
                 else { let hint = suggest(n, self.fns.iter().map(|f| f.0.as_str()).chain(BUILTIN_NAMES.iter().copied())); return self.err(format!("unknown function `{}`{}", n, hint)); };
             }
             _ => {}

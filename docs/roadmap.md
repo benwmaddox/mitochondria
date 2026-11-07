@@ -354,3 +354,11 @@ Phase 6 is done (2026-11-06).
   a `let` over an unbounded part is counted as unbounded. Campfire: the sidebar's cache key and the cable's identifier, Origin and
   broadcast prefix are lets or `-> text` (three request fields gone; the cable endpoints zero 2,124 B, 260 B and 0 B, from 15,448,
   8,456 and 12,296).
+- Capped `var` done (2026-11-06): `var acc: text<N> = ...` reserves N bytes in its scope's region (`txt_cap`); `=` and `+=` write the
+  pieces in place in one call (`txt_set`, bytes moved, so the var's own text may be a piece); more than N fails the request (413, as a
+  field's cap does). The recursion rule and the scope release are the `let`'s. `--costs` now gives the most region text live at once
+  (scopes given back are subtracted; a region kept across a loop's iterations counts as unbounded): "region text N locals (at most B
+  B at once, K unbounded)". `tests/cases/text_var.case` (26 MB of a capped var in a loop body through the 4 MiB text area, the cap's
+  413, self-reference, a function returning one, a `let` of one as a window onto it), `tests/errors/text_var_recursive.mito`, `tests/errors/text_let_cap.mito`. Campfire:
+  the session cookie's hash is a capped var and its other scratch text lets (`work.plain` gone; POST /session's region text is at
+  most 12,600 B at once).

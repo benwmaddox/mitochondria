@@ -1,4 +1,4 @@
-// expect: a `let` holding text built here is live at a recursive call
+// expect: text a `let` built or a capped `var` holds is live at a recursive call
 struct S { n: i64; } state s: S;
 fn walk(n: i64) -> i64 { let k = "n=" + str(n); if n <= 0 { return len(k); } return walk(n - 1) + len(k); }
 @get("/a") fn a() -> Response<{ n: i64 }> { return ok({ n: walk(3) }); }

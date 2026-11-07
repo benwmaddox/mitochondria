@@ -2499,6 +2499,38 @@ static int h_found(Ctx *c, const Txt *t) {
     if (!(a_str(&m->head, "Location: http://") && a_put(&m->head, h, hn) && a_put(&m->head, p, n) && a_str(&m->head, "\r\n"))) return fail(m, 500, "redirect path too long");
     return 0;
 }
+/* `var acc: text<cap>`: its bytes reserved in the text area, in its scope's region (the scope's end gives them back) */
+static int h_txt_cap(Ctx *c, u32 cap, Txt *out) {
+    Mito *m = M_(c);
+    if ((u64)m->text.len + cap > m->text.cap) return text_full(m);
+    out->off = m->text.len; out->len = 0; out->present = 1; m->text.len += cap;
+    return 0;
+}
+/* Write pieces (as h_str_set formats them) to a capped var's reserved bytes: after what it holds, or from the start when `clear`.
+   A piece may be the var's own text or a window onto it, so bytes are moved, not copied. */
+static int h_txt_set(Ctx *c, Txt *dst, u32 cap, int clear, const Val *v, u32 nv) {
+    Mito *m = M_(c);
+    u64 cur = clear ? 0 : dst->len;
+    u32 mark = m->text.len;
+    for (u32 i = 0; i < nv; i++) {
+        const u8 *p; u64 n; u8 d[24];
+        if (v[i].tag == 4) { p = m->text.p + v[i].a; n = v[i].b; }
+        else if (v[i].tag == 1) {
+            u64 x = v[i].i < 0 ? (u64)0 - (u64)v[i].i : (u64)v[i].i; int k = 24;
+            do { d[--k] = (u8)('0' + x % 10); x /= 10; } while (x);
+            if (v[i].i < 0) d[--k] = '-';
+            p = d + k; n = (u64)(24 - k);
+        }
+        else if (v[i].tag == 0) continue;
+        else { m->text.len = mark; if (show(m, &v[i])) return -1; p = m->text.p + mark; n = m->text.len - mark; }
+        if (cur + n > cap) { m->text.len = mark; err(m, E_TOOLONG, 413); a_str(&m->emsg, "text of "); a_u64(&m->emsg, cur + n); a_str(&m->emsg, " bytes does not fit text<"); a_u64(&m->emsg, cap); a_str(&m->emsg, ">"); return -1; }
+        if (n) memmove(m->text.p + dst->off + cur, p, n);
+        cur += n;
+    }
+    m->text.len = mark;
+    dst->len = (u32)cur; dst->present = 1;
+    return 0;
+}
 
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
@@ -2506,6 +2538,7 @@ static const H mito_h = {
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
     h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header, h_tinsert, h_found, h_split_next,
+    h_txt_cap, h_txt_set,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

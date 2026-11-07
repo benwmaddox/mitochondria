@@ -2,7 +2,7 @@
 // build 512 KiB (about 2 MiB with the copies of its parts): ten together, which the request's 4 MiB text area holds only because each
 // block gives its region back; a built text compared, and copied into a field (which outlives its region)
 --- program
-struct Work { x: utf8<1100000>; kept: utf8<64>; }
+struct Work { x: utf8<1100000>; kept: utf8<64>; y: utf8<40000>; }
 request work: Work;
 struct App { n: i64; }
 state app: App;
@@ -21,6 +21,25 @@ fn t(a: utf8<16>, b: utf8<16>) -> Response<{ total: i64; key: string; same: bool
     work.kept = key + "!";
     return ok({ total: total, key: key, same: same, kept: work.kept });
 }
+// text a function returns from inside a loop whose rounds give their regions back (the return leaves past the cut; what it
+// returns, a window onto its region, stays until the caller's scope ends)
+fn pick(n: i64) -> text {
+    foreach i in 1..400 {
+        let big = work.y + work.y + "#" + str(i);
+        if i == n { return substr(big, len(big) - 4, 4); }
+    }
+    return "none";
+}
+@post("/r")
+fn r(n: i64) -> Response<{ a: string; b: string; c: string }> {
+    work.y = "abcdefgh";
+    foreach i in 1..12 { work.y += work.y; }
+    let a = pick(n);
+    let b = pick(7);
+    let c = pick(1000);
+    return ok({ a: a, b: b, c: c });
+}
 --- requests
 POST /t {"a": "x", "b": "y"}
 POST /t {"a": "p", "b": "q"}
+POST /r {"n": 399}

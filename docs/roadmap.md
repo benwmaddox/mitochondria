@@ -362,3 +362,14 @@ Phase 6 is done (2026-11-06).
   413, self-reference, a function returning one, a `let` of one as a window onto it), `tests/errors/text_var_recursive.mito`, `tests/errors/text_let_cap.mito`. Campfire:
   the session cookie's hash is a capped var and its other scratch text lets (`work.plain` gone; POST /session's region text is at
   most 12,600 B at once).
+- Bounds required done (2026-11-07): sizes flow through the builtins (base64, hex, JSON and HTML quoting, form coding, case mapping,
+  `replace`, the crypto results, `random_bytes(n)`, `format_time`), `substr`, `trim`, `json_field`, `split`'s pieces, and text a
+  function returns (the most of its returns). A `let` whose size is not known when compiling (a header, the environment, stored data,
+  a recursive function's result) is an error that says to give it a cap; an endpoint whose region text can reach more than the
+  4 MiB text area is refused. A `return` leaves past its scopes' cuts, so a block that returns is cut too (what it returns stays
+  until the caller's scope ends, and counts as live until then). `--costs` names any region kept across a loop's rounds (file:line).
+  Tests: `tests/errors/text_let_unbounded.mito`, `tests/errors/text_area_full.mito`, `text_let.case`'s `/r` (text returned from a
+  loop whose rounds are cut). Campfire: every endpoint's region text is bounded, at most 36,283 B at once.
+- Text-bearing structs in locals: not started. No Campfire code wants one yet (the session's fields cross most endpoints and their
+  markup, which the request struct serves); the likely design is a compile-time bundle (scalar fields as C locals, text fields as
+  capped region text), with no layout or runtime change.

@@ -110,7 +110,9 @@ null, no arrow when it gives nothing), and checked at every call and `return`. `
 a `substr` or `trim` of one, what a function or builtin returns) and text a `let` builds (`let key = "sidebar:" + str(u.id)`): that
 lives in its scope's region, on the request's text area from a mark at the scope's start, which the scope's end moves back to (no
 zeroing; kept when text built there may outlive it: a `return` with a value, an outer variable given text, the answer cache). Such a
-`let` may not be live at a recursive call, so `mito check --costs` can give each endpoint's most bytes of them. A `var` holds text
+`let` may not be live at a recursive call, and its size must be known when compiling (from its parts': fields' caps, inputs'
+lengths, what builtins can give), so `mito check --costs` gives each endpoint's most bytes of them at once; an endpoint that could
+need more than the text area is refused. A `var` holds text
 of its own when it declares its cap, `var acc: text<8192> = "";`: that many bytes reserved in its scope's region, written in place
 (`acc += a + b` appends, `acc = ...` writes from the start; past the cap the request fails, 413). It follows the `let`'s rules (not
 live at a recursive call; given back at the scope's end); `var t = ""` without a cap is an error that says to declare one. A function may return text (`-> text`): built for the request in

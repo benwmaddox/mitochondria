@@ -11,6 +11,8 @@ use crate::lang::*;
 use crate::layout::{CKind, Kind, Program, Scalar, Ty};
 
 /// The C side of the boundary. `serve.rs` mirrors this table with `#[repr(C)]`, in the same order.
+/// The request's text area (runtime/mito.c's TEXT_CAP): where region text, built text and the request's own text are
+const TEXT_AREA: usize = 4 * 1024 * 1024;
 pub const PRELUDE: &str = r#"typedef long long i64; typedef unsigned int u32; typedef unsigned char u8; typedef unsigned long long u64;
 #define I64MAX 9223372036854775807LL
 #define I64MIN (-I64MAX - 1)
@@ -398,8 +400,9 @@ pub struct Generated { pub src: String, pub notes: Vec<String>, pub lits: Vec<u8
 /// joins, appends), each total and in loops.
 #[derive(Clone, Default, Debug)]
 pub struct Costs { pub queries: (u32, u32), pub reads: (u32, u32), pub writes: (u32, u32), pub texts: (u32, u32),
-    /// lets of text built in their scope's region: how many, the most bytes of those whose bound is known, how many have none
-    pub lets: (u32, usize, u32) }
+    /// region text (lets of built text, capped vars): how many, the most bytes live at once of those whose bound is known, and where
+    /// those without one are (`fn name` or the endpoint, and the line)
+    pub lets: (u32, usize, Vec<String>) }
 /// Count an endpoint's C body's helper calls, each in or out of a loop (a block opened by `for (` / `while (`).
 fn count_costs(body: &str) -> Costs {
     let mut c = Costs::default();
@@ -445,7 +448,8 @@ enum CV {
 /// Where `return` goes inside an inlined function, and the kind of value it returns (known after the first `return`).
 /// `func`: the return of a generated C function, which writes its result through `ret_v` (and `ret_s`) and returns 0.
 /// `sel`: a mark taken on entry when the function has loops, so items a loop collected are dropped however it returns.
-struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Option<String> }
+/// `bound`: the most bytes of text a return so far gave (None: none yet, or one not known: `unbounded`)
+struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Option<String>, bound: Option<usize>, unbounded: bool }
 
 /// How an argument is passed to a generated C function: a value of a kind, or an instance of a collection.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -606,7 +610,7 @@ struct G<'p> {
     /// unbounded part, or a region kept across a loop's iterations)
     region_live: usize,
     region_peak: usize,
-    region_unbounded: u32,
+    region_unbounded: Vec<String>,
     /// the C names of capped `var`s of text (`var acc: text<N>`) and their caps
     txt_caps: std::collections::HashMap<String, usize>,
     prog: &'p Program, api: &'p Api, ep: &'p Endpoint, body: String, n: usize, depth: usize, inlining: Vec<u32>, ret: Vec<Ret>,
@@ -1178,7 +1182,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
     let mut costs: Vec<Costs> = Vec::new();
     for (k, ep) in api.eps.iter().enumerate() {
         let mut touched: Option<Vec<(usize, usize)>> = None;
-        let mut lets = (0u32, 0usize, 0u32);
+        let mut lets = (0u32, 0usize, Vec::new());
         let (mut slot_kinds, mut ret_kinds): (Vec<((Option<u32>, u32), K)>, Vec<(u32, K)>) = (Vec::new(), Vec::new());
         let mut tries = 0;
         let (res, body, specs) = loop {
@@ -1188,7 +1192,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
             let r = g.inputs(ep, &mut env).and_then(|_| g.block(&ep.body, &mut env));
             let (widen, body, at) = (g.widen, std::mem::take(&mut g.body), g.at);
-            lets = (g.region_lets.len() as u32, g.region_peak, g.region_unbounded);
+            lets = (g.region_lets.len() as u32, g.region_peak, std::mem::take(&mut g.region_unbounded));
             touched = if g.uses_spec { None } else { let mut t = std::mem::take(&mut g.rq_touched); t.sort(); let mut m: Vec<(usize, usize)> = Vec::new(); for r in t { match m.last_mut() { Some(l) if r.0 <= l.1 => l.1 = l.1.max(r.1), _ => m.push(r) } } Some(m) };
             drop(g);
             let r = r.map_err(|e| place_err(at, e));
@@ -1219,7 +1223,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 }
                 done = specs;
                 zeros.push(touched);
-                costs.push(Costs { lets, ..count_costs(&body) });
+                costs.push(Costs { lets: lets.clone(), ..count_costs(&body) });
                 src += &format!("{}{}int {}(Ctx *c) {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", head, linkage, name, body);
             }
             Err(why) => {
@@ -1348,7 +1352,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { rq_touched: Vec::new(), uses_spec: false, narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), region_live: 0, region_peak: 0, region_unbounded: 0, txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
+        G { rq_touched: Vec::new(), uses_spec: false, narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1561,7 +1565,7 @@ impl<'p> G<'p> {
             g.inlining.push(k);
             let sel = if has_collecting_loop(self.api, &f.body) { Some("hm".to_string()) } else { None };
             if sel.is_some() { g.line("u32 hm;"); g.call("c->h->sel_mark(c, &hm)"); }
-            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone() });
+            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone(), bound: None, unbounded: true });
             let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
             for (i, pk) in pks.iter().enumerate() {
                 fenv[i] = Some(match pk {
@@ -1989,12 +1993,13 @@ impl<'p> G<'p> {
                     return no("text a `let` built or a capped `var` holds is live at a recursive call here: copy it into a field first, or build it after the call");
                 }
             }
-            // the scope's region released at its end, unless text built in it may outlive it: a `return` with a value, an outer
-            // variable given text here, or the answer cache (which keeps places in the text area between statements)
+            // the scope's region released at its end, unless text built in it may outlive it: an outer variable given text here, or the
+            // answer cache (which keeps places in the text area between statements). A `return` leaves past the cut, so what it returns
+            // stays (the caller's scope gives it back; until then its bytes count as live)
             let returns = stmts_return_value(stmts);
             let escapes = self.txt_escapes[esc0..].iter().any(|s| bound_before.get(*s as usize).copied().unwrap_or(false));
             let cached = code.contains("builtin(c, 61,") || code.contains("builtin(c, 64,");
-            if !returns && !escapes && !cached {
+            if !escapes && !cached {
                 let mark = self.tmp("tm");
                 let kept = std::mem::take(&mut self.body);
                 self.line(&format!("u32 {};", mark));
@@ -2002,18 +2007,27 @@ impl<'p> G<'p> {
                 let head = std::mem::replace(&mut self.body, kept);
                 self.body.insert_str(start, &head);
                 self.call(&format!("c->h->text_cut(c, {})", mark));
-                self.region_live = live0;
+                if !returns { self.region_live = live0; }
             } else if !self.loops.is_empty() {
                 // kept past its scope inside a loop: it may add up over the iterations
-                self.region_unbounded += 1;
+                let at = self.here(); self.region_unbounded.push(format!("{} (kept across a loop's rounds)", at));
             }
         }
         Ok(())
     }
-    /// A `let` or capped `var` of region text, of at most `b` bytes (None: not known)
-    fn region_add(&mut self, b: Option<usize>) {
+    /// A `let` or capped `var` of region text, of at most `b` bytes: its size must be known when compiling (from its parts' sizes), and
+    /// the endpoint's region text must fit the request's text area
+    fn region_add(&mut self, b: Option<usize>, name: &str) -> R<()> {
         self.region_lets.push(b);
-        match b { Some(b) => { self.region_live += b; self.region_peak = self.region_peak.max(self.region_live); } None => self.region_unbounded += 1 }
+        let Some(b) = b else { return no(format!("`let {}` builds text whose size is not known when compiling (a part from a header, the environment, stored data or a recursive function): give it a cap, `var {}: text<N> = ...;`", name, name)) };
+        self.region_live += b;
+        self.region_peak = self.region_peak.max(self.region_live);
+        if self.region_peak > TEXT_AREA { return no(format!("`{}`: the text in this endpoint's scopes can reach {} bytes, more than the request's text area holds ({} bytes): build less at once, or keep it in a field", name, self.region_peak, TEXT_AREA)); }
+        Ok(())
+    }
+    /// Where code is being generated, for messages: the function being inlined (or the endpoint) and the line
+    fn here(&self) -> String {
+        match self.inlining.last() { Some(k) => format!("fn {} line {}", self.api.fns[*k as usize].name, self.at.0), None => format!("line {}", self.at.0) }
     }
     fn block_inner(&mut self, stmts: &'p [Stmt], env: &mut Vec<Option<CV>>, live_from: &mut Option<usize>) -> R<()> {
         let mut restore: Vec<(u32, CV)> = Vec::new();
@@ -2132,7 +2146,7 @@ impl<'p> G<'p> {
                 self.var_names.insert(t.clone());
                 self.txt_caps.insert(t.clone(), cap);
                 self.txt_bounds.insert(t.clone(), cap);
-                self.region_add(Some(cap));
+                self.region_add(Some(cap), n)?;
                 self.txt_write(&t, cap, true, &[init], env)?;
                 let place = match self.inlining.last() { Some(k) => format!("fn {}", self.api.fns[*k as usize].name), None => self.ep.text.clone() };
                 KINDS.with(|k| k.borrow_mut().push((place, self.at.0, format!("var {}", n), format!("text (its own, up to {} bytes)", cap))));
@@ -2156,7 +2170,7 @@ impl<'p> G<'p> {
                     // (text a function returns lives in the request's text area, as a builtin's does: a window onto it)
                     // text built here (`let k = a + ":" + b`): it lives in its scope's region (block() releases it at the scope's end)
                     let built = match e { Expr::Bin(op, ..) => op == "+", Expr::Call(f, _, _) => f == "str", _ => false };
-                    if built { let b = self.txt_bound(&v); self.region_add(b); }
+                    if built { let b = self.txt_bound(&v); self.region_add(b, &n)?; }
                 }
                 let v = match self.slot_kind(*slot) { Some(k) => self.coerce(v, k, mutable)?, None => self.hold(v, mutable)? };
                 {
@@ -2649,6 +2663,8 @@ impl<'p> G<'p> {
     }
 
     fn ret_with(&mut self, v: CV) -> R<()> {
+        let b = self.txt_bound(&v);
+        if let Some(r) = self.ret.last_mut() { match b { Some(b) => r.bound = Some(r.bound.unwrap_or(0).max(b)), None => r.unbounded = true } }
         let v = self.hold(v, false)?;
         let Some(kv) = kind(&v) else { return no("a function returning this kind of value is not compiled yet") };
         let r = self.ret.last().unwrap();
@@ -3084,6 +3100,36 @@ impl<'p> G<'p> {
             CV::PlainStr(off) => self.plain_str_cap(*off),
             CV::Sub(b, ..) => self.txt_bound(b),
             CV::Int(_) => Some(20), CV::Flt(_) => Some(32), CV::Bool(_) => Some(5), CV::Null => Some(0),
+            _ => None,
+        }
+    }
+    /// The most bytes of text a builtin gives, from its arguments' bounds (None: not known, as for a header or the environment)
+    fn builtin_bound(&self, bi: B, a: &[CV]) -> Option<usize> {
+        let n = |k: usize| a.get(k).and_then(|v| self.txt_bound(v));
+        let int = |k: usize| match a.get(k) { Some(CV::Int(e)) => e.strip_suffix("LL").unwrap_or(e).parse::<usize>().ok(), _ => None };
+        match bi {
+            B::Str => match a.first() { Some(CV::Int(_)) => Some(20), Some(CV::Flt(_)) => Some(32), Some(CV::Bool(_)) => Some(5), _ => n(0) },
+            B::Base64 | B::Base64Url => n(0).map(|x| (x + 2) / 3 * 4),
+            B::Unbase64 => n(0).map(|x| (x + 3) / 4 * 3),
+            B::Hex => n(0).map(|x| 2 * x),
+            B::Sha1 | B::HmacSha1 => Some(20),
+            B::Sha256 | B::HmacSha256 => Some(32),
+            B::Pbkdf2Sha256 => int(3),
+            B::RandomBytes => int(0),
+            B::XorBytes => n(0).zip(n(1)).map(|(x, y)| x.max(y)),
+            B::GcmSeal => n(2).map(|x| x + 16),
+            B::GcmOpen => n(2),
+            B::BcryptHash => Some(60),
+            B::FormEncode => n(0).map(|x| 3 * x),
+            B::FormDecode | B::JsonUnquote | B::TrimStart | B::TrimEnd => n(0),
+            // each `%` directive writes at most 32 bytes (a zone or weekday name, a year)
+            B::FormatTime => n(1).map(|x| 32 * x),
+            B::EscapeHtml => n(0).map(|x| 6 * x),
+            B::JsonQuote => n(0).map(|x| 6 * x + 2),
+            // a character's other case takes at most three times its bytes
+            B::Lower | B::Upper => n(0).map(|x| 3 * x),
+            B::RandomText => int(0).zip(n(1)).map(|(k, _)| 4 * k),
+            B::Replace => match (n(0), n(1), n(2)) { (Some(x), Some(_), Some(z)) => match a.get(1) { Some(CV::Lit(s)) if !s.is_empty() => Some(x + x / s.len() * z), _ => None }, _ => None },
             _ => None,
         }
     }
@@ -3911,10 +3957,12 @@ impl<'p> G<'p> {
             // as written), or null
             let [j, k] = <[CV; 2]>::try_from(a).map_err(|_| "`field` takes a JSON text and a field name: `field(r.body, \"id\")`".to_string())?;
             let CV::Lit(key) = k else { return no("`field`'s name is a string written in the test") };
+            let jb = self.txt_bound(&j);
             let j = self.txt_of(j)?;
             let r = self.tmp("t");
             self.line(&format!("Txt {} = {{ 0, 0, 0 }};", r));
             self.call(&format!("c->h->json_field(c, &{}, {}, {}, &{})", j, c_lit(key.as_bytes()), key.len(), r));
+            if let Some(b) = jb { self.txt_bounds.insert(r.clone(), b); }
             return Ok(CV::Txt(r));
         }
         if let B::ReqGet | B::ReqPost | B::ReqPut | B::ReqPatch | B::ReqDelete = bi {
@@ -3988,7 +4036,7 @@ impl<'p> G<'p> {
             }
         }
         // `str(n)` of a number or bool: its longest text, for the bounds of lets of built text
-        let str_bound = if bi == B::Str { match a.first() { Some(CV::Int(_)) => Some(20), Some(CV::Flt(_)) => Some(32), Some(CV::Bool(_)) => Some(5), _ => None } } else { None };
+        let str_bound = self.builtin_bound(bi, &a);
         if let (true, Some(code)) = (generic, BUILTINS.iter().position(|x| *x == bi)) {
             // arguments as one Val array; the interpreter's builtin computes the result
             let mut names = Vec::new();
@@ -4008,7 +4056,7 @@ impl<'p> G<'p> {
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
                     | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText | B::JsonQuote | B::RequestTarget | B::Lower | B::Upper | B::CacheLabel | B::Replace | B::TrimStart | B::TrimEnd => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
-                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env | B::JsonUnquote | B::ReadStored => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
+                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env | B::JsonUnquote | B::ReadStored => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
                 _ => CV::Any(r),
             });
         }
@@ -4086,21 +4134,25 @@ impl<'p> G<'p> {
                     }
                     return Ok(CV::Sub(Box::new(base), s2, count));
                 }
+                let tb = self.txt_bound(&text);
                 let t = self.txt_of(text)?;
                 let (from, count) = (self.int_or(from, 400, "a start and a count must be integers"), self.int_or(count, 400, "a start and a count must be integers"));
                 let (from, count) = (self.hold_int(from), self.hold_int(count));
                 self.line(&format!("if (UNLIKELY({from} < 0 || {count} < 0 || {from} + {count} > (i64){t}.len)) FAIL(400, \"substring out of range\", 22);"));
                 let r = self.tmp("t");
                 self.line(&format!("Txt {r} = {{ (u32)({t}.off + {from}), (u32){count}, 1 }};"));
+                if let Some(b) = tb { self.txt_bounds.insert(r.clone(), b); }
                 CV::Txt(r)
             }
             B::Trim => {
                 // `trim(text)`: the text without the spaces, tabs and line breaks at either end, a window onto the same bytes
                 let [text] = <[CV; 1]>::try_from(a).map_err(|_| "`trim` takes one text".to_string())?;
+                let tb = self.txt_bound(&text);
                 let t = self.txt_of(text).map_err(|_| "`trim` takes a text".to_string())?;
                 let r = self.tmp("t");
                 self.line(&format!("Txt {} = {{ 0, 0, 0 }};", r));
                 self.call(&format!("c->h->trim(c, &{}, &{})", t, r));
+                if let Some(b) = tb { self.txt_bounds.insert(r.clone(), b); }
                 CV::Txt(r)
             }
             B::WrapAdd | B::WrapSub | B::WrapMul => {
@@ -4210,7 +4262,7 @@ impl<'p> G<'p> {
         self.inlining.push(k);
         let forced = match &f.ret { Some(t) => Some(self.decl_kind(t, &f.name)?), None => self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1) };
         let sel = if has_collecting_loop(self.api, &f.body) { Some(self.tmp("hm")) } else { None };
-        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone() });
+        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone(), bound: None, unbounded: false });
         self.depth += 1;
         let frame = std::mem::replace(&mut self.frame, Some(k));
         let r = self.block(&f.body, fenv);
@@ -4234,7 +4286,11 @@ impl<'p> G<'p> {
             K::Int => (format!("i64 {}_v = 0;", var), CV::Int(format!("{}_v", var))),
             K::Flt => (format!("double {}_v = 0;", var), CV::Flt(format!("{}_v", var))),
             K::Bool => (format!("int {}_v = 0;", var), CV::Bool(format!("{}_v", var))),
-            K::Txt => (format!("Txt {}_v = {{ 0, 0, 0 }};", var), CV::Txt(format!("{}_v", var))),
+            K::Txt => {
+                // the most any of its returns gives
+                if let (false, Some(b)) = (ret.unbounded, ret.bound) { self.txt_bounds.insert(format!("{}_v", var), b); }
+                (format!("Txt {}_v = {{ 0, 0, 0 }};", var), CV::Txt(format!("{}_v", var)))
+            }
             K::Any => (format!("Val {}_v = {{ 0, 0, 0, 0, 0 }};", var), CV::Any(format!("{}_v", var))),
             K::Item(c) => (format!("u32 {}_v = 0;", var), CV::Item(c, format!("{}_v", var))),
             K::Ref(c) => (format!("u32 {}_s = 0, {}_v = 0;", var, var), CV::Ref(c, format!("{}_s", var), format!("{}_v", var))),
@@ -4285,6 +4341,7 @@ impl<'p> G<'p> {
         if let Some(l) = &lim { self.line(&format!("if ((i64){} >= {}) break;", hits, l)); }
         self.call(&format!("c->h->split_next(c, &{}, {}, &{}, &{}, &{})", t, sep.as_ref().map_or("0".to_string(), |s| format!("&{}", s)), pos, part, more));
         self.line(&format!("if (!{}) break;", more));
+        if let Some(b) = self.txt_bounds.get(&t).copied() { self.txt_bounds.insert(part.clone(), b); }
         env[it.slot as usize] = Some(CV::Txt(part.clone()));
         if let Some((_, s)) = it.index { let ix = self.tmp("ix"); self.line(&format!("i64 {} = (i64){};", ix, hits)); env[s as usize] = Some(CV::Int(ix)); }
         if let Some(w) = &it.wher { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) continue;", wc)); }

@@ -141,9 +141,18 @@ fn costs(args: &[String]) {
         let z = match g.zeros.get(k) { Some(Some(rs)) => rs.iter().map(|(a, b)| b - a).sum::<usize>(), _ => req };
         let c = g.costs.get(k).cloned().unwrap_or_default();
         let both = |x: (u32, u32)| if x.1 > 0 { format!("{} ({} in loops)", x.0, x.1) } else { x.0.to_string() };
-        let lets = if c.lets.0 == 0 { String::new() } else { format!("; region text {} locals (at most {} B at once{})", c.lets.0, c.lets.1, if c.lets.2 > 0 { format!(", {} unbounded", c.lets.2) } else { String::new() }) };
+        let lets = if c.lets.0 == 0 { String::new() } else { format!("; region text {} locals (at most {} B at once{})", c.lets.0, c.lets.1, if c.lets.2.is_empty() { String::new() } else { let mut w: Vec<String> = c.lets.2.iter().map(|x| place_in_file(&f, x)).collect(); w.dedup(); format!("; no bound at {}", w.join(", ")) }) };
         println!("  {}: zeroes {} B; queries {}, row reads {}, table writes {}, text built {}{}", ep.text, z, both(c.queries), both(c.reads), both(c.writes), both(c.texts), lets);
     }
+}
+
+/// A place cgen names ("fn f line N", "line N", maybe with a note after) with the line in the file it came from: "fn f (file:line)"
+fn place_in_file(file: &str, p: &str) -> String {
+    let Some(k) = p.find("line ") else { return p.to_string() };
+    let digits: String = p[k + 5..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let Ok(l) = digits.parse::<usize>() else { return p.to_string() };
+    let (f2, l2) = match origin(l) { Some((f2, l2, _)) => (f2, l2), None => (file.to_string(), l) };
+    format!("{}{}:{}{}", &p[..k], f2, l2, &p[k + 5 + digits.len()..])
 }
 
 /// The program files among `args`: everything before the first option.

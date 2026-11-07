@@ -752,15 +752,21 @@ impl P {
 
     /// `{ ... }` in markup (`attr`: inside an attribute's quotes): statements (`{if ...}`, `{foreach ...}`, `{item(t);}`), in which a bare
     /// string writes itself; or one expression, written escaped.
-    fn markup_code(&mut self, out: &mut Vec<Stmt>, attr: bool) -> R<()> {
-        let code = match self.t.get(self.i + 1) {
+    /// Is the `{` here a block of statements (`{if ...}`, `{item(t);}`) rather than a value (`{x}`, or a JSON object `{ a: 1 }`)?
+    fn code_block_ahead(&self) -> bool {
+        // `{ name: ...`: a field, whatever the name (`{ log: app.log }`)
+        if matches!((self.t.get(self.i + 1), self.t.get(self.i + 2)), (Some(Tok::Id(_)), Some(Tok::Sym(c))) if c == ":") { return false; }
+        match self.t.get(self.i + 1) {
             Some(Tok::Id(k)) if ["if", "foreach", "for", "while", "let", "var", "match", "log"].contains(&k.as_str()) => true,
             // a call as a statement: `{item(t);}`
             _ => { let mut k = self.i + 1; let mut depth = 0i32; let mut semi = false;
                    while let Some(t) = self.t.get(k) { match t { Tok::Sym(s) if s == "(" || s == "{" || s == "[" => depth += 1, Tok::Sym(s) if s == ")" || s == "]" => depth -= 1,
                        Tok::Sym(s) if s == "}" => { if depth == 0 { break; } depth -= 1; } Tok::Sym(s) if s == ";" && depth == 0 => { semi = true; break; } _ => {} } k += 1; }
                    semi }
-        };
+        }
+    }
+    fn markup_code(&mut self, out: &mut Vec<Stmt>, attr: bool) -> R<()> {
+        let code = self.code_block_ahead();
         if code {
             let was = self.markup.replace(attr);
             let b = self.block();
@@ -878,6 +884,8 @@ impl P {
                 } else { code };
                 let j = if code == 204 { Json::Empty } else if code == 303 || code == 302 { Json::E(self.expr()?) }
                     else if matches!(self.peek(), Some(Tok::HOpen(_) | Tok::HText(_))) { let body = self.html()?; self.pre.extend(body); Json::Html }
+                    // an HTML answer written by code alone, for a fragment with no single element around it: `ok({foreach t in ts { item(t); }})`
+                    else if matches!(self.peek(), Some(Tok::Sym(x)) if x == "{") && self.code_block_ahead() { let mut body = Vec::new(); self.markup_code(&mut body, false)?; self.pre.extend(body); Json::Html }
                     else { self.json()? };
                 self.eat(")")?; self.eat(";")?;
                 return Ok(Stmt::Respond(code, j));

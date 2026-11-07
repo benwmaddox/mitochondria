@@ -1,0 +1,5 @@
+GET /items -> 200 <Content-Type: text/html; charset=utf-8> 
+POST /n/3 -> 200 {"n":3}
+GET /items -> 200 <Content-Type: text/html; charset=utf-8> <li id="i1">1</li><li id="i2">2</li><li id="i3">3</li>
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

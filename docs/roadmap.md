@@ -331,3 +331,17 @@ parallel with no app changes, 0.07-0.14 ms a sidebar) and where it costs the dev
   (2 in loops), row reads 71 (14 in loops), table writes 4, text built 164".
 
 Phase 6 is done (2026-11-06).
+
+## Phase 7: text and structs in locals (under consideration, 2026-11-06)
+
+### 7.1 `let` with built text (and structs) in a scoped region
+- A `let` (or capped `var`) may hold text it builds, or a struct with text fields: its own region, from a mark on the request's
+  text area to the scope's end, where the area moves back to the mark (no zeroing, no bookkeeping).
+- A value leaves its scope only by copy: into a field or item (its declared capacity, as today), or as a function's result, which
+  the caller copies (decided 2026-11-06: copy for now, no sliding the result down into the caller's region).
+- Windows onto region text (`substr`, `trim`, split pieces) stay in the same or an inner scope.
+- Bounds always known: from the parts' maxima for `let`; `var` text that grows in a loop declares its cap (`var acc: text<8192>`).
+- No region-backed local live at a recursive call, so each endpoint's worst-case region use is computed when compiling (shown by
+  `--costs`; an endpoint that cannot fit the text area is refused).
+- First step: `let` over bounded parts only, release at scope end, the recursion check, the worst case in `--costs`; then the
+  sidebar's and cable's scratch fields as lets. Then capped `var`, then text-bearing structs.

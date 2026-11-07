@@ -1,0 +1,20 @@
+// functions that return text (`-> text`): built for the request, in its text area; a `let` holds what one returns; one called in
+// a loop body, each iteration's text dropped at its end; returned through another function
+--- program
+struct User { name: utf8<32>; n: i64; }
+struct App { users: pool<User, 8>; }
+state app: App;
+fn tag(u: User) -> text { return "<" + u.name + ":" + str(u.n) + ">"; }
+fn shout(u: User) -> text { if u.n > 1 { return upper(tag(u)); } return tag(u); }
+@post("/u/{name}/{n}") fn add(name: utf8<32>, n: i64) -> Response<{}> { let u = app.users.add(); u.name = name; u.n = n; return ok({}); }
+@get("/all") fn all() -> Response<text> {
+    var count = 0;
+    foreach u in app.users { count += len(shout(u)); }
+    let first = app.users[0];
+    let t = shout(first);
+    return ok(t + " " + str(count));
+}
+--- requests
+POST /u/ann/1
+POST /u/bob/22
+GET /all

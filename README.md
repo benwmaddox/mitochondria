@@ -24,7 +24,8 @@ to run; an index is checked for liveness on the way.
 
 **No hidden storage.** Text a program builds has a declared place too: a field of the state, or of a `request` struct that
 is emptied before each request and never kept. `s += x` appends in place, and running past a field's maximum is an error
-naming that field. A local holds numbers, items and windows onto text, never text of its own.
+naming that field. A local holds numbers, items and windows onto text, never text of its own; a function may return text built
+for the request, which goes with it. Each endpoint empties only the parts of the request struct its code names.
 
 **What that changes when you design.** You decide limits early, per thing: how many sessions, how long a name, how
 many messages a room keeps. Reaching a limit is an ordinary error the program answers (full, too long), never a crash or

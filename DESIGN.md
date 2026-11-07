@@ -107,8 +107,15 @@ A collection whose trim released nothing is skipped until 256 of its items have 
 **Functions.** `fn name(p: Player, n: i64) -> f64 { ... }`: every parameter and the result are typed (`-> T?` when it may be
 null, no arrow when it gives nothing), and checked at every call and `return`. `let` and `var`; `+=` and friends. No closures. A
 `var` keeps the kind of its first value. A local holds numbers, bools, items and windows onto text (a field, an input, a literal,
-a `substr` or `trim` of one), never text of its own: `var t = ""` and a function returning text are errors that say to build the text in a
-field (a function takes the item or struct to write into).
+a `substr` or `trim` of one, what a function or builtin returns), never text it builds itself: `var t = ""` and `let t = a + b` are
+errors that say to build the text in a field. A function may return text (`-> text`): built for the request in its text area, as
+a builtin's result is, and gone with the request (`fn avatar_path(u: User) -> text { return "/users/" + ...; }`).
+
+**Narrowing.** A value that may be null (`T?`, a nullable field) is used after a test says it is there: inside `if exists(x)`
+(or `x != null`), in the rest of an `&&` after it (`if exists(r) && r.n > 0`), in an `else` of `if !exists(x)`, and after
+`if !exists(x) { return ...; }` (or `fail`, `break`, `continue`) for the rest of the block. A row's nullable field narrows the same
+way (`if exists(m.connected_at) && m.connected_at > t`: a time, then a number; a reference, then a row). `or(x, fallback)` has the
+kind of the two (text, a number, a bool, an item).
 
 **Endpoints** are functions with an attribute and typed inputs:
 

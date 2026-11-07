@@ -1,4 +1,4 @@
-// expect: `label` would return text: a function writes text into a field instead
+// expect: `label` returns text: declare it `-> text`
 struct Row { label: string<32>; } struct App { rows: pool<Row, 4>; title: string<16>; } state app: App;
 fn label(n: i64) -> string { return "n=" + str(n); }
 @get("/a") fn a() -> Response<{ s: string }> { return ok({ s: label(1) }); }

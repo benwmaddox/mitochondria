@@ -267,17 +267,27 @@ parallel with no app changes, 0.07-0.14 ms a sidebar) and where it costs the dev
 - The request struct is zeroed before every request, whole: sized for the worst endpoint, it cost every endpoint (600 KB, 11% of a
   page's CPU). Each endpoint zeroes only the request fields its code (with every function it calls) reads or writes.
 - Done when: an endpoint that never names a field does not zero it (measured), and every case still passes.
+- Done (2026-11-06): code generation records each top-level request field an endpoint's code names (reads and writes, through every
+  inlined function); the route carries those ranges and the runtime zeroes only them (all of it for an endpoint that calls a
+  function generated for recursive calls, shared by endpoints). `each_endpoint_zeroes_only_the_request_fields_it_names` checks it.
+  Campfire's sidebar still names its lists (its cache-miss path does), so it zeroes them; its other endpoints no longer do.
 
 ### 6.2 Functions that return text
 - Built text has only fields to live in, so helpers write `work.*` out-fields (`avatar_path(u)` leaving `work.avatar`), fields get
   reused for unrelated things and helpers alias each other. A function may return text (`-> text`): the result lives in the
   request's text area, as a window the caller uses or stores like any other text.
 - Done when: the app's out-field helpers are functions that return their text.
+- Done (2026-11-06): `-> text` (and `text` parameters); `let s = f(...)` holds what a function returns; `tests/cases/text_return.case`.
+  The app's `avatar_path`, `user_title`, `room_gid`, `signed_stream`, `csrf_form_token` and `browser` return their text; seven
+  out-fields of its request struct are gone.
 
 ### 6.3 Narrowing that follows the code
 - `exists(x)` narrows across `&&` (`if exists(r) && r.n > 0`), after an early exit (`if !exists(x) { return ...; }` /
   `{ break; }` / `{ continue; }` / `fail`), and `or(text, "")` is text; a nullable field compared after `exists` is a comparison.
 - Done when: those forms check, and the app's nested `if`s written around them are gone.
+- Done (2026-11-06): `&&` (compiled as nested tests, so nothing after the test runs before it), early `break`/`continue` and an `else`
+  that leaves, fields of rows (nullable times and references), `or` of two texts, numbers or bools; `tests/cases/narrowing.case`.
+  The app's workarounds are gone (sidebar lists, direct members, cable close, membership connected).
 
 ### 6.4 Ordered table loops compiled to SQL
 - `foreach m in t by lower(f) where ...` (and `by f` on any column, `reverse`) orders in SQLite; across a reference

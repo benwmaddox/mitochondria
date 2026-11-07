@@ -2659,7 +2659,12 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     m->now = m->fixed_clock ? m->clock : os_now_ms();
     if (!m->reader) begin(&m->mem);
     m->frees.len = 0; m->sel.len = 0;
-    if (mito_prog.req_size) memset(m->mem.base + mito_prog.req_off, 0, mito_prog.req_size); /* the request struct starts empty */
+    /* the request struct starts empty: the parts of it the endpoint's code names (all of it when it calls a shared function) */
+    if (mito_prog.req_size) {
+        const MitoRoute *zr = &mito_prog.routes[ei];
+        if (zr->nzero == 0xFFFFFFFFu) memset(m->mem.base + mito_prog.req_off, 0, mito_prog.req_size);
+        else for (u32 z = 0; z < zr->nzero; z++) memset(m->mem.base + zr->zero[2 * z], 0, zr->zero[2 * z + 1] - zr->zero[2 * z]);
+    }
     /* a reader journals nothing, but its writes go through the journal's test (its line map is clear), so each reaches save_line */
     Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->reader ? 1 : m->mem.jon, m->text.p, 0, m->loop_budget };
 #ifdef MITO_USES_SQLITE

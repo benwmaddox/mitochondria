@@ -1,0 +1,10 @@
+POST /owners/ann -> 201 {"id":1}
+POST /rooms -> 201 {"id":1}
+POST /rooms -> 201 {"id":2}
+POST /rooms -> 201 {"id":3}
+GET /rooms/1 -> 200 {"late":true,"by_ann":true,"name_len":2,"owned":1}
+GET /rooms/2 -> 200 {"late":false,"by_ann":false,"name_len":1,"owned":2}
+GET /rooms/3 -> 200 {"late":false,"by_ann":true,"name_len":5,"owned":2}
+GET /rooms/9 -> 404 {"error":"no such room","line":16}
+state <plain values> 1
+memory reserved=4096 committed=4096 live=1

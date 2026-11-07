@@ -1,0 +1,42 @@
+// narrowing that follows the code: `exists(x) && ...` (the rest sees x), `exists(r.f)` for a row's nullable time and reference
+// (a number, an item), an early `continue` / `break` and an `else` that leaves, and `or(...)` keeping its kind
+--- program
+struct Owner { name: utf8<16>; }
+struct Room { name: utf8<16>?; opened: time?; owner: Owner?; }
+struct App { rooms: table<Room>; owners: table<Owner>; }
+state app: App;
+
+@post("/owners/{name}") fn owner(name: utf8<16>) -> Response<{ id: i64 }> { let o = app.owners.add { name: name }; return created({ id: o.id }); }
+@post("/rooms") fn room(name: utf8<16>?, opened: i64 = -1, owner: i64 = 0) -> Response<{ id: i64 }> {
+    let r = app.rooms.add { name: name };
+    if opened >= 0 { r.opened = opened; }
+    let o = first o in app.owners where o.id == owner;
+    if exists(o) { r.owner = o; }
+    return created({ id: r.id });
+}
+@get("/rooms/{id}") fn show(id: i64) -> Response<{ late: bool; by_ann: bool; name_len: i64; owned: i64 }> {
+    let r = first r in app.rooms where r.id == id;
+    if exists(r) {} else { fail 404 "no such room"; }
+    var late = false;
+    if exists(r.opened) && r.opened > 1000 { late = true; }
+    var by_ann = false;
+    if exists(r.owner) && r.owner.name == "ann" { by_ann = true; }
+    var owned = 0;
+    foreach k in 1..5 {
+        let x = first x in app.rooms where x.id == k;
+        if !exists(x) { continue; }
+        if !exists(x.owner) { continue; }
+        if x.owner.name == "ann" { owned += 1; }
+        if x.id >= id { break; }
+    }
+    return ok({ late: late, by_ann: by_ann, name_len: len(or(r.name, "?")), owned: owned });
+}
+--- requests
+POST /owners/ann {}
+POST /rooms {"name": "hq", "opened": 5000, "owner": 1}
+POST /rooms {"opened": 10}
+POST /rooms {"name": "quiet", "owner": 1}
+GET /rooms/1
+GET /rooms/2
+GET /rooms/3
+GET /rooms/9

@@ -1,0 +1,6 @@
+POST /u/ann/1 -> 200 {}
+POST /u/bob/22 -> 200 {}
+GET /all -> 200 <Content-Type: text/plain; charset=utf-8> <ann:1> 15
+state <plain values> 0
+state app.users 54
+memory reserved=4096 committed=4096 live=54

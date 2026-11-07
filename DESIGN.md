@@ -387,8 +387,12 @@ Ubuntu 24.04, clang 18).
 
 Limits:
 - Functions have full signatures (`fn f(p: Player, n: i64) -> f64`, `-> T?` for a result that may be null, no arrow for none;
-  `pool<T>`, `list<T>`, and in modules `T.key`, the type of a field), checked at every call and return. Calls are still
-  inlined (a recursive function is one C function per combination of argument places); recursion is limited to 64 nested calls.
+  `pool<T>`, `list<T>`, and in modules `T.key`, the type of a field), checked at every call and return. Calls are
+  inlined, except a recursive function's and a large one's (past about 4000 statements and expression nodes once its own calls
+  are inlined, as a deep tree of text handling grows), each one C function per combination of argument places, shared by every
+  endpoint; a text argument's size bound is part of that combination (rounded up to a power of two), so a large function's
+  text keeps known sizes, and its region text counts against each caller's as if inlined. Recursion is limited to 64 nested
+  calls.
 - Only a string input can be optional; a number takes a default. An item input cannot be optional yet, nor an enum input
   read by name.
 - A stored id (`Player?` field) names only items of a top-level pool, not of a nested collection.

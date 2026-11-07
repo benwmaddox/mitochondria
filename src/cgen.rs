@@ -461,13 +461,16 @@ struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Optio
 
 /// How an argument is passed to a generated C function: a value of a kind, or an instance of a collection.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum PK { V(K), Coll(usize), Plain(usize, usize) }
+enum PK { V(K), Coll(usize), Plain(usize, usize), TxtB(usize) }
 
-/// A C function generated for a recursive function, for one combination of argument kinds. `ret` is the kind it
+/// A C function generated for a recursive or outlined function, for one combination of argument kinds. `ret` is the kind it
 /// returns: while its body is being generated, the kind being tried.
 /// The table is the program's: an endpoint reuses the functions earlier endpoints generated, and each is emitted once.
+/// For an outlined function (`rec` false), what its body does to the request's text area, which a caller adds to its own: `peak` the
+/// most region text it holds at once, `kept` what stays after it returns (text it returns), `ret_bound` the most bytes its text
+/// result holds (None: not known).
 #[derive(Clone)]
-struct Spec { key: String, name: String, ret: K, proto: String, body: Option<String> }
+struct Spec { key: String, name: String, ret: K, proto: String, body: Option<String>, rec: bool, peak: usize, kept: usize, ret_bound: Option<usize> }
 
 /// A loop's body, as the code generator sees it before generating it.
 #[derive(Clone, Copy)]
@@ -537,6 +540,8 @@ fn unify(a: K, b: K) -> K {
 }
 
 thread_local! {
+    /// Per function: compiled as a C function of its own though not recursive (see `outlined_fns`), for the program being generated.
+    static OUTLINED: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Ranges of plain integer fields worked out from the whole program (see `generate_with`): `.0` the ranges reads may assume, `.1` what
     /// each field was seen given by every store compiled (None once a store's value has no proven range).
     static FIELD_RANGES: std::cell::RefCell<(std::collections::HashMap<usize, (i64, i64)>, std::collections::HashMap<usize, Option<(i64, i64)>>)> = std::cell::RefCell::new(Default::default());
@@ -1116,6 +1121,11 @@ fn writes_name(line: &str, x: &str) -> bool {
 
 /// Whether a function body holds a loop that collects items (the `collect` rule of `Stmt::Each`), at any depth: only then does the
 /// function need a selection mark to drop what such a loop collected when a `return` leaves it early.
+/// A value a generated C function takes as an argument (see `call_spec`).
+fn spec_arg(v: &CV) -> bool {
+    matches!(v, CV::Coll(..) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) | CV::Txt(_) | CV::Int(_) | CV::Flt(_) | CV::Bool(_) | CV::Any(_) | CV::Item(..) | CV::Ref(..) | CV::Null | CV::Plain(..))
+}
+
 fn has_collecting_loop(api: &Api, stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match s {
         Stmt::Each(it, body) => allocates(api, body, &mut Vec::new()) || (it.wher.is_some() && writes(api, body, &mut Vec::new())) || has_collecting_loop(api, body),
@@ -1168,6 +1178,84 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
     }).collect()
 }
 
+/// The size a function's body has once its calls are inlined (statements and expression nodes, a call's callee counted in full
+/// unless it is recursive or itself outlined), above which it is compiled once as a C function of its own and called: inlining
+/// everything copies a deep call tree into each place that reaches it, and the copies multiply with the tree's depth.
+const OUTLINE_SIZE: usize = 4000;
+
+/// Which functions are compiled as C functions of their own though not recursive: those whose inlined size passes OUTLINE_SIZE.
+/// A function that answers the request itself (`respond`, `forward`) stays inlined.
+fn outlined_fns(api: &Api, recursive: &[bool]) -> Vec<bool> {
+    fn ex(api: &Api, e: &Expr, memo: &mut Vec<Option<usize>>, out: &mut Vec<bool>, rec: &[bool]) -> usize {
+        match e {
+            Expr::Call(_, a, r) => {
+                let mut n = 1 + a.iter().map(|x| ex(api, x, memo, out, rec)).sum::<usize>();
+                if let CallRes::User(k) = r { if !rec[*k as usize] { let s = size(api, *k as usize, memo, out, rec); if !out[*k as usize] { n += s; } } }
+                n
+            }
+            Expr::Field(b, ..) | Expr::Un(_, b) => 1 + ex(api, b, memo, out, rec),
+            Expr::Index(a, b) | Expr::Bin(_, a, b) => 1 + ex(api, a, memo, out, rec) + ex(api, b, memo, out, rec),
+            _ => 1,
+        }
+    }
+    fn json(api: &Api, j: &Json, memo: &mut Vec<Option<usize>>, out: &mut Vec<bool>, rec: &[bool]) -> usize {
+        match j {
+            Json::Obj(f) => f.iter().map(|(_, v)| 1 + json(api, v, memo, out, rec)).sum(),
+            Json::Arr(it, inner) => 1 + stmts(api, &[Stmt::Each(it.clone(), Vec::new())], memo, out, rec) + json(api, inner, memo, out, rec),
+            Json::E(e) => ex(api, e, memo, out, rec),
+            Json::Empty | Json::Html => 1,
+        }
+    }
+    fn stmts(api: &Api, ss: &[Stmt], memo: &mut Vec<Option<usize>>, out: &mut Vec<bool>, rec: &[bool]) -> usize {
+        let mut n = 0;
+        for s in ss {
+            n += 1;
+            let mut e = |x: &Expr, memo: &mut Vec<Option<usize>>, out: &mut Vec<bool>| ex(api, x, memo, out, rec);
+            n += match s {
+                Stmt::Let(_, _, x) | Stmt::Var(_, _, x) | Stmt::Do(x) | Stmt::Return(Some(x)) | Stmt::Clear(x) => e(x, memo, out),
+                Stmt::Remove(a, b) | Stmt::Assign(a, b) => e(a, memo, out) + e(b, memo, out),
+                Stmt::Move(a, b, c, d) | Stmt::Fill(a, b, c, d) => e(a, memo, out) + e(b, memo, out) + e(c, memo, out) + e(d, memo, out),
+                Stmt::Alloc { coll, .. } => e(coll, memo, out),
+                Stmt::If(c, t, f) => e(c, memo, out) + stmts(api, t, memo, out, rec) + stmts(api, f, memo, out, rec),
+                Stmt::Each(it, b) => {
+                    let mut m = e(&it.coll, memo, out);
+                    for x in [&it.hi, &it.wher, &it.limit, &it.after].into_iter().flatten() { m += e(x, memo, out); }
+                    m + stmts(api, b, memo, out, rec)
+                }
+                Stmt::Respond(_, j) => json(api, j, memo, out, rec),
+                Stmt::Forward { key, fields, .. } => e(key, memo, out) + fields.iter().map(|f| e(&f.1, memo, out)).sum::<usize>(),
+                _ => 0,
+            };
+        }
+        n
+    }
+    fn answers(ss: &[Stmt]) -> bool {
+        ss.iter().any(|s| match s {
+            Stmt::Respond(..) | Stmt::Forward { .. } => true,
+            Stmt::If(_, t, e) => answers(t) || answers(e),
+            Stmt::Each(_, b) => answers(b),
+            _ => false,
+        })
+    }
+    fn size(api: &Api, k: usize, memo: &mut Vec<Option<usize>>, out: &mut Vec<bool>, rec: &[bool]) -> usize {
+        if let Some(s) = memo[k] { return s; }
+        memo[k] = Some(1); // (not reached again: only recursive functions call back, and they are not followed)
+        let s = stmts(api, &api.fns[k].body, memo, out, rec);
+        memo[k] = Some(s);
+        if s > OUTLINE_SIZE && !answers(&api.fns[k].body) && api.fns[k].test.is_none() { out[k] = true; }
+        s
+    }
+    let mut memo = vec![None; api.fns.len()];
+    let mut out = vec![false; api.fns.len()];
+    for k in 0..api.fns.len() { if !recursive[k] { size(api, k, &mut memo, &mut out, recursive); } }
+    if std::env::var("MITO_OUTLINE_TRACE").is_ok() {
+        let mut v: Vec<(usize, &str, bool)> = (0..api.fns.len()).filter_map(|k| memo[k].map(|s| (s, api.fns[k].name.as_str(), out[k]))).collect();
+        v.sort(); v.reverse();
+        for (s, n, o) in v.iter().take(40) { eprintln!("{:>8} {}{}", s, n, if *o { "  (outlined)" } else { "" }); }
+    }
+    out
+}
+
 /// `linkage`: "static " in a whole C program (only its `mito_*` interface is external), "" when the Rust runtime looks
 /// endpoints up by name.
 /// Generate the program twice when that helps. A plain integer field without a declared range whose every store in the program has a
@@ -1192,6 +1280,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
     let mut src = String::from(PRELUDE);
     let mut notes = Vec::new();
     let recursive = recursive_fns(api);
+    OUTLINED.with(|o| *o.borrow_mut() = outlined_fns(api, &recursive));
     let mut done: Vec<Spec> = Vec::new(); // functions for recursive calls, generated by endpoints that compiled
     let mut zeros: Vec<Option<Vec<(usize, usize)>>> = Vec::new();
     let mut costs: Vec<Costs> = Vec::new();
@@ -1232,7 +1321,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 let head = match source { Some(sf) => source_comment(ep, sf), None => format!("\n// {}\n", ep.text) };
                 let new = &specs[done.len()..];
                 if !new.is_empty() {
-                    src += &format!("\n// functions for recursive calls, first used by {}, one per combination of argument kinds\n", ep.text);
+                    src += &format!("\n// functions for recursive and outlined calls, first used by {}, one per combination of argument kinds\n", ep.text);
                     for sp in new { src += &format!("{}int {}{};\n", linkage, sp.name, sp.proto); }
                     for sp in new { src += &format!("{}int {}{} {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; (void)dep; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", linkage, sp.name, sp.proto, sp.body.as_deref().unwrap_or("")); }
                 }
@@ -1485,13 +1574,21 @@ impl<'p> G<'p> {
         else if n > MAX_DEPTH { self.fail(500, DEPTH_MSG); }
     }
 
-    /// Call the C function for recursive function `k` with these argument values, generating it if needed.
+    /// Call the C function for recursive or outlined function `k` with these argument values, generating it if needed.
     fn call_spec(&mut self, k: u32, vals: Vec<CV>) -> R<CV> {
+        let rec = self.recursive[k as usize];
         let (mut pks, mut cargs) = (Vec::new(), Vec::new());
         for v in vals {
             match v {
                 CV::Coll(c, inst) => { pks.push(PK::Coll(c)); cargs.push(format!("(u32)({})", inst)); }
-                v @ (CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) | CV::Txt(_)) => { let t = self.txt_of(v)?; pks.push(PK::V(K::Txt)); cargs.push(t); }
+                v @ (CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) | CV::Txt(_)) => {
+                    // an outlined function's text parameter keeps its size bound (rounded up to a power of two: fewer copies), which
+                    // the sizes of the text its body builds are worked out from
+                    let b = if rec { None } else { self.txt_bound(&v).map(|b| b.max(1).next_power_of_two()) };
+                    let t = self.txt_of(v)?;
+                    pks.push(match b { Some(b) => PK::TxtB(b), None => PK::V(K::Txt) });
+                    cargs.push(t);
+                }
                 CV::Int(e) => { pks.push(PK::V(K::Int)); cargs.push(e); }
                 CV::Flt(e) => { pks.push(PK::V(K::Flt)); cargs.push(e); }
                 CV::Bool(e) => { pks.push(PK::V(K::Bool)); cargs.push(e); }
@@ -1506,7 +1603,13 @@ impl<'p> G<'p> {
         let key = format!("{}{:?}", k, pks);
         let found = self.specs.borrow().iter().position(|s| s.key == key);
         let si = match found { Some(i) => i, None => self.gen_spec(k, key, &pks)? };
-        let (name, ret) = { let sp = &self.specs.borrow()[si]; (sp.name.clone(), sp.ret) };
+        let (name, ret, peak, kept, ret_bound) = { let sp = &self.specs.borrow()[si]; (sp.name.clone(), sp.ret, sp.peak, sp.kept, sp.ret_bound) };
+        if !rec {
+            // its region text on top of the caller's; what it returns stays until the caller's scope ends, as an inlined call's does
+            self.region_peak = self.region_peak.max(self.region_live + peak);
+            if self.region_peak > TEXT_AREA { return no(format!("`{}`: the text in this endpoint's scopes can reach {} bytes, more than the request's text area holds ({} bytes): build less at once, or keep it in a field", self.api.fns[k as usize].name, self.region_peak, TEXT_AREA)); }
+            if kept > 0 { self.region_lets.push(Some(kept)); self.region_live += kept; }
+        }
         self.uses_spec = true;
         let level = if self.dep { format!("dep + {}", self.inl + 1) } else { format!("{}", self.inl + 1) };
         let mut a = vec!["c".to_string(), level];
@@ -1528,6 +1631,7 @@ impl<'p> G<'p> {
         if let K::Ref(_) = ret { a.push(format!("&{}_s", r)); }
         if !matches!(ret, K::Null | K::Plain(..)) { a.push(format!("&{}", r)); }
         self.call(&format!("{}({})", name, a.join(", ")));
+        if let (CV::Txt(t), Some(b)) = (&out, ret_bound) { self.txt_bounds.insert(t.clone(), b); }
         Ok(out)
     }
 
@@ -1543,24 +1647,26 @@ impl<'p> G<'p> {
                 PK::V(K::Int) => proto += &format!(", i64 p{}", i),
                 PK::V(K::Flt) => proto += &format!(", double p{}", i),
                 PK::V(K::Bool) => proto += &format!(", int p{}", i),
-                PK::V(K::Txt) => proto += &format!(", Txt p{}", i),
+                PK::V(K::Txt) | PK::TxtB(_) => proto += &format!(", Txt p{}", i),
                 PK::V(K::Any) => proto += &format!(", Val p{}", i),
                 PK::V(K::Null) | PK::Plain(..) => {}
                 PK::V(K::Coll(_)) => proto += &format!(", u32 p{}", i),
                 PK::V(K::Plain(..)) => {}
             }
         }
-        self.specs.borrow_mut().push(Spec { key, name, ret: K::Null, proto: String::new(), body: None });
+        let rec = self.recursive[k as usize];
+        self.specs.borrow_mut().push(Spec { key, name, ret: K::Null, proto: String::new(), body: None, rec, peak: 0, kept: 0, ret_bound: None });
         // the declared result (a function without one gives no value)
         let cand = match &self.api.fns[k as usize].ret { Some(t) => self.decl_kind(t, &self.api.fns[k as usize].name)?, None => K::Null };
         {
             self.specs.borrow_mut()[si].ret = cand;
             match self.spec_body(k, pks, cand) {
-                Ok(body) => {
+                Ok((body, peak, kept, ret_bound)) => {
                     let rp = match cand { K::Null | K::Plain(..) => "", K::Int => ", i64 *ret_v", K::Flt => ", double *ret_v", K::Bool => ", int *ret_v", K::Txt => ", Txt *ret_v", K::Any => ", Val *ret_v", K::Item(_) | K::Coll(_) => ", u32 *ret_v", K::Ref(_) => ", u32 *ret_s, u32 *ret_v" };
                     let mut sp = self.specs.borrow_mut();
                     sp[si].proto = format!("{}{})", proto, rp);
                     sp[si].body = Some(body);
+                    (sp[si].peak, sp[si].kept, sp[si].ret_bound) = (peak, kept, ret_bound);
                     return Ok(si);
                 }
                 Err(SpecErr::Conflict(_)) => { self.specs.borrow_mut().truncate(si); no(format!("`{}` returns a value of another kind than it declares", self.api.fns[k as usize].name)) }
@@ -1570,7 +1676,9 @@ impl<'p> G<'p> {
     }
 
     /// The body of a C function for `k`, assuming its result kind is `cand`; widens its own locals as endpoints do.
-    fn spec_body(&mut self, k: u32, pks: &[PK], cand: K) -> Result<String, SpecErr> {
+    /// With the body: (for an outlined function) its region text's peak, what stays after it returns, its text result's bound.
+    fn spec_body(&mut self, k: u32, pks: &[PK], cand: K) -> Result<(String, usize, usize, Option<usize>), SpecErr> {
+        let rec = self.recursive[k as usize];
         let f = &self.api.fns[k as usize];
         let (mut slot_kinds, mut ret_kinds): (Vec<((Option<u32>, u32), K)>, Vec<(u32, K)>) = (Vec::new(), Vec::new());
         for _ in 0..32 {
@@ -1580,7 +1688,7 @@ impl<'p> G<'p> {
             g.inlining.push(k);
             let sel = if has_collecting_loop(self.api, &f.body) { Some("hm".to_string()) } else { None };
             if sel.is_some() { g.line("u32 hm;"); g.call("c->h->sel_mark(c, &hm)"); }
-            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone(), bound: None, unbounded: true, mark: "rmark".into() });
+            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone(), bound: None, unbounded: rec, mark: "rmark".into() });
             let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
             for (i, pk) in pks.iter().enumerate() {
                 fenv[i] = Some(match pk {
@@ -1591,6 +1699,7 @@ impl<'p> G<'p> {
                     PK::V(K::Flt) => CV::Flt(format!("p{}", i)),
                     PK::V(K::Bool) => CV::Bool(format!("p{}", i)),
                     PK::V(K::Txt) => CV::Txt(format!("p{}", i)),
+                    PK::TxtB(b) => { g.txt_bounds.insert(format!("p{}", i), *b); CV::Txt(format!("p{}", i)) }
                     PK::V(K::Any) => CV::Any(format!("p{}", i)),
                     PK::V(K::Null) => CV::Null,
                     PK::Plain(sd, o) | PK::V(K::Plain(sd, o)) => CV::Plain(*sd, *o),
@@ -1604,9 +1713,13 @@ impl<'p> G<'p> {
                 (Ok(()), _) if !ends_by_itself && !fits(K::Null, cand) => return Err(SpecErr::Other(format!("`{}` can end without returning its `{}`: return a value on every path", f.name, f.ret.as_ref().map_or(String::new(), |t| t.to_string())))),
                 // the function's parameters (p0, p1, ...: in its prototype, not its body) are its locals too
                 (Ok(()), _) => {
+                    if !rec && !g.region_unbounded.is_empty() { return Err(SpecErr::Other(format!("region text kept across a loop's rounds: {}", g.region_unbounded[0]))); }
                     let body = resolve_return_cuts(&g.body, "rmark");
                     let ps: Vec<String> = (0..f.params.len()).map(|i| format!("p{}", i)).collect();
-                    return check_profile_in(&body, &ps).map(|_| body).map_err(|e| SpecErr::Other(format!("C safety profile: {}", e)))
+                    let ret_bound = match g.ret.first() { Some(r) if !r.unbounded => r.bound, _ => None };
+                    let texty = matches!(cand, K::Txt | K::Any);
+                    let kept = if texty { g.region_live.max(ret_bound.unwrap_or(0)) } else { 0 };
+                    return check_profile_in(&body, &ps).map(|_| (body, g.region_peak, kept, ret_bound)).map_err(|e| SpecErr::Other(format!("C safety profile: {}", e)))
                 }
                 (Err(_), Some(Widen::Ret(f2, u))) if f2 == k => return Err(SpecErr::Conflict(u)),
                 (Err(_), Some(Widen::Slot(fr, sl, kk))) => match slot_kinds.iter_mut().find(|x| x.0 == (fr, sl)) { Some(x) => x.1 = unify(x.1, kk), None => slot_kinds.push(((fr, sl), kk)) },
@@ -2009,7 +2122,7 @@ impl<'p> G<'p> {
             // a text built in a `let` is not live at a recursive call (so each endpoint's worst case is known when compiling)
             if let Some(at) = live_from {
                 let after = &self.body[at..];
-                if self.specs.borrow().iter().any(|sp| after.contains(&format!("{}(c", sp.name))) {
+                if self.specs.borrow().iter().any(|sp| sp.rec && after.contains(&format!("{}(c", sp.name))) {
                     return no("text a `let` built or a capped `var` holds is live at a recursive call here: copy it into a field first, or build it after the call");
                 }
             }
@@ -4264,6 +4377,14 @@ impl<'p> G<'p> {
         self.depth_check();
         if self.recursive[k as usize] {
             return self.call_spec(k, vals);
+        }
+        // an outlined function: called, when its arguments are of kinds a C function takes and its body compiles as one; inlined otherwise
+        if OUTLINED.with(|o| o.borrow().get(k as usize).copied().unwrap_or(false)) && vals.iter().all(spec_arg) {
+            let (n0, body0, specs0) = (self.n, self.body.len(), self.specs.borrow().len());
+            match self.call_spec(k, vals.clone()) {
+                Ok(v) => return Ok(v),
+                Err(_) => { self.n = n0; self.body.truncate(body0); self.specs.borrow_mut().truncate(specs0); self.widen = None; WHY.with(|w| w.borrow_mut().clear()); }
+            }
         }
         let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
         for (i, v) in vals.into_iter().enumerate() { fenv[i] = Some(v); }

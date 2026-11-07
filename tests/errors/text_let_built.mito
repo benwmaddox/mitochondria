@@ -1,3 +1,4 @@
-// expect: `let s` would hold text built here: build it in a field instead
-struct Row { label: string<32>; } struct App { rows: pool<Row, 4>; title: string<16>; } state app: App;
-@get("/a") fn a(n: i64) -> Response<{ s: string }> { let s = "n=" + n; return ok({ s: s }); }
+// expect: a `let` holding text built here is live at a recursive call
+struct S { n: i64; } state s: S;
+fn walk(n: i64) -> i64 { let k = "n=" + str(n); if n <= 0 { return len(k); } return walk(n - 1) + len(k); }
+@get("/a") fn a() -> Response<{ n: i64 }> { return ok({ n: walk(3) }); }

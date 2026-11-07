@@ -395,7 +395,9 @@ pub struct Generated { pub src: String, pub notes: Vec<String>, pub lits: Vec<u8
 /// lookups), reads of a row's fields, writes to tables (adds, stores, removes), and text built (literals copied, fields read as text,
 /// joins, appends), each total and in loops.
 #[derive(Clone, Default, Debug)]
-pub struct Costs { pub queries: (u32, u32), pub reads: (u32, u32), pub writes: (u32, u32), pub texts: (u32, u32) }
+pub struct Costs { pub queries: (u32, u32), pub reads: (u32, u32), pub writes: (u32, u32), pub texts: (u32, u32),
+    /// lets of text built in their scope's region: how many, the most bytes of those whose bound is known, how many have none
+    pub lets: (u32, usize, u32) }
 /// Count an endpoint's C body's helper calls, each in or out of a loop (a block opened by `for (` / `while (`).
 fn count_costs(body: &str) -> Costs {
     let mut c = Costs::default();
@@ -594,6 +596,10 @@ struct G<'p> {
     rq_touched: Vec<(usize, usize)>, uses_spec: bool,
     /// fields of items known not null where the code is (`if exists(m.connected_at) { ... }`): collection, item index, path
     narrowed: Vec<(usize, String, String)>,
+    /// the most bytes a text value (a Txt's C name) can hold, where known: literals, fields, inputs, joins of those
+    txt_bounds: std::collections::HashMap<String, usize>,
+    /// each `let` of text built here (in its scope's region): its most bytes, when known; `built_lets` counts them as compiled
+    region_lets: Vec<Option<usize>>,
     prog: &'p Program, api: &'p Api, ep: &'p Endpoint, body: String, n: usize, depth: usize, inlining: Vec<u32>, ret: Vec<Ret>,
     frame: Option<u32>,                                  // the function whose slots `env` holds (None: the endpoint)
     slot_kinds: &'p [((Option<u32>, u32), K)],           // widened kinds of `var` and `let` slots
@@ -1163,6 +1169,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
     let mut costs: Vec<Costs> = Vec::new();
     for (k, ep) in api.eps.iter().enumerate() {
         let mut touched: Option<Vec<(usize, usize)>> = None;
+        let mut lets = (0u32, 0usize, 0u32);
         let (mut slot_kinds, mut ret_kinds): (Vec<((Option<u32>, u32), K)>, Vec<(u32, K)>) = (Vec::new(), Vec::new());
         let mut tries = 0;
         let (res, body, specs) = loop {
@@ -1172,6 +1179,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
             let r = g.inputs(ep, &mut env).and_then(|_| g.block(&ep.body, &mut env));
             let (widen, body, at) = (g.widen, std::mem::take(&mut g.body), g.at);
+            lets = (g.region_lets.len() as u32, g.region_lets.iter().flatten().sum(), g.region_lets.iter().filter(|x| x.is_none()).count() as u32);
             touched = if g.uses_spec { None } else { let mut t = std::mem::take(&mut g.rq_touched); t.sort(); let mut m: Vec<(usize, usize)> = Vec::new(); for r in t { match m.last_mut() { Some(l) if r.0 <= l.1 => l.1 = l.1.max(r.1), _ => m.push(r) } } Some(m) };
             drop(g);
             let r = r.map_err(|e| place_err(at, e));
@@ -1202,7 +1210,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 }
                 done = specs;
                 zeros.push(touched);
-                costs.push(count_costs(&body));
+                costs.push(Costs { lets, ..count_costs(&body) });
                 src += &format!("{}{}int {}(Ctx *c) {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", head, linkage, name, body);
             }
             Err(why) => {
@@ -1331,7 +1339,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { rq_touched: Vec::new(), uses_spec: false, narrowed: Vec::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
+        G { rq_touched: Vec::new(), uses_spec: false, narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1373,7 +1381,7 @@ impl<'p> G<'p> {
                 }
                 InTy::Flt => { let x = self.tmp("f"); self.line(&format!("double {} = {}.f;", x, v)); CV::Flt(x) }
                 InTy::Bool => { let x = self.tmp("b"); self.line(&format!("int {} = {}.i != 0;", x, v)); CV::Bool(x) }
-                InTy::Str(..) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, v, v, v)); CV::Txt(t) }
+                InTy::Str(_, hi, _) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, v, v, v)); self.txt_bounds.insert(t.clone(), *hi as usize); CV::Txt(t) }
                 InTy::Item(..) if inp.optional => { let (s, x) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}.tag != 0, {} = {}.b;", s, v, x, v)); CV::Ref(pool, s, x) }
                 InTy::Item(..) => { let x = self.tmp("i"); self.line(&format!("u32 {} = {}.b;", x, v)); CV::Item(pool, x) }
             };
@@ -1959,6 +1967,37 @@ impl<'p> G<'p> {
     fn close(&mut self, tail: &str) { self.checked.clear(); self.depth -= 1; self.line(tail); }
 
     fn block(&mut self, stmts: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<()> {
+        let (start, lets0, esc0) = (self.body.len(), self.region_lets.len(), self.txt_escapes.len());
+        let bound_before: Vec<bool> = env.iter().map(|x| x.is_some()).collect();
+        let mut live_from: Option<usize> = None; // where the first `let` of built text in this block was compiled
+        self.block_inner(stmts, env, &mut live_from)?;
+        if self.region_lets.len() > lets0 {
+            let code = self.body[start..].to_string();
+            // a text built in a `let` is not live at a recursive call (so each endpoint's worst case is known when compiling)
+            if let Some(at) = live_from {
+                let after = &self.body[at..];
+                if self.specs.borrow().iter().any(|sp| after.contains(&format!("{}(c", sp.name))) {
+                    return no("a `let` holding text built here is live at a recursive call: copy it into a field first, or build it after the call");
+                }
+            }
+            // the scope's region released at its end, unless text built in it may outlive it: a `return` with a value, an outer
+            // variable given text here, or the answer cache (which keeps places in the text area between statements)
+            let returns = stmts_return_value(stmts);
+            let escapes = self.txt_escapes[esc0..].iter().any(|s| bound_before.get(*s as usize).copied().unwrap_or(false));
+            let cached = code.contains("builtin(c, 61,") || code.contains("builtin(c, 64,");
+            if !returns && !escapes && !cached {
+                let mark = self.tmp("tm");
+                let kept = std::mem::take(&mut self.body);
+                self.line(&format!("u32 {};", mark));
+                self.call(&format!("c->h->text_len(c, &{})", mark));
+                let head = std::mem::replace(&mut self.body, kept);
+                self.body.insert_str(start, &head);
+                self.call(&format!("c->h->text_cut(c, {})", mark));
+            }
+        }
+        Ok(())
+    }
+    fn block_inner(&mut self, stmts: &'p [Stmt], env: &mut Vec<Option<CV>>, live_from: &mut Option<usize>) -> R<()> {
         let mut restore: Vec<(u32, CV)> = Vec::new();
         let mut fields_kept = 0usize;
         let mut skip = 0usize;
@@ -2002,7 +2041,9 @@ impl<'p> G<'p> {
                     }
                 }
             }
+            let lets = self.region_lets.len();
             self.stmt(s, env)?;
+            if matches!(s, Stmt::Let(..)) && self.region_lets.len() > lets && live_from.is_none() { *live_from = Some(self.body.len()); }
             // `if !exists(x) { ... }` (or `if x == null`) whose branch always leaves (return, fail, break, continue), or `if exists(x)
             // { ... } else { ... }` whose else always leaves: x is a plain item for the rest of this block; the same for a field `m.f`
             if let Stmt::If(c, t, e) = s {
@@ -2071,8 +2112,9 @@ impl<'p> G<'p> {
                     let n = match s { Stmt::Let(n, ..) | Stmt::Var(n, ..) => n.clone(), _ => String::new() };
                     if mutable { return no(format!("`var {}` would hold its own text: text lives in fields. Name a field with `let` (a window onto it), or build the text in a field of the state or of a `request` struct (`work.line += ...`)", n)); }
                     // (text a function returns lives in the request's text area, as a builtin's does: a window onto it)
+                    // text built here (`let k = a + ":" + b`): it lives in its scope's region (block() releases it at the scope's end)
                     let built = match e { Expr::Bin(op, ..) => op == "+", Expr::Call(f, _, _) => f == "str", _ => false };
-                    if built { return no(format!("`let {}` would hold text built here: build it in a field instead (`work.line = ...` in a `request` struct, or a field of the state), or write it straight into the answer", n)); }
+                    if built { let b = self.txt_bound(&v); self.region_lets.push(b); }
                 }
                 let v = match self.slot_kind(*slot) { Some(k) => self.coerce(v, k, mutable)?, None => self.hold(v, mutable)? };
                 {
@@ -2968,6 +3010,30 @@ impl<'p> G<'p> {
         }
     }
 
+    /// The most bytes a text value can hold, when known: a literal's, a field's capacity, a number's longest form, a tracked
+    /// text's (an input, a table's text column, a join of those).
+    fn txt_bound(&self, v: &CV) -> Option<usize> {
+        match v {
+            CV::Lit(s) => Some(s.len()),
+            CV::Txt(n) => self.txt_bounds.get(n).copied(),
+            CV::StateStr(c, _, ci) => match self.prog.colls[*c].cols.get(ci + 1).map(|x| &x.kind) { Some(crate::layout::CKind::StrBytes(m)) => Some(*m), _ => None },
+            CV::PlainStr(off) => self.plain_str_cap(*off),
+            CV::Sub(b, ..) => self.txt_bound(b),
+            CV::Int(_) => Some(20), CV::Flt(_) => Some(32), CV::Bool(_) => Some(5), CV::Null => Some(0),
+            _ => None,
+        }
+    }
+    /// The capacity of the plain text field at `off`, found through the state's structs.
+    fn plain_str_cap(&self, off: usize) -> Option<usize> {
+        fn walk(prog: &Program, ty: &Ty, at: usize, off: usize) -> Option<usize> {
+            match ty {
+                Ty::Str(m) if at == off => Some(*m as usize),
+                Ty::Struct(s) => { let sd = &prog.structs[*s]; sd.fields.iter().zip(sd.offs.iter()).find_map(|(f, o)| walk(prog, &f.1, at + o, off)) }
+                _ => None,
+            }
+        }
+        self.prog.globals.iter().find_map(|g| if g.coll.is_none() { walk(self.prog, &g.ty, g.off, off) } else { None })
+    }
     /// Field k of the plain struct sid at `off`: when that is the request struct, its range is one the endpoint must find zeroed.
     fn touch_request(&mut self, off: usize, sid: usize, k: usize) {
         let Some((ro, _)) = self.prog.request else { return };
@@ -3093,8 +3159,8 @@ impl<'p> G<'p> {
                 TKind::Time if col.null => CV::Any(v),
                 TKind::Time => CV::Int(format!("{}.i", v)),
                 // a nullable column (`utf8<N>?`): null when the column is NULL
-                TKind::Text(..) if col.null => { let tt = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", tt, v, v, v)); CV::Txt(tt) }
-                TKind::Text(..) => { let tt = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", tt, v, v)); CV::Txt(tt) }
+                TKind::Text(n, _) if col.null => { let tt = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", tt, v, v, v)); self.txt_bounds.insert(tt.clone(), n as usize); CV::Txt(tt) }
+                TKind::Text(n, _) => { let tt = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", tt, v, v)); self.txt_bounds.insert(tt.clone(), n as usize); CV::Txt(tt) }
                 // a reference: null, or a row (SQLite makes it null when its row goes, so it names a live row)
                 TKind::Ref(target) if self.narrowed.iter().any(|n| n.0 == TBASE + t && n.1 == idx && n.2 == path) => { let k = self.tmp("i"); self.line(&format!("u32 {} = (u32){}.i;", k, v)); CV::Item(TBASE + target, k) }
                 TKind::Ref(target) => { let (s, k) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}.tag != 0, {} = (u32){}.i;", s, v, k, v)); CV::Ref(TBASE + target, s, k) }
@@ -3599,11 +3665,16 @@ impl<'p> G<'p> {
                 return Ok(CV::Bool(format!("({} != 0)", t)));
             }
         }
+        let (lb, rb) = (self.txt_bound(&l), self.txt_bound(&r));
         let (lv, rv) = (self.val(l)?, self.val(r)?);
         let t = self.tmp("v");
         self.line(&format!("Val {};", t));
         self.call(&format!("c->h->binop(c, {}, &{}, &{}, &{})", code, lv, rv, t));
-        if joined { let x = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", x, t, t)); return Ok(CV::Txt(x)); }
+        if joined {
+            let x = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", x, t, t));
+            if let (Some(a), Some(b)) = (lb, rb) { self.txt_bounds.insert(x.clone(), a + b); }
+            return Ok(CV::Txt(x));
+        }
         if compared { return Ok(CV::Bool(format!("({}.i != 0)", t))); }
         Ok(CV::Any(t))
     }
@@ -3852,6 +3923,8 @@ impl<'p> G<'p> {
                 return no(format!("`{}` takes {}", name, what));
             }
         }
+        // `str(n)` of a number or bool: its longest text, for the bounds of lets of built text
+        let str_bound = if bi == B::Str { match a.first() { Some(CV::Int(_)) => Some(20), Some(CV::Flt(_)) => Some(32), Some(CV::Bool(_)) => Some(5), _ => None } } else { None };
         if let (true, Some(code)) = (generic, BUILTINS.iter().position(|x| *x == bi)) {
             // arguments as one Val array; the interpreter's builtin computes the result
             let mut names = Vec::new();
@@ -3869,7 +3942,7 @@ impl<'p> G<'p> {
                 B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot | B::AddYears | B::IndexOf | B::LastIndexOf | B::Crc32 | B::ByteAt | B::CacheGet | B::DataVersion => CV::Int(format!("{}.i", r)),
                 B::SecretEqual | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith => CV::Bool(format!("({}.i != 0)", r)),
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
-                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText | B::JsonQuote | B::RequestTarget | B::Lower | B::Upper | B::CacheLabel | B::Replace | B::TrimStart | B::TrimEnd => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); CV::Txt(t) }
+                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText | B::JsonQuote | B::RequestTarget | B::Lower | B::Upper | B::CacheLabel | B::Replace | B::TrimStart | B::TrimEnd => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
                 B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env | B::JsonUnquote | B::ReadStored => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); CV::Txt(t) }
                 _ => CV::Any(r),
@@ -4913,6 +4986,15 @@ fn stmt_sites<'p>(st: &'p Stmt, v: u32, assigned: &std::collections::HashSet<u32
 /// An i64 as a C constant (the smallest one cannot be written as a literal).
 fn c_i64(v: i64) -> String { if v == i64::MIN { "(-9223372036854775807LL - 1)".into() } else { format!("{}LL", v) } }
 
+/// Does any `return` in these statements (or in blocks inside them) give a value?
+fn stmts_return_value(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Return(Some(_)) | Stmt::Respond(..) => true,
+        Stmt::If(_, t, e) => stmts_return_value(t) || stmts_return_value(e),
+        Stmt::Each(_, b) => stmts_return_value(b),
+        _ => false,
+    })
+}
 /// `exists(m.f)`, `m.f != null` (and their negations, false) for a local m: its slot, the field's path, and whether the test holding
 /// means the field is there.
 fn field_narrow_test(c: &Expr) -> Option<(u32, String, bool)> {

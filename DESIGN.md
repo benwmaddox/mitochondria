@@ -107,9 +107,12 @@ A collection whose trim released nothing is skipped until 256 of its items have 
 **Functions.** `fn name(p: Player, n: i64) -> f64 { ... }`: every parameter and the result are typed (`-> T?` when it may be
 null, no arrow when it gives nothing), and checked at every call and `return`. `let` and `var`; `+=` and friends. No closures. A
 `var` keeps the kind of its first value. A local holds numbers, bools, items and windows onto text (a field, an input, a literal,
-a `substr` or `trim` of one, what a function or builtin returns), never text it builds itself: `var t = ""` and `let t = a + b` are
-errors that say to build the text in a field. A function may return text (`-> text`): built for the request in its text area, as
-a builtin's result is, and gone with the request (`fn avatar_path(u: User) -> text { return "/users/" + ...; }`).
+a `substr` or `trim` of one, what a function or builtin returns) and text a `let` builds (`let key = "sidebar:" + str(u.id)`): that
+lives in its scope's region, on the request's text area from a mark at the scope's start, which the scope's end moves back to (no
+zeroing; kept when text built there may outlive it: a `return` with a value, an outer variable given text, the answer cache). Such a
+`let` may not be live at a recursive call, so `mito check --costs` can give each endpoint's most bytes of them. A `var` does not hold
+text of its own yet (`var t = ""` is an error): its cap comes next. A function may return text (`-> text`): built for the request in
+its text area, as a builtin's result is; the caller copies it where it keeps it.
 
 **Text.** `len`, `substr`, `contains`, `starts_with`, `ends_with`, `index_of`, `last_index_of`, `trim` (and `trim_start`,
 `trim_end`), `replace(t, a, b)`, `byte_at`, and `lower` / `upper` with Unicode's full case mappings (as Ruby's downcase and upcase).

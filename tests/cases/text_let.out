@@ -1,0 +1,4 @@
+POST /t -> 200 {"total":2621445,"key":"x:y","same":true,"kept":"x:y!"}
+POST /t -> 200 {"total":2621445,"key":"p:q","same":false,"kept":"p:q!"}
+state <plain values> 1105920
+memory reserved=1105920 committed=1105920 live=1105920

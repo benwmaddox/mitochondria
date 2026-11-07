@@ -1,0 +1,26 @@
+// `let` with text built in it (`let k = a + ":" + b`): it lives in its scope's region, released at the scope's end. Five blocks each
+// build 512 KiB (about 2 MiB with the copies of its parts): ten together, which the request's 4 MiB text area holds only because each
+// block gives its region back; a built text compared, and copied into a field (which outlives its region)
+--- program
+struct Work { x: utf8<1100000>; kept: utf8<64>; }
+request work: Work;
+struct App { n: i64; }
+state app: App;
+@post("/t")
+fn t(a: utf8<16>, b: utf8<16>) -> Response<{ total: i64; key: string; same: bool; kept: string }> {
+    work.x = "abcdefgh";
+    foreach i in 1..15 { work.x += work.x; }
+    var total = 0;
+    if len(work.x) > 0 { let big = work.x + work.x + "!"; total += len(big); }
+    if len(work.x) > 0 { let big = work.x + work.x + "!"; total += len(big); }
+    if len(work.x) > 0 { let big = work.x + work.x + "!"; total += len(big); }
+    if len(work.x) > 0 { let big = work.x + work.x + "!"; total += len(big); }
+    if len(work.x) > 0 { let big = work.x + work.x + "!"; total += len(big); }
+    let key = a + ":" + b;
+    let same = key == "x:y";
+    work.kept = key + "!";
+    return ok({ total: total, key: key, same: same, kept: work.kept });
+}
+--- requests
+POST /t {"a": "x", "b": "y"}
+POST /t {"a": "p", "b": "q"}

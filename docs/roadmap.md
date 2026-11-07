@@ -345,3 +345,12 @@ Phase 6 is done (2026-11-06).
   `--costs`; an endpoint that cannot fit the text area is refused).
 - First step: `let` over bounded parts only, release at scope end, the recursion check, the worst case in `--costs`; then the
   sidebar's and cable's scratch fields as lets. Then capped `var`, then text-bearing structs.
+- First step done (2026-11-06): `let k = a + b` (and `str(...)`) holds its text; a block that declared one marks the text area at its
+  start and cuts back at its end, unless text built in it may outlive it (a `return` with a value, an outer variable given text, the
+  answer cache's places); a call to a function generated for recursive calls after such a `let` in its block is refused. Bounds are
+  tracked for literals, fields, inputs, table text columns, numbers' `str` and joins; `--costs` adds "lets of built text N (up to B
+  bytes, K unbounded)" (a sum over the endpoint's lets: an upper bound, as scopes reuse their space). `tests/cases/text_let.case` (ten
+  MiB of lets through a 4 MiB text area), `tests/errors/text_let_built.mito` (the recursion rule). Bounded parts are not yet required:
+  a `let` over an unbounded part is counted as unbounded. Campfire: the sidebar's cache key and the cable's identifier, Origin and
+  broadcast prefix are lets or `-> text` (three request fields gone; the cable endpoints zero 2,124 B, 260 B and 0 B, from 15,448,
+  8,456 and 12,296).

@@ -363,6 +363,8 @@ fn app_user(id: i64) -> User {{ return db.users[id]; }}
         let start = |exe: &std::path::Path| -> (std::process::Child, String) {
             let mut c = std::process::Command::new(exe).args(["--port", &port.to_string(), "--db"]).arg(&db).stdout(std::process::Stdio::piped()).spawn().unwrap();
             let mut l = String::new(); std::io::BufReader::new(c.stdout.take().unwrap()).read_line(&mut l).unwrap();
+            // a server refused at start still holds the port until it exits: the next one waits for that
+            if l.starts_with("error:") { let _ = c.wait(); }
             (c, l.trim().to_string())
         };
         let ask = |req: &str| -> String {

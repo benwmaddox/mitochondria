@@ -111,6 +111,11 @@ a `substr` or `trim` of one, what a function or builtin returns), never text it 
 errors that say to build the text in a field. A function may return text (`-> text`): built for the request in its text area, as
 a builtin's result is, and gone with the request (`fn avatar_path(u: User) -> text { return "/users/" + ...; }`).
 
+**Text.** `len`, `substr`, `contains`, `starts_with`, `ends_with`, `index_of`, `last_index_of`, `trim` (and `trim_start`,
+`trim_end`), `replace(t, a, b)`, `byte_at`, and `lower` / `upper` with Unicode's full case mappings (as Ruby's downcase and upcase).
+`foreach part in split(t, ", ")` walks the pieces as Ruby's `split` gives them (a leading empty one kept, trailing ones dropped);
+`split(t)` walks the words. Each piece is a window onto the text.
+
 **Narrowing.** A value that may be null (`T?`, a nullable field) is used after a test says it is there: inside `if exists(x)`
 (or `x != null`), in the rest of an `&&` after it (`if exists(r) && r.n > 0`), in an `else` of `if !exists(x)`, and after
 `if !exists(x) { return ...; }` (or `fail`, `break`, `continue`) for the rest of the block. A row's nullable field narrows the same

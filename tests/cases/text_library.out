@@ -1,0 +1,7 @@
+POST /t -> 200 {"pieces":"[a]|[ b]|[]|[ c]","words":"3","first":"a,","lower":"a, b,, c,,","upper":"A, B,, C,,","rep":"a+ b++ c++","ts":"a, b,, c,,","te":"a, b,, c,,"}
+POST /t -> 200 {"pieces":"[]|[x]","words":"1","first":",x","lower":",x","upper":",X","rep":"+x","ts":",x","te":",x"}
+POST /t -> 200 {"pieces":"","words":"1","first":",,","lower":",,","upper":",,","rep":"++","ts":",,","te":",,"}
+POST /t -> 200 {"pieces":"","words":"0","first":"-","lower":"","upper":"","rep":"","ts":"","te":""}
+POST /t -> 200 {"pieces":"[]|[]|[Hello]|[]|[Wörld]|[ß]|[İ]|[K]|[ΣΑΣ]|[ﬃ]","words":"7","first":"Hello","lower":"  hello  wörld ß i̇ k σασ ﬃ ","upper":"  HELLO  WÖRLD SS İ K ΣΑΣ FFI ","rep":"++Hello++Wörld+ß+İ+K+ΣΑΣ+ﬃ+","ts":"Hello  Wörld ß İ K ΣΑΣ ﬃ ","te":"  Hello  Wörld ß İ K ΣΑΣ ﬃ"}
+state <plain values> 8192
+memory reserved=8192 committed=8192 live=8192

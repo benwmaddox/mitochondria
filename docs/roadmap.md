@@ -303,6 +303,11 @@ parallel with no app changes, 0.07-0.14 ms a sidebar) and where it costs the dev
 - Unicode case (`lower`, `upper`: Unicode's simple mappings, as Ruby's downcase), `replace(t, a, b)`, `split` as a loop
   (`foreach part in split(t, ", ")`), `trim` variants; request-scoped text lists where a list of texts is needed.
 - Done when: the user-agent port uses them (no byte loops for case or splitting), its 385 vectors still pass.
+- Done (2026-11-06): `lower` / `upper` with Unicode 15's full mappings (runtime/unicase.c, written by tools/unicase.py, compiled
+  in only when a program uses them; as Ruby 3.4: no final sigma, checked against Ruby), `replace(t, a, b)`, `trim_start`, `trim_end`,
+  and `foreach p in split(t, sep)` / `split(t)` (words) with Ruby's pieces; `tests/cases/text_library.case`. The user-agent port's
+  Kelvin-sign fold is one `lower` (385/385), the sidebar's first names and initials are split loops. Text lists were not needed:
+  split loops covered the app's lists of texts, so they wait for a program that keeps one.
 
 ### 6.6 SQLite's memory bounded with readers
 - With readers SQLite takes memory from the system allocator (the fixed pool's lock serialized them). Each connection gets its own

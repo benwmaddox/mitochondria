@@ -1583,6 +1583,8 @@ static u8 *t_room(Mito *m, u64 need) { if ((u64)m->text.len + need > m->text.cap
 static int t_done(Mito *m, u32 start, u64 wrote, Val *out) { m->text.len = (u32)(start + wrote); *out = v_str(t_since(m, start)); return 0; }
 static int b64_val(u8 ch) { return ch >= 'A' && ch <= 'Z' ? ch - 'A' : ch >= 'a' && ch <= 'z' ? ch - 'a' + 26 : ch >= '0' && ch <= '9' ? ch - '0' + 52 : ch == '+' || ch == '-' ? 62 : ch == '/' || ch == '_' ? 63 : -1; }
 static int hex_val(u8 ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; }
+/* ASCII white space (\s), for split and the trims */
+static int split_ws(u8 b) { return b == ' ' || (b >= 9 && b <= 13); }
 static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
     T x, y, z; u32 start = m->text.len; u8 *w;
     switch (code) {
@@ -1797,20 +1799,52 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
     case 65: /* cache_part(i) */ if (n < 1 || a[0].tag != 1) return fail(m, 500, "cache_part(i)"); return c_part(m, a[0].i, out, 0);
     case 66: /* cache_label(i) */ if (n < 1 || a[0].tag != 1) return fail(m, 500, "cache_label(i)"); return c_part(m, a[0].i, out, 1);
     case 67: /* data_version() */ *out = v_int((i64)g_data_version); return 0;
+    case 68: { /* replace(t, a, b): every a in t (from the left, not overlapping) as b */
+        T z2;
+        if (arg_txt(m, a, n, 0, &x) || arg_txt(m, a, n, 1, &y) || arg_txt(m, a, n, 2, &z2)) return -1;
+        if (!y.len) return fail(m, 500, "replace: the text to replace is empty");
+        u64 most = z2.len > y.len ? (u64)x.len / y.len * z2.len + x.len : x.len;
+        if (!(w = t_room(m, most))) return -1;
+        const u8 *s = t_ptr(m, x), *f = t_ptr(m, y), *r = t_ptr(m, z2); u64 o = 0;
+        for (u32 i = 0; i < x.len;) {
+            if (i + y.len <= x.len && b_eq(s + i, y.len, f, y.len)) { for (u32 j = 0; j < z2.len; j++) w[o++] = r[j]; i += y.len; }
+            else w[o++] = s[i++];
+        }
+        return t_done(m, start, o, out); }
+    case 69: case 70: { /* trim_start(t), trim_end(t): t without the white space (as trim's) at its start (end): a window onto t */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        const u8 *s = t_ptr(m, x); u32 b0 = 0, e0 = x.len;
+        if (code == 69) while (b0 < e0 && split_ws(s[b0])) b0++; else while (e0 > b0 && split_ws(s[e0 - 1])) e0--;
+        T r = { x.off + b0, e0 - b0 }; *out = v_str(r); return 0; }
     case 58: { /* byte_at(t, i): the byte at offset i (0 to 255), or -1 past either end */
         if (arg_txt(m, a, n, 0, &x)) return -1;
         if (n < 2 || a[1].tag != 1) return fail(m, 500, "byte_at(text, offset)");
         *out = v_int(a[1].i >= 0 && a[1].i < (i64)x.len ? t_ptr(m, x)[a[1].i] : -1); return 0; }
-    case 59: case 60: { /* lower(t), upper(t): ASCII letters in lower (upper) case, every other byte as it is */
+    case 59: case 60: { /* lower(t), upper(t): Unicode's full case mappings (runtime/unicase.c), as Ruby's downcase and upcase: a
+                           character may become several ('ß' upper is "SS"; a text grows at most three times) */
         if (arg_txt(m, a, n, 0, &x)) return -1;
-        if (!(w = t_room(m, (u64)x.len))) return -1;
-        const u8 *s = t_ptr(m, x);
-        for (u32 i = 0; i < x.len; i++) {
+        if (!(w = t_room(m, (u64)x.len * 3))) return -1;
+        const u8 *s = t_ptr(m, x); u64 o = 0;
+#ifdef MITO_UNICASE
+        const u32 *cps = code == 59 ? uc_lower_cp : uc_upper_cp, *offs = code == 59 ? uc_lower_off : uc_upper_off; const u8 *by = code == 59 ? uc_lower_bytes : uc_upper_bytes;
+        u32 nc = code == 59 ? UC_LOWER_N : UC_UPPER_N;
+#endif
+        for (u32 i = 0; i < x.len;) {
             u8 b = s[i];
-            if (code == 59 && b >= 'A' && b <= 'Z') b += 32; else if (code == 60 && b >= 'a' && b <= 'z') b -= 32;
-            w[i] = b;
+            if (b < 0x80) { if (code == 59 && b >= 'A' && b <= 'Z') b += 32; else if (code == 60 && b >= 'a' && b <= 'z') b -= 32; w[o++] = b; i++; continue; }
+            u32 k = b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1; if (i + k > x.len) k = x.len - i;
+            u32 cp = k == 2 ? (u32)(b & 0x1F) << 6 | (s[i + 1] & 0x3F) : k == 3 ? (u32)(b & 0x0F) << 12 | (u32)(s[i + 1] & 0x3F) << 6 | (s[i + 2] & 0x3F)
+                   : k == 4 ? (u32)(b & 0x07) << 18 | (u32)(s[i + 1] & 0x3F) << 12 | (u32)(s[i + 2] & 0x3F) << 6 | (s[i + 3] & 0x3F) : b;
+            int found = 0;
+#ifdef MITO_UNICASE
+            u32 lo = 0, hi = nc;
+            while (lo < hi) { u32 mid = (lo + hi) / 2; if (cps[mid] < cp) lo = mid + 1; else hi = mid; }
+            if (lo < nc && cps[lo] == cp) { for (u32 j = offs[lo]; j < offs[lo + 1]; j++) w[o++] = by[j]; found = 1; }
+#endif
+            if (!found) for (u32 j = 0; j < k; j++) w[o++] = s[i + j];
+            i += k;
         }
-        return t_done(m, start, x.len, out); }
+        return t_done(m, start, o, out); }
     case 41: { /* escape_html(t): & < > " ' as entities (as ERB's <%= %> writes text), for markup or JSON written as text */
         if (arg_txt(m, a, n, 0, &x)) return -1;
         const u8 *s = t_ptr(m, x);
@@ -2412,6 +2446,27 @@ static int h_etag(Ctx *c, const char *tag, u32 n, int *nm) {
     if (*nm) m->out.len = 0;
     return 0;
 }
+/* `foreach p in split(t, sep)` / `split(t)`: the piece of t from *pos, as Ruby's String#split gives them: by a separator, pieces
+   between (a leading empty one kept), and none once only separators are left (trailing empty pieces dropped); by whitespace (no
+   separator), the runs of non-whitespace. *more 0 when there is no piece left. */
+static int h_split_next(Ctx *c, const Txt *t, const Txt *sep, u32 *pos, Txt *part, int *more) {
+    Mito *m = M_(c); const u8 *s = m->text.p + t->off; u32 n = t->present ? t->len : 0, p = *pos;
+    *more = 0;
+    if (!sep) {
+        while (p < n && split_ws(s[p])) p++;
+        if (p >= n) { *pos = n; return 0; }
+        u32 e = p; while (e < n && !split_ws(s[e])) e++;
+        part->off = t->off + p; part->len = e - p; part->present = 1; *pos = e; *more = 1; return 0;
+    }
+    const u8 *q = m->text.p + sep->off; u32 k = sep->present ? sep->len : 0;
+    if (!k) return fail(m, 500, "split: the separator is empty");
+    /* only separators (or nothing) left: no more pieces */
+    { u32 r = p; while (r + k <= n && b_eq(s + r, k, q, k)) r += k; if (r >= n) { *pos = n; return 0; } }
+    u32 e = p; while (e + k <= n && !b_eq(s + e, k, q, k)) e++;
+    if (e + k > n) e = n;
+    part->off = t->off + p; part->len = e - p; part->present = 1; *pos = e < n ? e + k : n; *more = 1;
+    return 0;
+}
 static int h_trim(Ctx *c, const Txt *in, Txt *out) {
     const u8 *p = M_(c)->text.p + in->off; u32 b = 0, e = in->present ? in->len : 0;
     while (b < e && (p[b] == ' ' || (p[b] >= 9 && p[b] <= 13))) b++;
@@ -2449,7 +2504,7 @@ static const H mito_h = {
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
     h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header, h_tinsert, h_found,
+    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header, h_tinsert, h_found, h_split_next,
 };
 
 /* ---------------------------------------------------------------- the interface: mito_* */

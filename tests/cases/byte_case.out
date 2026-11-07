@@ -1,5 +1,5 @@
 POST /t -> 200 {"byte":73,"lower":"internet explorer","upper":"INTERNET EXPLORER","first_up":"Internet explorer"}
-POST /t -> 200 {"byte":47,"lower":"applewebkit/É","upper":"APPLEWEBKIT/É","first_up":"Applewebkit/É"}
+POST /t -> 200 {"byte":47,"lower":"applewebkit/é","upper":"APPLEWEBKIT/É","first_up":"Applewebkit/é"}
 POST /t -> 200 {"byte":-1,"lower":"ab","upper":"AB","first_up":"Ab"}
 POST /t -> 200 {"byte":-1,"lower":"ab","upper":"AB","first_up":"Ab"}
 state <plain values> 8

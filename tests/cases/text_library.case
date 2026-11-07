@@ -1,0 +1,21 @@
+// the text library: `foreach p in split(t, sep)` (Ruby's split: a leading empty piece kept, trailing ones dropped) and `split(t)` (words),
+// `lower` / `upper` with Unicode's full mappings as Ruby's (ß to SS, İ to i̇, K to k; no final sigma), `replace`, `trim_start`, `trim_end`
+--- program
+struct Work { out: utf8<512>; }
+request work: Work;
+struct App { n: i64; }
+state app: App;
+fn words(s: utf8<200>) -> text { var n = 0; foreach w in split(s) { n += 1; } return str(n); }
+fn first_word(s: utf8<200>) -> text { foreach w in split(s) limit 1 { return w; } return "-"; }
+@post("/t")
+fn t(s: utf8<200>, sep: utf8<8>) -> Response<{ pieces: string; words: string; first: string; lower: string; upper: string; rep: string; ts: string; te: string }> {
+    foreach p, i in split(s, sep) { if i > 0 { work.out += "|"; } work.out += "[" + p + "]"; }
+    let a = work.out;
+    return ok({ pieces: a, words: words(s), first: first_word(s), lower: lower(s), upper: upper(s), rep: replace(s, sep, "+"), ts: trim_start(s), te: trim_end(s) });
+}
+--- requests
+POST /t {"s": "a, b,, c,,", "sep": ","}
+POST /t {"s": ",x", "sep": ","}
+POST /t {"s": ",,", "sep": ","}
+POST /t {"s": "", "sep": ","}
+POST /t {"s": "  Hello  Wörld ß İ K ΣΑΣ ﬃ ", "sep": " "}

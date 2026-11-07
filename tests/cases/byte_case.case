@@ -1,4 +1,4 @@
-// byte_at(t, i): a text's byte, -1 past either end; lower(t) / upper(t): ASCII letters only, other bytes kept (é stays é)
+// byte_at(t, i): a text's byte, -1 past either end; lower(t) / upper(t): Unicode case (É lowers to é; see text_library.case)
 --- program
 struct App { n: i64; }
 state app: App;

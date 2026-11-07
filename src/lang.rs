@@ -88,7 +88,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
-    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored, SocketSend, SocketClose, SocketSubscribe, SocketUnsubscribe, Broadcast, SocketSendAll, SocketTag, ByteAt, Lower, Upper, CacheGet, CachePut, CacheStart, CacheHole, CachePart, CacheLabel, DataVersion }
+    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored, SocketSend, SocketClose, SocketSubscribe, SocketUnsubscribe, Broadcast, SocketSendAll, SocketTag, ByteAt, Lower, Upper, CacheGet, CachePut, CacheStart, CacheHole, CachePart, CacheLabel, DataVersion, Replace, TrimStart, TrimEnd }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -100,7 +100,7 @@ impl B {
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
             "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml, "random_text" => RandomText, "add_years" => AddYears, "index_of" => IndexOf, "last_index_of" => LastIndexOf, "json_quote" => JsonQuote, "json_unquote" => JsonUnquote, "request_target" => RequestTarget, "crc32" => Crc32, "read_stored" => ReadStored, "socket_send" => SocketSend, "socket_close" => SocketClose, "socket_subscribe" => SocketSubscribe,
-            "socket_unsubscribe" => SocketUnsubscribe, "broadcast" => Broadcast, "socket_send_all" => SocketSendAll, "socket_tag" => SocketTag, "byte_at" => ByteAt, "lower" => Lower, "upper" => Upper, "cache_get" => CacheGet, "cache_put" => CachePut, "cache_start" => CacheStart, "cache_hole" => CacheHole, "cache_part" => CachePart, "cache_label" => CacheLabel, "data_version" => DataVersion,
+            "socket_unsubscribe" => SocketUnsubscribe, "broadcast" => Broadcast, "socket_send_all" => SocketSendAll, "socket_tag" => SocketTag, "byte_at" => ByteAt, "lower" => Lower, "upper" => Upper, "cache_get" => CacheGet, "cache_put" => CachePut, "cache_start" => CacheStart, "cache_hole" => CacheHole, "cache_part" => CachePart, "cache_label" => CacheLabel, "data_version" => DataVersion, "replace" => Replace, "trim_start" => TrimStart, "trim_end" => TrimEnd,
             _ => return None,
         })
     }
@@ -1409,6 +1409,8 @@ impl Binder<'_> {
                     if let Some(i) = n.rfind('.') { if !self.fns[k].2 && self.owner.as_deref() != Some(&n[..i]) { return self.err(format!("`{}` is private to {}", n, &n[..i])); } }
                     CallRes::User(k as u32)
                 } else if let Some(b) = B::from(n) { CallRes::Builtin(b) }
+                // `split(...)`: what a loop walks (`foreach p in split(t, ", ")`); compiled there
+                else if n == "split" { CallRes::Unbound }
                 else { let hint = suggest(n, self.fns.iter().map(|f| f.0.as_str()).chain(BUILTIN_NAMES.iter().copied())); return self.err(format!("unknown function `{}`{}", n, hint)); };
             }
             _ => {}

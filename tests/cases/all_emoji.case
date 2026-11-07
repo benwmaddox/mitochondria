@@ -1,0 +1,16 @@
+// all_emoji(t): every character an emoji (Emoji_Presentation, Extended_Pictographic or U+FE0F, as Ruby 3.4's regexp reads them):
+// a thumbs up, a red heart (U+2764 U+FE0F), a family joined with ZWJs (U+200D is neither: false), text, nothing, a digit, ©
+--- program
+struct App { n: i64; }
+state app: App;
+@post("/e")
+fn e(t: utf8<64>) -> Response<{ all: bool }> { return ok({ all: all_emoji(t) }); }
+--- requests
+POST /e {"t": "👍"}
+POST /e {"t": "❤️"}
+POST /e {"t": "👍🔥🎉"}
+POST /e {"t": "👨‍👩‍👧"}
+POST /e {"t": "hi 👍"}
+POST /e {"t": ""}
+POST /e {"t": "1"}
+POST /e {"t": "©"}

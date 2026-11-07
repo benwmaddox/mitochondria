@@ -1,0 +1,10 @@
+POST /e -> 200 {"all":true}
+POST /e -> 200 {"all":true}
+POST /e -> 200 {"all":true}
+POST /e -> 200 {"all":false}
+POST /e -> 200 {"all":false}
+POST /e -> 200 {"all":false}
+POST /e -> 200 {"all":false}
+POST /e -> 200 {"all":true}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

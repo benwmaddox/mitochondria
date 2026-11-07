@@ -119,7 +119,8 @@ live at a recursive call; given back at the scope's end); `var t = ""` without a
 its text area, as a builtin's result is; the caller copies it where it keeps it.
 
 **Text.** `len`, `substr`, `contains`, `starts_with`, `ends_with`, `index_of`, `last_index_of`, `trim` (and `trim_start`,
-`trim_end`), `replace(t, a, b)`, `byte_at`, and `lower` / `upper` with Unicode's full case mappings (as Ruby's downcase and upcase).
+`trim_end`), `replace(t, a, b)`, `byte_at`, `lower` / `upper` with Unicode's full case mappings (as Ruby's downcase and upcase), and
+`all_emoji(t)` (every character an emoji, with Ruby 3.4's tables of the two Unicode properties).
 `foreach part in split(t, ", ")` walks the pieces as Ruby's `split` gives them (a leading empty one kept, trailing ones dropped);
 `split(t)` walks the words. Each piece is a window onto the text.
 
@@ -145,7 +146,7 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
 }
 ```
 
-- Inputs come from the path (`{room}`: an id gives the item), the body (POST, PUT, PATCH: JSON, or an HTML form's
+- Inputs come from the path (`{room}`: an id gives the item; a segment may put literal text before its parameter, `@{message}`), the body (POST, PUT, PATCH: JSON, or an HTML form's
   `application/x-www-form-urlencoded`, whose values are read as text the way query values are; a ticked checkbox's `on` is
   true, an unticked one is absent and takes the default; a name given twice keeps its first value) or the query (GET,
   DELETE), a header (`from header("X-Session")`: a session token gives the session), a cookie (`from cookie("list")`; an
@@ -155,7 +156,7 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
   item 404, a body field not taken 400.
 - Markup: an HTML answer is written as HTML in the code, `return ok(<ul>{foreach t in b.todos { item(t); }}</ul>);`, and a
   function declared `-> html` writes a reusable piece (`fn item(t: Todo) -> html { <li class="{if t.done { "done" }}">{t.title}</li> }`).
-  Markup starts at `<tag` after `(`, `,`, `{` or `;`. An answer with no single element around it (a list of fragments) is written by code
+  Markup starts at `<tag` after `(`, `,`, `{`, `;` or `}`. An answer with no single element around it (a list of fragments) is written by code
   alone: `return ok({foreach t in b.todos { item(t); }});` (a `{` holding a statement, so never a JSON object). `{x}` writes a value escaped (text with `& < >` as entities, and `"` inside
   an attribute's quotes; numbers as digits); `name={b}` with a bool writes the bare attribute when true; `{if ...}`, `{foreach ...}`
   and `{piece(x);}` are statements, in which a bare string writes itself. The compiler checks that tags match (void elements such

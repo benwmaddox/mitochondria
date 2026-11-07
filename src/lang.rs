@@ -88,7 +88,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
-    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored, SocketSend, SocketClose, SocketSubscribe, SocketUnsubscribe, Broadcast, SocketSendAll, SocketTag, ByteAt, Lower, Upper, CacheGet, CachePut, CacheStart, CacheHole, CachePart, CacheLabel, DataVersion, Replace, TrimStart, TrimEnd }
+    Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored, SocketSend, SocketClose, SocketSubscribe, SocketUnsubscribe, Broadcast, SocketSendAll, SocketTag, ByteAt, Lower, Upper, CacheGet, CachePut, CacheStart, CacheHole, CachePart, CacheLabel, DataVersion, Replace, TrimStart, TrimEnd, AllEmoji }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -100,7 +100,7 @@ impl B {
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
             "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml, "random_text" => RandomText, "add_years" => AddYears, "index_of" => IndexOf, "last_index_of" => LastIndexOf, "json_quote" => JsonQuote, "json_unquote" => JsonUnquote, "request_target" => RequestTarget, "crc32" => Crc32, "read_stored" => ReadStored, "socket_send" => SocketSend, "socket_close" => SocketClose, "socket_subscribe" => SocketSubscribe,
-            "socket_unsubscribe" => SocketUnsubscribe, "broadcast" => Broadcast, "socket_send_all" => SocketSendAll, "socket_tag" => SocketTag, "byte_at" => ByteAt, "lower" => Lower, "upper" => Upper, "cache_get" => CacheGet, "cache_put" => CachePut, "cache_start" => CacheStart, "cache_hole" => CacheHole, "cache_part" => CachePart, "cache_label" => CacheLabel, "data_version" => DataVersion, "replace" => Replace, "trim_start" => TrimStart, "trim_end" => TrimEnd,
+            "socket_unsubscribe" => SocketUnsubscribe, "broadcast" => Broadcast, "socket_send_all" => SocketSendAll, "socket_tag" => SocketTag, "byte_at" => ByteAt, "lower" => Lower, "upper" => Upper, "cache_get" => CacheGet, "cache_put" => CachePut, "cache_start" => CacheStart, "cache_hole" => CacheHole, "cache_part" => CachePart, "cache_label" => CacheLabel, "data_version" => DataVersion, "replace" => Replace, "trim_start" => TrimStart, "trim_end" => TrimEnd, "all_emoji" => AllEmoji,
             _ => return None,
         })
     }
@@ -187,7 +187,8 @@ pub enum Stmt {
 pub enum Pat { One(Expr), Range(Expr, Expr) }
 
 #[derive(Debug, Clone)]
-pub enum Seg { Lit(String), Param(String) }
+/// A path segment: literal text, or a parameter (after a literal prefix, possibly empty: `@{message}` takes `@933` as 933)
+pub enum Seg { Lit(String), Param(String, String) }
 #[derive(Debug, Clone)]
 /// `lines`: first and last source line (1-based) of the endpoint, for comments in generated code.
 /// An endpoint: a function with an attribute (`@post("/players") fn add_player(name: string<1..24>) -> Response<T>`).
@@ -330,9 +331,10 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
             if let Some(Mode::Code { depth, html }) = modes.last_mut() { if *depth == 0 && *html { modes.pop(); } else { *depth = depth.saturating_sub(1); } }
             continue;
         }
-        // markup starts at `<` and a letter (or `<!doctype`) where no expression can be followed by `<`: after `(`, `,`, `{`, `;`, or other markup
+        // markup starts at `<` and a letter (or `<!doctype`) where no expression can be followed by `<`: after `(`, `,`, `{`, `;`, `}` (a
+        // block's end: `if !exists(c) { return; } <div>...`), or other markup
         if ch == '<' && c.get(i + 1).map_or(false, |x| x.is_ascii_alphabetic() || *x == '!')
-            && matches!(out.last(), Some(Tok::Sym(s)) if s == "(" || s == "," || s == "{" || s == ";") || (ch == '<' && c.get(i + 1).map_or(false, |x| x.is_ascii_alphabetic()) && matches!(out.last(), Some(Tok::HClose(_) | Tok::HEnd(_)))) {
+            && matches!(out.last(), Some(Tok::Sym(s)) if s == "(" || s == "," || s == "{" || s == ";" || s == "}") || (ch == '<' && c.get(i + 1).map_or(false, |x| x.is_ascii_alphabetic()) && matches!(out.last(), Some(Tok::HClose(_) | Tok::HEnd(_)))) {
             modes.push(Mode::Content { depth: 0 });
             continue;
         }
@@ -504,14 +506,14 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
         p.eat("(")?;
         let mut inputs: Vec<Input> = Vec::new();
         while !p.sym(")") { let i = p.input(&method, &segs)?; if inputs.iter().any(|x| x.name == i.name) { return Err(format!("endpoint `{}`: two inputs named `{}`", name, i.name)); } inputs.push(i); p.sym(","); }
-        for s in &segs { if let Seg::Param(n) = s { if !inputs.iter().any(|i| i.name == *n && i.src == Src::Path) { return Err(format!("endpoint `{}`: the path's `{{{}}}` is not one of its inputs: `fn {}({}: ...)`", name, n, name, n)); } } }
+        for s in &segs { if let Seg::Param(_, n) = s { if !inputs.iter().any(|i| i.name == *n && i.src == Src::Path) { return Err(format!("endpoint `{}`: the path's `{{{}}}` is not one of its inputs: `fn {}({}: ...)`", name, n, name, n)); } } }
         if !(p.sym("->") && p.is_kw("Response")) { return Err(format!("endpoint `{}` returns a `Response<T>`: `fn {}() -> Response<T>`", name, name)); }
         p.i += 1; p.eat("<")?; let resp = p.rtype()?; p.eat(">")?;
         p.in_endpoint = true;
         let body = p.block();
         p.in_endpoint = false;
         let body = body?;
-        let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(n) => format!("/{{{}}}", n) }).collect::<String>());
+        let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(pre, n) => format!("/{}{{{}}}", pre, n) }).collect::<String>());
         let last = p.lines.get(p.i.saturating_sub(1)).map_or(first, |x| x.0);
         api.eps.push(Endpoint { method, segs, body, text, slots: 0, lines: (first, last), name, resp, inputs });
     }
@@ -524,9 +526,13 @@ fn path_segs(path: &str) -> R<Vec<Seg>> {
     let mut segs = Vec::new();
     for part in rest.split('/').filter(|x| !x.is_empty()) {
         let ok = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
-        match part.strip_prefix('{').and_then(|x| x.strip_suffix('}')) {
-            Some(n) if ok(n) => segs.push(Seg::Param(n.to_string())),
-            None if ok(part) => segs.push(Seg::Lit(part.to_string())),
+        // a parameter, after a literal prefix of name characters or `@`, `~`, `+` (`/rooms/{room}/@{message}`)
+        let open = part.find('{');
+        let pre = open.map_or("", |k| &part[..k]);
+        let pre_ok = pre.chars().all(|c| c.is_alphanumeric() || "_-.@~+".contains(c));
+        match open.and_then(|k| part[k + 1..].strip_suffix('}')) {
+            Some(n) if ok(n) && pre_ok => segs.push(Seg::Param(pre.to_string(), n.to_string())),
+            None if open.is_none() && ok(part) => segs.push(Seg::Lit(part.to_string())),
             _ => return Err(format!("endpoint path `{}`: `{}` is not a name or a `{{parameter}}`", path, part)),
         }
         if segs.len() > 32 { return Err("an endpoint path has at most 32 parts".into()); }
@@ -571,7 +577,7 @@ impl P {
         };
         let optional = self.sym("?");
         let default = if self.sym("=") { Some(match self.t.get(self.i).cloned() { Some(Tok::Int(n)) => { self.i += 1; Expr::Int(n) } Some(Tok::Sym(m)) if m == "-" => { self.i += 1; Expr::Int(-self.int()?) } Some(Tok::Flt(f)) => { self.i += 1; Expr::Float(f) } Some(Tok::Str(s)) => { self.i += 1; Expr::Str(s) } Some(Tok::Id(b)) if b == "true" || b == "false" => { self.i += 1; Expr::Bool(b == "true") } _ => return Err(format!("input `{}`: a default is a literal", name)) }) } else { None };
-        let in_path = segs.iter().any(|s| matches!(s, Seg::Param(n) if *n == name));
+        let in_path = segs.iter().any(|s| matches!(s, Seg::Param(_, n) if *n == name));
         let src = if self.is_kw("from") {
             self.i += 1;
             if self.is_kw("query") { self.i += 1; Src::Query }

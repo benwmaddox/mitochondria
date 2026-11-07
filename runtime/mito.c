@@ -648,6 +648,25 @@ static T t_since(Mito *m, u32 start) { T t = { start, m->text.len - start }; ret
 static const u8 *t_ptr(Mito *m, T t) { return m->text.p + t.off; }
 static int t_push(Mito *m, const void *b, u64 n, T *out) { u32 s = m->text.len; if (!a_put(&m->text, b, n)) return text_full(m); *out = t_since(m, s); return 0; }
 
+/* all_emoji's code points (inclusive ranges, sorted), as Ruby 3.4's regexp reads the two properties and U+FE0F */
+static const u32 EMOJI_RANGES[] = { 0xA9,0xA9, 0xAE,0xAE, 0x203C,0x203C, 0x2049,0x2049, 0x2122,0x2122, 0x2139,0x2139, 0x2194,0x2199, 0x21A9,0x21AA, 0x231A,0x231B, 0x2328,0x2328, 0x2388,0x2388, 0x23CF,0x23CF, 0x23E9,0x23F3, 0x23F8,0x23FA, 0x24C2,0x24C2, 0x25AA,0x25AB, 0x25B6,0x25B6, 0x25C0,0x25C0, 0x25FB,0x25FE, 0x2600,0x2605, 0x2607,0x2612, 0x2614,0x2685, 0x2690,0x2705, 0x2708,0x2712, 0x2714,0x2714, 0x2716,0x2716, 0x271D,0x271D, 0x2721,0x2721, 0x2728,0x2728, 0x2733,0x2734, 0x2744,0x2744, 0x2747,0x2747, 0x274C,0x274C, 0x274E,0x274E, 0x2753,0x2755, 0x2757,0x2757, 0x2763,0x2767, 0x2795,0x2797, 0x27A1,0x27A1, 0x27B0,0x27B0, 0x27BF,0x27BF, 0x2934,0x2935, 0x2B05,0x2B07, 0x2B1B,0x2B1C, 0x2B50,0x2B50, 0x2B55,0x2B55, 0x3030,0x3030, 0x303D,0x303D, 0x3297,0x3297, 0x3299,0x3299, 0xFE0F,0xFE0F, 0x1F000,0x1F0FF, 0x1F10D,0x1F10F, 0x1F12F,0x1F12F, 0x1F16C,0x1F171, 0x1F17E,0x1F17F, 0x1F18E,0x1F18E, 0x1F191,0x1F19A, 0x1F1AD,0x1F1FF, 0x1F201,0x1F20F, 0x1F21A,0x1F21A, 0x1F22F,0x1F22F, 0x1F232,0x1F23A, 0x1F23C,0x1F23F, 0x1F249,0x1F53D, 0x1F546,0x1F64F, 0x1F680,0x1F6FF, 0x1F774,0x1F77F, 0x1F7D5,0x1F7FF, 0x1F80C,0x1F80F, 0x1F848,0x1F84F, 0x1F85A,0x1F85F, 0x1F888,0x1F88F, 0x1F8AE,0x1F8FF, 0x1F90C,0x1F93A, 0x1F93C,0x1F945, 0x1F947,0x1FAFF, 0x1FC00,0x1FFFD };
+static int emoji_cp(u32 c) {
+    u32 lo = 0, hi = (u32)(sizeof EMOJI_RANGES / sizeof EMOJI_RANGES[0]) / 2;
+    while (lo < hi) { u32 k = (lo + hi) / 2; if (c < EMOJI_RANGES[2 * k]) hi = k; else if (c > EMOJI_RANGES[2 * k + 1]) lo = k + 1; else return 1; }
+    return 0;
+}
+static int all_emoji(const u8 *s, u32 n) {
+    if (n == 0) return 0;
+    for (u32 i = 0; i < n; ) {
+        u32 c, k; u8 b = s[i];
+        if (b < 0x80) { c = b; k = 1; } else if ((b & 0xE0) == 0xC0) { c = b & 0x1F; k = 2; } else if ((b & 0xF0) == 0xE0) { c = b & 0x0F; k = 3; } else if ((b & 0xF8) == 0xF0) { c = b & 0x07; k = 4; } else return 0;
+        if (i + k > n) return 0;
+        for (u32 j = 1; j < k; j++) { if ((s[i + j] & 0xC0) != 0x80) return 0; c = (c << 6) | (s[i + j] & 0x3F); }
+        if (!emoji_cp(c)) return 0;
+        i += k;
+    }
+    return 1;
+}
 static Val v_null(void) { Val v = { 0, 0, 0, 0, 0 }; return v; }
 static Val v_int(i64 i) { Val v = { 1, 0, 0, i, 0 }; return v; }
 static Val v_flt(double f) { Val v = { 2, 0, 0, 0, f }; return v; }
@@ -1817,6 +1836,10 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
         const u8 *s = t_ptr(m, x); u32 b0 = 0, e0 = x.len;
         if (code == 69) while (b0 < e0 && split_ws(s[b0])) b0++; else while (e0 > b0 && split_ws(s[e0 - 1])) e0--;
         T r = { x.off + b0, e0 - b0 }; *out = v_str(r); return 0; }
+    case 71: { /* all_emoji(t): t is one or more characters each Emoji_Presentation, Extended_Pictographic or U+FE0F (Ruby's
+                  /\A(\p{Emoji_Presentation}|\p{Extended_Pictographic}|\uFE0F)+\z/u; the ranges are Ruby 3.4's, read from it) */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        *out = v_bool(all_emoji(t_ptr(m, x), x.len)); return 0; }
     case 58: { /* byte_at(t, i): the byte at offset i (0 to 255), or -1 past either end */
         if (arg_txt(m, a, n, 0, &x)) return -1;
         if (n < 2 || a[1].tag != 1) return fail(m, 500, "byte_at(text, offset)");
@@ -2690,6 +2713,8 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
             while (i < pn && path[i] == '/') i++;
             u64 b = i; while (i < pn && path[i] != '/') i++;
             if (!r->segs[s].param && !c_eq(r->segs[s].text, path + b, i - b)) ok = 0;
+            /* a parameter after a literal prefix: the segment starts with it, and holds more */
+            if (r->segs[s].param && r->segs[s].pre) { u64 pl = c_len(r->segs[s].pre); if (i - b <= pl || !b_eq(path + b, pl, (const u8 *)r->segs[s].pre, pl)) ok = 0; }
             s++;
         }
         if (ok) return e;
@@ -2727,6 +2752,7 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
       while (s < r->nsegs) {
           while (i < q && t[i] == '/') i++;
           u64 b = i; while (i < q && t[i] != '/') i++;
+          if (r->segs[s].param && r->segs[s].pre) b += c_len(r->segs[s].pre);
           if (r->segs[s].param) { T x; if (m->nparams < MAX_PARAMS && push_decoded(m, t + b, i - b, 0, &x)) { m->params[m->nparams].seg = s; m->params[m->nparams].t = x; m->nparams++; } else fits = 0; }
           s++;
       } }

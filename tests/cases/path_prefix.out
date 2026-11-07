@@ -1,0 +1,7 @@
+GET /rooms/7/@933 -> 200 {"room":7,"message":933}
+GET /rooms/7/@ -> 404 {"error":"no such endpoint"}
+GET /rooms/7/933 -> 404 {"error":"no such endpoint"}
+GET /rooms/7/messages -> 200 {"room":7}
+GET /rooms/7/@x -> 400 {"error":"`message`: expected an integer"}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

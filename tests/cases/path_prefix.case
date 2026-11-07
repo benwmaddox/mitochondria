@@ -1,0 +1,15 @@
+// a path parameter after a literal prefix (`/rooms/{room}/@{message}`, as Rails' `get "@:message_id"`): `@933` gives 933; a segment
+// that is only the prefix, or does not start with it, matches no endpoint (404), and a literal segment beside it still routes
+--- program
+struct App { n: i64; }
+state app: App;
+@get("/rooms/{room}/@{message}")
+fn at(room: i64, message: i64) -> Response<{ room: i64; message: i64 }> { return ok({ room: room, message: message }); }
+@get("/rooms/{room}/messages")
+fn messages(room: i64) -> Response<{ room: i64 }> { return ok({ room: room }); }
+--- requests
+GET /rooms/7/@933
+GET /rooms/7/@
+GET /rooms/7/933
+GET /rooms/7/messages
+GET /rooms/7/@x

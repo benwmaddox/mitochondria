@@ -323,3 +323,11 @@ parallel with no app changes, 0.07-0.14 ms a sidebar) and where it costs the dev
 - `use "rooms.mito";` brings another file's structs and functions into the program (one program, one state).
 - `mito check --costs` lists per endpoint: request bytes zeroed, table queries in its code (and in loops), text copies.
 - Done when: the Campfire app is split by feature, and the report shows the sidebar's numbers.
+- Done (2026-11-06): `use "file.mito";` (a line of its own, a comment after it allowed; relative to the file that uses it; each file
+  once, by any path) puts that file's text in its place: one program, one state. Errors name the file and line they are in, quoted;
+  `serve --watch` watches every file used. `mito check app.mito --costs` prints per endpoint the request struct bytes it zeroes and
+  its code's sites: queries, row reads, table writes, text built (each with those in loops, run once a round). Campfire is ten files
+  by feature (`app/campfire.mito` keeps the tables, state, web block and request struct); its sidebar: "zeroes 22398 B; queries 25
+  (2 in loops), row reads 71 (14 in loops), table writes 4, text built 164".
+
+Phase 6 is done (2026-11-06).

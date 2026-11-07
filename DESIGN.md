@@ -116,6 +116,11 @@ a builtin's result is, and gone with the request (`fn avatar_path(u: User) -> te
 `foreach part in split(t, ", ")` walks the pieces as Ruby's `split` gives them (a leading empty one kept, trailing ones dropped);
 `split(t)` walks the words. Each piece is a window onto the text.
 
+**Files.** A program may be several files: `use "rooms.mito";` on a line of its own puts that file's text there (relative to
+the file that uses it, each file once). It is still one program with one state; errors name the file and line they are in.
+`mito check app.mito --costs` lists, per endpoint, the request struct bytes it zeroes and what its code does: queries, row reads,
+table writes and text built, each with how many are inside loops.
+
 **Narrowing.** A value that may be null (`T?`, a nullable field) is used after a test says it is there: inside `if exists(x)`
 (or `x != null`), in the rest of an `&&` after it (`if exists(r) && r.n > 0`), in an `else` of `if !exists(x)`, and after
 `if !exists(x) { return ...; }` (or `fail`, `break`, `continue`) for the rest of the block. A row's nullable field narrows the same

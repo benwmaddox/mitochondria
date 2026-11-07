@@ -22,7 +22,7 @@ const USAGE: &str = "usage: mito <command> <program> [options]
 
 A program is one `.mito` file: a program, or a system of workers (a file holding `system { ... }`).
 
-  check  <program> [--kinds]        report the problems found, or say it loads; --kinds lists every local's kind
+  check  <program> [--kinds|--costs] report the problems found, or say it loads; --kinds lists every local's kind; --costs each endpoint's work
   build  <program> [-o app.exe] [--tcc]
                                     an executable serving HTTP (clang -O3; --tcc builds in milliseconds, unoptimised)
   serve  <program> [--clang] [--watch] [executable options]
@@ -37,6 +37,48 @@ memory pressure); --conns N (a system's connection threads, 16); --seed N and --
 
 fn die(e: String) -> ! { eprintln!("error: {}", e); std::process::exit(1) }
 
+// A program in several files: `use "rooms.mito";` (a line of its own) puts that file's text there (relative to the file that uses
+// it; each file once). The merged text is one program; where each piece came from is kept for errors' places and `serve --watch`.
+thread_local! { static PIECES: std::cell::RefCell<Vec<Piece>> = std::cell::RefCell::new(Vec::new()); }
+/// Lines `at..at + n` of the merged text are lines `from..` of `file`.
+#[derive(Clone)]
+struct Piece { at: usize, n: usize, file: String, from: usize, text: String }
+/// `path`'s text with its `use`s expanded, and the pieces it is made of.
+fn expand(path: &str, text: &str, seen: &mut Vec<String>, out: &mut String, pieces: &mut Vec<Piece>) -> Result<(), String> {
+    let dir = std::path::Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let mut from = 1; let mut run = 0; let mut start = out.lines().count() + 1;
+    let flush = |pieces: &mut Vec<Piece>, start: usize, run: usize, from: usize| if run > 0 { pieces.push(Piece { at: start, n: run, file: path.to_string(), from, text: text.to_string() }); };
+    for (k, line) in text.split('\n').enumerate() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("use \"") {
+            // `use "file.mito";`, a comment after it allowed
+            let Some((name, after)) = rest.split_once("\";").filter(|(_, a)| { let a = a.trim(); a.is_empty() || a.starts_with("//") }) else { return Err(format!("{}:{}:1: `use \"file.mito\";` names a file in double quotes", path, k + 1)) };
+            flush(pieces, start, run, from);
+            let p = dir.join(name);
+            let ps = p.to_string_lossy().replace('\\', "/");
+            let ps = ps.strip_prefix("./").map(String::from).unwrap_or(ps);
+            // the same file by any path (`lib/../app.mito` is `app.mito`)
+            let key = std::fs::canonicalize(&p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| ps.clone());
+            if seen.contains(&key) { return Err(format!("{}:{}:1: `{}` is used twice (or uses itself): each file once", path, k + 1, name)); }
+            seen.push(key);
+            let inner = std::fs::read_to_string(&p).map_err(|e| format!("{}:{}:1: {}: {}", path, k + 1, ps, e))?;
+            expand(&ps, &inner, seen, out, pieces)?;
+            // the `use` line itself stays (blank), so this file's lines after it keep their numbers in their own piece
+            out.push('\n');
+            pieces.push(Piece { at: out.lines().count(), n: 1, file: path.to_string(), from: k + 1, text: text.to_string() });
+            start = out.lines().count() + 1; from = k + 2; run = 0;
+            continue;
+        }
+        out.push_str(line); out.push('\n'); run += 1;
+    }
+    flush(pieces, start, run, from);
+    Ok(())
+}
+/// Where line `l` of the merged program comes from: its file, its line there, and that file's text.
+fn origin(l: usize) -> Option<(String, usize, String)> {
+    PIECES.with(|p| p.borrow().iter().find(|x| l >= x.at && l < x.at + x.n).map(|x| (x.file.clone(), x.from + (l - x.at), x.text.clone())))
+}
+
 /// A program's error as `file:line:col: message`, with the line quoted and a caret under the column, when it names a
 /// place (`line:col: ...`) inside the file; otherwise `file: message`. Several errors (one per line) are reported one by one.
 fn report(file: &str, text: &str, e: &str) -> String {
@@ -46,6 +88,12 @@ fn report(file: &str, text: &str, e: &str) -> String {
     let (Some(l), Some(c), Some(rest)) = (parts.next(), parts.next(), parts.next()) else { return format!("{}: {}", file, e) };
     let (Ok(l), Ok(c)) = (l.parse::<usize>(), c.parse::<usize>()) else { return format!("{}: {}", file, e) };
     let rest = rest.trim_start();
+    // a program in several files: the place in the file the line came from
+    if let Some((f2, l2, t2)) = origin(l) { return quote(&f2, &t2, l2, c, rest); }
+    quote(file, text, l, c, rest)
+}
+/// `file:line:col: message`, the line quoted and a caret under the column.
+fn quote(file: &str, text: &str, l: usize, c: usize, rest: &str) -> String {
     match text.lines().nth(l.wrapping_sub(1)) {
         Some(line) => {
             let shown = line.replace('\t', " ");
@@ -63,6 +111,7 @@ fn main() {
     if let Some(f) = inputs(rest).first() { lang::set_file_dir(std::path::Path::new(f.as_str()).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))); }
     match args.first().map(|s| s.as_str()) {
         Some("check") if rest.iter().any(|a| a == "--kinds") => kinds(rest),
+        Some("check") if rest.iter().any(|a| a == "--costs") => costs(rest),
         Some("check") => { let (_, name) = program(&inputs(rest)); println!("{}: loads", name); }
         Some("build") => build_exe(rest),
         Some("serve") => serve(rest),
@@ -73,15 +122,48 @@ fn main() {
     }
 }
 
+/// `check <program> --costs`: per endpoint, the request struct bytes it zeroes and what its code does (sites, and those in loops)
+fn costs(args: &[String]) {
+    let (f, text, system) = read_program(&inputs(args));
+    if system { die(format!("{}: --costs is for one program, not a system", f)); }
+    let path = std::path::Path::new(&f);
+    if let Some((w, line)) = web::find(&text) {
+        let w = web::parse(&w, line, path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))).unwrap_or_else(|e| die(report(&f, &text, &e)));
+        lang::set_assets(w.assets.clone());
+    }
+    let (s, code) = source::load(&text).unwrap_or_else(|e| die(report(&f, &text, &e)));
+    let prog = layout::Program::parse(&s).unwrap_or_else(|e| die(report(&f, &text, &e)));
+    let api = cgen::check(&prog, &code).unwrap_or_else(|e| die(report(&f, &text, &e)));
+    let g = cgen::generate(&prog, &api);
+    let req = prog.request.map_or(0, |r| r.1);
+    println!("{}: per endpoint, the request struct bytes zeroed (of {}), and sites in its code (in loops: run once a round)", f, req);
+    for (k, ep) in api.eps.iter().enumerate() {
+        let z = match g.zeros.get(k) { Some(Some(rs)) => rs.iter().map(|(a, b)| b - a).sum::<usize>(), _ => req };
+        let c = g.costs.get(k).cloned().unwrap_or_default();
+        let both = |x: (u32, u32)| if x.1 > 0 { format!("{} ({} in loops)", x.0, x.1) } else { x.0.to_string() };
+        println!("  {}: zeroes {} B; queries {}, row reads {}, table writes {}, text built {}", ep.text, z, both(c.queries), both(c.reads), both(c.writes), both(c.texts));
+    }
+}
+
 /// The program files among `args`: everything before the first option.
 fn inputs(args: &[String]) -> Vec<&String> { args.iter().take_while(|a| !a.starts_with('-')).collect() }
 
 /// Read a program file: (its text, whether it is a system of workers).
 fn read_program(files: &[&String]) -> (String, String, bool) {
     let [f] = files else { eprintln!("{}", USAGE); std::process::exit(2) };
-    let text = std::fs::read_to_string(f.as_str()).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
+    let text = load_text(f).unwrap_or_else(|e| die(e));
     let system = source::is_system(&text);
     (f.to_string(), text, system)
+}
+/// A program file's text, its `use`s expanded (the pieces kept for errors' places).
+fn load_text(f: &str) -> Result<String, String> {
+    let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {}", f, e))?;
+    if source::is_system(&text) || !text.lines().any(|l| l.trim_start().starts_with("use \"")) { PIECES.with(|p| p.borrow_mut().clear()); return Ok(text); }
+    let (mut out, mut pieces) = (String::new(), Vec::new());
+    let root = std::fs::canonicalize(f).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| f.to_string());
+    expand(f, &text, &mut vec![root], &mut out, &mut pieces)?;
+    PIECES.with(|p| *p.borrow_mut() = pieces);
+    Ok(out)
 }
 
 /// A program's C translation units for an executable, and a name for it.
@@ -144,7 +226,7 @@ fn serve_watch(files: &[&String], clang: bool, pass: &[&String]) {
     let (f, _, system) = read_program(files);
     let path = std::path::PathBuf::from(&f);
     let watched = |p: &std::path::Path| -> Vec<std::path::PathBuf> {
-        if !system { return vec![p.to_path_buf()]; }
+        if !system { let mut v = vec![p.to_path_buf()]; PIECES.with(|ps| for x in ps.borrow().iter() { let q = std::path::PathBuf::from(&x.file); if !v.contains(&q) { v.push(q); } }); return v; }
         let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
         std::fs::read_dir(dir).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|x| x.extension().map_or(false, |e| e == "mito")).collect()).unwrap_or_default()
     };
@@ -160,7 +242,7 @@ fn serve_watch(files: &[&String], clang: bool, pass: &[&String]) {
     loop {
         // build; on success replace the running server (the old one stops first: they share the port)
         let started = std::time::Instant::now();
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", f, e));
+        let text = load_text(&f);
         let built = text.and_then(|t| compile(&f, &t, system)).and_then(|(units, name)| {
             generation += 1;
             let next = std::env::temp_dir().join(format!("mito-serve-{}-{}-{}{}", name, std::process::id(), generation, std::env::consts::EXE_SUFFIX));
@@ -293,5 +375,29 @@ fn kinds(args: &[String]) {
         if place != last { println!("{}", place); last = place.clone(); }
         // a library module's code comes after the file's lines
         if line as usize > text.lines().count() { println!("  (module code)  {}: {}", name, kind); } else { println!("  {}:{}  {}: {}", file, line, name, kind); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_program_in_several_files() {
+        let dir = std::env::temp_dir().join(format!("mito-use-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        let app = dir.join("app.mito");
+        std::fs::write(&app, "struct App { n: i64; }\nstate app: App;\nuse \"lib/pages.mito\";\n@post(\"/n\") fn bump() -> Response<{ n: i64 }> { app.n += 1; return ok({ n: twice(app.n) }); }\n").unwrap();
+        std::fs::write(dir.join("lib/pages.mito"), "// helpers\nfn twice(x: i64) -> i64 { return x * nope; }\n").unwrap();
+        let f = app.to_string_lossy().replace('\\', "/");
+        let text = super::load_text(&f).unwrap();
+        assert!(text.contains("fn twice") && text.contains("fn bump"));
+        // an error in the used file is placed there: its own line, quoted
+        let e = super::compile(&f, &text, false).unwrap_err();
+        assert!(e.contains("pages.mito:2:") && e.contains("return x * nope"), "{}", e);
+        // a file used twice (or using itself) is refused
+        std::fs::write(dir.join("lib/pages.mito"), "use \"../app.mito\";\n").unwrap();
+        let e = super::load_text(&f).unwrap_err();
+        assert!(e.contains("used twice (or uses itself)"), "{}", e);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

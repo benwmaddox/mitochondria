@@ -314,6 +314,10 @@ parallel with no app changes, 0.07-0.14 ms a sidebar) and where it costs the dev
   bounded pool instead, so `--db-memory` bounds SQLite again without a shared lock.
 - Done when: readers run on per-connection pools at the speed of the system allocator, and a connection that fills its pool fails
   its request clearly.
+- Done (2026-11-06): SQLite's allocator (SQLITE_CONFIG_MALLOC) is a pool for each connection, of `--db-memory` MB, in power-of-two
+  classes with a list of freed blocks each (as memsys5's classes), with no lock: a thread names the pool of the connection it is about
+  to use (thread-local), a block goes back to the pool its address is in. Sidebar 28,848 / 67,860 req/s (system allocator: 27,791 /
+  68,150); a 900 KB value on 1 MB pools fails its request with "database: out of memory" and the next request works.
 
 ### 6.7 Apps in several files, and a cost report per endpoint
 - `use "rooms.mito";` brings another file's structs and functions into the program (one program, one state).

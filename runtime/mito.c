@@ -621,6 +621,7 @@ typedef struct Mito {
        mapped read-only, its own request struct, text, answer and database connection. A request that would change anything else stops
        (wants_write) and runs again alone on the primary. */
     int reader, wants_write;
+    u32 pool; /* SQLite's pool for this instance's connection (with db_pools): 0 the primary's, k + 1 reader k's */
     u32 tw; /* table writes of the request (with its undo log, whether it changed anything: the data version) */
     /* the answer being cached (cache_start .. cache_put): where it starts in the answer, and its holes (where each ends, its label);
        the entry cache_get found: its bytes in the text area */
@@ -2606,9 +2607,12 @@ MITO_API void *MITO(reader)(void *mp_, u32 k, char *why, u32 cap) {
     m->loop_budget = p->loop_budget; m->text_base = MITO_LITS_LEN; m->web_etag = p->web_etag; m->clock = p->clock; m->fixed_clock = p->fixed_clock;
     m->shared_fd = -1; m->reader = 1;
 #ifdef MITO_USES_SQLITE
-    if (p->store.open && !store_open(&m->store, mito_tables, MITO_NTABLES, p->db_dir, p->db_file, p->db_pool, p->db_flags | 4)) {
-        u32 n = 0; while (m->store.err[n] && n + 1 < cap) { why[n] = m->store.err[n]; n++; } if (cap) why[n] = 0; return 0;
-    }
+    m->pool = k + 1;
+    if (sq_npools && m->pool >= sq_npools) { const char *e = "more readers than SQLite pools"; u32 n = 0; while (e[n] && n + 1 < cap) { why[n] = e[n]; n++; } if (cap) why[n] = 0; return 0; }
+    if (sq_npools) sq_use(m->pool);
+    int opened = !p->store.open || store_open(&m->store, mito_tables, MITO_NTABLES, p->db_dir, p->db_file, p->db_pool, p->db_flags | 4);
+    if (sq_npools) sq_use(0);
+    if (!opened) { u32 n = 0; while (m->store.err[n] && n + 1 < cap) { why[n] = m->store.err[n]; n++; } if (cap) why[n] = 0; return 0; }
 #endif
     return m;
 }
@@ -2712,6 +2716,9 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     }
     if (!fits) { out_err_c(m, "request too large for the request text area"); return 413; }
     m->now = m->fixed_clock ? m->clock : os_now_ms();
+#ifdef MITO_USES_SQLITE
+    if (sq_npools) sq_use(m->pool); /* SQLite allocates for this instance's connection from its pool */
+#endif
     if (!m->reader) begin(&m->mem);
     m->frees.len = 0; m->sel.len = 0;
     /* the request struct starts empty: the parts of it the endpoint's code names (all of it when it calls a shared function) */
@@ -2785,11 +2792,12 @@ MITO_API int MITO(run_test)(void *mp_, u32 k, char *msg, u32 cap, u32 *line) { M
 MITO_API u32 MITO(test_count)(void) { return MITO_NTESTS; }
 MITO_API const char *MITO(test_name)(u32 k) { return mito_test_names[k]; }
 #endif
-/* Before MITO(open_data): SQLite takes its memory from the system's allocator rather than one pool (for readers: see store.c) */
+/* Before MITO(open_data): SQLite's memory as `n` pools of `mb` MB, one for each connection (the primary's and each reader's: see
+   store.c), in place of one pool for the process. 1, or 0 when they cannot be made. */
 #ifdef MITO_USES_SQLITE
-MITO_API void MITO(db_system_alloc)(int on) { sq_system_alloc = on; }
+MITO_API int MITO(db_pools)(u32 n, u64 mb) { return sq_pools_init(n, mb); }
 #else
-MITO_API void MITO(db_system_alloc)(int on) { (void)on; }
+MITO_API int MITO(db_pools)(u32 n, u64 mb) { (void)n; (void)mb; return 1; }
 #endif
 /* Open the program's tables in `dir` (the database file `file`, SQLite's memory pool `pool_mb` MB, `full`: every commit synced to disk
    before its answer; flags: 1 that, 2 drop what does not fit instead of refusing): 1, or 0 with MITO(data_error) saying why. A program

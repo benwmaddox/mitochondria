@@ -22,7 +22,7 @@ int mito_begin(void *m);
 int mito_response_binary(void *m);
 int mito_response_bare(void *m);
 void mito_set_files(const char *dir);
-void *mito_reader(void *m, u32 k, char *why, u32 cap); int mito_wants_write(void *m); int mito_share_state(int on); void mito_db_system_alloc(int on); int mito_set_cache(u64 bytes);
+void *mito_reader(void *m, u32 k, char *why, u32 cap); int mito_wants_write(void *m); int mito_share_state(int on); int mito_db_pools(u32 n, u64 mb); int mito_set_cache(u64 bytes);
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 const char *mito_response_head(void *m, u32 *len);
@@ -925,7 +925,8 @@ int main(int argc, char **argv) {
        the program stops the server here, saying why */
     if (mito_has_tables()) {
         u64 dbmem = 64; flag(argc, argv, "--db-memory", &dbmem);
-        if (workers > 1) mito_db_system_alloc(1); /* connections at once: see store.c (--db-memory then does not apply) */
+        /* connections at once: SQLite's memory as a pool of --db-memory MB for each (see store.c) */
+        if (workers > 1 && !mito_db_pools((u32)workers + 1, dbmem)) { printf("error: no address space for %u SQLite pools of %u MB\n", (u32)workers + 1, (u32)dbmem); mito_stop(app); return 1; }
         const char *dir = sflag(argc, argv, "--data", "data");
         int full = db_sync(argc, argv);
         if (full < 0) { printf("error: --db-sync is full or normal, --db-fit refuse or drop\n"); mito_stop(app); return 1; }

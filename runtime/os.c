@@ -74,6 +74,12 @@ static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
 /* threads: a record that lives as long as the thread (the caller's) */
 typedef struct { void *h; } OsThread;
 static int os_thread_start(OsThread *t, u32 (*fn)(void *), void *arg) { t->h = CreateThread(0, 0, fn, arg, 0, 0); return t->h != 0; }
+u32 TlsAlloc(void); void *TlsGetValue(u32 k); int TlsSetValue(u32 k, void *v);
+/* a value of the calling thread's own (one key for the process) */
+static u32 g_os_tls = 0xFFFFFFFFu;
+static int os_tls_init(void) { if (g_os_tls == 0xFFFFFFFFu) g_os_tls = TlsAlloc(); return g_os_tls != 0xFFFFFFFFu; }
+static void *os_tls_get(void) { return g_os_tls == 0xFFFFFFFFu ? 0 : TlsGetValue(g_os_tls); }
+static void os_tls_set(void *v) { if (g_os_tls != 0xFFFFFFFFu) TlsSetValue(g_os_tls, v); }
 static void os_thread_join(OsThread *t) { WaitForSingleObject(t->h, OS_FOREVER); CloseHandle(t->h); }
 
 /* SRW locks and condition variables */
@@ -223,6 +229,12 @@ int pthread_cond_wait(Cond *c, Lock *l);
 int pthread_cond_timedwait(Cond *c, Lock *l, const OsTime *at);
 static void *os_thread_main(void *p) { OsThread *t = (OsThread *)p; t->fn(t->arg); return 0; }
 static int os_thread_start(OsThread *t, u32 (*fn)(void *), void *arg) { t->fn = fn; t->arg = arg; return pthread_create(&t->id, 0, os_thread_main, t) == 0; }
+int pthread_key_create(u32 *k, void (*dtor)(void *)); void *pthread_getspecific(u32 k); int pthread_setspecific(u32 k, const void *v);
+/* a value of the calling thread's own (one key for the process) */
+static u32 g_os_tls; static int g_os_tls_on;
+static int os_tls_init(void) { if (!g_os_tls_on) g_os_tls_on = pthread_key_create(&g_os_tls, 0) == 0; return g_os_tls_on; }
+static void *os_tls_get(void) { return g_os_tls_on ? pthread_getspecific(g_os_tls) : 0; }
+static void os_tls_set(void *v) { if (g_os_tls_on) pthread_setspecific(g_os_tls, v); }
 static void os_thread_join(OsThread *t) { pthread_join(t->id, 0); }
 static void lk_init(Lock *l) { pthread_mutex_init(l, 0); }
 static void lk_on(Lock *l) { pthread_mutex_lock(l); }

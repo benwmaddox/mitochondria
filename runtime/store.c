@@ -86,10 +86,57 @@ static void sq_bare(const char *q, char *out, u32 cap) { u32 n = 0; for (q++; *q
 
 static u32 c_strlen_sq(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
 static int sq_configured;
-/* SQLite's memory: one fixed pool for the process (--db-memory), or, when connections run at once (readers), the system's allocator,
-   whose threads do not queue on one lock for every allocation the way they do on the pool's; each connection's page cache still has
-   its bound (cache_size). */
-static int sq_system_alloc;
+/* SQLite's memory: one fixed pool for the process (--db-memory, memsys5), or, when connections run at once (readers), a pool for each
+   connection: one lock for every allocation held readers back, and connections touch only their own memory, so each pool is used by
+   one thread at a time and needs none. A thread says which pool is its (sq_use: the connection it is about to use; 0, the primary's,
+   when it says nothing); a block goes back to the pool its address is in. A pool is power-of-two classes (as memsys5's), each with a
+   list of freed blocks, carved from the pool's space as needed; a pool that runs out answers null, and SQLite fails the request
+   ("out of memory"), as one full pool did before. */
+static u32 sq_npools; static u64 sq_pool_size; static u8 *sq_region;
+typedef struct { u64 used; void *free[48]; } SqPool;
+static SqPool *sq_pools;
+#define SQ_HDR 16 /* each block's head: its class (and padding, so blocks are 16-aligned) */
+static u32 sq_class(u64 n) { u32 c = 4; while ((1ULL << c) < n + SQ_HDR) c++; return c; } /* the smallest power of two holding n and the head */
+static SqPool *sq_pool_now(u32 *k) { u32 i = (u32)(u64)os_tls_get(); if (i >= sq_npools) i = 0; *k = i; return &sq_pools[i]; }
+static void *sq_take(int n) {
+    if (n <= 0) n = 1;
+    u32 k; SqPool *p = sq_pool_now(&k); u32 c = sq_class((u64)n);
+    if (c >= 48) return 0;
+    u8 *b = (u8 *)p->free[c];
+    if (b) { void *next; memcpy(&next, b + SQ_HDR, sizeof next); p->free[c] = next; }
+    else { u64 sz = 1ULL << c; if (p->used + sz > sq_pool_size) return 0; b = sq_region + (u64)k * sq_pool_size + p->used; p->used += sz; }
+    u32 cc = c; memcpy(b, &cc, 4);
+    return b + SQ_HDR;
+}
+static void sq_free(void *q) {
+    if (!q) return;
+    u8 *b = (u8 *)q - SQ_HDR; u32 c; memcpy(&c, b, 4);
+    SqPool *p = &sq_pools[(u64)(b - sq_region) / sq_pool_size];
+    memcpy(b + SQ_HDR, &p->free[c], sizeof(void *)); p->free[c] = b;
+}
+static int sq_size(void *q) { if (!q) return 0; u32 c; memcpy(&c, (u8 *)q - SQ_HDR, 4); return (int)((1ULL << c) - SQ_HDR); }
+static void *sq_regrow(void *q, int n) {
+    if (!q) return sq_take(n);
+    int have = sq_size(q);
+    if (n <= have && sq_class((u64)n) == sq_class((u64)have)) return q;
+    void *r = sq_take(n); if (!r) return 0;
+    memcpy(r, q, (u64)(have < n ? have : n)); sq_free(q);
+    return r;
+}
+static int sq_roundup(int n) { return (int)((1ULL << sq_class((u64)(n > 0 ? n : 1))) - SQ_HDR); }
+static int sq_init(void *x) { (void)x; return 0; }
+static void sq_shutdown(void *x) { (void)x; }
+typedef struct { void *(*x_take)(int); void (*x_give)(void *); void *(*x_regrow)(void *, int); int (*xSize)(void *); int (*xRoundup)(int); int (*xInit)(void *); void (*xShutdown)(void *); void *pAppData; } SqMem;
+static const SqMem sq_mem = { sq_take, sq_free, sq_regrow, sq_size, sq_roundup, sq_init, sq_shutdown, 0 };
+/* a pool for each of `n` connections, of `mb` MB each (reserved; memory taken as SQLite uses it) */
+static int sq_pools_init(u32 n, u64 mb) {
+    if (!os_tls_init()) return 0;
+    sq_pool_size = (mb ? mb : 64) << 20; sq_npools = n;
+    sq_region = (u8 *)os_reserve(sq_pool_size * n); sq_pools = (SqPool *)os_alloc(sizeof(SqPool) * n);
+    return sq_region && sq_pools && os_commit(sq_region, sq_pool_size * n);
+}
+/* the connection the calling thread is about to use: 0 the primary's, k + 1 reader k's */
+static void sq_use(u32 k) { os_tls_set((void *)(u64)k); }
 /* Open (create) the database and bring its tables to the program's declarations. 1, or 0 with the reason in st->err. */
 /* What does not fit, dropped deliberately (`--db-fit drop`): said on standard error, one line each. */
 static void st_dropped(const char *what) { os_err("dropped: ", 9); u32 n = 0; while (what[n]) n++; os_err(what, n); os_err("\n", 1); }
@@ -160,7 +207,10 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
         if (!os_mkdir(path)) return st_fail(st, "cannot make the data directory", path);
         sb_s(&p, "/"); sb_s(&p, file);
     }
-    if (!sq_configured && sq_system_alloc) sq_configured = 1;
+    if (!sq_configured && sq_npools) {
+        if (sqlite3_config(4, &sq_mem) != SQ_OK) return st_fail(st, "cannot give SQLite its pools", 0); /* SQLITE_CONFIG_MALLOC */
+        sq_configured = 1;
+    }
     if (!sq_configured) {
         /* SQLite's memory: one fixed pool for the process, given before anything opens */
         u64 n = (pool_mb ? pool_mb : 64) << 20;

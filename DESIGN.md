@@ -315,9 +315,10 @@ outside its request struct reaches `save_line`, which stops the request; so does
 operation. Such a request runs again, alone, on the primary: nothing of the first run stays (a Rails app's `last_active_at`
 refresh once an hour is such a GET). A write the runtime missed would fault on the read-only mapping rather than land. A program
 with unlogged state (whose writes skip the undo log, and so `save_line`), or with memory-pressure marks (state not committed
-whole at start), has no readers: asked for with `--workers`, the server refuses to start, saying why. With readers, SQLite takes
-its memory from the system's allocator (one pool's lock, taken for every allocation, held readers back), each connection's page
-cache keeping its bound; `--db-memory` then does not apply.
+whole at start), has no readers: asked for with `--workers`, the server refuses to start, saying why. With readers, SQLite's memory is
+a pool of `--db-memory` MB for each connection (the primary's and each reader's) rather than one for the process: one pool's lock,
+taken for every allocation, held readers back, and a connection touches only its own memory, so each pool needs no lock. A request
+whose connection runs out of its pool fails ("database: out of memory"), and the next one runs as before.
 
 ## The answer cache
 Pieces of answers kept between requests (`--cache-mb N`, default 64, 0 none), shared by every instance (readers fill it too), outside

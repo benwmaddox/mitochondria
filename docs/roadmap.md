@@ -257,3 +257,45 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 - **Persistence across restarts** (so `serve --watch` keeps state): a design question for the language as a whole, not only tooling.
   Options drafted in [persistence.md](persistence.md) (snapshots, request log, change log, mapped file, migration by name), with a
   recommendation: layout-described snapshots with migration first, then a change log for durability.
+
+## Phase 6: from the Campfire port (review of 2026-11-06)
+
+A 2,300-line Campfire app (Rails' behaviour, on Rails' database) showed the memory model paying off (49 MB under load, reads in
+parallel with no app changes, 0.07-0.14 ms a sidebar) and where it costs the developer. Worked through in this order.
+
+### 6.1 Request scratch zeroed only where an endpoint can touch it
+- The request struct is zeroed before every request, whole: sized for the worst endpoint, it cost every endpoint (600 KB, 11% of a
+  page's CPU). Each endpoint zeroes only the request fields its code (with every function it calls) reads or writes.
+- Done when: an endpoint that never names a field does not zero it (measured), and every case still passes.
+
+### 6.2 Functions that return text
+- Built text has only fields to live in, so helpers write `work.*` out-fields (`avatar_path(u)` leaving `work.avatar`), fields get
+  reused for unrelated things and helpers alias each other. A function may return text (`-> text`): the result lives in the
+  request's text area, as a window the caller uses or stores like any other text.
+- Done when: the app's out-field helpers are functions that return their text.
+
+### 6.3 Narrowing that follows the code
+- `exists(x)` narrows across `&&` (`if exists(r) && r.n > 0`), after an early exit (`if !exists(x) { return ...; }` /
+  `{ break; }` / `{ continue; }` / `fail`), and `or(text, "")` is text; a nullable field compared after `exists` is a comparison.
+- Done when: those forms check, and the app's nested `if`s written around them are gone.
+
+### 6.4 Ordered table loops compiled to SQL
+- `foreach m in t by lower(f) where ...` (and `by f` on any column, `reverse`) orders in SQLite; across a reference
+  (`by lower(m.room.name)`) the query joins. No sorting by hand.
+- Done when: the sidebar's insertion sorts are loops ordered by SQL, the pages unchanged.
+
+### 6.5 A string library
+- Unicode case (`lower`, `upper`: Unicode's simple mappings, as Ruby's downcase), `replace(t, a, b)`, `split` as a loop
+  (`foreach part in split(t, ", ")`), `trim` variants; request-scoped text lists where a list of texts is needed.
+- Done when: the user-agent port uses them (no byte loops for case or splitting), its 385 vectors still pass.
+
+### 6.6 SQLite's memory bounded with readers
+- With readers SQLite takes memory from the system allocator (the fixed pool's lock serialized them). Each connection gets its own
+  bounded pool instead, so `--db-memory` bounds SQLite again without a shared lock.
+- Done when: readers run on per-connection pools at the speed of the system allocator, and a connection that fills its pool fails
+  its request clearly.
+
+### 6.7 Apps in several files, and a cost report per endpoint
+- `use "rooms.mito";` brings another file's structs and functions into the program (one program, one state).
+- `mito check --costs` lists per endpoint: request bytes zeroed, table queries in its code (and in loops), text copies.
+- Done when: the Campfire app is split by feature, and the report shows the sidebar's numbers.

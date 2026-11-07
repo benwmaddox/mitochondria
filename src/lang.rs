@@ -664,7 +664,16 @@ impl P {
             e => Expr::Bin("+".into(), Box::new(e), Box::new(Expr::Int(1))),
         }) } else { None };
         let from = if self.is_kw("from") { self.i += 1; Some(self.expr()?) } else { None };
-        let by = if self.is_kw("by") { self.i += 1; Some(self.id()?) } else { None };
+        // `by f`, `by lower(f)` (ASCII letters lowered, as SQLite's LOWER), `by f.g` across a reference (and `by lower(f.g)`)
+        let by = if self.is_kw("by") {
+            self.i += 1;
+            let lower = matches!(self.peek(), Some(Tok::Id(n)) if n == "lower") && matches!(self.t.get(self.i + 1), Some(Tok::Sym(s)) if s == "(");
+            if lower { self.i += 2; }
+            let mut path = self.id()?;
+            while self.sym(".") { path = format!("{}.{}", path, self.id()?); }
+            if lower { self.eat(")")?; path = format!("lower({})", path); }
+            Some(path)
+        } else { None };
         let after = if self.is_kw("after") { self.i += 1; Some(self.expr()?) } else { None };
         let reverse = if self.is_kw("reverse") { self.i += 1; true } else { false };
         let whil = if self.is_kw("while") { self.i += 1; Some(self.expr()?) } else { None };

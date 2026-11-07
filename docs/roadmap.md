@@ -293,6 +293,11 @@ parallel with no app changes, 0.07-0.14 ms a sidebar) and where it costs the dev
 - `foreach m in t by lower(f) where ...` (and `by f` on any column, `reverse`) orders in SQLite; across a reference
   (`by lower(m.room.name)`) the query joins. No sorting by hand.
 - Done when: the sidebar's insertion sorts are loops ordered by SQL, the pages unchanged.
+- Done (2026-11-06): `by lower(f)`, `by f.g` across a reference (a correlated subquery: the loop's own columns stay unqualified) and
+  `by lower(f.g)`, with `reverse`; an expression order sorts the rows the `where` found (an index must lead it, or `scan`); `by f`
+  takes `scan` too; `after` and `last` refuse expression orders, saying so. `tests/cases/ordered_loops.case`. The sidebar's three
+  sorts are loops ordered in SQL written as they go (its 64 KB name buffer and two 32 KB lists gone): the pages unchanged for three
+  users; cached 68,150 req/s (was 59,915, less to zero), uncached 27,791 (was 29,334: SQL sorts through a subquery per row).
 
 ### 6.5 A string library
 - Unicode case (`lower`, `upper`: Unicode's simple mappings, as Ruby's downcase), `replace(t, a, b)`, `split` as a loop

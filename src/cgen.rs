@@ -3197,6 +3197,28 @@ impl<'p> G<'p> {
             e => match col(e) { Some(f) => { conds.push(format!("{} != 0", self.csql(t, &f))); cols.push(f); true } None => false },
         }
     }
+    /// A loop's order in SQL: `f` (one of the row's fields: also returned), `lower(f)` (SQLite's LOWER: ASCII letters), `f.g` across a
+    /// reference (the referenced row's field, through a subquery, NULL when the reference is), `lower(f.g)`.
+    fn order_sql(&self, t: usize, by: &str) -> R<(String, Option<String>)> {
+        let (lower, path) = match by.strip_prefix("lower(").and_then(|x| x.strip_suffix(')')) { Some(p) => (true, p), None => (false, by) };
+        let tb = &self.prog.tables[t];
+        let plain = |tbl: &crate::layout::Table, f: &str| tbl.cols.iter().any(|c| c.path == f && !matches!(c.kind, crate::layout::TKind::Blob(..)));
+        let wrap = |c: String| if lower { format!("LOWER({})", c) } else { c };
+        match path.split_once('.') {
+            None => {
+                if path != "id" && !plain(tb, path) { return no(format!("`by {}`: not a field of a row of {}", by, tb.name)); }
+                Ok((wrap(self.csql(t, path)), if lower { None } else { Some(path.to_string()) }))
+            }
+            Some((f, g)) => {
+                let Some(col) = tb.cols.iter().find(|c| c.path == f) else { return no(format!("`by {}`: `{}` is not a field of a row of {}", by, f, tb.name)) };
+                let crate::layout::TKind::Ref(target) = col.kind else { return no(format!("`by {}`: `{}` is not a reference to another table's row", by, f)) };
+                let tt = &self.prog.tables[target];
+                if g.contains('.') || !plain(tt, g) { return no(format!("`by {}`: `{}` is not a field of a row of {}", by, g, tt.name)); }
+                let inner = wrap(format!("o.{}", self.csql(target, g)));
+                Ok((format!("(SELECT {} FROM {} AS o WHERE o.id = {}.{})", inner, tt.sql, tb.sql, self.csql(t, f)), None))
+            }
+        }
+    }
     /// `foreach r in table [where ...] [reverse] [limit n]`: one query (written here, prepared once) whose cursor gives the rows' ids
     /// and columns; a field of the loop's row is read from the cursor. A `where` that is comparisons with values goes into the query;
     /// over a whole top-level table it must be, on indexed fields (a scan of every row is refused). Over one owner's rows anything goes:
@@ -3238,6 +3260,7 @@ impl<'p> G<'p> {
             let n = nested as usize + wvals.len() + 1; // after the owner's and the `where`'s values
             let op = if it.reverse { "<" } else { ">" };
             conds.push(match &it.by {
+                Some(f) if f.contains('(') || f.contains('.') => return no(format!("`after` with `by {}`: only an order by one of the row's own fields is compiled", f)),
                 Some(f) => format!("(?{n} IS NULL OR ({}, id) {op} ((SELECT {} FROM {} WHERE id = ?{n}), ?{n}))", self.csql(t, f), self.csql(t, f), tb.sql),
                 None => format!("(?{n} IS NULL OR id {op} ?{n})"),
             });
@@ -3250,15 +3273,22 @@ impl<'p> G<'p> {
         if it.last && (sql_limit.is_none() || in_c.is_some()) { return no("`last n` takes a constant count, with the whole `where` compiled to SQL (comparisons of the row's fields with values)"); }
         // order: insertion (row ids), or `by` a field: one an index starts with, or any field when an index leads the `where` (SQLite
         // sorts the rows it found, as Rails' `where(room: r).order(:created_at)` does); ties in insertion order
-        let led = !nested && wcols.iter().any(|f| tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)));
+        let led = !nested && wcols.iter().any(|f| f == "id" || tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)));
         let rev = it.reverse != it.last;
         let order = match &it.by {
             Some(f) => {
-                if !tb.cols.iter().any(|c| c.path == *f && !matches!(c.kind, crate::layout::TKind::Blob(..))) { return no(format!("`by {}`: not a field of a row of {}", f, tb.name)); }
-                if !tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)) && !led && !nested {
-                    return no(format!("`by {}` walks an index, and {} has none on `{}`: declare one (`{}: table<{}> index({})`), or narrow the loop with a `where` an index leads", f, tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
+                let (c, own) = self.order_sql(t, f)?;
+                match &own {
+                    // a field of the row: walked by an index that starts with it, or sorted when an index leads the `where`
+                    Some(f) => if !tb.index.iter().chain(tb.unique.iter()).any(|ix| ix.first() == Some(f)) && !led && !nested && !it.scan {
+                        return no(format!("`by {}` walks an index, and {} has none on `{}`: declare one (`{}: table<{}> index({})`), narrow the loop with a `where` an index leads, or accept sorting every row (`scan`)", f, tb.name, f, tb.name.rsplit('.').next().unwrap_or(""), self.prog.structs[tb.item].name, f));
+                    },
+                    // an expression (`lower(f)`, a field across a reference): SQLite sorts the rows the `where` found
+                    None => {
+                        if !led && !nested && !it.scan { return no(format!("`by {}` sorts the rows found: narrow the loop with a `where` an index leads, or accept sorting every row (`scan`)", f)); }
+                        if it.last { return no(format!("`last n` with `by {}`: only an order by one of the row's own fields is compiled", f)); }
+                    }
                 }
-                let c = self.csql(t, f);
                 (format!("{c}{d}, id{d}", d = if rev { " DESC" } else { "" }), format!("{c}{d}, id{d}", d = if it.reverse { " DESC" } else { "" }))
             }
             None => ((if rev { "id DESC" } else { "id" }).to_string(), (if it.reverse { "id DESC" } else { "id" }).to_string()),

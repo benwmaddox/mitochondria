@@ -1,0 +1,33 @@
+// table loops ordered in SQL: `by lower(f)` (SQLite's LOWER: ASCII letters), `by f.g` across a reference and `by lower(f.g)` (the
+// referenced row's field, NULL first as SQLite orders it), `reverse`; equal keys in row order
+--- program
+struct Room { name: utf8<16>?; at: i64; }
+struct Member { room: Room?; user: i64; }
+struct App { rooms: table<Room>; members: table<Member> index(user); }
+state app: App;
+
+@post("/rooms") fn room(name: utf8<16>?, at: i64) -> Response<{ id: i64 }> { let r = app.rooms.add { name: name, at: at }; return created({ id: r.id }); }
+@post("/members/{room}/{user}") fn member(room: i64, user: i64) -> Response<{ id: i64 }> {
+    let r = first r in app.rooms where r.id == room;
+    let m = app.members.add { user: user };
+    if exists(r) { m.room = r; }
+    return created({ id: m.id });
+}
+@get("/rooms/by-name") fn by_name() -> Response<{ ids: [i64] }> { return ok({ ids: [foreach r in app.rooms by lower(name) where r.id > 0 r.id] }); }
+@get("/members/{user}/by-room-name") fn by_room(user: i64) -> Response<{ ids: [i64] }> { return ok({ ids: [foreach m in app.members by lower(room.name) where m.user == user m.id] }); }
+@get("/members/{user}/newest-room") fn newest(user: i64) -> Response<{ ids: [i64] }> { return ok({ ids: [foreach m in app.members by room.at reverse where m.user == user m.id] }); }
+--- requests
+POST /rooms {"name": "beta", "at": 3}
+POST /rooms {"name": "Alpha", "at": 1}
+POST /rooms {"at": 2}
+POST /rooms {"name": "alpha", "at": 1}
+POST /members/1/7 {}
+POST /members/2/7 {}
+POST /members/3/7 {}
+POST /members/4/7 {}
+POST /members/9/7 {}
+POST /members/1/8 {}
+GET /rooms/by-name
+GET /members/7/by-room-name
+GET /members/7/newest-room
+GET /members/8/by-room-name

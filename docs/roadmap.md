@@ -373,3 +373,22 @@ Phase 6 is done (2026-11-06).
 - Text-bearing structs in locals: not started. No Campfire code wants one yet (the session's fields cross most endpoints and their
   markup, which the request struct serves); the likely design is a compile-time bundle (scalar fields as C locals, text fields as
   capped region text), with no layout or runtime change.
+
+## Phase 8: HTML fragments (decided 2026-11-07)
+
+From the Campfire port: Rails renders a message body through Action Text, which parses it as HTML5 (Nokogiri::HTML5, Rails 8.2's
+default sanitizer vendor), walks and edits the tree (its attachments, the app's filters, Loofah's safe list) and writes it back as
+Nokogiri does; `auto_link` then works on that text. Ben chose (2026-11-07) a parser in the runtime with a node API in the language,
+so the app writes that pipeline in Mitochondria, over the other options (an app's C extension, a sanitizer builtin, deferring).
+
+- The parser: Nokogiri's fork of gumbo at the version the reference runs (1.19.4, Apache 2.0, with its LICENSE and NOTICE beside it
+  as zlib's and crypt_blowfish's), bundled in the runtime: the same parse Rails gets, not a lookalike.
+- Nodes in a pool of each instance (as the text area: never shared state, so readers parse at once), given back with the request;
+  a fixed cap that fails the request clearly when a document would need more (no silent cut).
+- The operations: those the Rust port's `richtext` crate shows to be enough (`crates/richtext/src/dom.rs`): parse a fragment (and in
+  a node's context), children, parent, name, the attributes (read, set, remove, list), text, append, insert before, detach, replace
+  with nodes or parsed markup, clone, serialize as Nokogiri does (into the answer; as text only with a declared cap).
+- Checked against Rails' output: the Rust port's Rails-generated rich text cases first, then the parity states.
+- Order: the message frame without rich text (the app); the parser with fragment parsing and serializing (round trips); the node
+  operations; the sanitizer layers; attachments; `auto_link` (a hand matcher, as the Rust port's: the language has no regular
+  expressions, and adding them would be a decision of its own).

@@ -1,3 +1,3 @@
-// expect: text compared is text that lives somewhere: build it in a field first
+// expect: text compared is text that lives somewhere: build it in a `let` first
 struct App { code: ascii<16>; } state app: App;
 @get("/a/{n}") fn a(n: i64) -> Response<{ same: bool }> { return ok({ same: app.code == "x" + n }); }

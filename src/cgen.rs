@@ -3735,7 +3735,7 @@ impl<'p> G<'p> {
         let compared = matches!(op, "<" | "<=" | ">" | ">=" | "==" | "!=") && lk == "string" && rk == "string";
         // text compared is text that lives somewhere: built on the spot it would be a temporary copy (tests may: they report)
         if compared && !self.test && [a, b].iter().any(|e| matches!(e, Expr::Bin(o, ..) if o == "+")) {
-            return no("text compared is text that lives somewhere: build it in a field first (`work.key = ...`), then compare the field");
+            return no("text compared is text that lives somewhere: build it in a `let` first (`let key = a + b;`), then compare that");
         }
         if !joined && !compared && lk != "?" && rk != "?" {
             // a null here comes from a copy of a function made for a null argument, in a branch that cannot run with it

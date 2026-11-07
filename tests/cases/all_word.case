@@ -1,0 +1,23 @@
+// all_word(t): every character \p{Word} (letters, marks, numbers, connector punctuation, as Ruby 3.4's regexp reads them), and at
+// least one: ASCII letters and _, an accented letter, a Greek letter, an Arabic-Indic digit, a combining mark after a letter, a
+// slash, a space, nothing, an emoji; chr(cp): a code point as UTF-8
+--- program
+struct App { n: i64; }
+state app: App;
+@post("/w")
+fn w(t: utf8<64>) -> Response<{ all: bool }> { return ok({ all: all_word(t) }); }
+@get("/chr")
+fn c() -> Response<{ a: string; e_acute: string; euro: string; party: string; bytes: i64 }> {
+    return ok({ a: chr(97), e_acute: chr(233), euro: chr(8364), party: chr(127881), bytes: len(chr(127881)) });
+}
+--- requests
+POST /w {"t": "abc_XYZ09"}
+POST /w {"t": "é"}
+POST /w {"t": "λ"}
+POST /w {"t": "٣"}
+POST /w {"t": "é"}
+POST /w {"t": "/"}
+POST /w {"t": "a b"}
+POST /w {"t": ""}
+POST /w {"t": "👍"}
+GET /chr

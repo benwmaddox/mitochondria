@@ -59,6 +59,8 @@ typedef struct { sqlite3 *db; sqlite3_stmt *begin, *commit, *rollback; int open;
     u8 noadd[SQ_TABLES]; char noadd_msg[SQ_TABLES][200]; /* another program's table the program cannot add rows to, and why */ } Store;
 
 static const char *const sq_types[] = { "INTEGER", "REAL", "TEXT", "BLOB" };
+/* a column type's SQL name: a time (4) is stored as TEXT, Rails' format */
+static const char *sq_type_name(u32 t) { return t == 4 ? "TEXT" : t < 4 ? sq_types[t] : "?"; }
 static const char *const sq_defaults[] = { "0", "0.0", "''", "x''" };
 
 /* a bounded text builder for SQL and messages */
@@ -251,9 +253,9 @@ static int store_open(Store *st, const StoreTable *tabs, u32 ntabs, const char *
             u32 k = 0; while (k < tb->ncols && !sq_streq(tb->cols[k].name, cn)) k++;
             if (k == tb->ncols) { if (ndrop < 32) { SqBuf d = { drop[ndrop], 128, 0 }; sb_s(&d, cn); ndrop++; } continue; }
             if (k < 256) seen[k] = 1;
-            if (!sq_streq(ct, sq_types[tb->cols[k].type])) {
+            if (!sq_streq(ct, sq_type_name(tb->cols[k].type))) {
                 SqBuf m = { msg, sizeof msg, 0 }; sb_s(&m, "column "); sb_s(&m, tb->sql); sb_s(&m, "."); sb_s(&m, cn); sb_s(&m, " is "); sb_s(&m, ct); sb_s(&m, " in the database, ");
-                sb_s(&m, sq_types[tb->cols[k].type]); sb_s(&m, " in the program");
+                sb_s(&m, sq_type_name(tb->cols[k].type)); sb_s(&m, " in the program");
                 if (!dropmis) { sqlite3_finalize(ti); return st_fail(st, "the database does not fit the program (--db-fit drop drops what does not fit)", msg); }
                 /* dropping: the column goes and comes back with its new type, every row with its first value */
                 st_dropped(msg);

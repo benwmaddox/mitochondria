@@ -1,0 +1,3 @@
+GET /e -> 200 {"len":15,"cr":13,"nul":0,"quote":34,"back":92,"apos":39,"e_acute":"café","party":"🎉","cr_gone":"xy"}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

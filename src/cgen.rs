@@ -233,7 +233,7 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 98] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 100] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
     B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
@@ -256,7 +256,9 @@ pub const BUILTINS: [B; 98] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B
     // text: every a as b (68); white space off the start or the end (69, 70); every character an emoji (71)
     B::Replace, B::TrimStart, B::TrimEnd, B::AllEmoji,
     // HTML fragments (runtime/html.c, gumbo linked in): 72 to 97
-    B::HtmlParse, B::HtmlParseIn, B::NodeKind, B::NodeName, B::NodeParent, B::NodeFirst, B::NodeLast, B::NodeNext, B::NodePrev, B::NodeContent, B::NodeAttr, B::NodeAttrCount, B::NodeAttrName, B::NodeAttrValue, B::NodeSetAttr, B::NodeRemoveAttr, B::NodeNewElement, B::NodeNewText, B::NodeAppend, B::NodeInsertBefore, B::NodeDetach, B::NodeClone, B::NodeHtml, B::NodeInnerHtml, B::NodeSetText, B::NodeHtmlEscaped];
+    B::HtmlParse, B::HtmlParseIn, B::NodeKind, B::NodeName, B::NodeParent, B::NodeFirst, B::NodeLast, B::NodeNext, B::NodePrev, B::NodeContent, B::NodeAttr, B::NodeAttrCount, B::NodeAttrName, B::NodeAttrValue, B::NodeSetAttr, B::NodeRemoveAttr, B::NodeNewElement, B::NodeNewText, B::NodeAppend, B::NodeInsertBefore, B::NodeDetach, B::NodeClone, B::NodeHtml, B::NodeInnerHtml, B::NodeSetText, B::NodeHtmlEscaped,
+    // a code point as UTF-8: 98; every character a word character: 99
+    B::Chr, B::AllWord];
 /// The built-ins of HTML fragments: a program using one gets runtime/html.c and gumbo (program_c_full, build.rs).
 const HTML_BUILTINS: [B; 26] = [B::HtmlParse, B::HtmlParseIn, B::NodeKind, B::NodeName, B::NodeParent, B::NodeFirst, B::NodeLast, B::NodeNext, B::NodePrev, B::NodeContent, B::NodeAttr, B::NodeAttrCount, B::NodeAttrName, B::NodeAttrValue, B::NodeSetAttr, B::NodeRemoveAttr, B::NodeNewElement, B::NodeNewText, B::NodeAppend, B::NodeInsertBefore, B::NodeDetach, B::NodeClone, B::NodeHtml, B::NodeInnerHtml, B::NodeSetText, B::NodeHtmlEscaped];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
@@ -453,7 +455,9 @@ enum CV {
 /// `func`: the return of a generated C function, which writes its result through `ret_v` (and `ret_s`) and returns 0.
 /// `sel`: a mark taken on entry when the function has loops, so items a loop collected are dropped however it returns.
 /// `bound`: the most bytes of text a return so far gave (None: none yet, or one not known: `unbounded`)
-struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Option<String>, bound: Option<usize>, unbounded: bool }
+/// `mark`: the text area's length when the function began, which a `return` of a value that is not text cuts back to (placeholders
+/// `/*RCUT mark*/` until the body is compiled: kept as cuts when the body built region text, dropped otherwise)
+struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Option<String>, bound: Option<usize>, unbounded: bool, mark: String }
 
 /// How an argument is passed to a generated C function: a value of a kind, or an instance of a collection.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -610,6 +614,9 @@ struct G<'p> {
     txt_bounds: std::collections::HashMap<String, usize>,
     /// each `let` of text built here (in its scope's region): its most bytes, when known; `built_lets` counts them as compiled
     region_lets: Vec<Option<usize>>,
+    /// the statement being compiled declared region text of its own (a `let` of built text, a capped `var`), not only text that
+    /// calls inlined into it held in their own scopes
+    own_region: bool,
     /// bytes of region text live now (lets and capped vars of the scopes open here), the most at once, and how many are unbounded (an
     /// unbounded part, or a region kept across a loop's iterations)
     region_live: usize,
@@ -1360,7 +1367,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { rq_touched: Vec::new(), uses_spec: false, narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
+        G { rq_touched: Vec::new(), uses_spec: false, narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), own_region: false, region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1573,7 +1580,7 @@ impl<'p> G<'p> {
             g.inlining.push(k);
             let sel = if has_collecting_loop(self.api, &f.body) { Some("hm".to_string()) } else { None };
             if sel.is_some() { g.line("u32 hm;"); g.call("c->h->sel_mark(c, &hm)"); }
-            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone(), bound: None, unbounded: true });
+            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone(), bound: None, unbounded: true, mark: "rmark".into() });
             let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
             for (i, pk) in pks.iter().enumerate() {
                 fenv[i] = Some(match pk {
@@ -1595,7 +1602,12 @@ impl<'p> G<'p> {
             let ends_by_itself = matches!(f.body.last(), Some(Stmt::Return(_)) | Some(Stmt::Fail(..)) | Some(Stmt::Respond(..)) | Some(Stmt::Forward { .. }));
             match (r, g.widen) {
                 (Ok(()), _) if !ends_by_itself && !fits(K::Null, cand) => return Err(SpecErr::Other(format!("`{}` can end without returning its `{}`: return a value on every path", f.name, f.ret.as_ref().map_or(String::new(), |t| t.to_string())))),
-                (Ok(()), _) => return check_profile(&g.body).map(|_| g.body).map_err(|e| SpecErr::Other(format!("C safety profile: {}", e))),
+                // the function's parameters (p0, p1, ...: in its prototype, not its body) are its locals too
+                (Ok(()), _) => {
+                    let body = resolve_return_cuts(&g.body, "rmark");
+                    let ps: Vec<String> = (0..f.params.len()).map(|i| format!("p{}", i)).collect();
+                    return check_profile_in(&body, &ps).map(|_| body).map_err(|e| SpecErr::Other(format!("C safety profile: {}", e)))
+                }
                 (Err(_), Some(Widen::Ret(f2, u))) if f2 == k => return Err(SpecErr::Conflict(u)),
                 (Err(_), Some(Widen::Slot(fr, sl, kk))) => match slot_kinds.iter_mut().find(|x| x.0 == (fr, sl)) { Some(x) => x.1 = unify(x.1, kk), None => slot_kinds.push(((fr, sl), kk)) },
                 (Err(_), Some(Widen::Ret(f2, kk))) => match ret_kinds.iter_mut().find(|x| x.0 == f2) { Some(x) => x.1 = unify(x.1, kk), None => ret_kinds.push((f2, kk)) },
@@ -2015,7 +2027,10 @@ impl<'p> G<'p> {
                 let head = std::mem::replace(&mut self.body, kept);
                 self.body.insert_str(start, &head);
                 self.call(&format!("c->h->text_cut(c, {})", mark));
-                if !returns { self.region_live = live0; }
+                // what a `return` leaves in the region outlives the scope only when the function returns text (or a value of a kind
+                // known at run time); a number, a bool or an item leaves nothing behind
+                let texty = self.ret.last().map_or(true, |r| matches!(r.kind, None | Some(K::Txt) | Some(K::Any)));
+                if !returns || !texty { self.region_live = live0; }
             } else if !self.loops.is_empty() {
                 // kept past its scope inside a loop: it may add up over the iterations
                 let at = self.here(); self.region_unbounded.push(format!("{} (kept across a loop's rounds)", at));
@@ -2081,9 +2096,10 @@ impl<'p> G<'p> {
                     }
                 }
             }
-            let lets = self.region_lets.len();
+            self.own_region = false;
             self.stmt(s, env)?;
-            if matches!(s, Stmt::Let(..) | Stmt::Var(..)) && self.region_lets.len() > lets && live_from.is_none() { *live_from = Some(self.body.len()); }
+            if matches!(s, Stmt::Let(..) | Stmt::Var(..)) && self.own_region && live_from.is_none() { *live_from = Some(self.body.len()); }
+            self.own_region = false;
             // `if !exists(x) { ... }` (or `if x == null`) whose branch always leaves (return, fail, break, continue), or `if exists(x)
             // { ... } else { ... }` whose else always leaves: x is a plain item for the rest of this block; the same for a field `m.f`
             if let Stmt::If(c, t, e) = s {
@@ -2156,6 +2172,7 @@ impl<'p> G<'p> {
                 self.txt_bounds.insert(t.clone(), cap);
                 self.region_add(Some(cap), n)?;
                 self.txt_write(&t, cap, true, &[init], env)?;
+                self.own_region = true;
                 let place = match self.inlining.last() { Some(k) => format!("fn {}", self.api.fns[*k as usize].name), None => self.ep.text.clone() };
                 KINDS.with(|k| k.borrow_mut().push((place, self.at.0, format!("var {}", n), format!("text (its own, up to {} bytes)", cap))));
                 env[*slot as usize] = Some(CV::Txt(t));
@@ -2178,7 +2195,7 @@ impl<'p> G<'p> {
                     // (text a function returns lives in the request's text area, as a builtin's does: a window onto it)
                     // text built here (`let k = a + ":" + b`): it lives in its scope's region (block() releases it at the scope's end)
                     let built = match e { Expr::Bin(op, ..) => op == "+", Expr::Call(f, _, _) => f == "str", _ => false };
-                    if built { let b = self.txt_bound(&v); self.region_add(b, &n)?; }
+                    if built { let b = self.txt_bound(&v); self.region_add(b, &n)?; self.own_region = true; }
                 }
                 let v = match self.slot_kind(*slot) { Some(k) => self.coerce(v, k, mutable)?, None => self.hold(v, mutable)? };
                 {
@@ -2701,6 +2718,7 @@ impl<'p> G<'p> {
                 _ => return no("a function returning this kind of value is not compiled yet"),
             }
             if let Some(h) = self.ret.last().unwrap().sel.clone() { self.call(&format!("c->h->sel_end(c, {})", h)); }
+            if !matches!(k, K::Txt | K::Any) { let m = self.ret.last().unwrap().mark.clone(); self.line(&format!("/*RCUT {}*/", m)); }
             self.line("return 0;");
             return Ok(());
         }
@@ -2712,6 +2730,7 @@ impl<'p> G<'p> {
             _ => return no("a function returning this kind of value is not compiled yet"),
         };
         if !assign.is_empty() { self.line(&assign); }
+        if !matches!(k, K::Txt | K::Any) { let m = self.ret.last().unwrap().mark.clone(); self.line(&format!("/*RCUT {}*/", m)); }
         self.line(&format!("goto {};", label));
         Ok(())
     }
@@ -3136,6 +3155,7 @@ impl<'p> G<'p> {
             B::JsonQuote => n(0).map(|x| 6 * x + 2),
             // a character's other case takes at most three times its bytes
             B::Lower | B::Upper => n(0).map(|x| 3 * x),
+            B::Chr => Some(4),
             B::RandomText => int(0).zip(n(1)).map(|(k, _)| 4 * k),
             B::Replace => match (n(0), n(1), n(2)) { (Some(x), Some(_), Some(z)) => match a.get(1) { Some(CV::Lit(s)) if !s.is_empty() => Some(x + x / s.len() * z), _ => None }, _ => None },
             _ => None,
@@ -4023,7 +4043,7 @@ impl<'p> G<'p> {
         };
         // arity of the byte and crypto built-ins, checked when compiling
         let want = match bi {
-            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml | B::JsonQuote | B::JsonUnquote | B::Crc32 | B::ReadStored | B::Lower | B::Upper | B::CacheGet | B::CachePut | B::CachePart | B::CacheLabel | B::TrimStart | B::TrimEnd | B::AllEmoji | B::HtmlParse | B::NodeKind | B::NodeName | B::NodeParent | B::NodeFirst | B::NodeLast | B::NodeNext | B::NodePrev | B::NodeContent | B::NodeAttrCount | B::NodeNewElement | B::NodeNewText | B::NodeDetach | B::NodeClone | B::NodeHtml | B::NodeInnerHtml | B::NodeHtmlEscaped => Some((1, "one argument")),
+            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml | B::JsonQuote | B::JsonUnquote | B::Crc32 | B::ReadStored | B::Lower | B::Upper | B::CacheGet | B::CachePut | B::CachePart | B::CacheLabel | B::TrimStart | B::TrimEnd | B::AllEmoji | B::HtmlParse | B::NodeKind | B::NodeName | B::NodeParent | B::NodeFirst | B::NodeLast | B::NodeNext | B::NodePrev | B::NodeContent | B::NodeAttrCount | B::NodeNewElement | B::NodeNewText | B::NodeDetach | B::NodeClone | B::NodeHtml | B::NodeInnerHtml | B::NodeHtmlEscaped | B::Chr | B::AllWord => Some((1, "one argument")),
             B::HtmlParseIn | B::NodeAttr | B::NodeAttrName | B::NodeAttrValue | B::NodeRemoveAttr | B::NodeAppend | B::NodeInsertBefore | B::NodeSetText => Some((2, "two arguments")),
             B::NodeSetAttr => Some((3, "a node, a name and a value")),
             B::RequestTarget | B::CacheStart | B::DataVersion => Some((0, "no arguments")),
@@ -4039,7 +4059,7 @@ impl<'p> G<'p> {
         if let Some((k, what)) = want {
             if a.len() != k {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
-                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::JsonQuote => "json_quote", B::JsonUnquote => "json_unquote", B::RequestTarget => "request_target", B::Crc32 => "crc32", B::ByteAt => "byte_at", B::Lower => "lower", B::Upper => "upper", B::CacheGet => "cache_get", B::CachePut => "cache_put", B::CacheStart => "cache_start", B::CacheHole => "cache_hole", B::CachePart => "cache_part", B::CacheLabel => "cache_label", B::DataVersion => "data_version", B::Replace => "replace", B::TrimStart => "trim_start", B::TrimEnd => "trim_end", B::AllEmoji => "all_emoji", B::HtmlParse => "html_parse", B::HtmlParseIn => "html_parse_in", B::NodeKind => "node_kind", B::NodeName => "node_name", B::NodeParent => "node_parent", B::NodeFirst => "node_first", B::NodeLast => "node_last", B::NodeNext => "node_next", B::NodePrev => "node_prev", B::NodeContent => "node_content", B::NodeAttr => "node_attr", B::NodeAttrCount => "node_attr_count", B::NodeAttrName => "node_attr_name", B::NodeAttrValue => "node_attr_value", B::NodeSetAttr => "node_set_attr", B::NodeRemoveAttr => "node_remove_attr", B::NodeNewElement => "node_new_element", B::NodeNewText => "node_new_text", B::NodeAppend => "node_append", B::NodeInsertBefore => "node_insert_before", B::NodeDetach => "node_detach", B::NodeClone => "node_clone", B::NodeHtml => "node_html", B::NodeInnerHtml => "node_inner_html", B::NodeSetText => "node_set_text", B::NodeHtmlEscaped => "node_html_escaped", B::ReadStored => "read_stored", B::SocketSend => "socket_send", B::SocketClose => "socket_close", B::SocketSubscribe => "socket_subscribe", B::SocketUnsubscribe => "socket_unsubscribe", B::Broadcast => "broadcast", B::SocketSendAll => "socket_send_all", B::SocketTag => "socket_tag", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
+                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::JsonQuote => "json_quote", B::JsonUnquote => "json_unquote", B::RequestTarget => "request_target", B::Crc32 => "crc32", B::ByteAt => "byte_at", B::Lower => "lower", B::Upper => "upper", B::CacheGet => "cache_get", B::CachePut => "cache_put", B::CacheStart => "cache_start", B::CacheHole => "cache_hole", B::CachePart => "cache_part", B::CacheLabel => "cache_label", B::DataVersion => "data_version", B::Replace => "replace", B::TrimStart => "trim_start", B::TrimEnd => "trim_end", B::AllEmoji => "all_emoji", B::HtmlParse => "html_parse", B::HtmlParseIn => "html_parse_in", B::NodeKind => "node_kind", B::NodeName => "node_name", B::NodeParent => "node_parent", B::NodeFirst => "node_first", B::NodeLast => "node_last", B::NodeNext => "node_next", B::NodePrev => "node_prev", B::NodeContent => "node_content", B::NodeAttr => "node_attr", B::NodeAttrCount => "node_attr_count", B::NodeAttrName => "node_attr_name", B::NodeAttrValue => "node_attr_value", B::NodeSetAttr => "node_set_attr", B::NodeRemoveAttr => "node_remove_attr", B::NodeNewElement => "node_new_element", B::NodeNewText => "node_new_text", B::NodeAppend => "node_append", B::NodeInsertBefore => "node_insert_before", B::NodeDetach => "node_detach", B::NodeClone => "node_clone", B::NodeHtml => "node_html", B::NodeInnerHtml => "node_inner_html", B::NodeSetText => "node_set_text", B::NodeHtmlEscaped => "node_html_escaped", B::Chr => "chr", B::AllWord => "all_word", B::ReadStored => "read_stored", B::SocketSend => "socket_send", B::SocketClose => "socket_close", B::SocketSubscribe => "socket_subscribe", B::SocketUnsubscribe => "socket_unsubscribe", B::Broadcast => "broadcast", B::SocketSendAll => "socket_send_all", B::SocketTag => "socket_tag", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
                     B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time", B::Contains => "contains", B::StartsWith => "starts_with", B::EndsWith => "ends_with",
                     B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));
@@ -4063,10 +4083,10 @@ impl<'p> G<'p> {
             return Ok(match bi {
                 B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot | B::AddYears | B::IndexOf | B::LastIndexOf | B::Crc32 | B::ByteAt | B::CacheGet | B::DataVersion
                     | B::HtmlParse | B::HtmlParseIn | B::NodeKind | B::NodeParent | B::NodeFirst | B::NodeLast | B::NodeNext | B::NodePrev | B::NodeAttrCount | B::NodeNewElement | B::NodeNewText | B::NodeClone => CV::Int(format!("{}.i", r)),
-                B::SecretEqual | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith | B::AllEmoji => CV::Bool(format!("({}.i != 0)", r)),
+                B::SecretEqual | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith | B::AllEmoji | B::AllWord => CV::Bool(format!("({}.i != 0)", r)),
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
                     | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText | B::JsonQuote | B::RequestTarget | B::Lower | B::Upper | B::CacheLabel | B::Replace | B::TrimStart | B::TrimEnd
-                    | B::NodeName | B::NodeContent | B::NodeAttrName | B::NodeAttrValue | B::NodeHtml | B::NodeInnerHtml | B::NodeHtmlEscaped => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
+                    | B::NodeName | B::NodeContent | B::NodeAttrName | B::NodeAttrValue | B::NodeHtml | B::NodeInnerHtml | B::NodeHtmlEscaped | B::Chr => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
                 B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env | B::JsonUnquote | B::ReadStored | B::NodeAttr => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
                 _ => CV::Any(r),
@@ -4274,7 +4294,8 @@ impl<'p> G<'p> {
         self.inlining.push(k);
         let forced = match &f.ret { Some(t) => Some(self.decl_kind(t, &f.name)?), None => self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1) };
         let sel = if has_collecting_loop(self.api, &f.body) { Some(self.tmp("hm")) } else { None };
-        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone(), bound: None, unbounded: false });
+        let rmark = self.tmp("rm");
+        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone(), bound: None, unbounded: false, mark: rmark.clone() });
         self.depth += 1;
         let frame = std::mem::replace(&mut self.frame, Some(k));
         let r = self.block(&f.body, fenv);
@@ -4284,6 +4305,7 @@ impl<'p> G<'p> {
         self.inlining.pop();
         let inner = std::mem::replace(&mut self.body, saved);
         r?;
+        let inner = resolve_return_cuts(&inner, &ret.mark);
         let ends_by_itself = matches!(f.body.last(), Some(Stmt::Return(_)) | Some(Stmt::Fail(..)) | Some(Stmt::Respond(..)) | Some(Stmt::Forward { .. }));
         let kind = ret.kind.unwrap_or(K::Null);
         if !ends_by_itself && kind != K::Null {
@@ -4691,7 +4713,9 @@ impl<'p> G<'p> {
 /// 4. Control flow: `if`, `for` with a bound (no `while`, `do`, empty-condition `for`, `switch`), `goto` only forward,
 ///    `return` only of a status (a number or `st`).
 /// 5. No preprocessor, no `static`/`extern` (no globals), no `sizeof`, `asm`, `volatile`, unions or casts to pointers.
-pub fn check_profile(body: &str) -> Result<(), String> {
+pub fn check_profile(body: &str) -> Result<(), String> { check_profile_in(body, &[]) }
+/// The same for a function's body whose parameters (declared in its prototype) are named in `params`.
+pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
@@ -4703,6 +4727,7 @@ pub fn check_profile(body: &str) -> Result<(), String> {
     let is_id = |s: &str| s.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_');
     let is_num = |s: &str| s.chars().next().map_or(false, |c| c.is_ascii_digit());
     let mut declared: Vec<&str> = vec!["st", "b", "c"];
+    declared.extend(params.iter().map(|p| p.as_str()));
     let mut owners: Vec<&str> = Vec::new(); // what each open parenthesis belongs to
     let mut labels_seen: Vec<&str> = Vec::new();
     let err = |i: usize, m: &str| Err(format!("{} (near `{}`)", m, t[i.saturating_sub(3)..(i + 3).min(t.len())].join(" ")));
@@ -5243,6 +5268,18 @@ fn str_pieces<'e>(target: &Expr, rhs: &'e Expr) -> Option<(bool, Vec<&'e Expr>)>
     Some((true, pieces))
 }
 
+/// A function body's return placeholders (`/*RCUT mark*/`): when the body built region text (it cuts the text area somewhere), a mark
+/// at its start and a cut back to it before each return of a value that is not text; otherwise nothing.
+fn resolve_return_cuts(body: &str, mark: &str) -> String {
+    let ph = format!("/*RCUT {}*/", mark);
+    if !body.contains(&ph) { return body.to_string(); }
+    if body.contains("->text_cut(") {
+        let cut = body.replace(&ph, &format!("CALL(c->h->text_cut(c, {}));", mark));
+        format!("u32 {}; CALL(c->h->text_len(c, &{}));\n{}", mark, mark, cut)
+    } else {
+        body.lines().filter(|l| l.trim() != ph).map(|l| format!("{}\n", l)).collect()
+    }
+}
 fn place_err(at: (u32, u32), e: String) -> String { if at.0 == 0 || crate::lang::starts_with_place(&e) { e } else { format!("{}:{}: {}", at.0, at.1, e) } }
 /// `"12:5: rest"` as (`"12:5: "`, `"rest"`).
 fn split_place(e: &str) -> Option<(&str, &str)> {

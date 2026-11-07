@@ -581,6 +581,12 @@ fn closed() -> Response<null> { a.opened -= 1; return no_content(); }
         let run = |exe: &std::path::Path| run_with(exe, &[]).0;
         assert!(run(&build("v1", "title: utf8<1000>; done: bool;")).starts_with("tables in"));
         assert!(run(&build("v2", "title: utf8<1000>; done: bool; due: i64;")).starts_with("tables in"));
+        // a time column (stored as TEXT) reopens as it was made: the same build twice
+        let timed = build("v2t", "title: utf8<1000>; done: bool; due: i64; seen: time?;");
+        assert!(run(&timed).starts_with("tables in"));
+        let again = run(&timed);
+        assert!(again.starts_with("tables in"), "{}", again);
+        assert!(run(&build("v2b", "title: utf8<1000>; done: bool; due: i64;")).starts_with("tables in")); // seen dropped
         // a row from outside: a title of 10 bytes
         let insert = format!("#define MITO_USES_SQLITE\n{}\n{}", super::SQLITE_H, r#"
 static unsigned char pool[4 << 20];

@@ -1,0 +1,12 @@
+// the escapes in a text: \n \t \r \0 \" \\ \' and \u{HEX}; their bytes' count and the code of a few
+--- program
+struct App { n: i64; }
+state app: App;
+@get("/e")
+fn e() -> Response<{ len: i64; cr: i64; nul: i64; quote: i64; back: i64; apos: i64; e_acute: string; party: string; cr_gone: string }> {
+    let t = "a\nb\tc\rd\0e\"f\\g\'h";
+    return ok({ len: len(t), cr: byte_at(t, 5), nul: byte_at(t, 7), quote: byte_at(t, 9), back: byte_at(t, 11), apos: byte_at(t, 13),
+        e_acute: "caf\u{e9}", party: "\u{1F389}", cr_gone: replace("x\ry", "\r", "") });
+}
+--- requests
+GET /e

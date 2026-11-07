@@ -1,0 +1,26 @@
+// a recursive function's text parameter passed on to builtins (its address taken in the generated C: a parameter is a local of the
+// function); a statement holding a number from a call whose inlined body held a capped var in its own scope, then a recursive call
+// (only text the statement itself holds counts against the recursion rule)
+--- program
+struct App { n: i64; }
+state app: App;
+fn trimmed_total(t: text, n: i64) -> i64 {
+    if n <= 0 { return 0; }
+    return len(trim(t)) + trimmed_total(t, n - 1);
+}
+fn padded_len(x: i64) -> i64 {
+    var s: text<64> = "[";
+    s += x;
+    s += "]";
+    return len(s);
+}
+fn depth(n: i64) -> i64 {
+    let k = padded_len(n);
+    if n <= 0 { return k; }
+    return k + depth(n - 1);
+}
+@post("/t")
+fn t(s: utf8<64>, n: i64) -> Response<{ total: i64; depth: i64 }> { return ok({ total: trimmed_total(s, n), depth: depth(n) }); }
+--- requests
+POST /t {"s": "  ab  ", "n": 3}
+POST /t {"s": "x", "n": 12}

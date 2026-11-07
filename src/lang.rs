@@ -90,7 +90,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 pub enum B { Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
     Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored, SocketSend, SocketClose, SocketSubscribe, SocketUnsubscribe, Broadcast, SocketSendAll, SocketTag, ByteAt, Lower, Upper, CacheGet, CachePut, CacheStart, CacheHole, CachePart, CacheLabel, DataVersion, Replace, TrimStart, TrimEnd, AllEmoji,
     HtmlParse, HtmlParseIn, NodeKind, NodeName, NodeParent, NodeFirst, NodeLast, NodeNext, NodePrev, NodeContent, NodeAttr, NodeAttrCount, NodeAttrName, NodeAttrValue,
-    NodeSetAttr, NodeRemoveAttr, NodeNewElement, NodeNewText, NodeAppend, NodeInsertBefore, NodeDetach, NodeClone, NodeHtml, NodeInnerHtml, NodeSetText, NodeHtmlEscaped }
+    NodeSetAttr, NodeRemoveAttr, NodeNewElement, NodeNewText, NodeAppend, NodeInsertBefore, NodeDetach, NodeClone, NodeHtml, NodeInnerHtml, NodeSetText, NodeHtmlEscaped, Chr, AllWord }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -102,7 +102,7 @@ impl B {
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
             "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml, "random_text" => RandomText, "add_years" => AddYears, "index_of" => IndexOf, "last_index_of" => LastIndexOf, "json_quote" => JsonQuote, "json_unquote" => JsonUnquote, "request_target" => RequestTarget, "crc32" => Crc32, "read_stored" => ReadStored, "socket_send" => SocketSend, "socket_close" => SocketClose, "socket_subscribe" => SocketSubscribe,
-            "socket_unsubscribe" => SocketUnsubscribe, "broadcast" => Broadcast, "socket_send_all" => SocketSendAll, "socket_tag" => SocketTag, "byte_at" => ByteAt, "lower" => Lower, "upper" => Upper, "cache_get" => CacheGet, "cache_put" => CachePut, "cache_start" => CacheStart, "cache_hole" => CacheHole, "cache_part" => CachePart, "cache_label" => CacheLabel, "data_version" => DataVersion, "replace" => Replace, "trim_start" => TrimStart, "trim_end" => TrimEnd, "all_emoji" => AllEmoji, "html_parse" => HtmlParse, "html_parse_in" => HtmlParseIn, "node_kind" => NodeKind, "node_name" => NodeName, "node_parent" => NodeParent, "node_first" => NodeFirst, "node_last" => NodeLast, "node_next" => NodeNext, "node_prev" => NodePrev, "node_content" => NodeContent, "node_attr" => NodeAttr, "node_attr_count" => NodeAttrCount, "node_attr_name" => NodeAttrName, "node_attr_value" => NodeAttrValue, "node_set_attr" => NodeSetAttr, "node_remove_attr" => NodeRemoveAttr, "node_new_element" => NodeNewElement, "node_new_text" => NodeNewText, "node_append" => NodeAppend, "node_insert_before" => NodeInsertBefore, "node_detach" => NodeDetach, "node_clone" => NodeClone, "node_html" => NodeHtml, "node_inner_html" => NodeInnerHtml, "node_set_text" => NodeSetText, "node_html_escaped" => NodeHtmlEscaped,
+            "socket_unsubscribe" => SocketUnsubscribe, "broadcast" => Broadcast, "socket_send_all" => SocketSendAll, "socket_tag" => SocketTag, "byte_at" => ByteAt, "lower" => Lower, "upper" => Upper, "cache_get" => CacheGet, "cache_put" => CachePut, "cache_start" => CacheStart, "cache_hole" => CacheHole, "cache_part" => CachePart, "cache_label" => CacheLabel, "data_version" => DataVersion, "replace" => Replace, "trim_start" => TrimStart, "trim_end" => TrimEnd, "all_emoji" => AllEmoji, "html_parse" => HtmlParse, "html_parse_in" => HtmlParseIn, "node_kind" => NodeKind, "node_name" => NodeName, "node_parent" => NodeParent, "node_first" => NodeFirst, "node_last" => NodeLast, "node_next" => NodeNext, "node_prev" => NodePrev, "node_content" => NodeContent, "node_attr" => NodeAttr, "node_attr_count" => NodeAttrCount, "node_attr_name" => NodeAttrName, "node_attr_value" => NodeAttrValue, "node_set_attr" => NodeSetAttr, "node_remove_attr" => NodeRemoveAttr, "node_new_element" => NodeNewElement, "node_new_text" => NodeNewText, "node_append" => NodeAppend, "node_insert_before" => NodeInsertBefore, "node_detach" => NodeDetach, "node_clone" => NodeClone, "node_html" => NodeHtml, "node_inner_html" => NodeInnerHtml, "node_set_text" => NodeSetText, "node_html_escaped" => NodeHtmlEscaped, "chr" => Chr, "all_word" => AllWord,
             _ => return None,
         })
     }
@@ -363,7 +363,20 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
         else if ch == '"' {
             i += 1; let mut s = String::new(); let open = i;
             while i < c.len() && c[i] != '"' {
-                if c[i] == '\\' && i + 1 < c.len() { i += 1; s.push(match c[i] { 'n' => '\n', 't' => '\t', o => o }); } else { s.push(c[i]); }
+                if c[i] == '\\' && i + 1 < c.len() {
+                    // the escapes: \n \t \r \0 \" \\ \' and \u{HEX} (a code point); any other is an error, not its letter
+                    i += 1;
+                    match c[i] {
+                        'n' => s.push('\n'), 't' => s.push('\t'), 'r' => s.push('\r'), '0' => s.push('\0'), '"' | '\\' | '\'' => s.push(c[i]),
+                        'u' if c.get(i + 1) == Some(&'{') => {
+                            let close = c[i + 2..].iter().position(|x| *x == '}').map(|k| i + 2 + k);
+                            let hex: String = match close { Some(e) => c[i + 2..e].iter().collect(), None => String::new() };
+                            let ch = u32::from_str_radix(&hex, 16).ok().filter(|_| !hex.is_empty() && hex.len() <= 6).and_then(char::from_u32);
+                            match (close, ch) { (Some(e), Some(ch)) => { s.push(ch); i = e; } _ => return Err(format!("{}:{}: `\\u{{...}}` in a text takes 1 to 6 hex digits of a Unicode scalar value", tl, tc)) }
+                        }
+                        o => return Err(format!("{}:{}: `\\{}` is no escape in a text: write `\\n`, `\\t`, `\\r`, `\\0`, `\\\"`, `\\\\`, or `\\u{{HEX}}`", tl, tc, o)),
+                    }
+                } else { s.push(c[i]); }
                 i += 1;
             }
             if i >= c.len() { return Err(format!("{}:{}: a text that is never closed (a `\"` is missing)", tl, tc)); }

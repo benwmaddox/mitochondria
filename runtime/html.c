@@ -166,7 +166,9 @@ static int hp_parse(HPool *p, const u8 *s, u32 n, u32 ctx, u32 *frag) {
     }
     int status;
     void *out = mg_parse((const char *)s, n, tag, ns, form, &status);
-    if (!out) { p->err = status == 1 ? "html: an element has more than 400 attributes" : status == 2 ? "html: the markup is nested more than 400 deep" : "html: the parser ran out of memory"; return -1; }
+    /* markup the parser refuses (Nokogiri raises): no fragment (*frag none, 0 returned), for the caller to decide (Rails' callers rescue) */
+    if (!out && status != 3) { *frag = HP_NONE; return 0; }
+    if (!out) { p->err = "html: the parser ran out of memory"; return -1; }
     int r = hp_node(p, 11, frag);
     if (!r) r = hp_build(p, *frag, mg_root(out));
     mg_free(out);

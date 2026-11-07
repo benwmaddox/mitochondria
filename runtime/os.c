@@ -73,7 +73,10 @@ static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
 
 /* threads: a record that lives as long as the thread (the caller's) */
 typedef struct { void *h; } OsThread;
-static int os_thread_start(OsThread *t, u32 (*fn)(void *), void *arg) { t->h = CreateThread(0, 0, fn, arg, 0, 0); return t->h != 0; }
+/* a thread's stack: 16 MB reserved (STACK_SIZE_PARAM_IS_A_RESERVATION), committed as it is used. An unoptimized build (TinyCC) gives a
+   function each of its inlined calls' temporaries, so a recursive one can take far more than the executable's default 1 MB. */
+#define OS_THREAD_STACK (16u << 20)
+static int os_thread_start(OsThread *t, u32 (*fn)(void *), void *arg) { t->h = CreateThread(0, OS_THREAD_STACK, fn, arg, 0x10000, 0); return t->h != 0; }
 u32 TlsAlloc(void); void *TlsGetValue(u32 k); int TlsSetValue(u32 k, void *v);
 /* a value of the calling thread's own (one key for the process) */
 static u32 g_os_tls = 0xFFFFFFFFu;
@@ -228,7 +231,17 @@ int pthread_cond_broadcast(Cond *c);
 int pthread_cond_wait(Cond *c, Lock *l);
 int pthread_cond_timedwait(Cond *c, Lock *l, const OsTime *at);
 static void *os_thread_main(void *p) { OsThread *t = (OsThread *)p; t->fn(t->arg); return 0; }
-static int os_thread_start(OsThread *t, u32 (*fn)(void *), void *arg) { t->fn = fn; t->arg = arg; return pthread_create(&t->id, 0, os_thread_main, t) == 0; }
+/* a thread's stack: 16 MB (mapped as it is used), as on Windows: not whatever RLIMIT_STACK says */
+int pthread_attr_init(void *a); int pthread_attr_setstacksize(void *a, u64 n); int pthread_attr_destroy(void *a);
+static int os_thread_start(OsThread *t, u32 (*fn)(void *), void *arg) {
+    t->fn = fn; t->arg = arg;
+    u64 attr[16]; /* pthread_attr_t: 56 bytes on glibc's x86-64 and aarch64 */
+    if (pthread_attr_init(attr) != 0) return 0;
+    pthread_attr_setstacksize(attr, 16u << 20);
+    int r = pthread_create(&t->id, attr, os_thread_main, t);
+    pthread_attr_destroy(attr);
+    return r == 0;
+}
 int pthread_key_create(u32 *k, void (*dtor)(void *)); void *pthread_getspecific(u32 k); int pthread_setspecific(u32 k, const void *v);
 /* a value of the calling thread's own (one key for the process) */
 static u32 g_os_tls; static int g_os_tls_on;

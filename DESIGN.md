@@ -118,14 +118,17 @@ of its own when it declares its cap, `var acc: text<8192> = "";`: that many byte
 live at a recursive call; given back at the scope's end); `var t = ""` without a cap is an error that says to declare one. A function may return text (`-> text`): built for the request in
 its text area, as a builtin's result is; the caller copies it where it keeps it.
 
-**Text.** `len`, `substr`, `contains`, `starts_with`, `ends_with`, `index_of`, `last_index_of`, `trim` (and `trim_start`,
+**Text.** A text literal takes the escapes `\n` `\t` `\r` `\0` `\"` `\\` `\'` and `\u{HEX}` (a code point); any other is an error.
+`len`, `substr`, `contains`, `starts_with`, `ends_with`, `index_of`, `last_index_of`, `trim` (and `trim_start`,
 `trim_end`), `replace(t, a, b)`, `byte_at`, `lower` / `upper` with Unicode's full case mappings (as Ruby's downcase and upcase), and
-`all_emoji(t)` (every character an emoji, with Ruby 3.4's tables of the two Unicode properties).
+`all_emoji(t)` (every character an emoji, with Ruby 3.4's tables of the two Unicode properties), and `chr(cp)` (a code point
+as UTF-8).
 `foreach part in split(t, ", ")` walks the pieces as Ruby's `split` gives them (a leading empty one kept, trailing ones dropped);
 `split(t)` walks the words. Each piece is a window onto the text.
 
 **HTML fragments.** `html_parse(t)` parses markup as Rails 8.2 apps do (Nokogiri::HTML5: the same gumbo, bundled, as a fragment in a
-`body`; `html_parse_in(t, node)` in that node's context) into the request's node pool and gives the fragment, a node: an integer, good
+`body`; `html_parse_in(t, node)` in that node's context) into the request's node pool and gives the fragment (or -1 for markup the parser refuses, as Nokogiri raises: nested more than
+400 deep, an element with more than 400 attributes), a node: an integer, good
 for the request that made it (-1 is none). `node_kind` (1 element, 3 text, 4 CDATA, 8 comment, 11 fragment), `node_name`,
 `node_parent` / `node_first` / `node_last` / `node_next` / `node_prev`, `node_content` (a text's text, an element's text throughout),
 `node_attr(n, name)` (or null), `node_attr_count` / `node_attr_name` / `node_attr_value`, `node_set_attr`, `node_remove_attr`,

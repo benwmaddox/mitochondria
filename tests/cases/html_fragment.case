@@ -1,0 +1,57 @@
+// HTML fragments (Phase 8): a fragment parsed as Nokogiri::HTML5 parses it (gumbo) and written back as Nokogiri writes HTML5
+// (html_standard_serialize): void elements, entities decoded and escaped again, U+00A0 as &nbsp;, raw text in <script>, comments, a
+// stray </p>, SVG; walking children and attributes; editing attributes, a new element inserted, a node moved; parsing in a context
+--- program
+struct App { n: i64; }
+state app: App;
+@post("/round")
+fn round(t: utf8<4096>) -> Response<{ html: string }> {
+    let f = html_parse(t);
+    return ok({ html: node_html(f) });
+}
+@post("/walk")
+fn walk(t: utf8<4096>) -> Response<{ names: string; attrs: string; text: string }> {
+    let f = html_parse(t);
+    var names: text<512> = "";
+    var attrs: text<512> = "";
+    var c = node_first(f);
+    while c >= 0 {
+        names += node_name(c) + "/" + str(node_kind(c)) + " ";
+        if node_kind(c) == 1 {
+            foreach i in 0..node_attr_count(c) - 1 { attrs += node_attr_name(c, i) + "=" + node_attr_value(c, i) + ";"; }
+        }
+        c = node_next(c);
+    }
+    var all: text<512> = node_content(f);
+    return ok({ names: names, attrs: attrs, text: all });
+}
+@post("/edit")
+fn edit(t: utf8<4096>) -> Response<{ html: string; href: string?; gone: string? }> {
+    let f = html_parse(t);
+    let a = node_first(f);
+    node_set_attr(a, "target", "_blank");
+    node_set_attr(a, "href", "https://example.com/?a=1&b=<2>");
+    node_remove_attr(a, "class");
+    let em = node_new_element("em");
+    node_append(em, node_new_text("new & <x>"));
+    node_insert_before(a, em);
+    let last = node_last(f);
+    node_append(em, last);
+    return ok({ html: node_html(f), href: node_attr(a, "href"), gone: node_attr(a, "class") });
+}
+@post("/context")
+fn context(t: utf8<4096>) -> Response<{ body: string; table: string }> {
+    let tbl = node_first(html_parse("<table></table>"));
+    return ok({ body: node_html(html_parse(t)), table: node_html(html_parse_in(t, tbl)) });
+}
+@post("/bad")
+fn bad(k: i64) -> Response<{ n: i64 }> { return ok({ n: node_kind(k) }); }
+--- requests
+POST /round {"t": "<p>Hi <b>there</b> &amp; &lt;you&gt;&nbsp;!<br><img src=\"a.png\" alt=\"say &quot;hi&quot;\"></p>"}
+POST /round {"t": "<p>one</p></p><script>if (a < b && c) {}</script><!-- note --><div>x"}
+POST /round {"t": "<svg viewBox=\"0 0 1 1\"><foreignObject><p>in</p></foreignObject><use xlink:href=\"#a\"/></svg>"}
+POST /round {"t": "<ul><li>a<li>b</ul><table><tr><td>c</table>"}
+POST /walk {"t": "<a href=\"/x\" class=\"c\">link</a> text <!--c--><b>bold</b>"}
+POST /edit {"t": "<a class=\"old\" href=\"/x\">link</a><i>moved</i>"}
+POST /context {"t": "<tr><td>cell</td></tr>"}
+POST /bad {"k": 5}

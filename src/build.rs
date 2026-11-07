@@ -83,6 +83,51 @@ pub fn bcrypt_object(tcc: bool, opt: &str) -> Result<std::path::PathBuf, String>
     cached_object("crypt_blowfish", "crypt_blowfish-1.3", BCRYPT_FILES, "#include \"crypt_blowfish.c\"\n#include \"bcrypt.c\"\n", &[], tcc, opt)
 }
 
+/// gumbo (third_party/gumbo, Nokogiri's fork) and runtime/html_parse.c, for programs that use an HTML built-in.
+const GUMBO_FILES: &[(&str, &str)] = &[
+    ("ascii.c", include_str!("../third_party/gumbo/ascii.c")),
+    ("ascii.h", include_str!("../third_party/gumbo/ascii.h")),
+    ("attribute.c", include_str!("../third_party/gumbo/attribute.c")),
+    ("attribute.h", include_str!("../third_party/gumbo/attribute.h")),
+    ("char_ref.c", include_str!("../third_party/gumbo/char_ref.c")),
+    ("char_ref.h", include_str!("../third_party/gumbo/char_ref.h")),
+    ("error.c", include_str!("../third_party/gumbo/error.c")),
+    ("error.h", include_str!("../third_party/gumbo/error.h")),
+    ("foreign_attrs.c", include_str!("../third_party/gumbo/foreign_attrs.c")),
+    ("insertion_mode.h", include_str!("../third_party/gumbo/insertion_mode.h")),
+    ("macros.h", include_str!("../third_party/gumbo/macros.h")),
+    ("nokogiri_gumbo.h", include_str!("../third_party/gumbo/nokogiri_gumbo.h")),
+    ("parser.c", include_str!("../third_party/gumbo/parser.c")),
+    ("parser.h", include_str!("../third_party/gumbo/parser.h")),
+    ("replacement.h", include_str!("../third_party/gumbo/replacement.h")),
+    ("string_buffer.c", include_str!("../third_party/gumbo/string_buffer.c")),
+    ("string_buffer.h", include_str!("../third_party/gumbo/string_buffer.h")),
+    ("string_piece.c", include_str!("../third_party/gumbo/string_piece.c")),
+    ("svg_attrs.c", include_str!("../third_party/gumbo/svg_attrs.c")),
+    ("svg_tags.c", include_str!("../third_party/gumbo/svg_tags.c")),
+    ("tag.c", include_str!("../third_party/gumbo/tag.c")),
+    ("tag_lookup.c", include_str!("../third_party/gumbo/tag_lookup.c")),
+    ("tag_lookup.h", include_str!("../third_party/gumbo/tag_lookup.h")),
+    ("token_buffer.c", include_str!("../third_party/gumbo/token_buffer.c")),
+    ("token_buffer.h", include_str!("../third_party/gumbo/token_buffer.h")),
+    ("token_type.h", include_str!("../third_party/gumbo/token_type.h")),
+    ("tokenizer.c", include_str!("../third_party/gumbo/tokenizer.c")),
+    ("tokenizer.h", include_str!("../third_party/gumbo/tokenizer.h")),
+    ("tokenizer_states.h", include_str!("../third_party/gumbo/tokenizer_states.h")),
+    ("utf8.c", include_str!("../third_party/gumbo/utf8.c")),
+    ("utf8.h", include_str!("../third_party/gumbo/utf8.h")),
+    ("util.c", include_str!("../third_party/gumbo/util.c")),
+    ("util.h", include_str!("../third_party/gumbo/util.h")),
+    ("vector.c", include_str!("../third_party/gumbo/vector.c")),
+    ("vector.h", include_str!("../third_party/gumbo/vector.h")),
+    ("html_parse.c", include_str!("../runtime/html_parse.c")),
+];
+/// Each of gumbo's files compiled on its own (they are separate units: several define the same static names), with runtime/html_parse.c.
+pub fn gumbo_objects(tcc: bool, opt: &str) -> Result<Vec<std::path::PathBuf>, String> {
+    GUMBO_FILES.iter().filter(|(n, _)| n.ends_with(".c")).map(|(n, _)| cached_object("gumbo", &format!("gumbo-nokogiri-1.19.4-{}", n.trim_end_matches(".c")), GUMBO_FILES, &format!("#include \"{}\"
+", n), &[], tcc, opt)).collect()
+}
+
 /// What units need linked beside them, by the lines they define: objects (SQLite for tables, zlib for `gzip;`, crypt_blowfish for
 /// crypto) built by the same compiler from the cache, and system libraries (libcrypto on Linux for crypto; Windows' BCrypt is always
 /// linked).
@@ -91,6 +136,7 @@ pub fn extra_links(srcs: &[&str], tcc: bool, opt: &str) -> Result<(Vec<std::path
     let (mut objs, mut libs) = (Vec::new(), Vec::new());
     if has("#define MITO_USES_SQLITE") { objs.push(sqlite_object(tcc, opt)?); }
     if has("#define MITO_USES_ZLIB") { objs.push(zlib_object(tcc, opt)?); }
+    if has("#define MITO_USES_HTML") { objs.extend(gumbo_objects(tcc, opt)?); }
     if has("#define MITO_USES_CRYPTO") { objs.push(bcrypt_object(tcc, opt)?); if !cfg!(windows) { libs.push("crypto"); } }
     Ok((objs, libs))
 }

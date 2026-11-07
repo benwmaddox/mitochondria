@@ -392,3 +392,9 @@ so the app writes that pipeline in Mitochondria, over the other options (an app'
 - Order: the message frame without rich text (the app); the parser with fragment parsing and serializing (round trips); the node
   operations; the sanitizer layers; attachments; `auto_link` (a hand matcher, as the Rust port's: the language has no regular
   expressions, and adding them would be a decision of its own).
+- The parser and the node operations done (2026-11-07): third_party/gumbo (Nokogiri 1.19.4's, its sources matching the reference
+  image's gem), each file its own cached object; runtime/html_parse.c parses as `noko_gumbo_s_fragment` does; runtime/html.c holds the
+  pool, the operations and Nokogiri's `html_standard_serialize`; builtins 72 to 97 (DESIGN.md, "HTML fragments").
+  `tests/cases/html_fragment.case`: round trips (void elements, entities, `&nbsp;`, raw `<script>` text, a stray `</p>`, SVG and
+  xlink, implied `<tbody>` and `</li>`), walking, attribute edits, insertion and moves, a parse in a `<table>` context: every output
+  checked against Nokogiri::HTML5 in the reference image's Ruby, byte for byte.

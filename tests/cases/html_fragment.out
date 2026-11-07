@@ -1,0 +1,10 @@
+POST /round -> 200 {"html":"<p>Hi <b>there</b> &amp; &lt;you&gt;&nbsp;!<br><img src=\"a.png\" alt=\"say &quot;hi&quot;\"></p>"}
+POST /round -> 200 {"html":"<p>one</p><p></p><script>if (a < b && c) {}</script><!-- note --><div>x</div>"}
+POST /round -> 200 {"html":"<svg viewBox=\"0 0 1 1\"><foreignObject><p>in</p></foreignObject><use xlink:href=\"#a\"></use></svg>"}
+POST /round -> 200 {"html":"<ul><li>a</li><li>b</li></ul><table><tbody><tr><td>c</td></tr></tbody></table>"}
+POST /walk -> 200 {"names":"a/1 text/3 comment/8 b/1 ","attrs":"href=/x;class=c;","text":"link text bold"}
+POST /edit -> 200 {"html":"<em>new &amp; &lt;x&gt;<i>moved</i></em><a href=\"https://example.com/?a=1&amp;b=<2>\" target=\"_blank\">link</a>","href":"https://example.com/?a=1&b=<2>","gone":null}
+POST /context -> 200 {"body":"cell","table":"<tbody><tr><td>cell</td></tr></tbody>"}
+POST /bad -> 500 {"error":"html: not a node of this request","line":44}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

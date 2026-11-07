@@ -631,6 +631,9 @@ typedef struct Mito {
 #ifdef MITO_USES_SQLITE
     char db_dir[600], db_file[600]; u64 db_pool; int db_flags; /* how the tables were opened, for readers' connections */
 #endif
+#ifdef MITO_USES_HTML
+    HPool hp; /* the request's HTML nodes (runtime/html.c) */
+#endif
 } Mito;
 
 #define MITO_TBASE (1u << 24) /* a table is collection MITO_TBASE + its index in generated code */
@@ -1469,6 +1472,15 @@ static int h_sel_get(Ctx *c, u32 h, u32 k, u32 *out) { *out = *sel_at(M_(c), (u6
 static int h_sel_end(Ctx *c, u32 h) { M_(c)->sel.len = h; return 0; }
 
 /* ---- builtins (cgen BUILTINS order) ---- */
+#ifdef MITO_USES_HTML
+/* the HTML builtins' plumbing: text written into the text area, a node argument checked, the pool's error as the request's */
+static int h_put_text(void *c, const u8 *s, u32 n) { return a_put(&((Mito *)c)->text, s, n) ? 0 : -1; }
+static int h_node_arg(Mito *m, const Val *a, u32 n, u32 i, u32 *id) {
+    if (i >= n || a[i].tag != 1 || !hp_ok(&m->hp, a[i].i)) return fail(m, 500, "html: not a node of this request");
+    *id = (u32)a[i].i; return 0;
+}
+static int h_hp_fail(Mito *m) { return fail(m, 413, m->hp.err ? m->hp.err : "html: failed"); }
+#endif
 static int arg_txt(Mito *m, const Val *a, u32 n, u32 i, T *out) { if (i >= n || a[i].tag != 4) return fail(m, 500, "expected a string argument"); out->off = a[i].a; out->len = a[i].b; return 0; }
 /* a time's text (`2026-03-02 16:00:00`, `.ffffff` to 9 digits, a `T` for the space and a final `Z` allowed) as microseconds since 1970 */
 static int time_parse(const u8 *s, u32 n, i64 *out) {
@@ -1836,6 +1848,84 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
         const u8 *s = t_ptr(m, x); u32 b0 = 0, e0 = x.len;
         if (code == 69) while (b0 < e0 && split_ws(s[b0])) b0++; else while (e0 > b0 && split_ws(s[e0 - 1])) e0--;
         T r = { x.off + b0, e0 - b0 }; *out = v_str(r); return 0; }
+#ifdef MITO_USES_HTML
+    /* HTML fragments (runtime/html.c): 72 to 97. A node is an integer, valid in the request that made it; -1 is none. */
+    case 72: case 73: { /* html_parse(t), html_parse_in(t, node): a fragment parsed in a body, or in the node's context */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        u32 ctx = HP_NONE, f;
+        if (code == 73 && h_node_arg(m, a, n, 1, &ctx)) return -1;
+        if (hp_parse(&m->hp, t_ptr(m, x), x.len, ctx, &f)) return h_hp_fail(m);
+        *out = v_int(f); return 0; }
+    case 74: { u32 id; if (h_node_arg(m, a, n, 0, &id)) return -1; *out = v_int(m->hp.n[id].kind); return 0; } /* node_kind */
+    case 75: { /* node_name: an element's name; otherwise libxml2's (text, comment, #cdata-section, #document-fragment) */
+        u32 id; if (h_node_arg(m, a, n, 0, &id)) return -1;
+        HNode *y = &m->hp.n[id]; u32 start = m->text.len;
+        if (y->kind == 1) { if (!a_put(&m->text, m->hp.b + y->name, y->name_n)) return text_full(m); }
+        else if (!a_str(&m->text, y->kind == 3 ? "text" : y->kind == 8 ? "comment" : y->kind == 4 ? "#cdata-section" : "#document-fragment")) return text_full(m);
+        *out = v_str(t_since(m, start)); return 0; }
+    case 76: case 77: case 78: case 79: case 80: { /* node_parent, node_first, node_last, node_next, node_prev */
+        u32 id; if (h_node_arg(m, a, n, 0, &id)) return -1;
+        HNode *y = &m->hp.n[id];
+        u32 r = code == 76 ? y->parent : code == 77 ? y->first : code == 78 ? y->last : code == 79 ? y->next : y->prev;
+        *out = v_int(r == HP_NONE ? -1 : (i64)r); return 0; }
+    case 81: { /* node_content: a text's (comment's) text, an element's text throughout */
+        u32 id; if (h_node_arg(m, a, n, 0, &id)) return -1;
+        u32 start = m->text.len;
+        if (hp_content(&m->hp, id, h_put_text, m)) { m->text.len = start; return text_full(m); }
+        *out = v_str(t_since(m, start)); return 0; }
+    case 82: { /* node_attr(n, name): the value, or null */
+        u32 id; if (h_node_arg(m, a, n, 0, &id) || arg_txt(m, a, n, 1, &x)) return -1;
+        i64 k = m->hp.n[id].kind == 1 ? hp_attr_find(&m->hp, id, t_ptr(m, x), x.len) : -1;
+        if (k < 0) { *out = v_null(); return 0; }
+        HAttr *at = &m->hp.a[m->hp.n[id].attrs + k]; u32 start = m->text.len;
+        if (!a_put(&m->text, m->hp.b + at->value, at->value_n)) return text_full(m);
+        *out = v_str(t_since(m, start)); return 0; }
+    case 83: { u32 id; if (h_node_arg(m, a, n, 0, &id)) return -1; *out = v_int(m->hp.n[id].kind == 1 ? m->hp.n[id].nattrs : 0); return 0; } /* node_attr_count */
+    case 84: case 85: { /* node_attr_name(n, i) (as written: xlink:href), node_attr_value(n, i) */
+        u32 id; if (h_node_arg(m, a, n, 0, &id)) return -1;
+        if (n < 2 || a[1].tag != 1 || a[1].i < 0 || a[1].i >= (i64)m->hp.n[id].nattrs) return fail(m, 500, "html: no such attribute");
+        HAttr *at = &m->hp.a[m->hp.n[id].attrs + a[1].i]; u32 start = m->text.len;
+        if (code == 84) {
+            const char *pre; u32 pn = hp_attr_prefix(at->ns, &pre);
+            if (at->ns == 3 && at->name_n == 5 && memcmp(m->hp.b + at->name, "xmlns", 5) == 0) pn = 0;
+            if (!a_put(&m->text, pre, pn) || !a_put(&m->text, m->hp.b + at->name, at->name_n)) return text_full(m);
+        } else if (!a_put(&m->text, m->hp.b + at->value, at->value_n)) return text_full(m);
+        *out = v_str(t_since(m, start)); return 0; }
+    case 86: { /* node_set_attr(n, name, value) */
+        u32 id; T v; if (h_node_arg(m, a, n, 0, &id) || arg_txt(m, a, n, 1, &x) || arg_txt(m, a, n, 2, &v)) return -1;
+        if (m->hp.n[id].kind != 1) return fail(m, 500, "html: only an element has attributes");
+        if (hp_set_attr(&m->hp, id, t_ptr(m, x), x.len, t_ptr(m, v), v.len)) return h_hp_fail(m);
+        *out = v_null(); return 0; }
+    case 87: { /* node_remove_attr(n, name) */
+        u32 id; if (h_node_arg(m, a, n, 0, &id) || arg_txt(m, a, n, 1, &x)) return -1;
+        if (m->hp.n[id].kind == 1) hp_remove_attr(&m->hp, id, t_ptr(m, x), x.len);
+        *out = v_null(); return 0; }
+    case 88: case 89: { /* node_new_element(name) (an HTML element), node_new_text(t): new and detached */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        u32 id;
+        if ((code == 88 ? hp_new_element : hp_new_text)(&m->hp, t_ptr(m, x), x.len, &id)) return h_hp_fail(m);
+        *out = v_int(id); return 0; }
+    case 90: case 91: { /* node_append(parent, child), node_insert_before(ref, node): the node moved there */
+        u32 p0, c0; if (h_node_arg(m, a, n, 0, &p0) || h_node_arg(m, a, n, 1, &c0)) return -1;
+        if (code == 91) { u32 par = m->hp.n[p0].parent; if (par == HP_NONE) return fail(m, 500, "html: node_insert_before: the node has no parent"); if (hp_within(&m->hp, c0, par)) return fail(m, 500, "html: a node cannot go inside itself"); hp_insert_before(&m->hp, p0, c0); }
+        else { if (hp_within(&m->hp, c0, p0)) return fail(m, 500, "html: a node cannot go inside itself"); if (m->hp.n[p0].kind != 1 && m->hp.n[p0].kind != 11) return fail(m, 500, "html: only an element or a fragment has children"); hp_append(&m->hp, p0, c0); }
+        *out = v_null(); return 0; }
+    case 92: { u32 id; if (h_node_arg(m, a, n, 0, &id)) return -1; hp_detach(&m->hp, id); *out = v_null(); return 0; } /* node_detach */
+    case 93: { u32 id, c; if (h_node_arg(m, a, n, 0, &id)) return -1; if (hp_clone(&m->hp, id, &c)) return h_hp_fail(m); *out = v_int(c); return 0; } /* node_clone */
+    case 94: case 95: case 97: { /* node_html (outer: a fragment its children), node_inner_html, node_html_escaped (< > escaped in attributes too) */
+        u32 id; if (h_node_arg(m, a, n, 0, &id)) return -1;
+        u32 start = m->text.len; int r = 0;
+        if (code == 95) { for (u32 ch = m->hp.n[id].first; ch != HP_NONE && !r; ch = m->hp.n[ch].next) r = hp_write(&m->hp, ch, 0, h_put_text, m); }
+        else r = hp_write(&m->hp, id, code == 97, h_put_text, m);
+        if (r) { m->text.len = start; return text_full(m); }
+        *out = v_str(t_since(m, start)); return 0; }
+    case 96: { /* node_set_text(n, t): a text's (comment's, CDATA's) text */
+        u32 id; if (h_node_arg(m, a, n, 0, &id) || arg_txt(m, a, n, 1, &x)) return -1;
+        HNode *y = &m->hp.n[id];
+        if (y->kind != 3 && y->kind != 4 && y->kind != 8) return fail(m, 500, "html: node_set_text takes a text node");
+        if (hp_bytes(&m->hp, t_ptr(m, x), x.len, &y->text)) return h_hp_fail(m);
+        y->text_n = x.len; *out = v_null(); return 0; }
+#endif
     case 71: { /* all_emoji(t): t is one or more characters each Emoji_Presentation, Extended_Pictographic or U+FE0F (Ruby's
                   /\A(\p{Emoji_Presentation}|\p{Extended_Pictographic}|\uFE0F)+\z/u; the ranges are Ruby 3.4's, read from it) */
         if (arg_txt(m, a, n, 0, &x)) return -1;
@@ -2725,6 +2815,9 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
     m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0; m->bare = 0;
+#ifdef MITO_USES_HTML
+    hp_reset(&m->hp);
+#endif
     m->target = (const u8 *)target; m->target_n = tn; m->ops.len = 0; m->wants_write = 0; m->tw = 0; m->c_on = 0; m->c_entry.len = 0;
     const u8 *t = (const u8 *)target;
     u64 q = 0; while (q < tn && t[q] != '?') q++;

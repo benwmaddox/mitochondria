@@ -124,6 +124,17 @@ its text area, as a builtin's result is; the caller copies it where it keeps it.
 `foreach part in split(t, ", ")` walks the pieces as Ruby's `split` gives them (a leading empty one kept, trailing ones dropped);
 `split(t)` walks the words. Each piece is a window onto the text.
 
+**HTML fragments.** `html_parse(t)` parses markup as Rails 8.2 apps do (Nokogiri::HTML5: the same gumbo, bundled, as a fragment in a
+`body`; `html_parse_in(t, node)` in that node's context) into the request's node pool and gives the fragment, a node: an integer, good
+for the request that made it (-1 is none). `node_kind` (1 element, 3 text, 4 CDATA, 8 comment, 11 fragment), `node_name`,
+`node_parent` / `node_first` / `node_last` / `node_next` / `node_prev`, `node_content` (a text's text, an element's text throughout),
+`node_attr(n, name)` (or null), `node_attr_count` / `node_attr_name` / `node_attr_value`, `node_set_attr`, `node_remove_attr`,
+`node_set_text`, `node_new_element`, `node_new_text`, `node_append`, `node_insert_before`, `node_detach`, `node_clone`; `node_html(n)`
+writes a node back as Nokogiri writes HTML5 (`node_inner_html` its children; `node_html_escaped` with `<` `>` escaped in attribute
+values too). The pool is the instance's own (readers parse at once), emptied when the next request starts; more than its caps (131,072
+nodes, 262,144 attributes, 16 MiB of text) fails the request (413). The parser's own working memory is the C heap for the length of
+one parse, freed before it returns.
+
 **Files.** A program may be several files: `use "rooms.mito";` on a line of its own puts that file's text there (relative to
 the file that uses it, each file once). It is still one program with one state; errors name the file and line they are in.
 `mito check app.mito --costs` lists, per endpoint, the request struct bytes it zeroes and what its code does: queries, row reads,

@@ -233,7 +233,7 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 72] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 98] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
     B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
@@ -254,7 +254,11 @@ pub const BUILTINS: [B; 72] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B
     // the answer cache (pieces of answers kept between requests, shared by every instance): 61 to 66; the data's version: 67
     B::CacheGet, B::CachePut, B::CacheStart, B::CacheHole, B::CachePart, B::CacheLabel, B::DataVersion,
     // text: every a as b (68); white space off the start or the end (69, 70); every character an emoji (71)
-    B::Replace, B::TrimStart, B::TrimEnd, B::AllEmoji];
+    B::Replace, B::TrimStart, B::TrimEnd, B::AllEmoji,
+    // HTML fragments (runtime/html.c, gumbo linked in): 72 to 97
+    B::HtmlParse, B::HtmlParseIn, B::NodeKind, B::NodeName, B::NodeParent, B::NodeFirst, B::NodeLast, B::NodeNext, B::NodePrev, B::NodeContent, B::NodeAttr, B::NodeAttrCount, B::NodeAttrName, B::NodeAttrValue, B::NodeSetAttr, B::NodeRemoveAttr, B::NodeNewElement, B::NodeNewText, B::NodeAppend, B::NodeInsertBefore, B::NodeDetach, B::NodeClone, B::NodeHtml, B::NodeInnerHtml, B::NodeSetText, B::NodeHtmlEscaped];
+/// The built-ins of HTML fragments: a program using one gets runtime/html.c and gumbo (program_c_full, build.rs).
+const HTML_BUILTINS: [B; 26] = [B::HtmlParse, B::HtmlParseIn, B::NodeKind, B::NodeName, B::NodeParent, B::NodeFirst, B::NodeLast, B::NodeNext, B::NodePrev, B::NodeContent, B::NodeAttr, B::NodeAttrCount, B::NodeAttrName, B::NodeAttrValue, B::NodeSetAttr, B::NodeRemoveAttr, B::NodeNewElement, B::NodeNewText, B::NodeAppend, B::NodeInsertBefore, B::NodeDetach, B::NodeClone, B::NodeHtml, B::NodeInnerHtml, B::NodeSetText, B::NodeHtmlEscaped];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
 const CRYPTO_BUILTINS: [B; 11] = [B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::RandomText];
 
@@ -714,6 +718,8 @@ pub const OS: &str = include_str!("../runtime/os.c");
 pub const STORE: &str = include_str!("../runtime/store.c");
 /// Cryptography from the system's library (runtime/crypto.c), for a program that uses a crypto built-in.
 pub const CRYPTO: &str = include_str!("../runtime/crypto.c");
+/// HTML fragments' node pool (runtime/html.c), for a program that uses an HTML built-in.
+pub const HTML: &str = include_str!("../runtime/html.c");
 /// The runtime's types for the layout tables, ahead of them.
 pub const RUNTIME_TYPES: &str = include_str!("../runtime/types.h");
 
@@ -774,6 +780,8 @@ static const unsigned char mito_lits[] = {{ {} }};
         o += "#define MITO_USES_CRYPTO 1\n";
         o += CRYPTO;
     }
+    // HTML fragments: the node pool (the build sees this line and links gumbo with runtime/html_parse.c)
+    if g.src.contains("/*html*/") { o += "#define MITO_USES_HTML 1\n"; o += HTML; }
     // lower / upper (builtins 59, 60): Unicode's case tables
     if g.src.contains("builtin(c, 59,") || g.src.contains("builtin(c, 60,") { o += "#define MITO_UNICASE 1\n"; o += UNICASE; }
     o += RUNTIME;
@@ -4015,7 +4023,9 @@ impl<'p> G<'p> {
         };
         // arity of the byte and crypto built-ins, checked when compiling
         let want = match bi {
-            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml | B::JsonQuote | B::JsonUnquote | B::Crc32 | B::ReadStored | B::Lower | B::Upper | B::CacheGet | B::CachePut | B::CachePart | B::CacheLabel | B::TrimStart | B::TrimEnd | B::AllEmoji => Some((1, "one argument")),
+            B::Base64 | B::Base64Url | B::Unbase64 | B::Hex | B::Sha1 | B::Sha256 | B::RandomBytes | B::FormEncode | B::FormDecode | B::Env | B::EscapeHtml | B::JsonQuote | B::JsonUnquote | B::Crc32 | B::ReadStored | B::Lower | B::Upper | B::CacheGet | B::CachePut | B::CachePart | B::CacheLabel | B::TrimStart | B::TrimEnd | B::AllEmoji | B::HtmlParse | B::NodeKind | B::NodeName | B::NodeParent | B::NodeFirst | B::NodeLast | B::NodeNext | B::NodePrev | B::NodeContent | B::NodeAttrCount | B::NodeNewElement | B::NodeNewText | B::NodeDetach | B::NodeClone | B::NodeHtml | B::NodeInnerHtml | B::NodeHtmlEscaped => Some((1, "one argument")),
+            B::HtmlParseIn | B::NodeAttr | B::NodeAttrName | B::NodeAttrValue | B::NodeRemoveAttr | B::NodeAppend | B::NodeInsertBefore | B::NodeSetText => Some((2, "two arguments")),
+            B::NodeSetAttr => Some((3, "a node, a name and a value")),
             B::RequestTarget | B::CacheStart | B::DataVersion => Some((0, "no arguments")),
             B::SocketClose | B::SocketSendAll => Some((1, "one argument")),
             B::SocketSend | B::SocketUnsubscribe | B::Broadcast | B::SocketTag => Some((2, "two arguments")),
@@ -4029,7 +4039,7 @@ impl<'p> G<'p> {
         if let Some((k, what)) = want {
             if a.len() != k {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
-                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::JsonQuote => "json_quote", B::JsonUnquote => "json_unquote", B::RequestTarget => "request_target", B::Crc32 => "crc32", B::ByteAt => "byte_at", B::Lower => "lower", B::Upper => "upper", B::CacheGet => "cache_get", B::CachePut => "cache_put", B::CacheStart => "cache_start", B::CacheHole => "cache_hole", B::CachePart => "cache_part", B::CacheLabel => "cache_label", B::DataVersion => "data_version", B::Replace => "replace", B::TrimStart => "trim_start", B::TrimEnd => "trim_end", B::AllEmoji => "all_emoji", B::ReadStored => "read_stored", B::SocketSend => "socket_send", B::SocketClose => "socket_close", B::SocketSubscribe => "socket_subscribe", B::SocketUnsubscribe => "socket_unsubscribe", B::Broadcast => "broadcast", B::SocketSendAll => "socket_send_all", B::SocketTag => "socket_tag", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
+                    B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::JsonQuote => "json_quote", B::JsonUnquote => "json_unquote", B::RequestTarget => "request_target", B::Crc32 => "crc32", B::ByteAt => "byte_at", B::Lower => "lower", B::Upper => "upper", B::CacheGet => "cache_get", B::CachePut => "cache_put", B::CacheStart => "cache_start", B::CacheHole => "cache_hole", B::CachePart => "cache_part", B::CacheLabel => "cache_label", B::DataVersion => "data_version", B::Replace => "replace", B::TrimStart => "trim_start", B::TrimEnd => "trim_end", B::AllEmoji => "all_emoji", B::HtmlParse => "html_parse", B::HtmlParseIn => "html_parse_in", B::NodeKind => "node_kind", B::NodeName => "node_name", B::NodeParent => "node_parent", B::NodeFirst => "node_first", B::NodeLast => "node_last", B::NodeNext => "node_next", B::NodePrev => "node_prev", B::NodeContent => "node_content", B::NodeAttr => "node_attr", B::NodeAttrCount => "node_attr_count", B::NodeAttrName => "node_attr_name", B::NodeAttrValue => "node_attr_value", B::NodeSetAttr => "node_set_attr", B::NodeRemoveAttr => "node_remove_attr", B::NodeNewElement => "node_new_element", B::NodeNewText => "node_new_text", B::NodeAppend => "node_append", B::NodeInsertBefore => "node_insert_before", B::NodeDetach => "node_detach", B::NodeClone => "node_clone", B::NodeHtml => "node_html", B::NodeInnerHtml => "node_inner_html", B::NodeSetText => "node_set_text", B::NodeHtmlEscaped => "node_html_escaped", B::ReadStored => "read_stored", B::SocketSend => "socket_send", B::SocketClose => "socket_close", B::SocketSubscribe => "socket_subscribe", B::SocketUnsubscribe => "socket_unsubscribe", B::Broadcast => "broadcast", B::SocketSendAll => "socket_send_all", B::SocketTag => "socket_tag", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
                     B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time", B::Contains => "contains", B::StartsWith => "starts_with", B::EndsWith => "ends_with",
                     B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));
@@ -4046,17 +4056,19 @@ impl<'p> G<'p> {
             let r = self.tmp("v");
             self.line(&format!("Val {};", r));
             // a crypto built-in is marked, so the unit gets runtime/crypto.c and its library (program_c_full)
-            let mark = if CRYPTO_BUILTINS.contains(&bi) { "/*crypto*/" } else { "" };
+            let mark = if CRYPTO_BUILTINS.contains(&bi) { "/*crypto*/" } else if HTML_BUILTINS.contains(&bi) { "/*html*/" } else { "" };
             self.call(&format!("c->h->builtin(c, {}, {}, {}, &{}){}", code, argv, names.len(), r, mark));
             let _ = n;
             let _ = int_out;
             return Ok(match bi {
-                B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot | B::AddYears | B::IndexOf | B::LastIndexOf | B::Crc32 | B::ByteAt | B::CacheGet | B::DataVersion => CV::Int(format!("{}.i", r)),
+                B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot | B::AddYears | B::IndexOf | B::LastIndexOf | B::Crc32 | B::ByteAt | B::CacheGet | B::DataVersion
+                    | B::HtmlParse | B::HtmlParseIn | B::NodeKind | B::NodeParent | B::NodeFirst | B::NodeLast | B::NodeNext | B::NodePrev | B::NodeAttrCount | B::NodeNewElement | B::NodeNewText | B::NodeClone => CV::Int(format!("{}.i", r)),
                 B::SecretEqual | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith | B::AllEmoji => CV::Bool(format!("({}.i != 0)", r)),
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
-                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText | B::JsonQuote | B::RequestTarget | B::Lower | B::Upper | B::CacheLabel | B::Replace | B::TrimStart | B::TrimEnd => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
+                    | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText | B::JsonQuote | B::RequestTarget | B::Lower | B::Upper | B::CacheLabel | B::Replace | B::TrimStart | B::TrimEnd
+                    | B::NodeName | B::NodeContent | B::NodeAttrName | B::NodeAttrValue | B::NodeHtml | B::NodeInnerHtml | B::NodeHtmlEscaped => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
-                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env | B::JsonUnquote | B::ReadStored => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
+                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env | B::JsonUnquote | B::ReadStored | B::NodeAttr => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
                 _ => CV::Any(r),
             });
         }

@@ -17,67 +17,16 @@ The latest numbers, time and peak memory for every port against Rust and Crystal
 - Each port has an `audit` file with its verdict: `like-for-like`, `rewritten-to-match` (same algorithm, small mechanical rewrites the language forces, listed) or `closest-possible` (a difference in data-structure shape, listed). The headline geometric mean covers only the first two.
 - "Original" in LangArena means the Crystal implementation. Crystal is not installed here; its sources are in `<LangArena>/crystal` and the ports follow the same algorithms (the Rust implementation is a faithful port of them).
 
-## Results (Mitochondria 2026-11-05, Rust and Crystal 2026-11-04; run parameters, 3 rounds, best of rounds, all 41 ports in one run; ratio = Mitochondria / the column's implementation)
+## Results
 
-| Workload | Mitochondria s | Rust (reference) s | Mito/Rust | Rust with overflow checks s | Mito/Rust (checked) | Crystal (original) s | Mito/Crystal | audit |
-|---|---|---|---|---|---|---|---|---|
-| Base64::Decode | 1.085 | 0.186 | 5.83x | 0.191 | 5.68x | 1.144 | 0.95x | closest-possible |
-| Base64::Encode | 1.123 | 0.167 | 6.72x | 0.167 | 6.72x | 1.116 | 1.01x | closest-possible |
-| Binarytrees::Arena | 1.029 | 0.541 | 1.90x | 0.520 | 1.98x | 0.544 | 1.89x | like-for-like |
-| Binarytrees::Obj | 2.042 | 3.009 | 0.68x | 2.970 | 0.69x | 1.511 | 1.35x | like-for-like |
-| BF::Array | 1.397 | 0.943 | 1.48x | 1.346 | 1.04x | 2.133 | 0.65x | rewritten-to-match |
-| BF::Recursion | 1.950 | 1.370 | 1.42x | 1.473 | 1.32x | 1.491 | 1.31x | closest-possible |
-| Calculator::Ast | 0.189 | 0.686 | 0.28x | 0.688 | 0.27x | 0.415 | 0.46x | closest-possible |
-| Calculator::Interpreter | 0.343 | 0.885 | 0.39x | 0.891 | 0.38x | 0.513 | 0.67x | closest-possible |
-| CLBG::Fannkuchredux | 0.962 | 0.905 | 1.06x | 0.926 | 1.04x | 1.011 | 0.95x | like-for-like |
-| CLBG::Mandelbrot | 0.701 | 0.726 | 0.97x | 0.738 | 0.95x | 0.701 | 1.00x | rewritten-to-match |
-| CLBG::Nbody | 0.967 | 0.712 | 1.36x | 0.698 | 1.39x | 0.813 | 1.19x | closest-possible |
-| CLBG::Spectralnorm | 0.755 | 1.095 | 0.69x | 1.108 | 0.68x | 0.766 | 0.99x | rewritten-to-match |
-| Compress::ArithDecode | 1.020 | 1.254 | 0.81x | 1.242 | 0.82x | 0.918 | 1.11x | rewritten-to-match |
-| Compress::ArithEncode | 1.010 | 0.913 | 1.11x | 0.969 | 1.04x | 1.128 | 0.90x | like-for-like |
-| Compress::BWTDecode | 0.904 | 1.040 | 0.87x | 1.026 | 0.88x | 0.939 | 0.96x | rewritten-to-match |
-| Compress::BWTEncode | 0.495 | 0.433 | 1.14x | 0.424 | 1.17x | 1.129 | 0.44x | closest-possible |
-| Compress::HuffDecode | 1.057 | 0.629 | 1.68x | 0.618 | 1.71x | 0.918 | 1.15x | rewritten-to-match |
-| Compress::HuffEncode | 0.664 | 0.595 | 1.12x | 0.609 | 1.09x | 0.930 | 0.71x | rewritten-to-match |
-| Compress::LZWDecode | 0.180 | 1.133 | 0.16x | 1.136 | 0.16x | 0.529 | 0.34x | closest-possible |
-| Compress::LZWEncode | 0.095 | 0.530 | 0.18x | 0.519 | 0.18x | 0.874 | 0.11x | closest-possible |
-| CSV::Parse | 0.575 | 0.616 | 0.93x | 0.588 | 0.98x | 3.152 | 0.18x | closest-possible |
-| Distance::Jaro | 0.949 | 1.062 | 0.89x | 0.986 | 0.96x | 1.151 | 0.82x | rewritten-to-match |
-| Distance::NGram | 0.436 | 0.351 | 1.24x | 0.364 | 1.20x | 0.639 | 0.68x | rewritten-to-match |
-| Etc::CacheSimulation | 0.447 | 0.813 | 0.55x | 0.800 | 0.56x | 1.887 | 0.24x | rewritten-to-match |
-| Etc::GameOfLife | 1.593 | 1.964 | 0.81x | 1.979 | 0.80x | 1.853 | 0.86x | like-for-like |
-| Etc::NeuralNet | 0.901 | 0.864 | 1.04x | 0.864 | 1.04x | 0.926 | 0.97x | closest-possible |
-| Etc::Sieve | 1.742 | 1.320 | 1.32x | 1.795 | 0.97x | 2.027 | 0.86x | rewritten-to-match |
-| Etc::TextRaytracer | 0.748 | 0.627 | 1.19x | 0.629 | 1.19x | 0.799 | 0.94x | rewritten-to-match |
-| Etc::Words | 0.558 | 0.800 | 0.70x | 0.785 | 0.71x | 0.804 | 0.69x | closest-possible |
-| Graph::AStar | 0.636 | 1.313 | 0.48x | 1.331 | 0.48x | 2.162 | 0.29x | rewritten-to-match |
-| Graph::BFS | 0.965 | 0.840 | 1.15x | 0.853 | 1.13x | 1.239 | 0.78x | rewritten-to-match |
-| Graph::DFS | 0.880 | 0.729 | 1.21x | 0.746 | 1.18x | 1.066 | 0.83x | rewritten-to-match |
-| Hash::CRC32 | 0.808 | 0.846 | 0.96x | 0.838 | 0.96x | 0.813 | 0.99x | like-for-like |
-| Hash::SHA256 | 0.650 | 0.671 | 0.97x | 0.676 | 0.96x | 0.661 | 0.98x | like-for-like |
-| Matmul::Single | 3.334 | 3.303 | 1.01x | 3.298 | 1.01x | 3.172 | 1.05x | closest-possible |
-| Maze::AStar | 0.941 | 1.151 | 0.82x | 1.159 | 0.81x | 4.144 | 0.23x | rewritten-to-match |
-| Maze::BFS | 0.452 | 0.796 | 0.57x | 0.786 | 0.58x | 1.561 | 0.29x | rewritten-to-match |
-| Maze::Generator | 0.466 | 0.751 | 0.62x | 0.753 | 0.62x | 1.464 | 0.32x | rewritten-to-match |
-| Sort::Merge | 1.507 | 1.319 | 1.14x | 1.321 | 1.14x | 2.207 | 0.68x | rewritten-to-match |
-| Sort::Quick | 1.369 | 1.126 | 1.22x | 1.181 | 1.16x | 1.580 | 0.87x | rewritten-to-match |
-| Template::Parse | 0.603 | 0.981 | 0.61x | 1.050 | 0.57x | 1.938 | 0.31x | closest-possible |
+The latest numbers, time and peak memory for every port against Rust, Rust with overflow checks and Crystal, are in [RESULTS.md](RESULTS.md), which `run.py` writes from `results.json` at the end of every run (do not copy its table here: it goes stale). Headline, 2026-11-11 (run parameters, best of the rounds, all 41 ports, every checksum verified against LangArena's):
 
-Geometric mean of the 27 like-for-like and rewritten-to-match ports: 0.965x of Rust (0.939x of Rust with overflow checks) and 0.737x of Crystal (the 14 closest-possible ports are left out; over all 41 it is 0.926x of Rust). The Mitochondria column was measured again on 2026-11-05 (all 41 in one run, 3 rounds, best of rounds) after the language work of that day: loops (`foreach`, `while`, `for`), typed
-signatures, enums and `match`, and text built in fields (`ascii<N>` with `+=`, `substr` windows, `request` structs); the Rust and Crystal columns are the 2026-11-04 run, unchanged.
-Against the previous Mitochondria column: Calculator::Interpreter -35% and Calculator::Ast -10% (their text is an ascii field, names are windows onto it), BF::Array -10% (`match`),
-Binarytrees::Obj -28% (that row was stale); Compress::HuffDecode +15% and HuffEncode +9% against the old column, +4% against the compiler before that day's work measured side by
-side, with the same generated code for its endpoints (the runtime gained functions; the difference is the binary's layout, not the program's code). Earlier, all 41 were measured
-together on 2026-11-05 after keep-alive, range-typed fields, wider loop versioning and `unlogged` scratch state. Crystal is LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not
-comparable, replaced by the standard library's), run with the same runner on the same core.
+- Mitochondria / Rust over all 41 ports: 0.739x (over the 27 like-for-like and rewritten-to-match ports: 0.878x, and 0.850x against Rust with overflow checks on); / Crystal 0.534x.
+- 29 ports are faster than Rust, 8 within +20%, 4 slower by more: Compress::HuffDecode 1.44x, BF::Array 1.32x, BF::Recursion 1.24x, Graph::DFS 1.23x.
+- Total time of the timed iterations: Mitochondria 32.3 s, Rust 39.5 s, Crystal 54.0 s.
+- Base64::Encode, Base64::Decode and Compress::BWTEncode call the language's library routines (AVX2 `base64`/`unbase64`, `array.sort`), so they compare a library with a library (their audit files say so); the earlier versions written as loops in the language are kept as `main_loop.mito` and `main_merge.mito`.
 
-How it got here (Mitochondria / Rust, best of 3; each step merged): the first run had Sieve 4.93x, Fannkuchredux 2.84x, Sort::Quick 1.61x, Sort::Merge 2.54x. Stores to plain
-state skip the page-commit check (state is committed at start): 1.97x, 1.90x, 1.30x, 1.71x. A bulk `array.fill` for the sieve's per-run array. Stores of aligned scalars inline, with
-the undo-log and commit tests against per-request locals: 1.66x, 1.52x, 1.21x, 1.44x. Value-range analysis for names that never change: no measurable change on these ports
-(their indices are mutable variables, or sizes read from state).
-
-Where the time was, for the sieve, per run (measuring-only builds with parts switched off): 24.7 ms as built; 19.6 ms without the undo log; 13.3 ms without the commit check; 7.8 ms
-without both; Rust 5.0 ms. A loop of many small array stores pays for atomicity (every store is range-checked, committed and undo-logged so that a failed request leaves nothing behind).
+How the numbers got here, step by step (the first run had Sieve 4.93x of Rust, Fannkuchredux 2.84x, Sort::Merge 2.54x; state unlogged by default, ranges of variables and arrays, inline pool `add`, narrow bitwise operations, AVX2 base64 and the library sort moved it to 0.74x overall), with what each change was worth and the measurements behind it: [docs/measurements.md](../../docs/measurements.md). Crystal is LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not comparable, replaced by the standard library's), run with the same runner on the same core.
 
 ## Triage of all 50 tests
 

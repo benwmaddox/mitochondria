@@ -1,0 +1,26 @@
+GET /fnv/0 -> 200 {"h":2166136261}
+GET /fnv/1 -> 200 {"h":67918732}
+GET /fnv/100 -> 200 {"h":1688093341}
+GET /fnv/299 -> 200 {"h":2340232251}
+GET /f/3 -> 200 {"a":16777216,"b":1.5}
+GET /set/5 -> 200 {"v":255}
+GET /set/6 -> 400 {"error":"`b` must be in 0..255","line":22}
+GET /set/-250 -> 200 {"v":0}
+GET /set/-251 -> 400 {"error":"`b` must be in 0..255","line":22}
+GET /let/32767 -> 200 {"v":32767}
+GET /let/32768 -> 400 {"error":"`c` must be in -32768..32767","line":27}
+GET /let/-32768 -> 200 {"v":-32768}
+GET /let/-32769 -> 400 {"error":"`c` must be in -32768..32767","line":27}
+GET /ret/200 -> 200 {"v":200}
+GET /ret/255 -> 200 {"v":255}
+GET /ret/256 -> 400 {"error":"`the result` must be in 0..255","line":31}
+GET /ret/-1 -> 400 {"error":"`the result` must be in 0..255","line":31}
+GET /pick/-128 -> 200 {"v":-128}
+GET /pick/-129 -> 400 {"error":"`the result` must be in -128..127","line":6}
+GET /pick/0 -> 200 {"v":0}
+GET /arg/5 -> 200 {"v":67110476}
+GET /arg/4294967295 -> 200 {"v":4261412058}
+GET /arg/4294967296 -> 400 {"error":"`h` must be in 0..4294967295","line":35}
+GET /arg/-1 -> 400 {"error":"`h` must be in 0..4294967295","line":35}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

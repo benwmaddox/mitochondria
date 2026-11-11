@@ -4,6 +4,7 @@ mod cases;
 #[cfg(test)]
 mod http_check;
 mod platform;
+mod docs_check;
 #[cfg(test)]
 mod error_corpus;
 #[cfg(test)]

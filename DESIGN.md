@@ -3,7 +3,7 @@
 All of a program's state is a declared tree of fixed-size values with declared maxima, reserved up front. The runtime
 knows from the structure which bytes are live, which are committed and which are only reserved. It descends from
 StasisLang (one visible state, bounded collections, data-oriented layout) and next-lang (allocate at startup, explicit
-over implicit, compile time first). Measurements behind it: [docs/measurements.md](docs/measurements.md).
+over implicit, compile time first). Measurements behind it: [docs/measurements.md](docs/measurements.md). Every command, executable option, built-in and library module is listed in [docs/reference.md](docs/reference.md); the tutorial is [docs/tutorial.md](docs/tutorial.md).
 
 ## Principles
 1. **Everything has a declared maximum.** Exceeding one is a typed failure, never a crash or an out-of-memory kill.
@@ -120,7 +120,12 @@ its text area, as a builtin's result is; the caller copies it where it keeps it.
 
 **Conversions.** `x as u8` (also `u16`, `u32`, `i8`, `i16`, `i32`, `i64`, `f64`) always succeeds: to a narrower integer it keeps the low bits (`x as u8` is `x & 255`; to a signed
 type the top bit is the sign, so `255 as i8` is -1), so the ranges the compiler works out for masks apply to it and a `u32` computation (`h = ((h ^ b) * 16777619) as u32`) needs no overflow test; a float
-becomes an integer by truncation, as `int(x)`. `as` binds tighter than `*` and looser than a prefix `-`. `u64` and `f32` are stored in fields but are not yet values in code.
+becomes an integer by truncation, as `int(x)`. `as` binds tighter than `*` and looser than a prefix `-`. `u64` is stored in fields but is not yet a value in code.
+
+**Sized numbers in code.** A `let` or `var` declared with a sized type (`var h: u32 = 2166136261;`, `let c: i16 = x;`, types `i8` `i16` `i32` `u8` `u16` `u32`), a parameter, and a result (`fn mix(h: u32, b: u8) -> u32`) are tested against the type's range, as a store into a field
+declared `in lo..hi` is: a value outside fails the request (400, naming the variable) unless the range analysis proves it inside, in which case no test is written. Every later assignment to a typed `var` is tested the same way (`h = ...`, `h += ...`);
+a parameter is tested when the function is entered. A returned value's range is known to the caller (the union of what every `return` gives), and a loop variable that is masked or tested to a range each round settles on that range, so
+`h = mix(h, b) ` over a loop of any length has no test left. `f32` rounds a value to a float where it is stored or returned (a parameter is not rounded on entry). `i64` and `f64` are the plain kinds.
 
 **Text.** A text literal takes the escapes `\n` `\t` `\r` `\0` `\"` `\\` `\'` and `\u{HEX}` (a code point); any other is an error.
 `len`, `substr`, `contains`, `starts_with`, `ends_with`, `index_of`, `last_index_of`, `trim` (and `trim_start`,
@@ -371,7 +376,7 @@ cannot be written, its items not added or removed directly, and its key not assi
 `iter_next` and `iter_item` can be walked by `each`.
 
 Standard library: `sorted<T, N, key>` (a skip list, items in order of a field: `add(k)`, `remove`, `set_key`,
-`first`, `last`, walks from a key) and `bag<T, N>` (the smallest module, for tests). `rowmap<N, W>` is `ordmap` with a row of W numbers per key (`put(key, col, value)`, `get_or`, `add_to`, `range_sum` by column): a record's numbers kept in the leaves beside its key.
+`first`, `last`, walks from a key), `intmap<N>` and `strmap<N>` (hash maps from `i64` or string keys to `i64` values, up to N entries; a removed entry frees its slot at once) and `bag<T, N>` (the smallest module, for tests). `rowmap<N, W>` is `ordmap` with a row of W numbers per key (`put(key, col, value)`, `get_or`, `add_to`, `range_sum` by column): a record's numbers kept in the leaves beside its key.
 
 ## Workers
 A system runs several programs as workers, each on its own thread with its own memory; they share nothing.

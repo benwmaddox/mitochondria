@@ -32,7 +32,27 @@ many messages a room keeps. Reaching a limit is an ordinary error the program an
 an out-of-memory kill, and peak memory is known before the program runs. In return, data whose size you cannot bound
 (documents, large uneven text, graphs of unknown shape) fits poorly; it belongs in a database or another language.
 
-Start with the [tutorial](docs/tutorial.md). The design is in [DESIGN.md](DESIGN.md).
+Start with the [tutorial](docs/tutorial.md). The design is in [DESIGN.md](DESIGN.md); every command, option, built-in and library module is listed in [docs/reference.md](docs/reference.md).
+
+**Kinds of programs.** A program is built for a *platform*, which is its entry file's: a **web** program has endpoints (`@get`, `@post`, ...) and is a server; a **cli** program has one `@main` function and is a
+command-line tool (arguments, stdin and flags in, stdout out, an exit code); a **test** program is tests only. `platform cli;` on a line of its own says so, or the entry points show it. A platform is a driver plus a list of
+named libraries, and the compiler refuses what does not belong to it (a cookie in a command-line tool, a table without SQLite). A game platform (a window and shaders through SDL3) is planned.
+
+```
+mito serve examples/todomvc/todomvc.mito --port 8080                       # a server
+echo '{"a":[1,2,3]}' | mito run examples/jx/jx.mito -- '.a[1]'             # a command-line tool: prints 2
+mito build examples/jx/jx.mito -o jx                                         # a standalone executable
+```
+
+**Examples.** Each is checked by its own tests.
+
+| | Platform | |
+| --- | --- | --- |
+| [examples/scoreboard](examples/scoreboard) | web | the smallest program: state, endpoints, tests |
+| [examples/chat](examples/chat), [chat-sharded](examples/chat-sharded) | web | sessions and rooms; workers on several threads |
+| [examples/todomvc](examples/todomvc) | web | server-rendered pages, tables in SQLite, the answer cache |
+| [examples/notes](examples/notes) | web | a multi-file app on tables: accounts, per-user notes, search |
+| [examples/jx](examples/jx) | cli | a small jq in three files |
 
 **Web pages.** Programs can answer HTML written as markup in the code, take HTML form posts and cookies, and serve their
 stylesheet and script compiled in. [examples/todomvc](examples/todomvc) is TodoMVC rendered on the server, checked in a browser

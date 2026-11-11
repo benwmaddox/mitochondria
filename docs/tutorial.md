@@ -206,9 +206,48 @@ GET /board
 With the environment variable `MITO_BLESS=1` set, `cargo test cases` records the answers; after that `cargo test`
 checks them on every build (TinyCC, clang, and clang with undefined-behaviour checks).
 
+## 10. A command-line program
+
+The same language makes tools. A program whose entry is `@main` is run from a command line: its arguments, what is piped in and its flags are its inputs, and its answer is written to standard output.
+This is `examples/jx`, a small jq, cut to its core:
+
+```
+platform cli;
+struct J { n: i64; }
+state j: J;
+
+@main
+fn main(path: ascii<1..100> from arg(0), doc: utf8<1000000> from stdin, c: bool = false) -> Response<text> {
+    return ok(path + " of " + doc);
+}
+```
+
+```
+echo '{"a":1}' | mito run tool.mito -- '.a' -c
+```
+
+`from arg(0)` is the first argument, `from stdin` what was piped in (read only if the program asks for it), and any other input is a flag: `-c`, `--name value` or `--name=value`. Inputs are checked as an endpoint's are:
+a missing or out-of-range one is an error on standard error and exit code 1, as is an answer with a status of 400 or more (`return status(400, "what went wrong")`). `mito build tool.mito -o tool` makes a standalone executable.
+`platform cli;` says what the program is for; without it, `@main` shows it. A command-line program has no endpoints and no tables, and the compiler says so if it is given one.
+
+## 11. Numbers
+
+Integers are `i64` and floats `f64` in code. Narrower types are for storage and for values that must stay in a range:
+
+```
+var h: u32 = 2166136261;          // tested against 0..4294967295 now, and on every assignment
+h = ((h ^ b) * 16777619) as u32;  // `as u32` keeps the low 32 bits; the compiler then knows the range and drops the test
+let y: f32 = x;                   // rounded to a float
+```
+
+`as` converts between widths (`u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `i64`, `f64`) and always succeeds: it keeps the low bits, and to a signed type the top bit is the sign (`255 as i8` is -1). A `let`, `var`,
+parameter or result with a sized type is a promise: a value outside it fails the request (400), naming it, unless the compiler can prove it inside. `wrapping_add`, `wrapping_sub` and `wrapping_mul` wrap at 64 bits
+where the operators `+ - *` fail on overflow. `u64` is stored in fields but is not yet a value in code.
+
 ## Next
 
 - `mito build examples/scoreboard/score.mito -o score.exe` makes an optimised executable; `emit-c` writes the C it is made of.
+- [reference.md](reference.md) lists every command, option, built-in and library module; `examples/notes` is a multi-file app on tables and `examples/jx` a command-line tool.
 - `examples/chat` adds sessions (`who: Session from header("X-Session")`); `examples/chat-sharded` runs workers on
   several threads.
 - [DESIGN.md](../DESIGN.md) has the whole design and what is not built yet.

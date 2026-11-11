@@ -6,23 +6,53 @@
 
 struct Todo { title: utf8<1000>; done: bool; }
 // a browser's list, and its todos (a table of the rows each list owns, in the order they were added)
-struct Board { secret: i64; todos: table<Todo>; }
-struct App { boards: table<Board>; }
+// `version` moves with every change to the list's todos (each change below bumps it in the same transaction): what a cached page or list is kept under
+struct Board { secret: i64; version: i64; todos: table<Todo>; }
+// `cache`: what is kept in the answer cache between requests, chosen by the TODOMVC_CACHE environment variable when the server starts: 0 nothing (every page is rendered afresh),
+// 1 the list and its footer (`lists`), the rest of the page rendered each time, 2 the whole page (the default)
+struct App { boards: table<Board>; cache: i64; }
 state app: App;
+
+@start
+fn init() {
+    let mode = or(env("TODOMVC_CACHE"), "page");
+    if mode == "none" { app.cache = 0; } else if mode == "fragment" { app.cache = 1; } else { app.cache = 2; }
+}
 
 // ---- pages: all todos, the active ones, the completed ones (show 0, 1, 2); `?edit=<id>` shows one as a text field
 
 @get("/")
 fn all(board: Board? from cookie("todos"), edit: i64 = -1) -> Response<html> {
-    return ok(<!doctype html><html lang="en">{document(board, 0, edit);}</html>);
+    return ok(<!doctype html><html lang="en">{page(board, 0, edit);}</html>);
 }
 @get("/active")
 fn active(board: Board? from cookie("todos"), edit: i64 = -1) -> Response<html> {
-    return ok(<!doctype html><html lang="en">{document(board, 1, edit);}</html>);
+    return ok(<!doctype html><html lang="en">{page(board, 1, edit);}</html>);
 }
 @get("/completed")
 fn completed(board: Board? from cookie("todos"), edit: i64 = -1) -> Response<html> {
-    return ok(<!doctype html><html lang="en">{document(board, 2, edit);}</html>);
+    return ok(<!doctype html><html lang="en">{page(board, 2, edit);}</html>);
+}
+
+// A page, or its piece from the answer cache: the same list at the same version, filter and (no) edit is the same page, so it is kept under those (a page that has a todo open for
+// editing is not kept). Any change to a list moves its version, so a key that names it is never found after a change; another browser's changes do not touch it.
+fn page(b: Board?, show: i64, edit: i64) -> html {
+    if app.cache == 2 && edit < 0 {
+        let key = "page:" + list_key(b) + ":" + str(show);
+        if cache_get(key) >= 0 {
+            cache_part(0);
+        } else {
+            cache_start();
+            document(b, show, edit);
+            cache_put(key);
+        }
+    } else {
+        document(b, show, edit);
+    }
+}
+fn list_key(b: Board?) -> text {
+    if exists(b) { return str(slot(b)) + "." + str(b.version); }
+    return "none";
 }
 
 fn document(b: Board?, show: i64, edit: i64) -> html {
@@ -42,7 +72,7 @@ fn document(b: Board?, show: i64, edit: i64) -> html {
                     <input class="new-todo" name="title" placeholder="What needs to be done?" autofocus autocomplete="off">
                 </form>
             </header>
-            {if exists(b) { lists(b, show, edit); }}
+            {if exists(b) { list_part(b, show, edit); }}
         </section>
         <footer class="info">
             <p>Double-click to edit a todo</p>
@@ -50,6 +80,22 @@ fn document(b: Board?, show: i64, edit: i64) -> html {
             <p>Part of <a href="https://todomvc.com">TodoMVC</a></p>
         </footer>
     </body>
+}
+
+// the list and its footer, from the answer cache when only they are kept
+fn list_part(b: Board, show: i64, edit: i64) -> html {
+    if app.cache == 1 && edit < 0 {
+        let key = "list:" + list_key(b) + ":" + str(show);
+        if cache_get(key) >= 0 {
+            cache_part(0);
+        } else {
+            cache_start();
+            lists(b, show, edit);
+            cache_put(key);
+        }
+    } else {
+        lists(b, show, edit);
+    }
 }
 
 // the list and its footer, when there are todos
@@ -117,7 +163,7 @@ fn back(show: i64) -> html {
 fn add(board: Board? from cookie("todos"), title: utf8<1000>, back: ascii<16> = "/") -> Response<html> {
     let text = trim(title);
     if len(text) == 0 { return see_other(back); }
-    if exists(board) { let t = board.todos.add(); t.title = text; return see_other(back); }
+    if exists(board) { let t = board.todos.add(); t.title = text; board.version += 1; return see_other(back); }
     let made = app.boards.add();
     made.secret = random();
     set_cookie("todos", token(made), 31536000);
@@ -129,6 +175,7 @@ fn add(board: Board? from cookie("todos"), title: utf8<1000>, back: ascii<16> = 
 fn toggle(board: Board from cookie("todos"), id: i64, back: ascii<16> = "/") -> Response<html> {
     let t = board.todos[id];
     t.done = !t.done;
+    board.version += 1;
     return see_other(back);
 }
 // an edit that leaves the title empty removes the todo
@@ -137,11 +184,13 @@ fn rename(board: Board from cookie("todos"), id: i64, title: utf8<1000>, back: a
     let t = board.todos[id];
     let text = trim(title);
     if len(text) == 0 { board.todos.remove(t); } else { t.title = text; }
+    board.version += 1;
     return see_other(back);
 }
 @post("/todos/{id}/delete")
 fn destroy(board: Board from cookie("todos"), id: i64, back: ascii<16> = "/") -> Response<html> {
     board.todos.remove(board.todos[id]);
+    board.version += 1;
     return see_other(back);
 }
 // all complete, or, when all already are, all active again
@@ -150,11 +199,13 @@ fn toggle_all(board: Board from cookie("todos"), back: ascii<16> = "/") -> Respo
     var all_done = true;
     foreach t in board.todos { if !t.done { all_done = false; } }
     foreach t in board.todos { t.done = !all_done; }
+    board.version += 1;
     return see_other(back);
 }
 @post("/clear-completed")
 fn clear_completed(board: Board from cookie("todos"), back: ascii<16> = "/") -> Response<html> {
     foreach t in board.todos where t.done { board.todos.remove(t); }
+    board.version += 1;
     return see_other(back);
 }
 

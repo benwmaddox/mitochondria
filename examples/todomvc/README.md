@@ -24,5 +24,10 @@ The lists are tables (`table<Board>`, each board's `table<Todo>`), kept in SQLit
 they survive restarts, and any SQLite tool can read them while the server runs. Titles are at most 1000 bytes; tables have no
 fixed number of rows.
 
+Caching: a page, or just its list and footer, is kept in the answer cache under the list's version (`Board.version`, which every change to the list moves, so another
+browser's changes do not touch it). `TODOMVC_CACHE=none|fragment|page` chooses at start what is kept (default `page`); the browser tests (`e2e.mjs`) pass in all three modes.
+`bench/todomvc` compares each mode with crudspec's equivalent, and both servers with `--db-sync normal` (the default: the log is synced at checkpoints) and `full` (every commit
+synced before the answer).
+
 Differences from the app spec: filters are the pages `/active` and `/completed` rather than `#/active`; every change reloads
 the page.

@@ -118,6 +118,14 @@ of its own when it declares its cap, `var acc: text<8192> = "";`: that many byte
 live at a recursive call; given back at the scope's end); `var t = ""` without a cap is an error that says to declare one. A function may return text (`-> text`): built for the request in
 its text area, as a builtin's result is; the caller copies it where it keeps it.
 
+**Functions of a type.** A function whose first parameter is `self: Type` belongs to that type, as in Stasis: `fn hurt(self: Player, n: i64) { self.hp -= n; }` is the function `hurt` of `Player`, called `p.hurt(3)`.
+The same name can be declared for any number of types (`fn hurt(self: Monster, n: i64)` is another function, with its own rule) and beside a function of no type (`hurt(3)`); which function `x.hurt(3)` is depends on the type of `x`,
+as the compiler sees it where the call is written, so the call costs nothing at run time and is inlined like any other. `self` is an item of a pool, list or table, or a number (`fn double(self: i64)` applies to every integer type,
+`fn half(self: f64)` to floats), a string (`fn shout(self: string) -> text`) or a bool. It is not nullable, and a plain struct cannot be `self` yet because a plain struct is not yet a parameter. A name that is a collection operation (`add`,
+`remove`, `count`, `sort` ...) cannot be a function of a type. These functions may call themselves and each other. A call on a type that does not have the function says which types do (`` `M` has no function `hit` (declare
+`fn hit(self: M, ...)`; `hit` is declared for P) ``). What the compiler works out about functions (which ones may write, which are recursive, how big they are) follows every function a call could reach. (In module code `self` is the
+instance, as before; a function of a type is not module code.)
+
 **Conversions.** `x as u8` (also `u16`, `u32`, `i8`, `i16`, `i32`, `i64`, `f64`) always succeeds: to a narrower integer it keeps the low bits (`x as u8` is `x & 255`; to a signed
 type the top bit is the sign, so `255 as i8` is -1), so the ranges the compiler works out for masks apply to it and a `u32` computation (`h = ((h ^ b) * 16777619) as u32`) needs no overflow test; a float
 becomes an integer by truncation, as `int(x)`. `as` binds tighter than `*` and looser than a prefix `-`. `u64` is stored in fields but is not yet a value in code.

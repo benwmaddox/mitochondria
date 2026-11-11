@@ -74,6 +74,12 @@ DESIGN.md describes most built-ins where they come up (text, JSON, time, crypto,
 | `stat("committed_kb")`, `stat("live_kb")`, `stat("reserved_kb")` | memory figures of this program, in KB (committed, live, reserved) |
 | `worker_index()`, `worker_count()`, `worker_count("kind")` | in a system of workers, which worker this is (0 up), how many workers there are of its kind, and of a named kind; outside a system 0 and 1 |
 
+## Functions of a type
+
+A function whose first parameter is `self: Type` belongs to that type: `fn hurt(self: Player, n: i64) { ... }` declares `hurt` for `Player`, and `p.hurt(3)` calls it. The same name may be declared for any number of types and beside a
+function of no type. `self` is an item, an integer (`i64`, or any narrower integer type), a float (`f64`), a `string` or a `bool`; not a nullable value, and not a plain struct yet. A collection operation's name (`add`, `remove`,
+`count`, `sort` ...) cannot be used (DESIGN.md, Functions of a type).
+
 ## Entry points
 
 `@get("/p")`, `@post`, `@put`, `@patch` and `@delete` are endpoints (a function with an HTTP route and typed inputs; `@get` and `@delete` read their inputs from the query, the others from the body, a path

@@ -220,7 +220,7 @@ pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64, bool), Item(String, Opti
 /// `ret_opt`: declared `-> T?`: the result may be null, and a caller must check it (`if exists(x)`) or give a fallback (`or`).
 /// `test`: a test (`test "name" { ... }`): no parameters, a result of `bool` or text, run by `mito test` only.
 /// `html`: declared `-> html`, a function that writes markup into the answer (used inside markup, as `{item(t)}`).
-pub struct Func { pub test: Option<String>, pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool, pub html: bool }
+pub struct Func { pub test: Option<String>, pub recv: bool, pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool, pub html: bool }
 /// A type in a function's signature, as written: `i64`, `f64`, `bool`, `string`, a struct whose items the function takes
 /// (`Player`, or `Player in game.players` when several collections hold it), the type of a struct's field (`T.key`, for
 /// modules), each with `?` for "or null".
@@ -408,6 +408,8 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
 /// an initializer may appear here (not in a condition, a loop's clauses or a JSON array, where it would run at a
 /// different time); `tmp`: hidden locals made so far.
 /// `markup`: inside code in markup (`{if ...}`), where a bare string statement writes itself: Some(false) in content, Some(true) in an attribute.
+/// The collection operations `x.f(...)` names (a receiver function may not be called one of these).
+pub const BUILTIN_METHODS: [&str; 15] = ["add", "try_add", "remove", "move", "copy_from", "sort", "fill", "clear", "truncate", "count_below", "count", "capacity", "json_field", "len", "exists"];
 /// Keys besides a letter or a digit that `from key("...")` names (the game platform's).
 pub const GAME_KEYS: [&str; 7] = ["space", "up", "down", "left", "right", "shift", "escape"];
 /// The sized number types of code, by the code `__mito__in` is given: a value kept in a `let`, `var`, parameter or result of such a type is tested against its range
@@ -461,6 +463,19 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             p.eat("(")?;
             let (mut params, mut ptys) = (Vec::new(), Vec::new());
             while !p.sym(")") { params.push(p.id()?); ptys.push(if p.sym(":") { Some(p.pty()?) } else { None }); p.sym(","); }
+            // a function whose first parameter is `self: Type` belongs to that type (as in Stasis): `fn hurt(self: Player, n: i64) { self.hp -= n; }` is called `p.hurt(3)`, and is named `Player.hurt`.
+            // The same name may be declared for any number of types, and beside a function of no type.
+            let is_recv = params.first().map_or(false, |n| n == "self");
+            if is_recv {
+                let Some(rt) = ptys[0].clone() else { return Err(format!("`fn {}(self, ...)`: `self` has a type, `self: Player`", name)) };
+                if rt.arg.is_some() || rt.field.is_some() || rt.opt { return Err(format!("`fn {}(self: ...)`: `self` is a struct, a number, `string` or `bool`, and not nullable", name)); }
+                // a number is any integer type or any float, a string any string: the type's name is the kind
+                let ty = match rt.name.as_str() { "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" => "i64", "f32" | "f64" => "f64", "string" | "utf8" | "ascii" | "text" => "string", n => n }.to_string();
+                if name.contains('.') || BUILTIN_METHODS.contains(&name.as_str()) { return Err(format!("`fn {}(self: {}, ...)`: `{}` is a collection operation, a function of a type needs another name", name, rt.name, name)); }
+                let method = name.clone();
+                name = format!("{}.{}", ty, name);
+                if api.fns.iter().any(|f| f.recv && f.name == name) { return Err(format!("`{}` is declared twice for `{}`", method, ty)); }
+            }
             let ret = if p.sym("->") { Some(p.pty()?) } else { None };
             let html = ret.as_ref().map_or(false, |t| t.name == "html" && t.arg.is_none() && !t.opt);
             let ret = if html { None } else { ret };
@@ -479,7 +494,7 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             p.typed.truncate(mark);
             let mut body = body?;
             if !entry.is_empty() { entry.append(&mut body); body = entry; }
-            api.fns.push(Func { test: None, name, params, ptys, ret, body, slots: 0, public, ret_opt, html });
+            api.fns.push(Func { test: None, recv: is_recv, name, params, ptys, ret, body, slots: 0, public, ret_opt, html });
             continue;
         }
         // `test "name" { ... }`: a function the test runner calls; inside, `get`, `post`, `put`, `patch`, `delete` make requests
@@ -491,7 +506,7 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             let body = p.block();
             p.in_test = false;
             let n = api.fns.iter().filter(|f| f.test.is_some()).count();
-            api.fns.push(Func { test: Some(title), name: format!("__mito__test{}", n), params: Vec::new(), ptys: Vec::new(), ret: None, body: body?, slots: 0, public: false, ret_opt: false, html: false });
+            api.fns.push(Func { test: Some(title), recv: false, name: format!("__mito__test{}", n), params: Vec::new(), ptys: Vec::new(), ret: None, body: body?, slots: 0, public: false, ret_opt: false, html: false });
             continue;
         }
         if p.is_kw("endpoint") { return Err("endpoints are functions with an attribute: `@post(\"/path\") fn name() -> Response<T> { ... }`".into()); }
@@ -1304,18 +1319,18 @@ pub fn path_of(e: &Expr) -> Option<String> {
 }
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums, test: bool, coll_loops: u32 }
+struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums, test: bool, coll_loops: u32 }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
 pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> { bind_with(api, globals, &[]) }
 /// The enums' names and values, for `Name.Value` in code.
 pub type Enums = [(String, Vec<(String, i64)>)];
 pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: &Enums) -> R<()> {
-    let fns: Vec<(String, usize, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public)).collect();
+    let fns: Vec<(String, usize, bool, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public, f.recv)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
     let mut errs = Vec::new();
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: f.name.rfind('.').map(|i| f.name[..i].to_string()), hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0 };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: if f.recv { None } else { f.name.rfind('.').map(|i| f.name[..i].to_string()) }, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0 };
         for p in &f.params { b.declare(p, false); }
         // a full signature: every parameter's type, and the result's when the function returns a value
         if let Some(Stmt::At(l, c)) = f.body.first() { b.at = (*l, *c); }
@@ -1414,7 +1429,8 @@ impl Binder<'_> {
         let Expr::Call(n, args, _) = e else { return };
         if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
         let Some((recv, op)) = n.rsplit_once('.') else { return };
-        if !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
+        let declared = self.fns.iter().any(|f| f.3 && f.0.rsplit_once('.').map_or(false, |(_, m)| m == op));
+        if !declared && !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
         let mut parts = recv.split('.');
         let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
         for f in parts { r = Expr::Field(Box::new(r), f.to_string()); }
@@ -1508,7 +1524,7 @@ impl Binder<'_> {
     fn expr(&mut self, e: &mut Expr) -> R<()> {
         // in a module instance's function, `self` is the instance, written as its path (`game.board`); never a local,
         // so nothing shadows it
-        if matches!(e, Expr::Var(n, _) if n == "self") {
+        if matches!(e, Expr::Var(n, _) if n == "self") && !self.names.iter().any(|x| x.0 == "self") {
             let Some(o) = self.owner.clone() else { return self.err("`self` is only for module code".into()) };
             let mut parts = o.split('.');
             let mut p = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
@@ -1559,6 +1575,8 @@ impl Binder<'_> {
                     (".count_below", k) => return self.err(format!("`array.count_below(n, target, inclusive)` takes three arguments, given {}", k - 1)),
                     (".move", _) => return self.err("`array.move(from, to, count)` is a statement".into()),
                     (".fill", _) => return self.err("`array.fill(from, count, value)` is a statement".into()),
+                    // a function declared for a type: which one is known when the receiver's type is
+                    _ if self.fns.iter().any(|f| f.3 && f.0.rsplit_once('.').map_or(false, |(_, m)| m == &n[1..])) => CallRes::Unbound,
                     _ => return self.err(format!("unknown function `{}`", &n[1..])),
                 };
             }

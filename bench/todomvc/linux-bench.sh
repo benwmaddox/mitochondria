@@ -1,6 +1,7 @@
 #!/bin/bash
 # TodoMVC against crudspec on Linux (WSL2): builds this compiler and examples/todomvc, then runs bench.py under the shared bench lock.
-# usage (from Windows): wsl -e bash /mnt/d/code/Mitochondria/bench/todomvc/linux-bench.sh CRUDSPEC_APP CRUDSPEC_ASSETS [bench.py args]
+# usage (from Windows): wsl -e bash /mnt/d/code/Mitochondria/bench/todomvc/cs-full.sh first (the two crudspec builds), then
+#   wsl -e bash /mnt/d/code/Mitochondria/bench/todomvc/linux-bench.sh /home/ben/cs-todomvc-out/app /mnt/d/code/crudspec/apps/todomvc/assets --crudspec-full /home/ben/cs-todomvc-full/app [bench.py args]
 set -e
 export PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 cd "$(dirname "$0")/../.."

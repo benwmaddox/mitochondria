@@ -485,7 +485,7 @@ enum CV {
 /// `bound`: the most bytes of text a return so far gave (None: none yet, or one not known: `unbounded`)
 /// `mark`: the text area's length when the function began, which a `return` of a value that is not text cuts back to (placeholders
 /// `/*RCUT mark*/` until the body is compiled: kept as cuts when the body built region text, dropped otherwise)
-struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Option<String>, bound: Option<usize>, unbounded: bool, mark: String }
+struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Option<String>, bound: Option<usize>, unbounded: bool, mark: String, ivs: Vec<Option<(i64, i64)>> }
 
 /// How an argument is passed to a generated C function: a value of a kind, or an instance of a collection.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1354,18 +1354,19 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
         // the loop guesses: from the entries, widened until a build agrees
         let mut guess: Loops = entries.clone();
         let mut verified = None;
-        for _ in 0..6 {
+        for round in 0..6 {
             let (g, sn, rm, inv, holds) = build(&next, &next_never, &guess);
             if holds { verified = Some((g, sn, rm, inv)); break; }
-            // widen: an assignment outside the guess sends that end to infinity; one with no known interval drops the variable's guess
+            // widen: an assignment outside the guess moves that end out to what the assignment gave (the first rounds: a variable that is masked or tested to a range each round settles there) or, later,
+            // to infinity; one with no known interval drops the variable's guess. Every guess is checked by a build before it is used.
             let mut wide: Loops = Default::default();
             for (k, (lo, hi)) in &guess {
                 match inv.assigns.get(k) {
                     Some(None) => {}
-                    Some(Some((a, b))) => { wide.insert(*k, (if a < lo { i64::MIN } else { *lo }, if b > hi { i64::MAX } else { *hi })); }
+                    Some(Some((a, b))) => { wide.insert(*k, (if a < lo { if round < 3 { *a } else { i64::MIN } } else { *lo }, if b > hi { if round < 3 { *b } else { i64::MAX } } else { *hi })); }
                     None => { wide.insert(*k, (*lo, *hi)); }
                 }
-                if let (Some((ea, eb)), Some(w)) = (inv.entries.get(k), wide.get_mut(k)) { if *ea < w.0 { w.0 = i64::MIN; } if *eb > w.1 { w.1 = i64::MAX; } }
+                if let (Some((ea, eb)), Some(w)) = (inv.entries.get(k), wide.get_mut(k)) { if *ea < w.0 { w.0 = if round < 3 { *ea } else { i64::MIN }; } if *eb > w.1 { w.1 = if round < 3 { *eb } else { i64::MAX }; } }
             }
             if wide == guess { break; }
             guess = wide;
@@ -1863,7 +1864,7 @@ impl<'p> G<'p> {
             g.inlining.push(k);
             let sel = if has_collecting_loop(self.api, &f.body) { Some("hm".to_string()) } else { None };
             if sel.is_some() { g.line("u32 hm;"); g.call("c->h->sel_mark(c, &hm)"); }
-            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone(), bound: None, unbounded: rec, mark: "rmark".into() });
+            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone(), bound: None, unbounded: rec, mark: "rmark".into(), ivs: Vec::new() });
             let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
             for (i, pk) in pks.iter().enumerate() {
                 fenv[i] = Some(match pk {
@@ -3145,6 +3146,9 @@ impl<'p> G<'p> {
         let b = self.txt_bound(&v);
         if let Some(r) = self.ret.last_mut() { match b { Some(b) => r.bound = Some(r.bound.unwrap_or(0).max(b)), None => r.unbounded = true } }
         let v = self.hold(v, false)?;
+        // what the call can give, for the range analysis in the caller: the union of the ranges of every value returned
+        let iv = match &v { CV::Int(e) => self.interval(e), _ => None };
+        if let Some(r) = self.ret.last_mut() { r.ivs.push(iv); }
         let Some(kv) = kind(&v) else { return no("a function returning this kind of value is not compiled yet") };
         let r = self.ret.last().unwrap();
         let (var, label, f) = (r.var.clone(), r.label.clone(), *self.inlining.last().unwrap());
@@ -4687,6 +4691,22 @@ impl<'p> G<'p> {
                 [CV::Int(e)] => { let e = self.hold_int(e.clone()); let r = self.tmp("v"); self.line(&format!("ABS_({}, {});", r, e)); CV::Int(r) }
                 _ => return no("`abs` takes one number"),
             },
+            // a value kept in a `let`, `var`, parameter or result declared with a sized number type (`var h: u32`): tested against the type's range, as a
+            // store into a field with that range is (the parser writes the call; `a` is the value, the type's code and the name for the message)
+            B::InRange => {
+                let [v, code, name] = <[CV; 3]>::try_from(a).map_err(|_| "internal: a typed value takes three arguments".to_string())?;
+                let code = match &code { CV::Int(s) => s.trim_end_matches("LL").parse::<usize>().unwrap_or(0), _ => 0 };
+                let name = match &name { CV::Lit(s) => s.clone(), _ => "value".to_string() };
+                let (_, lo, hi) = NUM_TYPES[code.min(NUM_TYPES.len() - 1)];
+                let v = self.in_field_range(v, (lo, hi), &name)?;
+                self.with_field_range(v, Some((lo, hi)))
+            }
+            // an `f32`: a number rounded to the nearest float
+            B::F32 => match a.as_slice() {
+                [CV::Flt(e)] => CV::Flt(format!("((double)(float)({}))", e)),
+                [CV::Int(e)] => CV::Flt(format!("((double)(float)({}))", e)),
+                _ => return no("an f32 takes a number"),
+            },
             B::Crash => { self.line("TAIL(c->h->crash(c));"); CV::Null }
             _ => unreachable!("handled above"),
         })
@@ -4766,7 +4786,7 @@ impl<'p> G<'p> {
         let forced = match &f.ret { Some(t) => Some(self.decl_kind(t, &f.name)?), None => self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1) };
         let sel = if has_collecting_loop(self.api, &f.body) { Some(self.tmp("hm")) } else { None };
         let rmark = self.tmp("rm");
-        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone(), bound: None, unbounded: false, mark: rmark.clone() });
+        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone(), bound: None, unbounded: false, mark: rmark.clone(), ivs: Vec::new() });
         self.depth += 1;
         let frame = std::mem::replace(&mut self.frame, Some(k));
         let r = self.block(&f.body, fenv);
@@ -4788,7 +4808,14 @@ impl<'p> G<'p> {
         }
         }
         let (decl, out) = match kind {
-            K::Int => (format!("i64 {}_v = 0;", var), CV::Int(format!("{}_v", var))),
+            K::Int => {
+                // every value returned had a range: the call's result is inside their union
+                if !ret.ivs.is_empty() && ret.ivs.iter().all(|x| x.is_some()) {
+                    let (lo, hi) = ret.ivs.iter().flatten().fold((i64::MAX, i64::MIN), |a, r| (a.0.min(r.0), a.1.max(r.1)));
+                    self.ranges.insert(format!("{}_v", var), (lo, hi));
+                }
+                (format!("i64 {}_v = 0;", var), CV::Int(format!("{}_v", var)))
+            }
             K::Flt => (format!("double {}_v = 0;", var), CV::Flt(format!("{}_v", var))),
             K::Bool => (format!("int {}_v = 0;", var), CV::Bool(format!("{}_v", var))),
             K::Txt => {

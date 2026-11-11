@@ -10,13 +10,13 @@ Operations per lookup workload: 1,000,000.
 
 | Workload | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |
 |---|---:|---:|---:|---:|---:|
-| Lookup: miss | 38.9 | 38.1 | 49.0 | 0.79x | 0.78x |
-| Lookup: hit | 40.5 | 38.7 | 48.8 | 0.83x | 0.79x |
-| Increment existing value | 40.7 | 39.1 | 48.9 | 0.83x | 0.80x |
-| Range scan, up to 100 entries | 375.3 | 172.7 | 210.5 | 1.78x | 0.82x |
-| Lookup: 50% hits, 50% misses | 45.1 | 42.2 | 50.7 | 0.89x | 0.83x |
-| Insert new keys | 99.0 | 77.0 | 72.7 | 1.36x | 1.06x |
-| Delete existing key | 102.5 | 73.6 | 68.7 | 1.49x | 1.07x |
+| Increment existing value | 40.3 | 38.8 | 48.9 | 0.82x | 0.79x |
+| Lookup: hit | 41.8 | 39.2 | 48.8 | 0.86x | 0.80x |
+| Range scan, up to 100 entries | 375.6 | 169.2 | 210.5 | 1.78x | 0.80x |
+| Lookup: miss | 39.9 | 39.6 | 49.0 | 0.81x | 0.81x |
+| Lookup: 50% hits, 50% misses | 44.7 | 42.0 | 50.7 | 0.88x | 0.83x |
+| Insert new keys | 93.6 | 73.5 | 72.7 | 1.29x | 1.01x |
+| Delete existing key | 104.1 | 72.9 | 68.7 | 1.51x | 1.06x |
 
 ## 10,000 keys: memory (peak working set, MB)
 
@@ -24,7 +24,7 @@ The most physical memory each process held at once (Windows' peak working set), 
 
 | | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |
 |---|---:|---:|---:|---:|---:|
-| Peak memory | 6.4 | 6.1 | 4.4 | 1.47x | 1.39x |
+| Peak memory | 6.4 | 6.1 | 4.4 | 1.47x | 1.40x |
 
 ## 1,000,000 keys: time (ns per operation; a range scan is per scan)
 
@@ -32,13 +32,13 @@ Operations per lookup workload: 1,000,000.
 
 | Workload | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |
 |---|---:|---:|---:|---:|---:|
-| Range scan, up to 100 entries | 1311.3 | 463.7 | 1287.3 | 1.02x | 0.36x |
-| Lookup: miss | 109.4 | 107.0 | 195.6 | 0.56x | 0.55x |
-| Lookup: 50% hits, 50% misses | 135.2 | 143.1 | 207.6 | 0.65x | 0.69x |
-| Increment existing value | 139.9 | 147.0 | 187.6 | 0.75x | 0.78x |
-| Lookup: hit | 139.0 | 141.5 | 182.6 | 0.76x | 0.77x |
-| Insert new keys | 155.0 | 131.6 | 148.6 | 1.04x | 0.89x |
-| Delete existing key | 251.6 | 218.3 | 175.6 | 1.43x | 1.24x |
+| Range scan, up to 100 entries | 1230.8 | 452.4 | 1287.3 | 0.96x | 0.35x |
+| Lookup: miss | 114.6 | 108.5 | 195.6 | 0.59x | 0.55x |
+| Lookup: 50% hits, 50% misses | 136.8 | 134.2 | 207.6 | 0.66x | 0.65x |
+| Increment existing value | 141.6 | 140.2 | 187.6 | 0.75x | 0.75x |
+| Lookup: hit | 139.8 | 141.0 | 182.6 | 0.77x | 0.77x |
+| Insert new keys | 157.6 | 130.7 | 148.6 | 1.06x | 0.88x |
+| Delete existing key | 261.9 | 223.2 | 175.6 | 1.49x | 1.27x |
 
 ## 1,000,000 keys: memory (peak working set, MB)
 
@@ -46,4 +46,4 @@ The most physical memory each process held at once (Windows' peak working set), 
 
 | | Mitochondria `lib/btree.mito` | Mitochondria `lib/ordmap.mito` | Rust `std::collections::BTreeMap` | btree.mito / BTreeMap | ordmap.mito / BTreeMap |
 |---|---:|---:|---:|---:|---:|
-| Peak memory | 50.0 | 32.4 | 32.1 | 1.56x | 1.01x |
+| Peak memory | 50.0 | 32.3 | 32.1 | 1.56x | 1.01x |

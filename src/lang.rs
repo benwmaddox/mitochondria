@@ -516,12 +516,21 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
         let method = match verb.as_str() {
             "get" | "post" | "put" | "patch" | "delete" => verb.to_uppercase(),
             "socket" => "SOCKET".into(), "socket_message" => "SOCKETMSG".into(), "socket_close" => "SOCKETCLOSE".into(),
-            v => return Err(format!("`@{}`: an endpoint is `@get`, `@post`, `@put`, `@patch`, `@delete`, `@socket`, `@socket_message` or `@socket_close`", v)),
+            // `@main fn name(filter: ascii<1..200> from arg(0), json: utf8<1000000> from stdin) -> Response<text>`: a command-line program's one
+            // function. The command line is its request: `from arg(N)` the Nth argument, `from stdin` what was piped in, any other input
+            // the flag `--name value`; the answer's body goes to stdout and a status of 400 or more makes the exit code 1 (runtime/cli.c)
+            "main" => "MAIN".into(),
+            v => return Err(format!("`@{}`: an endpoint is `@get`, `@post`, `@put`, `@patch`, `@delete`, `@socket`, `@socket_message`, `@socket_close` or `@main`", v)),
         };
-        p.eat("(")?;
-        let path = match p.t.get(p.i) { Some(Tok::Str(s)) => { p.i += 1; s.clone() } _ => return Err(format!("`@{}(...)` takes the path as a string, as in `@{}(\"/players/{{p}}\")`", verb, verb)) };
-        p.eat(")")?;
-        let segs = path_segs(&path)?;
+        let segs = if method == "MAIN" {
+            if api.eps.iter().any(|e| e.method == "MAIN") { return Err("a program has one `@main` function".into()); }
+            Vec::new()
+        } else {
+            p.eat("(")?;
+            let path = match p.t.get(p.i) { Some(Tok::Str(s)) => { p.i += 1; s.clone() } _ => return Err(format!("`@{}(...)` takes the path as a string, as in `@{}(\"/players/{{p}}\")`", verb, verb)) };
+            p.eat(")")?;
+            path_segs(&path)?
+        };
         p.kw("fn")?;
         let name = p.id()?;
         p.eat("(")?;
@@ -603,6 +612,15 @@ impl P {
             self.i += 1;
             if self.is_kw("query") { self.i += 1; Src::Query }
             else if self.is_kw("body") { self.i += 1; Src::Body }
+            // a command-line program's input: the Nth argument, or what was piped in (named as headers, as `:socket` is)
+            else if self.is_kw("stdin") { self.i += 1; Src::Header(":stdin".into()) }
+            else if self.is_kw("arg") {
+                self.i += 1; self.eat("(")?;
+                let n = self.int()?;
+                self.eat(")")?;
+                if !(0..=31).contains(&n) { return Err(format!("input `{}`: `from arg(N)` takes N from 0 to 31", name)); }
+                Src::Header(format!(":arg{}", n))
+            }
             else if self.is_kw("cookie") {
                 self.i += 1; self.eat("(")?;
                 let c = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from cookie(\"name\")`", name)) };
@@ -611,7 +629,7 @@ impl P {
                 Src::Cookie(c)
             }
             else { self.kw("header")?; self.eat("(")?; let h = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from header(\"Name\")`, `from cookie(\"name\")`, `from query` or `from body`", name)) }; self.eat(")")?; Src::Header(h) }
-        } else if forwarded { Src::Fwd } else if in_path { Src::Path } else if matches!(method, "GET" | "DELETE") { Src::Query } else { Src::Body };
+        } else if forwarded { Src::Fwd } else if in_path { Src::Path } else if matches!(method, "GET" | "DELETE" | "MAIN") { Src::Query } else { Src::Body };
         if in_path && src != Src::Path { return Err(format!("input `{}` is named in the path, so it comes from the path", name)); }
         if let InTy::Item(..) = ty { if default.is_some() || (optional && !matches!(src, Src::Cookie(_))) { return Err(format!("input `{}`: an item cannot have a default, and only one from a cookie can be optional (null when absent or not valid)", name)); } }
         if optional && !matches!(ty, InTy::Str(..) | InTy::Item(..)) { return Err(format!("input `{}`: only a string can be optional (null when absent); give it a default instead", name)); }

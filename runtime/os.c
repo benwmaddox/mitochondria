@@ -57,6 +57,10 @@ static u64 os_ticks_ms(void) { return GetTickCount64(); }
 static u64 os_perf_ns(void) { i64 t = 0, f = 1; QueryPerformanceCounter(&t); QueryPerformanceFrequency(&f); return (u64)((double)t * 1e9 / (double)f); }
 static u64 os_random(void) { u64 v = 0; BCryptGenRandom(0, (u8 *)&v, 8, 2); return v; } /* BCRYPT_USE_SYSTEM_PREFERRED_RNG */
 static void os_err(const void *p, u32 n) { u32 done = 0; WriteFile(GetStdHandle((u32)-12), p, n, &done, 0); } /* STD_ERROR_HANDLE */
+int ReadFile(void *h, void *b, u32 n, u32 *done, void *ov);
+/* standard output and input for command-line programs (runtime/cli.c): bytes as they are; os_in reads up to n bytes, 0 at the end of the input */
+static void os_out(const void *p, u32 n) { while (n) { u32 done = 0; if (!WriteFile(GetStdHandle((u32)-11), p, n, &done, 0) || !done) return; p = (const u8 *)p + done; n -= done; } }
+static u32 os_in(void *p, u32 n) { u32 done = 0; if (!ReadFile(GetStdHandle((u32)-10), p, n, &done, 0)) return 0; return done; }
 /* make a directory (one level); 1 when it exists afterwards */
 static int os_mkdir(const char *path) { return CreateDirectoryA(path, 0) || GetLastError() == 183; } /* ERROR_ALREADY_EXISTS */
 void *CreateFileA(const char *path, u32 access, u32 share, void *sec, u32 disp, u32 flags, void *tmpl);
@@ -204,6 +208,8 @@ static u64 os_ticks_ms(void) { OsTime t; clock_gettime(1, &t); return (u64)t.sec
 static u64 os_perf_ns(void) { OsTime t; clock_gettime(1, &t); return (u64)t.sec * 1000000000ULL + (u64)t.nsec; }
 static u64 os_random(void) { u64 v = 0; while (getrandom(&v, 8, 0) != 8) {} return v; }
 static void os_err(const void *p, u32 n) { while (n) { i64 k = write(2, p, n); if (k <= 0) return; p = (const u8 *)p + k; n -= (u32)k; } }
+static void os_out(const void *p, u32 n) { while (n) { i64 k = write(1, p, n); if (k <= 0) return; p = (const u8 *)p + k; n -= (u32)k; } }
+static u32 os_in(void *p, u32 n) { i64 k = read(0, p, n); return k > 0 ? (u32)k : 0; }
 static int os_mkdir(const char *path) { return mkdir(path, 0755) == 0 || *__errno_location() == 17; } /* EEXIST */
 int open(const char *path, int flags, ...);
 static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {

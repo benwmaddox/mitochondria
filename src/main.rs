@@ -25,6 +25,7 @@ A program is one `.mito` file: a program, or a system of workers (a file holding
   check  <program> [--kinds|--costs] report the problems found, or say it loads; --kinds lists every local's kind; --costs each endpoint's work
   build  <program> [-o app.exe] [--tcc]
                                     an executable serving HTTP (clang -O3; --tcc builds in milliseconds, unoptimised)
+  run    <program> [--clang] [-- args]   serve, for a command-line program (`@main`): what follows `--` is its command line, stdin and stdout are yours
   serve  <program> [--clang] [--watch] [executable options]
                                     build with TinyCC (or clang) and run it at once; --watch rebuilds and restarts
                                     when the program changes (state starts empty each time)
@@ -114,7 +115,7 @@ fn main() {
         Some("check") if rest.iter().any(|a| a == "--costs") => costs(rest),
         Some("check") => { let (_, name) = program(&inputs(rest)); println!("{}: loads", name); }
         Some("build") => build_exe(rest),
-        Some("serve") => serve(rest),
+        Some("serve") | Some("run") => serve(rest),
         Some("test") => test(rest),
         Some("emit-c") => emit_c(rest),
         Some("sigs") => sigs(rest),
@@ -220,7 +221,9 @@ fn build_exe(args: &[String]) {
 fn serve(args: &[String]) {
     let files = inputs(args);
     let clang = args.iter().any(|a| a == "--clang");
-    let pass: Vec<&String> = args[files.len()..].iter().filter(|a| *a != "--clang" && *a != "--watch").collect();
+    // `mito run tool.mito -- a b < in.txt`: a command-line program (`@main`) built and run at once; what follows `--` is its command line
+    let mut pass: Vec<&String> = args[files.len()..].iter().filter(|a| *a != "--clang" && *a != "--watch").collect();
+    if let Some(k) = pass.iter().position(|a| *a == "--") { pass.remove(k); }
     if args.iter().any(|a| a == "--watch") { return serve_watch(&files, clang, &pass); }
     let (units, name) = program(&files);
     let exe = std::env::temp_dir().join(format!("mito-serve-{}-{}{}", name, std::process::id(), std::env::consts::EXE_SUFFIX));

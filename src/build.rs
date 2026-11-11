@@ -253,6 +253,38 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A command-line program (`@main`): arguments, flags and stdin are its inputs, its answer goes to stdout, an answer of 400 or more to stderr with exit code 1.
+    #[test]
+    fn a_main_program_is_a_command_line_tool() {
+        use std::io::Write;
+        if super::clang().is_none() { return; }
+        let src = "struct A { n: i64; }\nstate a: A;\n@main\nfn main(word: ascii<1..20> from arg(0), times: i64 in 1..5 = 1, input: utf8<100> = \"\" from stdin, loud: bool = false) -> Response<text> {\n    if word == \"bad\" { fail 422 \"no\"; }\n    if loud { return ok(word + \"!x\" + str(times) + input); }\n    return ok(word + \"x\" + str(times) + input);\n}\n";
+        let (st, code) = crate::source::load(src).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap_or_else(|e| panic!("{}", e));
+        let dir = std::env::temp_dir().join(format!("mito-cli-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(format!("cli{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O0"]).unwrap();
+        let run = |args: &[&str], stdin: &str| {
+            let mut c = std::process::Command::new(&exe).args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            c.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+            let o = c.wait_with_output().unwrap();
+            (o.status.code().unwrap(), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+        };
+        assert_eq!(run(&["hi"], ""), (0, "hix1".into(), "".into()));
+        assert_eq!(run(&["hi", "--times", "3", "--loud"], "<end>"), (0, "hi!x3<end>".into(), "".into()));
+        assert_eq!(run(&["hi", "--times=2"], "x"), (0, "hix2x".into(), "".into()));
+        let (code, out, err) = run(&["bad"], "");
+        assert!(code == 1 && out.is_empty() && err.contains("no"), "{} {:?} {:?}", code, out, err);
+        let (code, _, err) = run(&[], "");
+        assert!(code == 1 && err.contains("word"), "{} {:?}", code, err);
+        let (code, _, err) = run(&["hi", "--times", "9"], "");
+        assert!(code == 1 && err.contains("times"), "{} {:?}", code, err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A program's `web` block through the real server: its header lines (an endpoint's own replacing one), ETags and 304s, gzip
     /// when accepted, static files (binary ones byte for byte, dated by the server's clock) and HEAD.
     #[test]

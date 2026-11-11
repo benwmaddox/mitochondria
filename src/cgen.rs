@@ -848,8 +848,16 @@ pub const HTTP: &str = include_str!("../runtime/http.c");
 
 /// One program as an executable's source: the program, its `web` block's data (src/web.rs; empty without one), then its HTTP server.
 pub fn program_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>, web: &str) -> Result<Vec<String>, String> {
+    // a program whose entry is `@main` is a command-line program: its `main` is runtime/cli.c, not a server
+    if let Some(e) = api.eps.iter().find(|e| e.method == "MAIN") {
+        if api.eps.iter().any(|x| !matches!(x.method.as_str(), "MAIN" | "START")) { return Err("a program with `@main` is a command-line program: it has no endpoints (`@get` ...) beside it".into()); }
+        let stdin = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":stdin"));
+        return Ok(vec![program_c(prog, api, source)? + if stdin { "#define MITO_CLI_STDIN 1\n" } else { "" } + CLI]);
+    }
     Ok(vec![program_c(prog, api, source)? + web + "#define HTTP_SINGLE\n" + HTTP])
 }
+/// The command-line driver and `main` (runtime/cli.c), for programs with `@main`.
+pub const CLI: &str = include_str!("../runtime/cli.c");
 
 /// A system as an executable's sources: its translation units, the HTTP server after the system's.
 pub fn system_exe(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {

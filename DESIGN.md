@@ -328,6 +328,15 @@ assignments give under the guess (an end that grows goes to infinity; an assignm
 no index or overflow test. A store whose value has no known interval (a value from outside, a loaded number nothing bounds) leaves its field or array without a range. A quotient by a positive divisor has the range its
 operands allow. `MITO_EXPLAIN_INDEX=1 mito emit-c prog.mito` lists the index tests that remain and what is known of each index.
 
+## Command-line programs
+A program whose entry is `@main` is a tool, not a server: `@main fn main(filter: utf8<1..1000> from arg(0), doc: utf8<33554432> from stdin, c: bool = false) -> Response<text>`.
+The command line is the request: `from arg(N)` is the Nth argument, `from stdin` what is piped in (read only when the program has such an input, up to 64 MB), and any
+other input is a flag: `--name value`, `--name=value`, a bare `--name` or a short `-c` is true. Inputs are checked as for an endpoint (a missing or out-of-range one
+answers 400). The answer's body goes to standard output with exit code 0; an answer of status 400 or more goes to standard error with exit code 1; a program that
+fails to start exits 2. A program with `@main` has no endpoints beside it (`@start` is allowed), and no tables yet. `mito run tool.mito -- args < in` builds and
+runs it; `mito build` makes a standalone executable. The driver is runtime/cli.c; `examples/jx` is a jq-like tool written this way.
+The inputs travel as the internal headers `:argN` and `:stdin`, as a socket's travel as `:socket`.
+
 ## Modules
 A module is a `.mito` file in `lib/`: parameters, structs, a `state { ... }` block (what an instance holds) and
 functions. A use is a field of the state, `scores: sorted<Score, 10000, points>;`, expanded when compiling into

@@ -1,5 +1,6 @@
 // lib/sorted.mito: order by key kept as items change, ties in the order added, walks from a key either way,
 // string keys, capacity, rollback of a failed request, and many adds and removes in one request
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Score { name: string<8>; points: i64; }
 struct Word { w: string<12>; n: i64; }
@@ -9,7 +10,7 @@ struct App {
     words: sorted<Word, 8, w>;
     fav: Fav;
 }
-state app: App;
+state app: App logged;
 
 @post("/add")
 fn post_add(points: i64, name: string<4096>?) -> Response<{ slot: i64, size: i64 }> { let s = app.board.add(points); s.name = name; return created({ "slot": slot(s), "size": app.board.size() }); }

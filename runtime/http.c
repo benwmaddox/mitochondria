@@ -900,7 +900,11 @@ int main(int argc, char **argv) {
     if (!app) { printf("error: over budget (%u MB) or out of address space\n", (u32)budget); return 1; }
     if (marks) mito_set_marks(app, soft << 20, hard << 20);
     if (clocked) mito_set_clock(app, (i64)clock, 1);
-    if (flag(argc, argv, "--loop-budget", &loop_budget)) mito_set_loop_budget(app, (i64)loop_budget);
+    if (flag(argc, argv, "--loop-budget", &loop_budget)) {
+        /* the compiler proves loop counters cannot overflow from this limit: a larger one would make that wrong */
+        if (loop_budget > (1ULL << 50)) { printf("error: --loop-budget %llu is above 2^50 (1125899906842624), the most the compiled code allows\n", (unsigned long long)loop_budget); return 1; }
+        mito_set_loop_budget(app, (i64)loop_budget);
+    }
     /* --files DIR: the directory read_stored reads (an app's stored files) */
     { const char *fd = sflag(argc, argv, "--files", 0); if (fd) mito_set_files(fd); }
 #ifdef MITO_WEB

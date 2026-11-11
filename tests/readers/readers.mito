@@ -1,0 +1,11 @@
+// readers with unlogged state: GETs that only read run on readers; a GET that writes unlogged state is sent to the primary and its write stays
+struct A { n: i64; scratch: u8[16]; }
+state app: A;
+@post("/set/{v}")
+fn set(v: i64) -> Response<{ n: i64 }> { app.n = v; return ok({ n: app.n }); }
+@get("/read")
+fn read() -> Response<{ n: i64 }> { return ok({ n: app.n }); }
+@get("/scratch/{v}")
+fn scratch(v: i64) -> Response<{ n: i64 }> { app.scratch[1] = v; return ok({ n: app.scratch[1] }); }
+@get("/peek")
+fn peek() -> Response<{ n: i64 }> { return ok({ n: app.scratch[1] }); }

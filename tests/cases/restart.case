@@ -1,9 +1,10 @@
 // a program with a table: its database opened at start (here a fresh folder per backend), every request one transaction; `restart`
 // stops the program and starts it again on the same data: working state starts empty, the tables are kept
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Note { text: utf8<100>; }
 struct App { notes: table<Note>; hits: i64; }
-state app: App;
+state app: App logged;
 @post("/hit")
 fn hit() -> Response<{ hits: i64 }> { app.hits += 1; return ok({ hits: app.hits }); }
 @post("/fail")

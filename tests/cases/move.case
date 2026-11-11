@@ -1,12 +1,13 @@
 // array.move(from, to, count): elements of a fixed array move within it, overlapping ranges either way, range checked,
 // in an item's array and in plain state, and undone with the rest of a request that fails
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Row { cells: i32[6]; small: u8[4]; }
 struct App {
     plain: i64[6];
     rows: pool<Row, 2>;
 }
-state app: App;
+state app: App logged;
 
 @post("/plain/{k}")
 fn post_plain_k(k: i64, v: i64) -> Response<{}> { app.plain[k] = v; return ok({}); }

@@ -1,9 +1,10 @@
 // `request work: Work;`: plain fields for the work of one request: zeroed before each request, not in the undo log, never kept;
 // text is built there in place and answered from there
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Work { line: string<64>; n: i64; parts: i64[4]; }
 struct App { saved: string<64>; count: i64; }
-state app: App;
+state app: App logged;
 request work: Work;
 
 fn put_pair(k: string, v: i64) { work.line += k; work.line += "="; work.line += v; work.line += ";"; work.n += 1; }

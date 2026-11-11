@@ -1,5 +1,5 @@
 // The same eight workloads on lib/ordmap.mito (values inside the tree's leaves): see ordered.mito and ordered_btree.mito.
-struct Bench { m: rowmap<1048576, 3> unlogged; } // kept out of the undo log, as a Rust map has no rollback
+struct Bench { m: rowmap<1048576, 3>; } // unlogged (the default): no undo log, as a Rust map has no rollback
 state b: Bench;
 
 @post("/insert/{n}")

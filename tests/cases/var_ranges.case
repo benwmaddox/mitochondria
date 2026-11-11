@@ -1,0 +1,54 @@
+// What the compiler knows of a `var` as the code runs (see DESIGN.md, "Ranges of variables"): counters stepped by constants in counted and `while` loops, `if` joins and `while` conditions
+// let it drop overflow tests that cannot fire; a counter that can pass the end of an i64 keeps its test and fails the request
+--- program
+struct A { n: i64 in 0..1000; }
+state app: A;
+
+@post("/count/{n}")
+fn count(n: i64 in 0..1000) -> Response<{ up: i64, down: i64, both: i64 }> {
+    var up = 0;
+    var down = 100;
+    var both = 0;
+    foreach i in 0..n - 1 { up = up + 1; down = down - 2; if i > 3 { both = both + 1; } else { both = both - 1; } }
+    return ok({ "up": up, "down": down, "both": both });
+}
+@post("/while/{n}")
+fn while_loop(n: i64 in 0..1000) -> Response<{ count: i64, i: i64 }> {
+    var count = 0;
+    var i = 0;
+    while i < n { count = count + 3; i = i + 1; }
+    return ok({ "count": count, "i": i });
+}
+@post("/join/{n}")
+fn join(n: i64 in 0..1000) -> Response<{ y: i64, z: i64 }> {
+    var c = 0;
+    if n > 5 { c = 100; } else { c = 7; }
+    var d = 1;
+    if n > 500 { d = n * 2; }
+    return ok({ "y": c + 1, "z": d + c });
+}
+@post("/near")
+fn near() -> Response<{ x: i64 }> {
+    var c = 9223372036854775800;
+    foreach i in 0..9 { c = c + 1; }
+    return ok({ "x": c });
+}
+@post("/near-ok")
+fn near_ok() -> Response<{ x: i64 }> {
+    var c = 9223372036854775800;
+    foreach i in 0..6 { c = c + 1; }
+    return ok({ "x": c });
+}
+--- requests
+POST /count/0
+POST /count/3
+POST /count/10
+POST /count/1000
+POST /while/0
+POST /while/7
+POST /while/1000
+POST /join/0
+POST /join/6
+POST /join/501
+POST /near
+POST /near-ok

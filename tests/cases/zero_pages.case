@@ -1,8 +1,9 @@
 // the undo log keeps one entry for a page still all zeros instead of copying it: a failed request that filled a fresh array
 // leaves it zeros again; once the array holds values, a failed request puts those values back
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Big { a: i64[20000]; b: u8[10000]; n: i64; }
-state s: Big;
+state s: Big logged;
 
 @post("/fill/{v}/{fail_after}")
 fn fill(v: i64, fail_after: bool) -> Response<{}> {

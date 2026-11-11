@@ -32,8 +32,8 @@ state chat: Chat;
 integer), text of at most N bytes (`utf8<N>`, also written `string<N>`, or `ascii<N>` for bytes 0..127) and `T[N]` (exactly N). In the items of a pool or list, `T` may also be a struct of numbers and bools (`vals: V[17]`): kept as one array per field and used as `item.vals[i].a`, with `item.vals.move(from, to, n)` moving every field alike (not yet in plain state, and an element cannot yet be read or written as a whole). Code reads maxima rather than repeating them (`x.capacity()`, `maxlen(s)`). An integer field may declare a range,
 `limit: i64 in 0..3000000` (both ends included, 0 inside, since state starts zeroed): every write is tested (400 outside), and reads let the
 compiler drop overflow and index tests on what is computed from them. A field without a declared range whose every store in the program has a proven range
-(`s.n = n` with `n: i64 in 2..900`) gets their union, with 0, the same way: the compiler works it out from the whole program. `unlogged` after a plain field, a collection, a struct field (with the collections inside it) or a module instance (`m: ordmap<N> unlogged;`) keeps it out of the
-undo log: a failed request leaves what it wrote there (for scratch state rebuilt by every request); removals still wait for success.
+(`s.n = n` with `n: i64 in 2..900`) gets their union, with 0, the same way: the compiler works it out from the whole program. State is unlogged by default (see "Failed requests" below); `logged` after a plain field, a collection, a struct field (with the collections inside it), a module instance (`m: ordmap<N> logged;`) or the `state` declaration
+(`state game: Game logged;`) keeps it in the undo log: a failed request is rolled back there; removals in unlogged collections still wait for success.
 
 **`list<T, N>`** keeps insertion order: add, read by position, walk forwards or in `reverse`. When full it fails
 (`Full`), or with `drop_oldest` overwrites the oldest (a ring). Positions shift as items drop, so a list item is
@@ -265,8 +265,16 @@ fn messages(who: Session from header("X-Session"), room: Room, limit: i64 in 0..
 - Collections are used through their functions: `add` (or `add { field: value }`), `try_add`, `remove`, `count`,
   `capacity`.
 
-**Every request is atomic.** The runtime records the old bytes of each write; a failed request writes them back.
-It saves whole 64-byte lines on their first write in a request; a 4 KB page still all zeros (state never written, as an array a request
+**Library routines in the runtime.** `base64` and `unbase64` use AVX2 where the CPU has it (checked once, at run time; a scalar loop elsewhere, and for every case the vector loops leave: the tail, the URL alphabet, text that is not base64), with the
+same answers either way (tests/simd_base64 compares both builds with a reference). `array.sort(from, count, scratch)` puts integer elements of a fixed array in ascending order, stably, with a scratch array of the same type the program declares
+(the language allocates nothing); it is a merge sort that skips the merge of halves already in order, so mostly sorted data costs little more than reading it.
+
+**Adding to a pool.** `add` to a plain pool (one instance, no generations, no nested collections) kept out of the undo log is done in the endpoint, with the layout (live-bit word, column offsets and sizes, header) as constants:
+at the high-water mark with nothing freed below it, one live bit, the columns of a reused slot cleared, the header; anything else (a freed slot to reuse, a full pool) goes to the runtime's helper.
+
+**Failed requests.** State is unlogged by default: a request that fails after writing leaves what it wrote (the cheap default, as for a local array in any language). State declared `logged` is atomic: the runtime
+records the old bytes of each write to it, and a failed request writes them back. (Tables are atomic in their database whatever is declared.) A `logged` field starts on a 64-byte line of its own, and unlogged fields pack together.
+The log saves whole 64-byte lines on their first write in a request; a 4 KB page still all zeros (state never written, as an array a request
 fills for the first time) is recorded as one "zeros" entry instead of a copy, so filling fresh state costs no undo-log memory.
 `remove` takes effect when the request succeeds, so a removed slot cannot be reused in the same request.
 
@@ -300,6 +308,25 @@ and `delete` make requests (`post("/players", { name: "ann" }, { "X-Session": to
 `true`, `false` or a text saying what went wrong. `mito test app.mito` runs each test on a fresh state with the clock and
 randomness fixed, and prints the line of the `return` that failed one, or of the statement whose error ended it. Tests are never
 part of a built or served program.
+
+**Ranges of variables.** Integer arithmetic is always checked; the compiler drops a check when it can show the operation cannot overflow, from the interval each operand lies in. A literal,
+a range-typed field and an input with a range have one. A `var` has what the code gives it at each point, worked out as it is compiled: its first value; the interval of what an
+assignment stores; the union of what the two ways of an `if` leave (a way that always leaves counts for nothing); inside the branch of an `if` or the body of a `while`, the upper bound its
+condition gives (`x < e`, `x <= e`, joined by `&&`, e's upper bound known). A counted loop (`foreach i in lo..hi`) or a `while` that only steps a counter by constants (`n = n + 1`,
+`n = n - 2`, constants up to 2^20, no other assignment to it in the body, none inside an inner loop) widens the counter's entry interval by the steps of one round times the most rounds, in the body
+and after the loop; a variable the loop assigns in any other way is unknown from there. The most rounds of a counted loop is `hi - lo` from the intervals of its bounds; a `while` (a loop without a fixed
+extent) charges every round to the request's budget, which the runtime never lets exceed 2^50 (`--loop-budget` above it is refused, with a message), so it is taken as 2^51. A start near the end of
+the i64 range, or a bound that is not known, keeps the test; so does anything the rules above do not name. Declaring a range on the field a loop is bounded by (`ncmds: i64 in 0..4096`)
+is what gives most loops a bound.
+
+**What the whole program shows.** The compiler builds a program more than once. Each build records what every store in the program puts into each plain integer field and each plain array of
+integers (an indexed store, `fill`, `copy_from`; `move` stays inside one array), and which pools anything removes from. The next build assumes them: a read of such a field or array element lies in the union of
+what was stored there and 0, its value at start; and an item reached by number in a pool nothing removes from needs only the range and high-water-mark tests, as every slot below the mark is live. Builds repeat until
+what they assume stops changing (a counter feeds a field, the field feeds an array, an index loaded from the array is then proven), and a build is kept only if everything it compiled agrees with what
+it assumed. A variable a loop moves by amounts that are not constants (`off = off + frame`) gets an interval at the head of its loop the same way: guessed from the one it had on entering, then widened by what the loop's
+assignments give under the guess (an end that grows goes to infinity; an assignment with no known interval drops the guess), until the guess holds; with a `while off < in_len` bound, an `off` that only grows needs
+no index or overflow test. A store whose value has no known interval (a value from outside, a loaded number nothing bounds) leaves its field or array without a range. A quotient by a positive divisor has the range its
+operands allow. `MITO_EXPLAIN_INDEX=1 mito emit-c prog.mito` lists the index tests that remain and what is known of each index.
 
 ## Modules
 A module is a `.mito` file in `lib/`: parameters, structs, a `state { ... }` block (what an instance holds) and
@@ -338,12 +365,13 @@ connection thread holding a reader is at times descheduled for its I/O, and with
 Linux only for now): each reader is an instance with its own request struct, text, answer and database connection, over the primary instance's
 state mapped read-only (the state lives in a shared memory file; the request struct is on whole pages, which each reader covers
 with pages of its own). Readers hold a readers-writer lock in shared mode; every other request, `@start`, `@every`, and socket
-events hold it alone, and a waiting writer holds back new readers. A reader's line map is clear, so its first write to any line
-outside its request struct reaches `save_line`, which stops the request; so does a store to a table, an `add`, a socket
-operation. Such a request runs again, alone, on the primary: nothing of the first run stays (a Rails app's `last_active_at`
-refresh once an hour is such a GET). A write the runtime missed would fault on the read-only mapping rather than land. A program
-with unlogged state (whose writes skip the undo log, and so `save_line`), or with memory-pressure marks (state not committed
-whole at start), has no readers: asked for with `--workers`, the server refuses to start, saying why. With readers, SQLite's memory is
+events hold it alone, and a waiting writer holds back new readers. The compiler marks each endpoint whose code never changes state (plain state, a collection, a table, a hand-off to another worker; the request struct and the text area are the
+request's own) as read-only in its route table; a reader runs only those. Any other endpoint reaching a reader runs again alone on the primary at once, nothing of it staying
+(a GET that writes, as a Rails app's `last_active_at` refresh once an hour does, is such a GET); a call of a recursive or outlined function counts as writing, as it is compiled apart.
+State may be unlogged: the decision is made by the compiler, not by the undo log. Writes the compiler missed would fault on the read-only mapping rather than land, and a
+reader's request that still reaches `save_line`, a table store, an `add` or a socket operation stops and runs again on the primary as before (tests/readers has a program and a stress script).
+A program with memory-pressure marks (state not committed
+whole at start) has no readers: asked for with `--workers`, the server refuses to start, saying why. With readers, SQLite's memory is
 a pool of `--db-memory` MB for each connection (the primary's and each reader's) rather than one for the process: one pool's lock,
 taken for every allocation, held readers back, and a connection touches only its own memory, so each pool needs no lock. A request
 whose connection runs out of its pool fails ("database: out of memory"), and the next one runs as before.
@@ -354,7 +382,7 @@ the state: not journaled, not rolled back. `cache_start()` marks where the piece
 writes a value (escaped) that is not kept; `cache_put(key)` keeps what was written from the start, minus the holes. `cache_get(key)`
 finds an entry: its number of holes (-1 when there is none); the request writes `cache_part(i)` and, between parts, a fresh value for
 each hole, `cache_label(i)` saying which (a form's CSRF token, freshly masked as Rails masks it on every page). `data_version()` moves
-whenever a request that changed the state or a table commits (unlogged state excepted), so a key that names it is never found after a
+whenever a request that changed the state or a table commits (for unlogged state, which the undo log does not see: whenever a successful POST, PUT or DELETE endpoint that can write state runs), so a key that names it is never found after a
 change; keys name everything else the piece shows (the user, say). A full cache, or one whose index is half full, starts empty again.
 
 ## Failures

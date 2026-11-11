@@ -979,3 +979,38 @@ store has one gets their union (with 0, its value at start) for its reads, and t
 build is kept only if each of its stores still lies within what it assumed. Across the ports: checked arithmetic 2809 to 2500 sites,
 index tests 2442 to 2280, versioning guards 219 to 170. Whole suite: geometric mean 0.994x of the previous compiler (Matmul::Single
 -9%, Compress::BWTEncode -10%; Etc::Words +8% with only held temporaries changed, placement). All 41 against Rust: 0.880x time.
+
+
+## Round 28: `logged` replaces `unlogged` (2026-11-11)
+
+Ben's decision: state is unlogged by default and `logged` is the opt-in (`count: i64 logged;`, `m: ordmap<N> logged;`, `state game: Game logged;`; on a struct-typed field or on the state it covers everything inside).
+`unlogged` is now an error naming the new rule. Tables stay atomic in their database whatever is declared. A `logged` field takes its own 64-byte lines (the log saves whole lines); unlogged
+fields pack together, so unlogged state is denser than before. The 30 LangArena ports and the ordered-map benchmarks lost their `unlogged` markers (everything in them is unlogged now, as a Rust local is);
+the four examples and the 20 test cases that depend on a failed request being rolled back are declared `logged`. Consequence: a program with unlogged state cannot have readers (`MITO(reader)`
+refuses it), because a reader finds out that a request writes by trapping on the undo log; only a program whose state is all `logged` runs GET requests in parallel until that is decided at compile time.
+Earlier rounds above describe the old default (logged, `unlogged` opt-out) and are left as written.
+
+
+## Round 29: ranges of variables (2026-11-11)
+
+Overflow tests are dropped where the interval of a `var` shows they cannot fire (DESIGN.md, "Ranges of variables"): counters stepped by constants in counted and `while` loops, `if` joins,
+`while` and `if` conditions. A loop's rounds are bounded by the request budget, which `--loop-budget` can no longer raise above 2^50 (the benchmark scripts ask for 10^15 instead of 4x10^18).
+Etc::Sieve: its `count = count + 1` sat inside `if sieve[n] == 1 { ... }`; the test, which can fail the request, stopped the C compiler from turning the branch into a select. Taking the one
+test out (alone, by hand, before the analysis): 1.752 s to 1.340 s, same checksum; with the analysis 1.785 s to 1.296 s (Rust 1.333 s). BF::Array, with the size fields declared (`ncmds: i64 in 0..4096`),
+loses every checked operation of its interpreter loop but gains only 7% (1.32 s to 1.23 s): range tests on its array indexes are 16% of its time (1.02 s with them compiled out, Rust 0.92 s).
+All 41 ports still verify; nothing else in LangArena moved beyond the 5% between two runs of the same build.
+
+Later the same day, three more proofs (each with a test in both directions; every LangArena checksum still verifies): the range of what is stored in each plain array reaches its reads, and builds repeat until the
+ranges stop changing; a pool nothing removes from skips the live-bit test when an item is reached by number; a quotient by a positive divisor has a range. Mitochondria / Rust over the 41 ports: 0.862x to 0.835x (2 rounds
+each, best of rounds). Etc::GameOfLife 1.260 s to 1.049 s (its neighbour slots were checked live on every access); Base64::Encode 1.269 s to 0.733 s and Base64::Decode 1.008 s to 0.772 s (their indexes came
+from `size / 3`); Etc::Sieve 1.772 s to 1.300 s (Rust 1.333 s); Maze::Generator 0.579 s to 0.524 s; BF::Array 1.322 s to 1.220 s. Where range tests still cost the most, measured by compiling them out for the
+whole set (the geometric mean cost was 1.099x before these three proofs): Base64 (index values loaded from tables), Maze::Generator, HuffDecode (children read from node arrays that hold -1 for none), Graph::AStar, Etc::Words.
+
+Then: `add` to a plain unlogged pool done in the endpoint (Binarytrees::Arena 0.954 s to 0.472 s, Rust 0.554 s), and intervals for loop-carried variables found by guess and widening (the message-batch benchmark no longer needs its
+`off & 32767` hint: 1.024 s without it, 1.028 s with it). Mitochondria / Rust over the 41 ports, all verified: 0.862x (start of the day's analysis work) to 0.835x (proofs) to 0.821x (inline add) to 0.818x (loop intervals);
+24 ports faster than Rust, 10 within +20%, 7 slower by more. Matmul::Single moves between 2.94 s and 3.34 s between runs of the same build (other sessions share the machine). Compile time for the 41 ports (`mito emit-c`, every build
+the analysis makes): see the note in DESIGN.md; the slowest is Base64::Decode at about 0.6 s.
+
+Library routines (2026-11-11): `base64` and `unbase64` with AVX2 loops (runtime/mito.c, checked against a Python reference on 1,100+ cases, with and without SIMD) and `array.sort(from, count, scratch)`. Base64::Encode 0.733 s to 0.143 s (Rust, with its SIMD
+crate, 0.166 s) and Base64::Decode 0.772 s to 0.147 s (Rust 0.185 s) once the ports call the builtins instead of looping in the language (the loop versions stay as main_loop.mito); Compress::BWTEncode 0.54 s to 0.281 s (Rust 0.42 s) with the keys
+sorted by `sort` (1.57 s when the keys were built in text order rather than in the last round's order, which is mostly sorted).

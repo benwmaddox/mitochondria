@@ -41,7 +41,8 @@ impl Ty { pub fn is_coll(&self) -> bool { matches!(self, Ty::List(..) | Ty::Pool
 /// (For a text field, `ranges[k]` is the range of its bytes: Some((0, 127)) for `ascii<N>`.)
 /// `ranges[k]`: field k's declared range (`limit: i64 in 0..3000000`, both ends included), when it has one: every write is checked against it,
 /// and reads give the range analysis that interval.
-/// `unlogged[k]`: field k is kept out of the undo log (`scratch: u8[4096] unlogged`): a failed request leaves what it wrote there.
+/// `unlogged[k]`: field k is kept out of the undo log: a failed request leaves what it wrote there. This is the default; `logged` (`count: i64 logged;`) puts a field in
+/// the undo log (`false` here), and on a struct-typed field or on the state it covers everything inside.
 /// `ids[k]`: field k holds a stored id (`best: Player?`, or `Player in game.players?`): the struct and the collection named, if any.
 /// `cols[k]`: how field k is kept in a table's column, beyond its type: a `time` (an i64 of microseconds since 1970 in the program, text in
 /// the column), and nullable (`utf8<N>?`: the column may be NULL, read as null; table rows only).
@@ -87,7 +88,7 @@ impl Coll {
     pub fn is_list(&self) -> bool { matches!(self.kind, Kind::List(_)) }
 }
 
-pub struct Global { pub name: String, pub ty: Ty, pub off: usize, pub coll: Option<usize> }
+pub struct Global { pub name: String, pub ty: Ty, pub off: usize, pub coll: Option<usize>, pub logged: bool }
 
 /// A table's column: an item field (a plain struct inside the item flattened to `inner.x`), stored as SQLite's INTEGER (integers, bools,
 /// enums, stored ids), REAL, TEXT (with its maximum bytes, and whether it is ascii) or BLOB (a fixed array of `n` bytes).
@@ -207,7 +208,7 @@ impl Program {
     fn parse_tokens(p: &mut P) -> Result<Program, String> {
         if let Some(t) = p.t.iter().find(|t| t.len() > crate::lang::MAX_NAME) { return Err(format!("a name longer than {} bytes: `{}...`", crate::lang::MAX_NAME, t.chars().take(32).collect::<String>())); }
         let mut structs: Vec<StructDef> = Vec::new();
-        let mut globals: Vec<(String, Ty)> = Vec::new();
+        let mut globals: Vec<(String, Ty, bool)> = Vec::new();
         let mut instances: Vec<ModInst> = Vec::new();
         let mut enums: Vec<EnumDef> = Vec::new();
         let mut request: Option<(String, Ty)> = None;
@@ -272,8 +273,9 @@ impl Program {
                             if lo > hi || (lo as i128) < tl || (hi as i128) > th { return Err(format!("`{}.{}`: range {}..{} does not fit its type", name, f, lo, hi)); }
                             if lo > 0 || hi < 0 { return Err(format!("`{}.{}`: range {}..{} must include 0, the value a field starts with", name, f, lo, hi)); }
                         }
-                        // `unlogged`: kept out of the undo log (a plain field, or a whole collection with what its items hold)
-                        let unl = p.word("unlogged");
+                        // `logged`: kept in the undo log, so a failed request restores it (a plain field, or a whole collection with what its items hold); the default is unlogged
+                        if p.word("unlogged") { return Err(format!("`{}.{}`: state is unlogged by default now; write `logged` on what a failed request must restore", name, f)); }
+                        let unl = !p.word("logged");
                         p.eat(";")?;
                         // an `ascii<N>` field: its bytes are 0..127 (the range of a text field is the range of its bytes)
                         fields.push((f, ty)); ranges.push(if ascii { Some((0, 127)) } else { range }); unlogged.push(unl); ids.push(idref); cols.push(ColOpt { time, null });
@@ -282,9 +284,11 @@ impl Program {
                     structs.push(StructDef { name, fields, ranges, ids, unlogged, cols, offs: Vec::new(), size: 0, align: 1, state: 0 });
                 }
                 "state" => {
-                    let n = p.ident()?; p.eat(":")?; let ty = p.ty()?; p.eat(";")?;
+                    let n = p.ident()?; p.eat(":")?; let ty = p.ty()?;
+                    if p.word("unlogged") { return Err(format!("`state {}`: state is unlogged by default now; write `logged` on what a failed request must restore", n)); }
+                    let logged = p.word("logged"); p.eat(";")?;
                     if let Some(g) = globals.first() { return Err(format!("a program has one state; `{}` is the second (the first is `{}`): put everything in one struct", n, g.0)); }
-                    globals.push((n, ty));
+                    globals.push((n, ty, logged));
                 }
                 // `request work: Work;`: plain fields for the work of one request (zeroed before it, never kept)
                 "request" => {
@@ -325,12 +329,12 @@ impl Program {
         for i in 0..prog.structs.len() { prog.layout_struct(i)?; }
         // plain values first
         let mut off = 0;
-        for (n, ty) in globals {
+        for (n, ty, logged) in globals {
             let ty = resolve(ty, &names)?;
             // a state holding nothing but collections takes no plain bytes (its inner structs still get distinct offsets)
             let (s, a) = if prog.has_plain(&ty) { prog.plain_size(&ty) } else { (0, 1) };
             off = up(off, a.max(8));
-            prog.globals.push(Global { name: n, ty, off, coll: None });
+            prog.globals.push(Global { name: n, ty, off, coll: None, logged });
             off += s;
         }
         // the request struct: its own pages after the state's plain values
@@ -342,7 +346,7 @@ impl Program {
             let (s, _) = prog.plain_size(&ty);
             off = up(off, PAGE);
             let size = up(s.max(1), PAGE);
-            prog.globals.push(Global { name: n, ty, off, coll: None });
+            prog.globals.push(Global { name: n, ty, off, coll: None, logged: false });
             prog.request = Some((off, size));
             off += size;
         }
@@ -353,17 +357,18 @@ impl Program {
             let ty = prog.globals[g].ty.clone();
             let name = prog.globals[g].name.clone();
             if ty.is_coll() {
-                let cid = prog.build_coll(&name, &ty, 1, None, false, &mut cur, 0)?;
+                let cid = prog.build_coll(&name, &ty, 1, None, !prog.globals[g].logged, &mut cur, 0)?;
                 prog.globals[g].coll = Some(cid);
             } else if let Ty::Struct(s) = ty {
                 let base = prog.globals[g].off;
-                prog.plain_struct_colls(s, base, &name, &mut cur, false)?;
+                let logged = prog.globals[g].logged;
+                prog.plain_struct_colls(s, base, &name, &mut cur, logged)?;
             } else if contains_coll(&prog, &ty) {
                 return Err(format!("`{}`: collections inside fixed arrays are not supported; use a nested list", name));
             }
         }
         // the bytes kept out of the undo log (the request struct whole)
-        for g in 0..prog.globals.len() { if let Ty::Struct(st) = prog.globals[g].ty.clone() { let base = prog.globals[g].off; if prog.request.map_or(true, |r| r.0 != base) { prog.plain_unlogged(st, base, false); } } }
+        for g in 0..prog.globals.len() { if let Ty::Struct(st) = prog.globals[g].ty.clone() { let base = prog.globals[g].off; if prog.request.map_or(true, |r| r.0 != base) { let logged = prog.globals[g].logged; prog.plain_unlogged(st, base, logged); } } }
         for c in 0..prog.colls.len() { if prog.colls[c].unlogged && prog.colls[c].parent.is_none() { let (a, b) = (prog.colls[c].start, prog.colls[c].end); prog.unlogged.push((a, up(b, 64))); } }
         if let Some((a, n)) = prog.request { prog.unlogged.push((a, a + n)); }
         prog.total = cur;
@@ -407,8 +412,8 @@ impl Program {
         for (k, (_, t)) in fields.iter().enumerate() {
             if t.is_coll() { offs.push(usize::MAX); continue; }
             let (s, a) = self.plain_size(t);
-            // an unlogged field has its own 64-byte lines: the undo log saves and restores whole lines, so no logged byte may share one
-            let (s, a) = if unlogged[k] { (up(s, 64), a.max(64)) } else { (s, a) };
+            // a logged field has its own 64-byte lines: the undo log saves and restores whole lines, so no unlogged byte may share one
+            let (s, a) = if !unlogged[k] { (up(s, 64), a.max(64)) } else { (s, a) };
             off = up(off, a); offs.push(off); off += s; align = align.max(a);
         }
         let s = &mut self.structs[i];
@@ -479,32 +484,32 @@ impl Program {
     }
     /// The pool a stored id at this place names, if the place holds one.
     pub fn id_at(&self, at: IdAt) -> Option<usize> { self.ids.iter().find(|x| x.0 == at).map(|x| x.1) }
-    fn plain_unlogged(&mut self, s: usize, base: usize, all: bool) {
+    fn plain_unlogged(&mut self, s: usize, base: usize, all_logged: bool) {
         let fields = self.structs[s].fields.clone();
         for (k, (_, t)) in fields.iter().enumerate() {
             if t.is_coll() { continue; }
             let o = base + self.structs[s].offs[k];
-            let unl = all || self.structs[s].unlogged[k];
-            if let Ty::Struct(c) = t { self.plain_unlogged(*c, o, unl); continue; }
-            if unl { let (sz, _) = self.plain_size(t); self.unlogged.push((o, o + up(sz, 64))); }
+            let logged = all_logged || !self.structs[s].unlogged[k];
+            if let Ty::Struct(c) = t { self.plain_unlogged(*c, o, logged); continue; }
+            if !logged { let (sz, _) = self.plain_size(t); self.unlogged.push((o, o + sz)); } // the bytes alone: a logged field starts on a line of its own
         }
     }
-    /// `all`: the struct is inside an `unlogged` field, so its collections are unlogged too.
-    fn plain_struct_colls(&mut self, s: usize, base: usize, path: &str, cur: &mut usize, all: bool) -> Result<(), String> {
+    /// `all_logged`: the struct is inside a `logged` field (or the state is `logged`), so its collections are logged too.
+    fn plain_struct_colls(&mut self, s: usize, base: usize, path: &str, cur: &mut usize, all_logged: bool) -> Result<(), String> {
         let fields = self.structs[s].fields.clone();
         for (k, (n, t)) in fields.iter().enumerate() {
             let p = format!("{}.{}", path, n);
-            let unl = all || self.structs[s].unlogged[k];
+            let logged = all_logged || !self.structs[s].unlogged[k];
             if let Ty::Table(..) = t {
-                if unl { return Err(format!("`{}`: a table is kept in its database, so it cannot be `unlogged`", p)); }
+                // a table is kept in its database, which keeps it atomic whatever the field says
                 let tid = self.build_table(&p, t, None, 0)?;
                 self.plain_tables.push((base, s, n.clone(), tid));
             } else if t.is_coll() {
-                let cid = self.build_coll(&p, t, 1, None, unl, cur, 0)?;
+                let cid = self.build_coll(&p, t, 1, None, !logged, cur, 0)?;
                 self.plain_colls.push((base, s, n.clone(), cid));
             } else if let Ty::Struct(c) = t {
                 let o = base + self.structs[s].offs[k];
-                self.plain_struct_colls(*c, o, &p, cur, unl)?;
+                self.plain_struct_colls(*c, o, &p, cur, logged)?;
             } else if contains_coll(self, t) {
                 return Err(format!("`{}`: collections inside fixed arrays are not supported; use a nested list", p));
             }
@@ -553,7 +558,7 @@ impl Program {
         let join = |f: &str| if prefix.is_empty() { f.to_string() } else { format!("{}.{}", prefix, f) };
         match t {
             Ty::Struct(i) => for (k, (f, ft)) in self.structs[*i].fields.iter().enumerate() {
-                if self.structs[*i].unlogged[k] { return Err(format!("`{}`: `{}` is declared unlogged, but items of a collection are logged or not as a whole: declare the collection `unlogged`", name, join(f))); }
+                if !self.structs[*i].unlogged[k] { return Err(format!("`{}`: `{}` is declared `logged`, but items of a collection are logged or not as a whole: declare the collection `logged`", name, join(f))); }
                 self.flatten(ft, &join(f), self.structs[*i].ranges[k], leaves, kids, name)?;
             },
             Ty::Scalar(_) | Ty::Str(_) => leaves.push((prefix.to_string(), t.clone(), range)),
@@ -562,7 +567,7 @@ impl Program {
             Ty::Arr(e, k) if matches!(**e, Ty::Struct(_)) => {
                 let Ty::Struct(i) = **e else { unreachable!() };
                 for (fk, (f, ft)) in self.structs[i].fields.iter().enumerate() {
-                    if self.structs[i].unlogged[fk] { return Err(format!("`{}`: `{}` is declared unlogged, but items of a collection are logged or not as a whole: declare the collection `unlogged`", name, join(f))); }
+                    if !self.structs[i].unlogged[fk] { return Err(format!("`{}`: `{}` is declared `logged`, but items of a collection are logged or not as a whole: declare the collection `logged`", name, join(f))); }
                     if !matches!(ft, Ty::Scalar(_)) { return Err(format!("`{}`: the structs in the array at `{}` hold numbers and bools only (`{}` is `{}`)", name, prefix, f, self.show(ft))); }
                     leaves.push((join(f), Ty::Arr(Box::new(ft.clone()), *k), None));
                 }
@@ -609,7 +614,6 @@ impl Program {
         for (k, (f, t)) in self.structs[s].fields.iter().enumerate() {
             let p = if prefix.is_empty() { f.clone() } else { format!("{}.{}", prefix, f) };
             let range = self.structs[s].ranges[k];
-            if self.structs[s].unlogged[k] { return Err(format!("`{}`: `{}` is declared unlogged, but a table's rows are kept in its database", name, p)); }
             // `owner: User?`: a reference to a row of the table that holds `User` (resolved once every table is known)
             if let Some(r) = &self.structs[s].ids[k] { leaves.push((p, TKind::Ref(usize::MAX), None, Some(r.clone()), true)); continue; }
             let opt = self.structs[s].cols[k];
@@ -821,6 +825,10 @@ in
         assert!(err("struct T { a: i64; } struct I { t: table<T>; } struct S { p: pool<I, 4>; } state s: S;").contains("inside an item of a pool or list"));
         assert!(err("struct T { a: i64; } struct S { t: table<T> index(b); } state s: S;").contains("not a column"));
         assert!(err("struct T { id: i64; } struct S { t: table<T>; } state s: S;").contains("own column"));
-        assert!(err("struct T { a: i64; } struct S { t: table<T> unlogged; } state s: S;").contains("cannot be `unlogged`"));
+        // `unlogged` was the opt-out; it is the default now and `logged` the opt-in (a table is atomic in its database whatever it says)
+        assert!(err("struct T { a: i64; } struct S { t: table<T> unlogged; } state s: S;").contains("unlogged by default"));
+        assert!(err("struct T { a: i64; } struct S { n: i64; } state s: S unlogged;").contains("unlogged by default"));
+        assert!(err("struct I { a: i64 logged; } struct S { p: pool<I, 4>; } state s: S;").contains("declared `logged`, but items of a collection"));
+        assert!(Program::parse("struct T { a: i64; } struct S { t: table<T>; n: i64 logged; } state s: S logged;").is_ok());
     }
 }

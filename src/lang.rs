@@ -164,6 +164,12 @@ pub enum Stmt {
     /// `array.move(from, to, count)`: `count` elements of a fixed array move from position `from` to position `to`, as
     /// if through a temporary (the array, from, to, count).
     Move(Expr, Expr, Expr, Expr),
+    /// `dst.copy_from(src, from, to, count)`: `count` elements of the fixed array `src` from position `from` are copied to position `to` of the fixed array
+    /// `dst` (another array of the same element type; the destination array, from, to, count, and the source first after it: dst, src, from, to, count).
+    Copy(Expr, Expr, Expr, Expr, Expr),
+    /// `array.sort(from, count, scratch)`: `count` integer elements of a fixed array from position `from` put in ascending order (a stable sort); `scratch` is another fixed array of the same
+    /// element type, with room for `count` elements, the sort uses (the array, from, count, scratch).
+    Sort(Expr, Expr, Expr, Expr),
     /// `array.fill(from, count, value)`: `count` elements of a fixed array from position `from` are set to `value` (the array, from, count, value).
     Fill(Expr, Expr, Expr, Expr),
     Fail(u16, String),
@@ -1291,7 +1297,7 @@ impl Binder<'_> {
         let Expr::Call(n, args, _) = e else { return };
         if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
         let Some((recv, op)) = n.rsplit_once('.') else { return };
-        if !matches!(op, "add" | "try_add" | "remove" | "move" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
+        if !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
         let mut parts = recv.split('.');
         let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
         for f in parts { r = Expr::Field(Box::new(r), f.to_string()); }
@@ -1318,6 +1324,14 @@ impl Binder<'_> {
                 let count = args.remove(3); let to = args.remove(2); let from = args.remove(1);
                 Some(Stmt::Move(args.remove(0), from, to, count))
             }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".sort" && args.len() == 4 => {
+                let scratch = args.remove(3); let count = args.remove(2); let from = args.remove(1);
+                Some(Stmt::Sort(args.remove(0), from, count, scratch))
+            }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".copy_from" && args.len() == 5 => {
+                let count = args.remove(4); let to = args.remove(3); let from = args.remove(2); let src = args.remove(1);
+                Some(Stmt::Copy(args.remove(0), src, from, to, count))
+            }
             _ => None,
         };
         if let Some(l) = lowered { *s = l; }
@@ -1325,7 +1339,7 @@ impl Binder<'_> {
             Stmt::At(..) => {}
             Stmt::Let(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, false); }
             Stmt::Var(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, true); }
-            Stmt::Alloc { .. } | Stmt::Remove(..) | Stmt::Clear(..) | Stmt::Move(..) | Stmt::Fill(..) if self.test => return self.err("a test changes the state only through requests (`post(...)` and the others); it can read the state directly".into()),
+            Stmt::Alloc { .. } | Stmt::Remove(..) | Stmt::Clear(..) | Stmt::Move(..) | Stmt::Copy(..) | Stmt::Sort(..) | Stmt::Fill(..) if self.test => return self.err("a test changes the state only through requests (`post(...)` and the others); it can read the state directly".into()),
             Stmt::Assign(lhs, _) if self.test && !matches!(lhs, Expr::Var(..)) => return self.err("a test changes the state only through requests (`post(...)` and the others); it can read the state directly".into()),
             Stmt::Alloc { var, slot, coll, .. } => { self.expr(coll)?; *slot = self.declare(var, false); }
             Stmt::Assign(lhs, rhs) => {
@@ -1355,7 +1369,9 @@ impl Binder<'_> {
             Stmt::Remove(c, e) => { self.expr(c)?; self.expr(e)?; }
             Stmt::Clear(c) => { self.expr(c)?; }
             Stmt::Move(a, f, t2, n) => { self.expr(a)?; self.expr(f)?; self.expr(t2)?; self.expr(n)?; }
+            Stmt::Copy(d, src, f, t2, n) => { self.expr(d)?; self.expr(src)?; self.expr(f)?; self.expr(t2)?; self.expr(n)?; }
             Stmt::Fill(a, f, n, v) => { self.expr(a)?; self.expr(f)?; self.expr(n)?; self.expr(v)?; }
+            Stmt::Sort(a, f, n, t) => { self.expr(a)?; self.expr(f)?; self.expr(n)?; self.expr(t)?; }
             Stmt::Do(e) => self.expr(e)?,
             Stmt::Return(e) => { if let Some(e) = e { self.expr(e)?; } }
             Stmt::Respond(_, j) => self.json(j)?,

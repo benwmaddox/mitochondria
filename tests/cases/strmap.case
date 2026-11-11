@@ -1,8 +1,9 @@
 // lib/strmap.mito: a hash map from string keys to i64 values: put/get/add_to/remove/clear, chains (a table of 4 buckets holding 6 keys),
 // a full map (507), rollback of a failed request, and many puts and removes in one request
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct App { m: strmap<6>; }
-state app: App;
+state app: App logged;
 
 @post("/put/{key}/{value}")
 fn post_put(key: string<64>, value: i64) -> Response<{ added: bool, size: i64 }> { let added = app.m.put(key, value); return ok({ "added": added, "size": app.m.size() }); }

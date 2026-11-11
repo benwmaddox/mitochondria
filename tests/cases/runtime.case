@@ -1,6 +1,7 @@
 // behaviours first checked by the Rust runtime's own tests, kept here when it was removed: structs holding only
 // collections stay distinct; a failed request rolls back every write; a freed slot is reused lowest first; a pool of
 // 100000 items with nested lists commits only the headers of items in use (see the memory line)
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct M { n: i32; }
 struct W { s: pool<M, 4>; }
@@ -13,7 +14,7 @@ struct App {
     ms: pool<M, 4>;
     rs: pool<R, 100000>;
 }
-state app: App;
+state app: App logged;
 
 @post("/w1")
 fn post_w1() -> Response<{ slot: i64 }> { let m = app.w1.s.add(); m.n = 1; return created({ "slot": slot(m) }); }

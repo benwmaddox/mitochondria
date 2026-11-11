@@ -3,7 +3,7 @@
 // program text and the warmup program (a small program run 1000 times before the timed run) are given to prepare; the checksum adds each run's result. The reference's
 // commands are an enum of their bytes, and its match on them a `match`. The reference's u32 and u8 wrapping is masking.
 enum Cmd: u8 { Inc = 43, Dec = 45, Right = 62, Left = 60, Open = 91, Close = 93, Out = 46, In = 44 }
-struct BF { prog: u8[4096]; proglen: i64; warm: u8[4096]; warmlen: i64; src: u8[4096] unlogged; srclen: i64; cmds: Cmd[4096] unlogged; ncmds: i64; jumps: i32[4096] unlogged; stack: i32[4096] unlogged; tape: u8[100000] unlogged; tlen: i64; out: i64; bad: i64; ok: i64; result: i64; }
+struct BF { prog: u8[4096]; proglen: i64 in 0..4096; warm: u8[4096]; warmlen: i64 in 0..4096; src: u8[4096]; srclen: i64 in 0..4096; cmds: Cmd[4096]; ncmds: i64 in 0..4096; jumps: i32[4096]; stack: i32[4096]; tape: u8[100000]; tlen: i64 in 0..100000; out: i64; bad: i64; ok: i64; result: i64; }
 state g: BF;
 
 fn compile() {

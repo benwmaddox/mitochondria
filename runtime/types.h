@@ -15,7 +15,7 @@ typedef struct { const char *path; u32 coll; } MitoKid;
 typedef struct { const char *name; u32 list, drop_oldest, checked, cap, mult; i32 parent; u64 hdr, live, gen, start, end; u32 ncols; const MitoCol *cols; u32 nkids; const MitoKid *kids; } MitoColl;
 /* A path segment of an endpoint: a literal, or a parameter `{text}`. */
 typedef struct { u32 param; const char *text; const char *pre; } MitoSeg; /* pre: a parameter's literal prefix (`@` of `@{message}`), or 0 */
-typedef struct { const char *method; u32 nsegs; const MitoSeg *segs; u32 html; const u64 *zero; u32 nzero; } MitoRoute; /* html: the endpoint answers HTML (its errors are a page); zero: the request struct's ranges it finds zeroed (nzero pairs; all of it when nzero is ~0) */
+typedef struct { const char *method; u32 nsegs; const MitoSeg *segs; u32 html; const u64 *zero; u32 nzero; u32 writes; u32 reads; } MitoRoute; /* reads: the endpoint's code never changes state (the compiler checked), so a reader may run it; writes: a POST, PUT or DELETE endpoint whose code can change state (statically), so a successful request moves data_version() even when the undo log saw nothing (unlogged state); html: the endpoint answers HTML (its errors are a page); zero: the request struct's ranges it finds zeroed (nzero pairs; all of it when nzero is ~0) */
 /* `req_off`, `req_size`: the request struct, zeroed before each request (size 0: none). `unlogged`: `nunlogged` pairs of byte offsets [start, end), on whole 64-byte lines, kept out of the undo log. */
 typedef struct { u32 ncolls; const MitoColl *colls; u64 plain_end, total; u32 neps; const MitoRoute *routes; u32 nunlogged; const u64 *unlogged; u64 req_off, req_size; } MitoProg;
 /* A request header or a forwarded field: name and value bytes. */

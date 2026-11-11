@@ -2,7 +2,7 @@
 
 Written 2026-11-05 from a review of the language as it stands (after the LangArena ports, `unlogged`, range-typed fields and `T?`).
 Items are worked through roughly in order; each lists the decision taken, what is still open, and when it counts as done.
-Decided against, for now: request-local scratch arrays (`unlogged` state covers that need).
+Decided against, for now: request-local scratch arrays (unlogged state, now the default, covers that need).
 
 ## Phase 1: the everyday loop
 

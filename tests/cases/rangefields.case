@@ -1,10 +1,11 @@
 // fields with a declared range (`limit: i64 in 0..3000000`, both ends included): every write is tested and a value outside fails the request (400,
 // rolled back); reads let the range analysis drop overflow and range tests (here `cells[app.slot]` needs no index test)
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Cfg { limit: i64 in 0..3000000; slot: u8 in 0..3; delta: i32 in -10..10; plain: i64; }
 struct Item { level: i16 in -5..5; name: string<8>; }
 struct App { cfg: Cfg; cells: i64[4]; items: pool<Item, 4>; }
-state app: App;
+state app: App logged;
 
 @post("/limit/{v}")
 fn post_limit(v: i64) -> Response<{ limit: i64, doubled: i64 }> { app.cfg.limit = v; return ok({ "limit": app.cfg.limit, "doubled": app.cfg.limit * 2 + 1 }); }

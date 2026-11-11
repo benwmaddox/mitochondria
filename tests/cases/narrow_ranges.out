@@ -1,0 +1,40 @@
+POST /sum/0 -> 200 {"h":0,"times3":0,"neg":0,"nonneg":true,"minus":-5000000000,"prod":0}
+POST /sum/10 -> 200 {"h":1800000,"times3":5400000,"neg":-1800000,"nonneg":true,"minus":-4998200000,"prod":18000000000}
+POST /sum/1000 -> 200 {"h":2800130816,"times3":8400392448,"neg":-2800130816,"nonneg":true,"minus":-2199869184,"prod":47490218639360}
+POST /sum/100000 -> 200 {"h":2847861760,"times3":8543585280,"neg":-2847861760,"nonneg":true,"minus":-2152138240,"prod":164036837376000}
+POST /mask/-1 -> 200 {"b":255,"w":65535,"d":4294967295}
+POST /mask/300 -> 200 {"b":44,"w":300,"d":300}
+POST /mask/-65537 -> 200 {"b":255,"w":65535,"d":4294901759}
+POST /mask/4294967296 -> 200 {"b":0,"w":0,"d":0}
+POST /bits/12/10/65280 -> 200 {"x":6,"o":14,"ca":0,"co":65292,"cx":255,"over":268}
+POST /bits/255/255/65535 -> 200 {"x":0,"o":255,"ca":255,"co":65535,"cx":0,"over":511}
+POST /fill -> 200 {}
+POST /mv/0/4/8 -> 200 {"h":2777370376}
+POST /fill -> 200 {}
+POST /mv/4/0/8 -> 200 {"h":2014237448}
+POST /fill -> 200 {}
+POST /mv/0/16/1 -> 400 {"error":"move out of range","line":44}
+POST /mv/-1/0/1 -> 400 {"error":"move out of range","line":44}
+POST /fill -> 200 {}
+POST /mv/0/0/16 -> 200 {"h":3024457992}
+POST /fill -> 200 {}
+POST /cp/0/0/16 -> 200 {"h":3240523016}
+POST /cp/4/8/8 -> 200 {"h":1190867720}
+POST /cp/0/12/4 -> 200 {"h":1190621448}
+POST /cp/0/13/4 -> 400 {"error":"copy out of range","line":37}
+POST /cp/17/0/0 -> 400 {"error":"copy out of range","line":37}
+POST /cp/-1/0/1 -> 400 {"error":"copy out of range","line":37}
+POST /cp/0/0/0 -> 200 {"h":1190621448}
+POST /fill -> 200 {}
+GET /lg -> 200 {"h":0}
+POST /cplog/2/8/true -> 409 {"error":"failed after copying","line":26}
+GET /lg -> 200 {"h":0}
+POST /cplog/2/8/false -> 200 {}
+GET /lg -> 200 {"h":214656900}
+POST /cplog/10/8/false -> 400 {"error":"copy out of range","line":25}
+POST /cplog/10/6/true -> 409 {"error":"failed after copying","line":26}
+GET /lg -> 200 {"h":214656900}
+POST /cplog/0/16/false -> 200 {}
+GET /lg -> 200 {"h":3240523016}
+state <plain values> 128
+memory reserved=4096 committed=4096 live=128

@@ -1,9 +1,10 @@
 // arrays of structs in items: one array column per field, read and written as item.vals[i].a, moved together, rolled back with the request
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct P { a: i64; b: i64; }
 struct Box { n: i64; vals: P[4]; }
 struct App { boxes: pool<Box, 4>; }
-state app: App;
+state app: App logged;
 
 @post("/make")
 fn make() -> Response<{ id: i64 }> {

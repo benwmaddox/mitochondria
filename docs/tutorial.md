@@ -118,7 +118,7 @@ GET /board?top=2    {"top":[{"name":"ada","points":400},{"name":"bo","points":34
 
 ## 5. All or nothing
 
-A request that fails is undone completely. `record` counts the game and appends it before checking the score:
+State is unlogged by default: a request that fails leaves what it wrote, which is the cheap behaviour and the right one when a program checks before it writes. Declare the state `logged` (`state game: Game logged;`) and a failed request is undone completely; this program does, because `record` counts the game and appends it before checking the score:
 
 ```
 GET /stats                                 {"players":3,"games":5,...}

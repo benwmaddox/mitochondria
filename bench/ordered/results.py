@@ -111,8 +111,8 @@ def write_markdown():
          + (dates[0] + " to " + dates[-1] if len(dates) > 1 else (dates[0] if dates else "no runs")) + "; `--mito-only` keeps Rust's last numbers).", "",
          f"Machine: {platform.system()} {platform.release()}, {platform.processor() or platform.machine()}. The same workloads on the same key sequence (MINSTD; present keys 2r, "
          "absent keys 2r+1), i64 keys to i64 values. `btree` is lib/btree.mito (items in their own pool with stable slots, each found by key), `ordmap` lib/ordmap.mito "
-         "(values inside the leaves); Rust is `BTreeMap<u64,u64>` (opt-level 3, fat LTO, one codegen unit). Both Mitochondria maps are declared `unlogged` "
-         "(`m: ordmap<1048576> unlogged;`): kept out of the undo log, so a failed request does not roll the map back, as a Rust map has no rollback; their arithmetic "
+         "(values inside the leaves); Rust is `BTreeMap<u64,u64>` (opt-level 3, fat LTO, one codegen unit). Both Mitochondria maps are unlogged (the default; before 2026-11-11 declared `unlogged`) "
+         "(no marker): kept out of the undo log, so a failed request does not roll the map back, as a Rust map has no rollback; their arithmetic "
          "is still overflow-checked. Both run on one pinned core, timed inside their own process, alternating rounds; best of the rounds. Ratios are Mitochondria / Rust; "
          "rows are sorted by the better of the two ratios, best first.", ""]
     for n in sorted(results, key=int):

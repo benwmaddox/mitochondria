@@ -1,12 +1,13 @@
 // array.fill(from, count, value): a range of a fixed array is set to one value, in plain state and in an item, for every
 // element width, bool and f64; the range and the value are checked, and a failed request leaves the array as it was
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Row { w: i16[4]; ok: bool[3]; f: f64[3]; }
 struct App {
     b: u8[6]; h: i32[5]; q: i64[3]; x: f64[3]; flag: bool[4];
     rows: pool<Row, 2>;
 }
-state app: App;
+state app: App logged;
 
 @post("/b/{from}/{n}/{v}")
 fn post_b(from: i64, n: i64, v: i64) -> Response<{}> { app.b.fill(from, n, v); return ok({}); }

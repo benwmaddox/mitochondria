@@ -6,7 +6,7 @@ struct HF {
     data: u8[1048576]; out: u8[1048576]; freq: i32[256]; code_len: i32[256]; codes: i32[256];
     node_freq: i32[600]; node_byte: i32[600]; node_leaf: i32[600]; node_left: i32[600]; node_right: i32[600]; nodes: i64;
     list: i32[600]; list_len: i64; root: i64;
-    size: i64; out_len: i64; bit_count: i64; result: i64; decoded: u8[1048576] unlogged; decoded_len: i64;
+    size: i64; out_len: i64; bit_count: i64; result: i64; decoded: u8[1048576]; decoded_len: i64;
 }
 state hf: HF;
 

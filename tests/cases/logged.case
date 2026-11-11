@@ -1,10 +1,10 @@
-// `unlogged` keeps a plain field or a whole collection out of the undo log: a request that fails after writing there leaves what it wrote (logged data
-// next to it, even on the same 64-byte line before the layout split them, is rolled back as before); adds and field writes in an unlogged pool survive
-// a failure, removals still happen only when a request succeeds
+// state is unlogged by default: a request that fails after writing a plain field or a collection leaves what it wrote; `logged` keeps a field or a whole collection in the
+// undo log (logged data next to unlogged data, even on the same 64-byte line before the layout split them, is rolled back); adds and field writes in an unlogged pool
+// survive a failure, removals still happen only when a request succeeds
 --- program
 struct Node { value: i64; tag: u8; }
-struct Scratch { count: i64 unlogged; buf: u8[16] unlogged; kept: i64; }
-struct App { s: Scratch; logged: i64; nodes: pool<Node, 8> unlogged; plain: pool<Node, 8>; }
+struct Scratch { count: i64; buf: u8[16]; kept: i64 logged; }
+struct App { s: Scratch; logged: i64 logged; nodes: pool<Node, 8>; plain: pool<Node, 8> logged; }
 state app: App;
 
 @post("/write/{v}/{fail_after}")

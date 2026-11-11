@@ -2,24 +2,93 @@
 
 Written by `bench.py` from `results.json` (2026-11-11, Linux 6.6.87.2-microsoft-standard-WSL2, best of 3 alternating rounds); do not edit by hand.
 
-Both are TodoMVC rendered on the server, from this repository's `examples/todomvc` and crudspec's `apps/todomvc`, each server alone on one pinned CPU. The client submits each app's own forms (url-encoded for Mitochondria, multipart with a signed field for crudspec). Times are the client's round trip on one kept-open connection, in microseconds (Python's client adds its own share to both). Both keep the lists in SQLite on disk (WAL): Mitochondria as tables (`table<T>`), crudspec as its entities. crudspec keeps a rendered page until its data changes, so its page time barely grows with the list; Mitochondria renders every page.
+Both are TodoMVC rendered on the server, from this repository's `examples/todomvc` and crudspec's `apps/todomvc`, each server alone on one pinned CPU. The client submits each app's own forms (url-encoded for Mitochondria, multipart with a signed field for crudspec). Times are the client's round trip on one kept-open connection, in microseconds (Python's client adds its own share to both). Both keep the lists in SQLite on disk (WAL): Mitochondria as tables (`table<T>`), crudspec as its entities, and both sync the log at checkpoints by default (`--db-sync normal`: a crash of the process loses nothing; an OS crash or power cut can lose the last moments of answered changes).
 
-**The first three columns are the comparison that loses no confirmed data.** Both servers sync every commit to disk before answering: Mitochondria's default `--db-sync full` (SQLite `synchronous=FULL`) and crudspec built with `synchronous=FULL` (as shipped, its runtime hard-codes `synchronous=NORMAL`; the benchmark's build changes that one line in a temporary copy of its Go runtime, cs-full.sh). An answered change then survives a power cut. The last three columns are the faster, less safe setting for both (`--db-sync normal` and crudspec as shipped): WAL commits are synced at checkpoints, a process crash loses nothing, an OS crash or power cut can lose the last moments.
+Each cache mode is compared like for like:
 
-| Measure | Mitochondria (`full`) | crudspec (`FULL`) | Mito / crudspec | Mitochondria (`normal`) | crudspec (`NORMAL`, as shipped) | Mito / crudspec |
-|---|---:|---:|---:|---:|---:|---:|
-| 10 todos: page, median (us) | 100 | 105 | 0.95x | 99 | 105 | 0.94x |
-| 10 todos: page, 99th percentile (us) | 174 | 190 | 0.92x | 185 | 204 | 0.91x |
-| 10 todos: toggle a todo, median (us) | 1565 | 1631 | 0.96x | 110 | 168 | 0.65x |
-| 10 todos: toggle a todo, 99th percentile (us) | 2028 | 2778 | 0.73x | 212 | 345 | 0.62x |
-| 10 todos: pages per second, 4 clients | 32,355 | 32,975 | 0.98x | 32,330 | 33,011 | 0.98x |
-| 10 todos: page size (bytes) | 7,447 | 11,650 | | 7,447 | 11,650 | |
-| 100 todos: page, median (us) | 139 | 109 | 1.27x | 139 | 110 | 1.26x |
-| 100 todos: page, 99th percentile (us) | 230 | 211 | 1.09x | 230 | 211 | 1.09x |
-| 100 todos: toggle a todo, median (us) | 765 | 881 | 0.87x | 108 | 162 | 0.67x |
-| 100 todos: toggle a todo, 99th percentile (us) | 1795 | 2330 | 0.77x | 209 | 285 | 0.73x |
-| 100 todos: pages per second, 4 clients | 15,615 | 26,985 | 0.58x | 15,712 | 27,102 | 0.58x |
-| 100 todos: page size (bytes) | 63,794 | 96,166 | | 63,794 | 96,166 | |
-| add a todo (100 to 300 todos), median (us) | 793 | 914 | 0.87x | 112 | 202 | 0.55x |
-| add a todo (100 to 300 todos), 99th percentile (us) | 1749 | 2083 | 0.84x | 229 | 366 | 0.63x |
-| peak memory (MB, VmHWM) | 4.6 | 35.1 | 0.13x | 4.5 | 35.4 | 0.13x |
+- **none**: every page is rendered afresh (Mitochondria `TODOMVC_CACHE=none`, crudspec `CRUDSPEC_NO_CACHE=1`).
+- **fragment**: the page is assembled from cached pieces and fresh ones (Mitochondria `TODOMVC_CACHE=fragment`: the list and its footer are kept in the answer cache under the list's version, the rest rendered each time; crudspec `CRUDSPEC_NO_PAGE_CACHE=1`: its fragment cache alone).
+- **page**: the whole page is kept until its data changes (Mitochondria `TODOMVC_CACHE=page`, the example's default: kept under the list's version, which every change to the list moves, so another browser's changes do not touch it; crudspec's default: kept under the data version, so any commit starts its page cache again).
+
+## No cache
+
+| Measure | Mitochondria | crudspec | Mito / crudspec |
+|---|---:|---:|---:|
+| 10 todos: page, median (us) | 90 | 189 | 0.47x |
+| 10 todos: page, 99th percentile (us) | 168 | 361 | 0.46x |
+| 10 todos: toggle a todo, median (us) | 102 | 152 | 0.67x |
+| 10 todos: toggle a todo, 99th percentile (us) | 195 | 285 | 0.69x |
+| 10 todos: pages per second, 4 clients | 33,065 | 8,808 | 3.75x |
+| 10 todos: page size (bytes) | 7,447 | 11,650 | |
+| 100 todos: page, median (us) | 135 | 532 | 0.25x |
+| 100 todos: page, 99th percentile (us) | 230 | 989 | 0.23x |
+| 100 todos: toggle a todo, median (us) | 107 | 147 | 0.72x |
+| 100 todos: toggle a todo, 99th percentile (us) | 215 | 290 | 0.74x |
+| 100 todos: pages per second, 4 clients | 16,251 | 2,049 | 7.93x |
+| 100 todos: page size (bytes) | 63,794 | 96,166 | |
+| add a todo (100 to 300 todos), median (us) | 114 | 170 | 0.67x |
+| add a todo (100 to 300 todos), 99th percentile (us) | 1544 | 324 | 4.77x |
+| peak memory (MB, VmHWM) | 4.5 | 35.9 | 0.12x |
+
+## Fragment cache (mixed: cached pieces and fresh ones)
+
+| Measure | Mitochondria | crudspec | Mito / crudspec |
+|---|---:|---:|---:|
+| 10 todos: page, median (us) | 84 | 156 | 0.54x |
+| 10 todos: page, 99th percentile (us) | 169 | 338 | 0.50x |
+| 10 todos: toggle a todo, median (us) | 104 | 150 | 0.69x |
+| 10 todos: toggle a todo, 99th percentile (us) | 264 | 262 | 1.01x |
+| 10 todos: pages per second, 4 clients | 38,892 | 11,738 | 3.31x |
+| 10 todos: page size (bytes) | 7,447 | 11,650 | |
+| 100 todos: page, median (us) | 96 | 260 | 0.37x |
+| 100 todos: page, 99th percentile (us) | 176 | 447 | 0.39x |
+| 100 todos: toggle a todo, median (us) | 101 | 154 | 0.66x |
+| 100 todos: toggle a todo, 99th percentile (us) | 203 | 280 | 0.73x |
+| 100 todos: pages per second, 4 clients | 32,745 | 5,312 | 6.16x |
+| 100 todos: page size (bytes) | 63,794 | 96,166 | |
+| add a todo (100 to 300 todos), median (us) | 106 | 173 | 0.61x |
+| add a todo (100 to 300 todos), 99th percentile (us) | 1329 | 291 | 4.56x |
+| peak memory (MB, VmHWM) | 4.8 | 35.8 | 0.13x |
+
+## Page cache
+
+| Measure | Mitochondria | crudspec | Mito / crudspec |
+|---|---:|---:|---:|
+| 10 todos: page, median (us) | 83 | 105 | 0.80x |
+| 10 todos: page, 99th percentile (us) | 170 | 197 | 0.86x |
+| 10 todos: toggle a todo, median (us) | 103 | 168 | 0.61x |
+| 10 todos: toggle a todo, 99th percentile (us) | 205 | 357 | 0.57x |
+| 10 todos: pages per second, 4 clients | 36,609 | 34,039 | 1.08x |
+| 10 todos: page size (bytes) | 7,447 | 11,650 | |
+| 100 todos: page, median (us) | 104 | 100 | 1.04x |
+| 100 todos: page, 99th percentile (us) | 183 | 196 | 0.94x |
+| 100 todos: toggle a todo, median (us) | 110 | 148 | 0.75x |
+| 100 todos: toggle a todo, 99th percentile (us) | 265 | 273 | 0.97x |
+| 100 todos: pages per second, 4 clients | 30,512 | 29,157 | 1.05x |
+| 100 todos: page size (bytes) | 63,794 | 96,166 | |
+| add a todo (100 to 300 todos), median (us) | 115 | 177 | 0.65x |
+| add a todo (100 to 300 todos), 99th percentile (us) | 1372 | 362 | 3.79x |
+| peak memory (MB, VmHWM) | 4.8 | 35.4 | 0.14x |
+
+## Page cache, every answered change on disk (`--db-sync full`)
+
+Both sync every commit to disk before answering (SQLite `synchronous=FULL`): an answered change survives a power cut. Reads are as in the page-cache table; writes wait for the disk.
+
+| Measure | Mitochondria | crudspec | Mito / crudspec |
+|---|---:|---:|---:|
+| 10 todos: page, median (us) | 84 | 95 | 0.88x |
+| 10 todos: page, 99th percentile (us) | 165 | 188 | 0.88x |
+| 10 todos: toggle a todo, median (us) | 1320 | 1446 | 0.91x |
+| 10 todos: toggle a todo, 99th percentile (us) | 2014 | 2134 | 0.94x |
+| 10 todos: pages per second, 4 clients | 39,513 | 34,670 | 1.14x |
+| 10 todos: page size (bytes) | 7,447 | 11,650 | |
+| 100 todos: page, median (us) | 96 | 100 | 0.96x |
+| 100 todos: page, 99th percentile (us) | 182 | 191 | 0.96x |
+| 100 todos: toggle a todo, median (us) | 705 | 811 | 0.87x |
+| 100 todos: toggle a todo, 99th percentile (us) | 1698 | 1716 | 0.99x |
+| 100 todos: pages per second, 4 clients | 32,771 | 29,325 | 1.12x |
+| 100 todos: page size (bytes) | 63,794 | 96,166 | |
+| add a todo (100 to 300 todos), median (us) | 708 | 887 | 0.80x |
+| add a todo (100 to 300 todos), 99th percentile (us) | 2901 | 1901 | 1.53x |
+| peak memory (MB, VmHWM) | 4.8 | 35.2 | 0.14x |
+

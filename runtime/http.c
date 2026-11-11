@@ -8,7 +8,7 @@
    ones (poll) and hands a connection back to the threads when its next request arrives; an idle connection is closed
    after 10 s. One program's handler runs for one request at a time (a lock); a system has its own workers.
    Sockets, threads, locks and timers are runtime/os.c's (Windows and Linux). Flags: --port N, --conns N (a system's connection threads), --budget MB, --soft MB,
-   --hard MB (one program's memory), --data DIR, --db-memory MB, --db-sync full|normal and --db-fit refuse|drop (a program's tables, in SQLite), and for tests --seed N and --clock MS. */
+   --hard MB (one program's memory), --data DIR, --db-memory MB, --db-sync normal|full and --db-fit refuse|drop (a program's tables, in SQLite), and for tests --seed N and --clock MS. */
 
 static int g_timing; /* --timing: every answer carries X-Handler-Ns, the time the handler took (for benchmarks; off, the answers are byte for byte as recorded) */
 
@@ -869,10 +869,10 @@ static const char *sflag(int argc, char **argv, const char *name, const char *de
     return def;
 }
 static int same(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
-/* the tables' flags: --db-sync full (default: an answered change is on disk) or normal (synced at checkpoints) gives 1 or 0; --db-fit refuse
+/* the tables' flags: --db-sync normal (default: synced at checkpoints) or full (an answered change is on disk first) gives 0 or 1; --db-fit refuse
    (default: a database that does not fit the program stops the server) or drop (drop what does not fit, saying each) adds 2; -1 for anything else */
 static int db_sync(int argc, char **argv) {
-    const char *v = sflag(argc, argv, "--db-sync", "full"), *f = sflag(argc, argv, "--db-fit", "refuse");
+    const char *v = sflag(argc, argv, "--db-sync", "normal"), *f = sflag(argc, argv, "--db-fit", "refuse");
     int s = same(v, "full") ? 1 : same(v, "normal") ? 0 : -1, d = same(f, "refuse") ? 0 : same(f, "drop") ? 2 : -1;
     return s < 0 || d < 0 ? -1 : s | d;
 }

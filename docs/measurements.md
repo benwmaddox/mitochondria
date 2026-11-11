@@ -1014,3 +1014,10 @@ the analysis makes): see the note in DESIGN.md; the slowest is Base64::Decode at
 Library routines (2026-11-11): `base64` and `unbase64` with AVX2 loops (runtime/mito.c, checked against a Python reference on 1,100+ cases, with and without SIMD) and `array.sort(from, count, scratch)`. Base64::Encode 0.733 s to 0.143 s (Rust, with its SIMD
 crate, 0.166 s) and Base64::Decode 0.772 s to 0.147 s (Rust 0.185 s) once the ports call the builtins instead of looping in the language (the loop versions stay as main_loop.mito); Compress::BWTEncode 0.54 s to 0.281 s (Rust 0.42 s) with the keys
 sorted by `sort` (1.57 s when the keys were built in text order rather than in the last round's order, which is mostly sorted).
+
+TodoMVC against crudspec, redone like for like (2026-11-11): the earlier comparison set Mitochondria, which rendered every page, against crudspec serving a cached page, so its rendering looked slower (100 todos: 139 us against 109 us,
+15.7k against 27k pages per second on one core). The handler's own work for that page was 37 us (rows read, HTML built); the rest of the 125 us round trip was HTTP and the client moving 64 KB. The example now keeps a page, or its list and footer,
+in the answer cache under a per-list version (every change to a list moves it; other lists are untouched), chosen at start by TODOMVC_CACHE=none|fragment|page (default page), and bench/todomvc compares each mode with crudspec's equivalent (none:
+CRUDSPEC_NO_CACHE=1, fragment: CRUDSPEC_NO_PAGE_CACHE=1, page: its default). 100 todos, page render median / pages per second on one core: none 135 us and 16,251 against crudspec 532 us and 2,049; fragment 96 us and 32,745 against 260 us and 5,312; page 104 us
+and 30,512 against 100 us and 29,157. Both servers now sync the log at checkpoints by default (`--db-sync normal`); with `--db-sync full` (every commit on disk before the answer) writes cost 0.7-1.3 ms in both (Mitochondria 0.80-0.91x of crudspec's time).
+The browser tests (examples/todomvc/e2e.mjs, 53 checks) pass in all three modes.

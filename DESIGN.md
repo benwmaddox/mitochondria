@@ -58,8 +58,8 @@ works on every collection). A row's field `assignee: User?` references a row of 
 set null when that row goes); working state can hold one too (the row id, null once the row is gone). A loop over each row's
 children inside a loop over the rows (`foreach t in b.todos` in `foreach b in app.boards`) is one query for all the children,
 walked in step with the outer loop, not one query per row. Each request is one transaction, committed before its
-answer and synced to disk first (`--db-sync full`, the default; `--db-sync normal` syncs at checkpoints instead, losing nothing on a
-process crash but possibly the last moments on an OS crash or power cut). At start the database is created or migrated by field name; a column whose type changed, or rows that break a declared
+answer, and synced to the log at checkpoints (`--db-sync normal`, the default: nothing is lost on a process crash, but the last moments of answered changes can be on an OS crash or power
+cut); `--db-sync full` syncs every commit to disk before the answer, so that an answered change survives a power cut, at several times the cost of a write (about 8x on TodoMVC). At start the database is created or migrated by field name; a column whose type changed, or rows that break a declared
 limit, stop the server with the reason; `--db-fit drop` drops them instead (the column's values, or the rows and what they
 own), saying each on standard error (docs/persistence.md).
 

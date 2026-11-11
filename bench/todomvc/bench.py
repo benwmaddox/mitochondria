@@ -1,14 +1,16 @@
 """TodoMVC rendered on the server: Mitochondria (examples/todomvc) against crudspec's build of the same app (apps/todomvc), on Linux.
 
-usage: python3 -I bench.py --mito EXE --crudspec APP --crudspec-full APP --crudspec-assets DIR [--rounds N]   (run under the shared bench lock)
---crudspec is crudspec as it ships (its runtime sets `synchronous=NORMAL`); --crudspec-full is the same app built with `synchronous=FULL`, so that an answered change survives a power cut as
-it does in Mitochondria's default `--db-sync full`: the durable pair is the comparison that loses no confirmed data. See cs-full.sh for how that build is made.
+usage: python3 -I bench.py --mito EXE --crudspec APP --crudspec-assets DIR [--rounds N]   (run under the shared bench lock)
 Each server runs alone on one pinned CPU (BENCH_CPU, default 10). The client reads each app's own pages and submits their real
 forms (the new-todo form, a todo's toggle form), so neither app's routes are written here: Mitochondria posts url-encoded forms,
 crudspec multipart forms with its signed field. Per app and list size (10 and 100 todos): the time of one request on one kept-open
 connection (median and 99th percentile of the client's round trip: page render, add a todo, toggle a todo), the pages per second
 four client processes get, and the server's peak resident memory (VmHWM) at the end. Writes results.json and RESULTS.md here.
-Both keep the lists in SQLite (WAL, on disk): Mitochondria as `table<T>`s, crudspec as its entities."""
+Both keep the lists in SQLite (WAL, on disk): Mitochondria as `table<T>`s, crudspec as its entities. Both sync the log at checkpoints
+by default (`--db-sync normal`); `--db-sync full` makes an answered change survive a power cut.
+The comparison is made in each cache mode, like for like: none (every page rendered afresh: TODOMVC_CACHE=none, CRUDSPEC_NO_CACHE=1),
+fragment (the page assembled from cached pieces: TODOMVC_CACHE=fragment, CRUDSPEC_NO_PAGE_CACHE=1) and page (the whole page kept until
+its data changes: TODOMVC_CACHE=page, crudspec's default); and with `--db-sync full` in page mode."""
 import http.client, json, multiprocessing, os, platform, re, shutil, socket, statistics, subprocess, sys, tempfile, time, urllib.parse, uuid
 from html.parser import HTMLParser
 
@@ -18,7 +20,6 @@ def opt(name, default=None):
     if name in args: i = args.index(name); v = args[i + 1]; del args[i:i + 2]; return v
     return default
 MITO, CS, CS_ASSETS = opt("--mito"), opt("--crudspec"), opt("--crudspec-assets")
-CS_FULL = opt("--crudspec-full")
 ROUNDS = int(opt("--rounds", "3"))
 CPU = int(os.environ.get("BENCH_CPU", "10"))
 CLIENT_CPUS = [CPU + 1 + i for i in range(4)]
@@ -107,8 +108,8 @@ def throughput(port, cookies):
     return sum(q.get() for _ in ps) / (THR_SECONDS + 0.5)
 
 
-def run_app(name, cmd, port, cleanup):
-    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def run_app(name, cmd, port, cleanup, env=None):
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, **(env or {})})
     os.sched_setaffinity(p.pid, {CPU})
     try:
         wait_up(port)
@@ -137,17 +138,31 @@ def run_app(name, cmd, port, cleanup):
         p.kill(); p.wait(); cleanup()
 
 
+# name -> (server, extra arguments, environment). Both servers sync at checkpoints by default.
+VARIANTS = {
+    "mito_none": ("mito", [], {"TODOMVC_CACHE": "none"}),
+    "cs_none": ("cs", [], {"CRUDSPEC_NO_CACHE": "1"}),
+    "mito_fragment": ("mito", [], {"TODOMVC_CACHE": "fragment"}),
+    "cs_fragment": ("cs", [], {"CRUDSPEC_NO_PAGE_CACHE": "1"}),
+    "mito_page": ("mito", [], {"TODOMVC_CACHE": "page"}),
+    "cs_page": ("cs", [], {}),
+    "mito_page_full": ("mito", ["--db-sync", "full"], {"TODOMVC_CACHE": "page"}),
+    "cs_page_full": ("cs", ["--db-sync", "full"], {}),
+}
+
+
 def measure():
     out = {}
+    names = list(VARIANTS)
     for rnd in range(ROUNDS):
-        for name in (["mito", "crudspec_full", "mito_normal", "crudspec"] if rnd % 2 == 0 else ["crudspec", "mito_normal", "crudspec_full", "mito"]):
-            if name.startswith("mito"):
+        for name in (names if rnd % 2 == 0 else names[::-1]):
+            kind, extra, env = VARIANTS[name]
+            if kind == "mito":
                 d = tempfile.mkdtemp(prefix="mito-todomvc-")
-                sync = ["--db-sync", "normal"] if name == "mito_normal" else []
-                r = run_app(name, [MITO, "--port", "18301", "--data", d] + sync, 18301, lambda: shutil.rmtree(d, ignore_errors=True))
+                r = run_app(name, [MITO, "--port", "18301", "--data", d] + extra, 18301, lambda: shutil.rmtree(d, ignore_errors=True), env)
             else:
                 d = tempfile.mkdtemp(prefix="cs-todomvc-")
-                r = run_app(name, [CS_FULL if name == "crudspec_full" else CS, "--data", d, "--assets", CS_ASSETS, "--port", "18302"], 18302, lambda: shutil.rmtree(d, ignore_errors=True))
+                r = run_app(name, [CS, "--data", d, "--assets", CS_ASSETS, "--port", "18302"] + extra, 18302, lambda: shutil.rmtree(d, ignore_errors=True), env)
             out.setdefault(name, []).append(r)
             print(f"  round {rnd + 1}: {name} done", file=sys.stderr)
     # best of the rounds per measure
@@ -165,31 +180,37 @@ def measure():
 
 
 def markdown(b):
-    mf, cf, mn, cn = b["mito"], b["crudspec_full"], b["mito_normal"], b["crudspec"]
     o = ["# TodoMVC: Mitochondria against crudspec", "",
          f"Written by `bench.py` from `results.json` ({b['date']}, {b['machine']}, best of {b['rounds']} alternating rounds); do not edit by hand.", "",
          "Both are TodoMVC rendered on the server, from this repository's `examples/todomvc` and crudspec's `apps/todomvc`, each server "
          "alone on one pinned CPU. The client submits each app's own forms (url-encoded for Mitochondria, multipart with a signed field for "
          "crudspec). Times are the client's round trip on one kept-open connection, in microseconds (Python's client adds its own share to both). "
-         "Both keep the lists in SQLite on disk (WAL): Mitochondria as tables (`table<T>`), crudspec as its entities. crudspec keeps a rendered page until its data changes, so its "
-         "page time barely grows with the list; Mitochondria renders every page.", "",
-         "**The first three columns are the comparison that loses no confirmed data.** Both servers sync every commit to disk before answering: Mitochondria's default `--db-sync full` "
-         "(SQLite `synchronous=FULL`) and crudspec built with `synchronous=FULL` (as shipped, its runtime hard-codes `synchronous=NORMAL`; the benchmark's build changes that one line in a "
-         "temporary copy of its Go runtime, cs-full.sh). An answered change then survives a power cut. The last three columns are the faster, less safe setting for both (`--db-sync normal` and "
-         "crudspec as shipped): WAL commits are synced at checkpoints, a process crash loses nothing, an OS crash or power cut can lose the last moments.", "",
-         "| Measure | Mitochondria (`full`) | crudspec (`FULL`) | Mito / crudspec | Mitochondria (`normal`) | crudspec (`NORMAL`, as shipped) | Mito / crudspec |", "|---|---:|---:|---:|---:|---:|---:|"]
-    def row(label, x, y, z, w, fmt="{:.0f}"):
-        f = lambda v: fmt.format(v)
-        o.append(f"| {label} | {f(x)} | {f(y)} | {x / y:.2f}x | {f(z)} | {f(w)} | {z / w:.2f}x |")
-    for size in map(str, SIZES):
-        for k, label in (("render", "page"), ("toggle", "toggle a todo")):
-            for q, ql in (("median_us", "median"), ("p99_us", "99th percentile")):
-                row(f"{size} todos: {label}, {ql} (us)", mf[size][k][q], cf[size][k][q], mn[size][k][q], cn[size][k][q])
-        row(f"{size} todos: pages per second, 4 clients", mf[size]["pages_per_s"], cf[size]["pages_per_s"], mn[size]["pages_per_s"], cn[size]["pages_per_s"], "{:,.0f}")
-        o.append(f"| {size} todos: page size (bytes) | {mf[size]['page_bytes']:,} | {cf[size]['page_bytes']:,} | | {mn[size]['page_bytes']:,} | {cn[size]['page_bytes']:,} | |")
-    for q, ql in (("median_us", "median"), ("p99_us", "99th percentile")):
-        row(f"add a todo ({SIZES[-1]} to {SIZES[-1] + 200} todos), {ql} (us)", mf["add"][q], cf["add"][q], mn["add"][q], cn["add"][q])
-    row("peak memory (MB, VmHWM)", mf["peak_mb"], cf["peak_mb"], mn["peak_mb"], cn["peak_mb"], "{:.1f}")
+         "Both keep the lists in SQLite on disk (WAL): Mitochondria as tables (`table<T>`), crudspec as its entities, and both sync the log at checkpoints by default "
+         "(`--db-sync normal`: a crash of the process loses nothing; an OS crash or power cut can lose the last moments of answered changes).", "",
+         "Each cache mode is compared like for like:", "",
+         "- **none**: every page is rendered afresh (Mitochondria `TODOMVC_CACHE=none`, crudspec `CRUDSPEC_NO_CACHE=1`).",
+         "- **fragment**: the page is assembled from cached pieces and fresh ones (Mitochondria `TODOMVC_CACHE=fragment`: the list and its footer are kept in the answer cache under the list's version, "
+         "the rest rendered each time; crudspec `CRUDSPEC_NO_PAGE_CACHE=1`: its fragment cache alone).",
+         "- **page**: the whole page is kept until its data changes (Mitochondria `TODOMVC_CACHE=page`, the example's default: kept under the list's version, which every change to the list moves, so "
+         "another browser's changes do not touch it; crudspec's default: kept under the data version, so any commit starts its page cache again).", ""]
+    def table(title, m, c, note=""):
+        o.extend([f"## {title}", ""] + ([note, ""] if note else []) + ["| Measure | Mitochondria | crudspec | Mito / crudspec |", "|---|---:|---:|---:|"])
+        def row(label, x, y, fmt="{:.0f}"): o.append(f"| {label} | {fmt.format(x)} | {fmt.format(y)} | {x / y:.2f}x |")
+        for size in map(str, SIZES):
+            for k, label in (("render", "page"), ("toggle", "toggle a todo")):
+                for q, ql in (("median_us", "median"), ("p99_us", "99th percentile")):
+                    row(f"{size} todos: {label}, {ql} (us)", m[size][k][q], c[size][k][q])
+            row(f"{size} todos: pages per second, 4 clients", m[size]["pages_per_s"], c[size]["pages_per_s"], "{:,.0f}")
+            o.append(f"| {size} todos: page size (bytes) | {m[size]['page_bytes']:,} | {c[size]['page_bytes']:,} | |")
+        for q, ql in (("median_us", "median"), ("p99_us", "99th percentile")):
+            row(f"add a todo ({SIZES[-1]} to {SIZES[-1] + 200} todos), {ql} (us)", m["add"][q], c["add"][q])
+        row("peak memory (MB, VmHWM)", m["peak_mb"], c["peak_mb"], "{:.1f}")
+        o.append("")
+    table("No cache", b["mito_none"], b["cs_none"])
+    table("Fragment cache (mixed: cached pieces and fresh ones)", b["mito_fragment"], b["cs_fragment"])
+    table("Page cache", b["mito_page"], b["cs_page"])
+    table("Page cache, every answered change on disk (`--db-sync full`)", b["mito_page_full"], b["cs_page_full"],
+          "Both sync every commit to disk before answering (SQLite `synchronous=FULL`): an answered change survives a power cut. Reads are as in the page-cache table; writes wait for the disk.")
     open(os.path.join(here, "RESULTS.md"), "w").write("\n".join(o) + "\n")
     print("\n".join(o))
 

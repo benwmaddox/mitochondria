@@ -3,6 +3,7 @@ mod build;
 mod cases;
 #[cfg(test)]
 mod http_check;
+mod platform;
 #[cfg(test)]
 mod error_corpus;
 #[cfg(test)]
@@ -107,6 +108,7 @@ fn quote(file: &str, text: &str, l: usize, c: usize, rest: &str) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().take_while(|a| *a != "--").any(|a| a == "--platform") { die("there is no --platform switch: the platform is the entry file's (`platform cli;` in it, or its entry points)".into()); }
     let rest = args.get(1..).unwrap_or(&[]);
     // `file("...")` in a program reads beside it
     if let Some(f) = inputs(rest).first() { lang::set_file_dir(std::path::Path::new(f.as_str()).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))); }
@@ -201,8 +203,13 @@ fn compile(f: &str, text: &str, system: bool) -> Result<(Vec<String>, String), S
     let (s, code) = source::load(text).map_err(|e| report(f, text, &e))?;
     let prog = layout::Program::parse(&s).map_err(|e| report(f, text, &e))?;
     let a = cgen::check(&prog, &code).map_err(|e| report(f, text, &e))?;
+    // the platform is the entry file's: what it says (`platform cli;`), or what its entry points show
+    let declared = platform::declared(text).map_err(|e| format!("{}: {}", f, e))?;
+    let plat = platform::resolve(declared, &a, &code).map_err(|e| format!("{}: {}", f, e))?;
     let web = web.map_or(String::new(), |w| web::c(&w));
-    Ok((cgen::program_exe(&prog, &a, Some((&file, &code)), &web)?, name))
+    let units = cgen::program_exe(&prog, &a, Some((&file, &code)), &web)?;
+    if let Some(p) = plat { platform::check_bundle(p, &units).map_err(|e| format!("{}: {}", f, e))?; }
+    Ok((units, name))
 }
 
 /// `build <program> [-o app.exe] [--tcc]`

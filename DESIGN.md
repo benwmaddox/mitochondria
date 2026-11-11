@@ -332,6 +332,28 @@ assignments give under the guess (an end that grows goes to infinity; an assignm
 no index or overflow test. A store whose value has no known interval (a value from outside, a loaded number nothing bounds) leaves its field or array without a range. A quotient by a positive divisor has the range its
 operands allow. `MITO_EXPLAIN_INDEX=1 mito emit-c prog.mito` lists the index tests that remain and what is known of each index.
 
+## Platforms
+A program says what it is built for with `platform web;`, `platform cli;` or `platform test;` on a line of its own in its entry file (`game` is reserved: not built yet). The platform is the
+entry file's: the file given to `mito build`, `run`, `serve` or `check`, so a server and a tool can be two entry files over the same modules, each with its own platform. There is no
+command-line switch. An entry file that names none is the platform its entry points show: `@get` and the like make it web, `@main` cli.
+
+A platform is a driver, the entry points it allows, the built-ins it allows and the libraries bundled with it:
+
+| | driver | entry points | bundled libraries | refused |
+| --- | --- | --- | --- | --- |
+| `web` | the HTTP server (runtime/http.c) | `@get` `@post` ... `@socket`, `@every`, `@start` | SQLite, zlib, HTML parsing, crypto | `@main` |
+| `cli` | the command-line driver (runtime/cli.c) | `@main`, `@start` | crypto | endpoints; `set_cookie`, the answer cache, `html_parse`, sockets; tables, `gzip;` |
+| `test` | the test runner (`mito test`) | none (`test "..." { }` blocks, `@start`) | as web | `@main`, endpoints |
+| `game` | a window loop (SDL3) | `@frame` | crypto | not built yet |
+
+A build has exactly one platform (its entry file's). Libraries are named items (`sqlite`, `zlib`, `html`, `crypto`; `sdl3` with the game) and a platform is a driver plus a list of them, so
+platforms share libraries by name (web and a game both bundle `crypto`). Direction: developers are to be able to add libraries (a name, the C sources or system library to link, and what shows a
+program uses it) and platforms (a driver, the entry attributes and built-ins it allows, a list of libraries) in files of their own, so neither list is a compiler-level fact. Not built: today
+both are tables in src/platform.rs (`LIBRARIES`, and `Platform::libraries`), which is the shape a developer's definition would take.
+
+The checks run when the program is compiled (`check`, `build`, `run`, `serve`) and say which platform the program is for and what does not belong to it. The library check looks at what
+the generated C needs (`MITO_USES_SQLITE`, `_ZLIB`, `_HTML`, `_CRYPTO`) against the platform's bundle, so a command-line program that declares a table is refused at compile time, not when it runs.
+
 ## Command-line programs
 A program whose entry is `@main` is a tool, not a server: `@main fn main(filter: utf8<1..1000> from arg(0), doc: utf8<33554432> from stdin, c: bool = false) -> Response<text>`.
 The command line is the request: `from arg(N)` is the Nth argument, `from stdin` what is piped in (read only when the program has such an input, up to 64 MB), and any

@@ -1971,7 +1971,10 @@ impl<'p> G<'p> {
         if let Some(d) = s.strip_suffix("LL") { if let Ok(v) = d.parse::<i64>() { return Some((v, v)); } }
         if let Some(r) = load_interval(s) { return Some(r); }
         let name = s.strip_prefix("(i64)").unwrap_or(s);
-        self.ranges.get(name).or_else(|| self.var_iv.get(name)).copied()
+        let known = self.ranges.get(name).or_else(|| self.var_iv.get(name)).copied();
+        // an index whose bounds test has passed in this straight run of code (`checked`: dropped at a branch and when the index is assigned) is inside that array, as the test said
+        let tested = self.checked.iter().filter(|(x, n)| x == name && *n > 0).map(|(_, n)| (0i64, (*n).min(i64::MAX as u64) as i64 - 1)).fold(None, |acc: Option<(i64, i64)>, r| Some(acc.map_or(r, |a| (a.0.max(r.0), a.1.min(r.1)))));
+        match (known, tested) { (Some(k), Some(t)) => Some((k.0.max(t.0), k.1.min(t.1))), (k, t) => k.or(t) }
     }
     /// A value stored into a field declared with a range (`n: i64 in 0..100`): an integer, tested against the range unless the range analysis
     /// proves it inside; a value outside fails the request (400), naming the field.
@@ -5452,6 +5455,18 @@ state app: A;
         assert!(tests("var off = 0; var s = 0; while off < app.n { s = s + app.xs[off + 1]; off = off - app.step; } return ok({ x: s });") > 0);
         assert!(tests("var off = 0; var s = 0; while off < app.n { s = s + app.xs[off + 1]; off = off + app.big; } return ok({ x: s });") > 0);
         assert!(tests("var off = 0; var s = 0; while off < app.big { s = s + app.xs[off + 1]; off = off + app.step; } return ok({ x: s });") > 0);
+    }
+
+    /// A bounds test that passes tells the compiler where the index is for the rest of that code: stepping it afterwards cannot overflow. Without an access there is nothing to tell.
+    #[test]
+    fn a_passed_bounds_test_bounds_the_index() {
+        let state = "struct A { n: i64 in 0..1000; big: i64; xs: u8[2000]; }\nstate app: A;";
+        let checked = |body: &str| endpoint_code(state, &format!("@get(\"/t\") fn t() -> Response<{{ x: i64 }}> {{ {} }}", body)).lines().map(|l| l.trim_start()).filter(|l| ["ADD(", "SUB(", "MUL("].iter().any(|m| l.starts_with(m))).count();
+        assert_eq!(checked("var i = app.big; let x = app.xs[i]; i = i + 1; i = i - 3; return ok({ x: i + x });"), 0);
+        assert!(checked("var i = app.big; i = i + 1; return ok({ x: i });") > 0);
+        assert!(checked("var i = app.big; i = i + 1; let x = app.xs[i]; return ok({ x: x });") > 0); // the step came before the access
+        assert!(checked("var i = app.big; let h = app.n > 5 && app.xs[i] == 1; i = i + 1; return ok({ x: i });") > 0); // the test may not have run: it says nothing of the code after
+        assert!(checked("var i = app.big; if app.n > 5 { let x = app.xs[i]; } i = i + 1; return ok({ x: i });") > 0);
     }
 
     #[test]

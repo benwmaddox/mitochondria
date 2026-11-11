@@ -21,9 +21,9 @@ The latest numbers, time and peak memory for every port against Rust and Crystal
 
 The latest numbers, time and peak memory for every port against Rust, Rust with overflow checks and Crystal, are in [RESULTS.md](RESULTS.md), which `run.py` writes from `results.json` at the end of every run (do not copy its table here: it goes stale). Headline, 2026-11-11 (run parameters, best of the rounds, all 41 ports, every checksum verified against LangArena's):
 
-- Mitochondria / Rust over all 41 ports: 0.739x (over the 27 like-for-like and rewritten-to-match ports: 0.878x, and 0.850x against Rust with overflow checks on); / Crystal 0.534x.
-- 29 ports are faster than Rust, 8 within +20%, 4 slower by more: Compress::HuffDecode 1.44x, BF::Array 1.32x, BF::Recursion 1.24x, Graph::DFS 1.23x.
-- Total time of the timed iterations: Mitochondria 32.3 s, Rust 39.5 s, Crystal 54.0 s.
+- Mitochondria / Rust over all 41 ports: 0.745x (over the 27 like-for-like and rewritten-to-match ports: 0.878x, and 0.850x against Rust with overflow checks on); / Crystal 0.538x.
+- 29 ports are faster than Rust, 7 within +20%, 5 slower by more: Compress::HuffDecode 1.46x, BF::Array 1.32x, BF::Recursion 1.26x, Graph::DFS 1.22x.
+- Total time of the timed iterations: Mitochondria 32.6 s, Rust 39.5 s, Crystal 54.0 s.
 - Base64::Encode, Base64::Decode and Compress::BWTEncode call the language's library routines (AVX2 `base64`/`unbase64`, `array.sort`), so they compare a library with a library (their audit files say so); the earlier versions written as loops in the language are kept as `main_loop.mito` and `main_merge.mito`.
 
 How the numbers got here, step by step (the first run had Sieve 4.93x of Rust, Fannkuchredux 2.84x, Sort::Merge 2.54x; state unlogged by default, ranges of variables and arrays, inline pool `add`, narrow bitwise operations, AVX2 base64 and the library sort moved it to 0.74x overall), with what each change was worth and the measurements behind it: [docs/measurements.md](../../docs/measurements.md). Crystal is LangArena's original implementation, 1.22.2 built with `crystal build main.cr --release` from a patched copy (the one JSON-library call, in a test that is not comparable, replaced by the standard library's), run with the same runner on the same core.

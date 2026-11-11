@@ -1,7 +1,8 @@
 // recursive functions, and the limit on how deep calls nest
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct C { n: i64; }
-state c: C;
+state c: C logged;
 
 fn sum_to(n: i64) -> i64? { var t = 0; if n > 0 { t = n + sum_to(n - 1); } return t; }
 fn fib(n: i64) -> i64 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }

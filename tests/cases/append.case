@@ -1,9 +1,10 @@
 // `s += x` appends to a string field in place (plain and items' fields), formatting numbers and bools as `+` does; an assignment
 // that starts with text is written as pieces; past the capacity the request fails (413) and is undone
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Note { text: string<16>; }
 struct App { log: string<24>; notes: pool<Note, 4>; n: i64; }
-state app: App;
+state app: App logged;
 
 @post("/log/{n}")
 fn add_log(n: i64) -> Response<{ log: string }> {

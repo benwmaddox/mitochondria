@@ -1,8 +1,9 @@
 // small logged fields and arrays stored into inside a loop are saved to the undo log whole, once, before the loop: a request
 // that fails after the loop (or inside it, in a nested loop or an inlined function) still puts every old value back
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Small { v: f64[5]; c: i32[8]; total: i64; hits: u8; }
-state s: Small;
+state s: Small logged;
 
 fn bump(i: i64) { s.c[i] = s.c[i] + 1; s.hits = s.hits + 1; }
 

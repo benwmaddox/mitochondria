@@ -2,7 +2,7 @@
 // the checksum adds last_prime + count of every run (warmup runs included, as in the reference).
 // The reference's vec![1u8; limit + 1] is array.fill here, a bulk fill. The reference takes (limit as f64).sqrt(); the language has no sqrt, so the integer square root is found by a short loop
 // (at most 1,733 steps for the run parameters, negligible next to the sieve).
-struct Sieve { primes: u8[3000001] unlogged; limit: i64 in 0..3000000; checksum: i64 in 0..4294967295; }
+struct Sieve { primes: u8[3000001]; limit: i64 in 0..3000000; checksum: i64 in 0..4294967295; }
 state s: Sieve;
 
 fn one_run() {

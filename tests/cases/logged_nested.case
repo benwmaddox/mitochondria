@@ -1,9 +1,9 @@
-// `unlogged` on a module instance (`m: intmap<16> unlogged;`) and on a plain struct field holding a collection: everything inside is kept out of
-// the undo log, so a request that fails after writing there leaves what it wrote; the logged twins beside them are rolled back
+// state is unlogged by default; `logged` on a module instance (`n: intmap<16> logged;`) and on a plain struct field holding a collection keeps everything inside
+// in the undo log, so a request that fails after writing there is rolled back; the unlogged twins beside them leave what the request wrote
 --- program
 struct Node { value: i64; }
 struct Inner { items: pool<Node, 4>; total: i64; }
-struct App { m: intmap<16> unlogged; n: intmap<16>; inner: Inner unlogged; logged: Inner; }
+struct App { m: intmap<16>; n: intmap<16> logged; inner: Inner; logged: Inner logged; }
 state app: App;
 
 @post("/put/{k}/{fail_after}")

@@ -43,7 +43,7 @@
     "keyword": {
       "patterns": [
         { "name": "keyword.control.mitochondria", "match": "\\b(if|else|foreach|for|while|break|continue|match|return|fail|forward|in|from|reverse|where|limit)\\b" },
-        { "name": "storage.modifier.mitochondria", "match": "\\b(pub|unlogged|checked|drop_oldest|instance|of|key|system|use)\\b" }
+        { "name": "storage.modifier.mitochondria", "match": "\\b(pub|logged|checked|drop_oldest|instance|of|key|system|use)\\b" }
       ]
     },
     "type": {

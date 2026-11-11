@@ -5,7 +5,7 @@
 // texts); the template is an ascii<8 MB> field built with `+=`, the rendered output a byte array written a byte at a time; a name is a window onto the text
 // (`substr`, nothing copied), as the reference borrows it.
 struct T {
-    text: ascii<8388608>; rendered: u8[8388608] unlogged; rendered_len: i64;
+    text: ascii<8388608>; rendered: u8[8388608]; rendered_len: i64;
     vars: strmap<150016>;
     names: u8[256]; name_off: i32[32]; name_len: i32[32]; names_len: i64;
     count: i64; result: i64;

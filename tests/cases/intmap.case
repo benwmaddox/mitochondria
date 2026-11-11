@@ -1,8 +1,9 @@
 // lib/intmap.mito: a hash map from i64 keys to i64 values: put/get/add_to/remove/clear, negative and large keys, chains (6 entries in a table of 6 buckets), a full map (507),
 // rollback of a failed request, and many puts and removes in one request
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct App { m: intmap<6>; }
-state app: App;
+state app: App logged;
 
 @post("/put/{key}/{value}")
 fn post_put(key: i64, value: i64) -> Response<{ added: bool, size: i64 }> { let added = app.m.put(key, value); return ok({ "added": added, "size": app.m.size() }); }

@@ -5,8 +5,8 @@
 // The parser is the reference's, function for function, reading the text byte by byte; it is mutually recursive (depth about 40 for the longest nesting, within the 64 limit).
 struct Calc {
     text: ascii<1048576>; pos: i64; cur: i64;
-    kind: u8[400000] unlogged; op: u8[400000] unlogged; left: i32[400000] unlogged; right: i32[400000] unlogged; number: i64[400000] unlogged; name_start: i32[400000] unlogged; name_len: i32[400000] unlogged; nodes: i64;
-    expressions: i32[16384] unlogged; count: i64;
+    kind: u8[400000]; op: u8[400000]; left: i32[400000]; right: i32[400000]; number: i64[400000]; name_start: i32[400000]; name_len: i32[400000]; nodes: i64;
+    expressions: i32[16384]; count: i64;
     last: i64; result: i64;
 }
 state g: Calc;

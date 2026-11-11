@@ -1,9 +1,10 @@
 // versioned loops: a loop of 32 or more steps whose array indexes are the counter (or a stepped variable) plus or minus a fixed value runs without per-store
 // range and undo-log tests when a test before the loop shows every index in range; otherwise (or for a short loop) the checked loop runs. Same results either
 // way, the same error at the same point, and the stores undone when the request fails
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct App { cells: i64[64]; bytes: u8[64]; total: i64; }
-state app: App;
+state app: App logged;
 
 fn sum_cells() -> i64 { var total = 0; foreach i in 0..63 { total = total + app.cells[i] * (i + 1); } return total; }
 fn sum_bytes() -> i64 { var total = 0; foreach i in 0..63 { total = total + app.bytes[i] * (i + 1); } return total; }

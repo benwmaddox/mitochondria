@@ -1,5 +1,6 @@
 // typed stores of integers, bools and floats: plain state, plain arrays and item columns; a value that does not fit is
 // refused with the same error whichever way it is stored; an integer stored in a float column; undone when the request fails
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Cell { n: i16; ok: bool; f: f64; u: u8; }
 struct App {
@@ -8,7 +9,7 @@ struct App {
     arr: u8[3];
     cells: pool<Cell, 2>;
 }
-state app: App;
+state app: App logged;
 
 @post("/plain/{which}/{v}")
 fn post_plain(which: i64, v: i64) -> Response<{}> {

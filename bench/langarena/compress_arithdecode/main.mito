@@ -3,7 +3,7 @@
 // pending bits for the straddle case, bits packed most significant first). The checksum adds the length of every run's decoded text, warmup included; plus 100000 when the decoded text equals the input.
 struct AR {
     data: u8[131072]; out: u8[131072]; freq: i32[256]; low_table: i64[256]; high_table: i64[256];
-    size: i64; total: i64; buffer: i64; bit_pos: i64; out_len: i64; result: i64; decoded: u8[131072] unlogged; decoded_len: i64; in_pos: i64; in_bit: i64; in_cur: i64;
+    size: i64; total: i64; buffer: i64; bit_pos: i64; out_len: i64; result: i64; decoded: u8[131072]; decoded_len: i64; in_pos: i64; in_bit: i64; in_cur: i64;
 }
 state ar: AR;
 

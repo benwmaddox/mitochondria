@@ -1,0 +1,93 @@
+// Range facts that change the generated C: a `var` that is only ever a constant or `x & mask` is proven inside the mask (no overflow tests on its arithmetic) and, when
+// that fits 32 bits, is kept in a `u32` and read as an `i64` (wrapping sums, products with another such var, negation and comparisons with negatives must not see
+// unsigned arithmetic); `&`, `|` and `^` of values proven to fit 8, 16 or 32 bits are done at that width (a negative operand under a mask, a value over the width
+// under `|`); `move` inside an unlogged (default) plain array is the copy alone (forward, backward and overlapping, and still range checked); `dst.copy_from(src, from, to, count)` between two
+// arrays is one plain copy, range checked on both (into a logged destination the bytes it overwrites are saved first, so a failed request puts them back)
+--- program
+struct Scratch { buf: u8[16]; src: u8[16]; dst: u8[16]; lg: u8[16] logged; }
+struct App { s: Scratch; }
+state app: App;
+
+@post("/sum/{n}")
+fn sum(n: i64 in 0..100000) -> Response<{ h: i64, times3: i64, neg: i64, nonneg: bool, minus: i64, prod: i64 }> {
+    var h = 0;
+    var g = 0;
+    foreach i in 0..n - 1 {
+        h = (h + i * 40000) & 0xFFFFFFFF;
+        g = (g + 1000) & 0xFFFF;
+    }
+    return ok({ "h": h, "times3": h * 3, "neg": 0 - h, "nonneg": h > -1, "minus": h - 5000000000, "prod": h * g });
+}
+@post("/mask/{x}")
+fn mask(x: i64) -> Response<{ b: i64, w: i64, d: i64 }> { return ok({ "b": x & 255, "w": x & 65535, "d": x & 0xFFFFFFFF }); }
+@post("/bits/{a}/{b}/{c}")
+fn bits(a: i64 in 0..255, b: i64 in 0..255, c: i64 in 0..65535) -> Response<{ x: i64, o: i64, ca: i64, co: i64, cx: i64, over: i64 }> {
+    return ok({ "x": a ^ b, "o": a | b, "ca": c & a, "co": c | a, "cx": c ^ 65535, "over": (a & 255) | 256 });
+}
+@post("/fill")
+fn fill() -> Response<{}> { foreach i in 0..15 { app.s.buf[i] = i + 1; app.s.src[i] = i + 101; app.s.dst[i] = 0; } return ok({}); }
+@post("/cplog/{t}/{n}/{fail_after}")
+fn cplog(t: i64, n: i64, fail_after: bool) -> Response<{}> {
+    app.s.lg.copy_from(app.s.src, 0, t, n);
+    if fail_after { fail 409 "failed after copying"; }
+    return ok({});
+}
+@get("/lg")
+fn lg() -> Response<{ h: i64 }> {
+    var h = 0;
+    foreach i in 0..15 { h = (h * 31 + app.s.lg[i]) & 0xFFFFFFFF; }
+    return ok({ "h": h });
+}
+@post("/cp/{f}/{t}/{n}")
+fn cp(f: i64, t: i64, n: i64) -> Response<{ h: i64 }> {
+    app.s.dst.copy_from(app.s.src, f, t, n);
+    var h = 0;
+    foreach i in 0..15 { h = (h * 31 + app.s.dst[i]) & 0xFFFFFFFF; }
+    return ok({ "h": h });
+}
+@post("/mv/{f}/{t}/{n}")
+fn mv(f: i64, t: i64, n: i64) -> Response<{ h: i64 }> {
+    app.s.buf.move(f, t, n);
+    var h = 0;
+    foreach i in 0..15 { h = (h * 31 + app.s.buf[i]) & 0xFFFFFFFF; }
+    return ok({ "h": h });
+}
+--- requests
+POST /sum/0
+POST /sum/10
+POST /sum/1000
+POST /sum/100000
+POST /mask/-1
+POST /mask/300
+POST /mask/-65537
+POST /mask/4294967296
+POST /bits/12/10/65280
+POST /bits/255/255/65535
+POST /fill
+POST /mv/0/4/8
+POST /fill
+POST /mv/4/0/8
+POST /fill
+POST /mv/0/16/1
+POST /mv/-1/0/1
+POST /fill
+POST /mv/0/0/16
+POST /fill
+POST /cp/0/0/16
+POST /cp/4/8/8
+POST /cp/0/12/4
+POST /cp/0/13/4
+POST /cp/17/0/0
+POST /cp/-1/0/1
+POST /cp/0/0/0
+POST /fill
+GET /lg
+POST /cplog/2/8/true
+GET /lg
+POST /cplog/2/8/false
+GET /lg
+POST /cplog/10/8/false
+POST /cplog/10/6/true
+GET /lg
+POST /cplog/0/16/false
+GET /lg

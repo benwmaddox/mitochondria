@@ -5,7 +5,7 @@
 // of every run, warmup runs included, modulo 2^32.
 struct Edge { to: i32; }
 struct Vertex { adj: list<Edge, 48>; }
-struct G { vs: pool<Vertex, 500000>; gs: i32[500000] unlogged; bf: i32[500000] unlogged; hf: i32[65536] unlogged; hv: i32[65536] unlogged; hn: i64; cur_f: i64; cur_v: i64; vertices: i64; last: i64; result: i64; }
+struct G { vs: pool<Vertex, 500000>; gs: i32[500000]; bf: i32[500000]; hf: i32[65536]; hv: i32[65536]; hn: i64; cur_f: i64; cur_v: i64; vertices: i64; last: i64; result: i64; }
 state g: G;
 
 fn next_int(max: i64) -> i64 {

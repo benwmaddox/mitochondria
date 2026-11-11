@@ -1,4 +1,5 @@
 // frees happen only when the request succeeds; a slot freed in a request is not reused by it; forward needs a system
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct T { n: i32; }
 struct C { n: i64; }
@@ -6,7 +7,7 @@ struct App {
     ts: pool<T, 2>;
     c: C;
 }
-state app: App;
+state app: App logged;
 
 @post("/t")
 fn post_t() -> Response<{ slot: i64 }> { let t = app.ts.add(); t.n = 7; return created({ "slot": slot(t) }); }

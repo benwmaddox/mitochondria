@@ -1,42 +1,16 @@
 // LangArena Base64::Encode (kostya/LangArena, MIT): encode `size` bytes of "a" to standard Base64 (with padding), `iterations` times; the checksum adds the encoded length
 // of every run (warmup included) and the benchmark's final message names the first four characters of the data and of the encoded text. This port builds that message
-// in a request field and answers its hash (GET /checksum), as the reference does. The reference calls the base64-simd library (SIMD); this is a plain
-// scalar loop over three input bytes at a time.
-struct B64 { data: u8[500000]; encoded: u8[666672] unlogged; alphabet: u8[64]; size: i64; encoded_len: i64; result: i64; }
+// in a request field and answers its hash (GET /checksum), as the reference does. The reference calls the base64-simd library (SIMD); this calls the language's `base64`
+// builtin, which uses AVX2 where the CPU has it (runtime/mito.c). main_loop.mito keeps the earlier version that is a plain scalar loop written in the language.
+struct B64 { data: u8[500000]; size: i64 in 0..500000; encoded_len: i64; result: i64; head: ascii<8>; }
 state b: B64;
 struct Work { message: ascii<128>; }
 request work: Work; // the final message, built to be hashed
 
 fn encode() {
-    let full = b.size / 3;
-    foreach group in 0..full - 1 {
-        let from = group * 3;
-        let to = group * 4;
-        let first = b.data[from];
-        let second = b.data[from + 1];
-        let third = b.data[from + 2];
-        b.encoded[to] = b.alphabet[first >> 2];
-        b.encoded[to + 1] = b.alphabet[((first & 3) << 4) | (second >> 4)];
-        b.encoded[to + 2] = b.alphabet[((second & 15) << 2) | (third >> 6)];
-        b.encoded[to + 3] = b.alphabet[third & 63];
-    }
-    let rest = b.size - full * 3;
-    let to = full * 4;
-    if rest == 1 {
-        let first = b.data[full * 3];
-        b.encoded[to] = b.alphabet[first >> 2];
-        b.encoded[to + 1] = b.alphabet[(first & 3) << 4];
-        b.encoded[to + 2] = 61;
-        b.encoded[to + 3] = 61;
-    } else if rest == 2 {
-        let first = b.data[full * 3];
-        let second = b.data[full * 3 + 1];
-        b.encoded[to] = b.alphabet[first >> 2];
-        b.encoded[to + 1] = b.alphabet[((first & 3) << 4) | (second >> 4)];
-        b.encoded[to + 2] = b.alphabet[(second & 15) << 2];
-        b.encoded[to + 3] = 61;
-    }
-    b.encoded_len = (b.size + 2) / 3 * 4;
+    let encoded = base64(text_from(b.data, 0, b.size));
+    b.encoded_len = len(encoded);
+    b.head = substr(encoded, 0, 4);
 }
 fn one_run() {
     encode();
@@ -47,10 +21,6 @@ fn one_run() {
 fn prepare(size: i64 in 4..500000) -> Response<{}> {
     b.size = size;
     b.result = 0;
-    foreach i in 0..25 { b.alphabet[i] = 65 + i; b.alphabet[26 + i] = 97 + i; }
-    foreach i in 0..9 { b.alphabet[52 + i] = 48 + i; }
-    b.alphabet[62] = 43;
-    b.alphabet[63] = 47;
     b.data.fill(0, size, 97);
     encode();
     return ok({});
@@ -62,7 +32,7 @@ fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run();
 // the reference's message, "encode aaaa... to YWFh...: <sum>", and its hash
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> {
-    work.message = "encode " + text_from(b.data, 0, 4) + "... to " + text_from(b.encoded, 0, 4) + "...: " + b.result;
+    work.message = "encode " + text_from(b.data, 0, 4) + "... to " + b.head + "...: " + b.result;
     var hash = 5381;
     foreach i in 0..len(work.message) - 1 { hash = (hash * 33 + work.message[i]) % 4294967296; }
     return ok({ checksum: hash });

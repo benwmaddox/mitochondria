@@ -70,12 +70,12 @@ fn remove_oldest() {
     }
 }
 // the reference's get: the node (0 if the key is not cached), refreshed to the front
-fn cache_get(key: string) -> i64 {
+fn lookup_key(key: string) -> i64 {
     let node = c.map.entry_of(key);
     if node != 0 { move_to_front(node); }
     return node;
 }
-fn cache_put(key: string, updated: i64) {
+fn store_key(key: string, updated: i64) {
     let node = c.map.entry_of(key);
     if node != 0 {
         set_value(node, updated);
@@ -94,12 +94,12 @@ fn one_run() {
     foreach step in 0..999 {
         work.key = "item_" + next_int(c.values);
         let key = work.key;
-        if cache_get(key) != 0 {
+        if lookup_key(key) != 0 {
             c.hits = c.hits + 1;
-            cache_put(key, 1);
+            store_key(key, 1);
         } else {
             c.misses = c.misses + 1;
-            cache_put(key, 0);
+            store_key(key, 0);
         }
     }
     c.run_id = c.run_id + 1;

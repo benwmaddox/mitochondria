@@ -154,7 +154,12 @@ fn decls(state: &str) -> (Vec<SDecl>, Vec<(String, String)>) {
         }
         if word(i, "state") {
             let Some(semi) = state[i..].find(';').map(|e| i + e) else { break };
-            if let Some((n, t)) = state[i + 5..semi].split_once(':') { globals.push((n.trim().to_string(), t.trim().to_string())); }
+            if let Some((n, t)) = state[i + 5..semi].split_once(':') {
+                // `state game: Game logged;`: the type is what comes before `logged`
+                let t = t.trim();
+                let t = match t.strip_suffix("logged") { Some(x) if x.ends_with(char::is_whitespace) => x.trim_end(), _ => t };
+                globals.push((n.trim().to_string(), t.to_string()));
+            }
             i = semi + 1; continue;
         }
         i += 1;
@@ -179,8 +184,8 @@ fn expand_fields(state: &str, api: &mut String) -> Result<String, String> {
     let mut added = String::new();
     for s in &structs {
         for (fname, ty, range) in &s.fields {
-            // `m: ordmap<N> unlogged;`: the instance's state (its items and plain values) is kept out of the undo log
-            let (ty, unlogged) = match ty.strip_suffix("unlogged") { Some(t) if t.ends_with(char::is_whitespace) => (t.trim_end(), true), _ => (ty.as_str(), false) };
+            // `m: ordmap<N> logged;`: the instance's state (its items and plain values) is kept in the undo log (the default is out of it)
+            let (ty, logged) = match ty.strip_suffix("logged") { Some(t) if t.ends_with(char::is_whitespace) && !t.ends_with("un") => (t.trim_end(), true), _ => (ty.as_str(), false) };
             let Some((m, args)) = ty.split_once('<') else { continue };
             if !STDLIB.iter().any(|x| x.0 == m.trim()) { continue; }
             let Some(args) = args.trim().strip_suffix('>') else { continue };
@@ -193,7 +198,7 @@ fn expand_fields(state: &str, api: &mut String) -> Result<String, String> {
             }
             let inst = format!("{}.{}", ps[0], fname);
             let (d, line, funcs) = instantiate(&inst, m.trim(), &args)?;
-            edits.push((range.clone(), format!("__mito__{}__state{}", inst.replace('.', "__"), if unlogged { " unlogged" } else { "" })));
+            edits.push((range.clone(), format!("__mito__{}__state{}", inst.replace('.', "__"), if logged { " logged" } else { "" })));
             added += &d; added += &line;
             *api += &funcs;
         }

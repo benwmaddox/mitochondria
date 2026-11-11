@@ -11,7 +11,7 @@ struct Game {
     board: sorted<Entry, 1000, points>;   // one entry per player, in order of points (lib/sorted.mito)
     recent: list<Played, 20> drop_oldest; // the last 20 games; the 21st overwrites the oldest
 }
-state game: Game;
+state game: Game logged; // logged: `record` below fails after writing, and the failure undoes it (see the tutorial)
 
 @post("/players")
 fn add_player(name: string<1..24>) -> Response<{ id: Player }> {

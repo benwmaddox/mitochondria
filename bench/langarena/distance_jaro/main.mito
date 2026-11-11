@@ -1,7 +1,7 @@
 // LangArena Distance::Jaro (kostya/LangArena, MIT): the Jaro similarity of `count` pairs of random strings (4 to 53 letters from "abcdefghij", from the reference's generator and random
 // sequence), all pairs per run, `iterations` runs; the checksum adds int(similarity * 1000) of every pair, warmup runs included, modulo 2^32. The reference's Vec<(String, String)> is one byte
 // array with an offset and length per string; jaro() is the reference's, line by line (the match window, the two match flags, the transposition count).
-struct Pairs { text: u8[200000]; off1: i32[1024]; len1: i32[1024]; off2: i32[1024]; len2: i32[1024]; flags1: u8[64] unlogged; flags2: u8[64] unlogged; count: i64; last: i64; result: i64; }
+struct Pairs { text: u8[200000]; off1: i32[1024]; len1: i32[1024]; off2: i32[1024]; len2: i32[1024]; flags1: u8[64]; flags2: u8[64]; count: i64; last: i64; result: i64; }
 state p: Pairs;
 
 fn next_int(max: i64) -> i64 {

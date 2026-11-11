@@ -548,7 +548,7 @@ MITO_API int t_reply(void *sp) {
         }
 
         // a forward: the handler's writes are kept only if the request was handed on
-        let case = Case { name: "forward-rollback".into(), state: "struct C { n: i64; } state c: C;".into(),
+        let case = Case { name: "forward-rollback".into(), state: "struct C { n: i64; } state c: C logged;".into(),
             api: "@post(\"/f\") fn post_f() -> Response<{}> { c.n = c.n + 1; forward next[0] { \"n\": c.n }; }\n@get(\"/n\") fn get_n() -> Response<{ n: i64 }> { return ok({ \"n\": c.n }); }".into(), requests: String::new(), system: None, files: Vec::new() };
         let mut be = CBackend::start(&case);
         let sym = |n: &str| match &be._code { Code::Tcc(u) => u.symbol(n).unwrap(), Code::Dll(h) => { let p = dl_sym(*h, n); assert!(!p.is_null(), "no {}", n); p as *const std::ffi::c_void } };

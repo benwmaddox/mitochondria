@@ -66,6 +66,7 @@ struct H {
     int (*wr_plain)(Ctx *, u64, u32, i64);                     /* the same, for plain state: committed at start, never trimmed, so no commit check */
     int (*wr_int)(Ctx *, u64, u32, i64);                       /* an integer of `size` bytes at a byte offset (the value already known to fit) */
     int (*move_elems)(Ctx *, u64, u32, i64, i64, i64);        /* move `count` elements of `esize` bytes within an array at byte offset `base`: from, to, count (already in range) */
+    int (*sort_elems)(Ctx *, u64, u32, i64, i64, u64);        /* put `count` integer elements of a fixed array (byte offset, scalar code, from, count) in ascending order, using the scratch array at the last offset */
     int (*fill_elems)(Ctx *, u64, u32, i64, i64, i64, int);   /* set `count` elements of `esize` bytes of an array at a byte offset to a value (its bits), from a position; the last is 1 for plain state */
     int (*clear_coll)(Ctx *, u32, u32);                         /* empty a collection (one instance) at once, with what its items hold; the writes are in the undo log */
     int (*count_below)(Ctx *, u64, u32, i64, i64, int, i64 *);      /* how many of the first n elements of an array (kind code, at a byte offset) are below a target (at most it when inclusive) */
@@ -179,6 +180,17 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 #define BAND(r, x, y) i64 r = (x) & (y)
 #define BOR(r, x, y) i64 r = (x) | (y)
 #define BXOR(r, x, y) i64 r = (x) ^ (y)
+/* a bitwise operation on values proven to fit 8, 16 or 32 bits is done at that width (the C compiler then packs a loop of them into vector lanes of that width) */
+#define BOPN_(T, op, r, x, y) i64 r = (i64)(T)((T)(x) op (T)(y))
+#define BAND8(r, x, y) BOPN_(u8, &, r, x, y)
+#define BAND16(r, x, y) BOPN_(u16, &, r, x, y)
+#define BAND32(r, x, y) BOPN_(u32, &, r, x, y)
+#define BOR8(r, x, y) BOPN_(u8, |, r, x, y)
+#define BOR16(r, x, y) BOPN_(u16, |, r, x, y)
+#define BOR32(r, x, y) BOPN_(u32, |, r, x, y)
+#define BXOR8(r, x, y) BOPN_(u8, ^, r, x, y)
+#define BXOR16(r, x, y) BOPN_(u16, ^, r, x, y)
+#define BXOR32(r, x, y) BOPN_(u32, ^, r, x, y)
 #define SHL(r, x, y) i64 r; if (UNLIKELY((u64)(y) > 63)) FAIL(500, "shift count out of range", 24); r = (i64)((u64)(x) << (y))
 #define SHR(r, x, y) i64 r; if (UNLIKELY((u64)(y) > 63)) FAIL(500, "shift count out of range", 24); r = (x) >> (y)
 #define NSHL(r, x, y) i64 r = (i64)((u64)(x) << (y))
@@ -211,11 +223,17 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 #define ST2_(a, v) do { u16 v_ = (u16)(v); __builtin_memcpy(b + (a), &v_, 2); } while (0)
 #define ST4_(a, v) do { u32 v_ = (u32)(v); __builtin_memcpy(b + (a), &v_, 4); } while (0)
 #define ST8_(a, v) do { u64 v_ = (u64)(v); __builtin_memcpy(b + (a), &v_, 8); } while (0)
+#define MOVE_(to, from, n) __builtin_memmove(b + (to), b + (from), (n))
+#define COPY_(to, from, n) __builtin_memcpy(b + (to), b + (from), (n))
+#define ZERO_(to, n) __builtin_memset(b + (to), 0, (n))
 #else
 #define ST1_(a, v) (*(u8 *)(b + (a)) = (u8)(v))
 #define ST2_(a, v) (*(u16 *)(b + (a)) = (u16)(v))
 #define ST4_(a, v) (*(u32 *)(b + (a)) = (u32)(v))
 #define ST8_(a, v) (*(u64 *)(b + (a)) = (u64)(v))
+#define MOVE_(to, from, n) memmove(b + (to), b + (from), (n))
+#define COPY_(to, from, n) memcpy(b + (to), b + (from), (n))
+#define ZERO_(to, n) memset(b + (to), 0, (n))
 #endif
 #ifdef __clang__
 #define ADD(r, x, y) i64 r; if (UNLIKELY(__builtin_add_overflow((x), (y), &r))) OVERFLOW_
@@ -399,6 +417,8 @@ fn rtype_of(prog: &Program, t: &Ty) -> RType {
 pub struct Generated { pub src: String, pub notes: Vec<String>, pub lits: Vec<u8>,
     /// per endpoint, the request struct's byte ranges it must find zeroed (merged, in order), or None for the whole struct
     pub zeros: Vec<Option<Vec<(usize, usize)>>>,
+    /// per endpoint, whether its code never changes state (the request struct and the text area are its own): a reader may run it
+    pub reads: Vec<bool>,
     /// per endpoint, what its code does (`mito check --costs`)
     pub costs: Vec<Costs> }
 /// What an endpoint's compiled code does, counted where it is written (a site in a loop runs once a round): table queries (loops and
@@ -426,6 +446,14 @@ fn count_costs(body: &str) -> Costs {
     }
     c
 }
+
+#[derive(Default, Clone)]
+struct LoopInv {
+    assumed: std::collections::HashMap<(usize, u32), (i64, i64)>,
+    entries: std::collections::HashMap<(usize, u32), (i64, i64)>,
+    assigns: std::collections::HashMap<(usize, u32), Option<(i64, i64)>>,
+}
+fn iv_union(a: (i64, i64), b: (i64, i64)) -> (i64, i64) { (a.0.min(b.0), a.1.max(b.1)) }
 
 /// What an expression produced, in C terms. String-valued variants are C variable names.
 #[derive(Clone, Debug)]
@@ -544,6 +572,11 @@ thread_local! {
     static OUTLINED: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Ranges of plain integer fields worked out from the whole program (see `generate_with`): `.0` the ranges reads may assume, `.1` what
     /// each field was seen given by every store compiled (None once a store's value has no proven range).
+    // pools nothing in the program removes from (assumed by this build; see `generate_with`), and the pools this build saw a removal from
+    static REMOVAL: std::cell::RefCell<(std::collections::HashSet<usize>, std::collections::HashSet<usize>)> = std::cell::RefCell::new(Default::default());
+    // loop-carried variables: the interval a build assumes a variable has at the head of a loop (keyed by the loop and the variable's slot), and what it saw: the intervals the variable has on
+    // entering the loop, and the union of what its assignments in the loop gave (None: one had no known interval). See `generate_with`.
+    static LOOP_INV: std::cell::RefCell<LoopInv> = std::cell::RefCell::new(Default::default());
     static FIELD_RANGES: std::cell::RefCell<(std::collections::HashMap<usize, (i64, i64)>, std::collections::HashMap<usize, Option<(i64, i64)>>)> = std::cell::RefCell::new(Default::default());
     /// The string literals of the program, each once, back to back: the runtime keeps them at the start of every
     /// request's text area, so a literal in generated code is a constant (offset, length) and costs nothing to use.
@@ -613,6 +646,13 @@ struct G<'p> {
     /// The request struct's top-level fields the endpoint's code names (byte ranges): only these are zeroed before it runs; and
     /// whether it calls a function generated for recursive calls (shared by endpoints: then the whole struct is zeroed).
     rq_touched: Vec<(usize, usize)>, uses_spec: bool,
+    // what is known of each mutable integer local's value at this point of the code (C name -> interval): from its initial value, its assignments, `if` joins, the
+    // widening a counted loop gives a counter, and the condition a `while` or `if` holds; absent: nothing known. Consulted by `interval` after `ranges`.
+    var_iv: std::collections::HashMap<String, (i64, i64)>,
+    loop_frames: Vec<usize>, // the loops being compiled, outermost first (their ids: the address of their `Iter`)
+    var_depth: std::collections::HashMap<String, usize>, // how many loops were open where each variable was declared
+    loop_stmts: Option<&'p [Stmt]>, loop_entry: Option<std::collections::HashMap<String, (i64, i64)>>, loop_heads: Option<std::collections::HashMap<String, (i64, i64)>>,
+    wrote_state: std::cell::Cell<bool>, // set when this endpoint's code can change state (plain state, a collection, a table): see `reads` in Generated
     /// fields of items known not null where the code is (`if exists(m.connected_at) { ... }`): collection, item index, path
     narrowed: Vec<(usize, String, String)>,
     /// the most bytes a text value (a Txt's C name) can hold, where known: literals, fields, inputs, joins of those
@@ -634,6 +674,8 @@ struct G<'p> {
     slot_kinds: &'p [((Option<u32>, u32), K)],           // widened kinds of `var` and `let` slots
     ret_kinds: &'p [(u32, K)],                           // widened result kinds of functions
     widen: Option<Widen>,
+    u32_vars: std::collections::HashSet<String>, // `var`s kept in a `u32` of the C (their range fits 0..2^32-1); read as `(i64)name`
+    rest: &'p [Stmt], // set by block_inner for the statement it compiles: the statements after it in its block
     var_names: std::collections::HashSet<String>, // the C names of `var`s: a `let` of one must copy it
     fast_sites: std::collections::HashSet<*const Expr>, // array indexes a versioned loop's guard proved in range (their stores' ranges already saved)
     versioned: u32, // how many versioned loops enclose the code being generated (each doubles its body; at most 3 deep)
@@ -761,7 +803,7 @@ fn program_c_full(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefi
     o += OS;
     o += RUNTIME_TYPES;
     o += &format!("#define MITO(x) {}##x\n", prefix);
-    o += &layout_c(prog, api, &g.zeros);
+    o += &layout_c(prog, api, &g.zeros, &g.reads);
     if tests {
         // the tests, for the runner (MITO(run_test))
         let names = test_names(api);
@@ -854,7 +896,7 @@ pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
 
 /// The layout and the routes as C data for the runtime: collections with their columns and nested collections,
 /// endpoints with their path segments.
-pub fn layout_c(prog: &Program, api: &Api, zeros: &[Option<Vec<(usize, usize)>>]) -> String {
+pub fn layout_c(prog: &Program, api: &Api, zeros: &[Option<Vec<(usize, usize)>>], reads: &[bool]) -> String {
     let mut o = String::from("\n/* ---- the program's layout and routes (generated) ---- */\n");
     for (k, c) in prog.colls.iter().enumerate() {
         o += &format!("static const MitoCol mito_cols{}[] = {{\n", k);
@@ -894,9 +936,9 @@ pub fn layout_c(prog: &Program, api: &Api, zeros: &[Option<Vec<(usize, usize)>>]
     o += "static const MitoRoute mito_routes[] = {\n";
     for (k, ep) in api.eps.iter().enumerate() {
         let nzero = match zeros.get(k) { Some(Some(rs)) => rs.len() as u32, _ => u32::MAX };
-        o += &format!("    {{ {}, {}, mito_segs{}, {}, mito_zero{}, {}u }},\n", c_lit(ep.method.as_bytes()), ep.segs.len(), k, matches!(&ep.resp, crate::lang::RType::Name(n) if n == "html") as u32, k, nzero);
+        o += &format!("    {{ {}, {}, mito_segs{}, {}, mito_zero{}, {}u, {}, {} }},\n", c_lit(ep.method.as_bytes()), ep.segs.len(), k, matches!(&ep.resp, crate::lang::RType::Name(n) if n == "html") as u32, k, nzero, (ep.method != "GET" && writes(api, &ep.body, &mut Vec::new())) as u32, reads.get(k).copied().unwrap_or(false) as u32);
     }
-    o += "    { 0, 0, 0, 0, 0, 0 }\n};\n";
+    o += "    { 0, 0, 0, 0, 0, 0, 0, 0 }\n};\n";
     for k in 0..api.eps.len() { o += &format!("static int ep{}(Ctx *c);\n", k); }
     o += "typedef int (*EpFn)(Ctx *);\nstatic const EpFn mito_eps[] = {";
     for k in 0..api.eps.len() { o += &format!(" ep{},", k); }
@@ -1008,7 +1050,9 @@ fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
                 Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
                 Stmt::Clear(c) => ex(c, out),
                 Stmt::Move(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
+                Stmt::Copy(d, src, f, t2, n) => { ex(d, out); ex(src, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Fill(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
+                Stmt::Sort(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); st(t, out); st(e, out); }
@@ -1151,7 +1195,9 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
                 Stmt::Remove(c, e) => { ex(c, out); ex(e, out); }
                 Stmt::Clear(c) => ex(c, out),
                 Stmt::Move(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
+                Stmt::Copy(d, src, f, t2, n) => { ex(d, out); ex(src, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Fill(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
+                Stmt::Sort(a, f, t2, n) => { ex(a, out); ex(f, out); ex(t2, out); ex(n, out); }
                 Stmt::Alloc { coll, .. } => ex(coll, out),
                 Stmt::Assign(a, b) => { ex(a, out); ex(b, out); }
                 Stmt::If(c, t, e) => { ex(c, out); calls(t, out); calls(e, out); }
@@ -1214,7 +1260,8 @@ fn outlined_fns(api: &Api, recursive: &[bool]) -> Vec<bool> {
             n += match s {
                 Stmt::Let(_, _, x) | Stmt::Var(_, _, x) | Stmt::Do(x) | Stmt::Return(Some(x)) | Stmt::Clear(x) => e(x, memo, out),
                 Stmt::Remove(a, b) | Stmt::Assign(a, b) => e(a, memo, out) + e(b, memo, out),
-                Stmt::Move(a, b, c, d) | Stmt::Fill(a, b, c, d) => e(a, memo, out) + e(b, memo, out) + e(c, memo, out) + e(d, memo, out),
+                Stmt::Move(a, b, c, d) | Stmt::Fill(a, b, c, d) | Stmt::Sort(a, b, c, d) => e(a, memo, out) + e(b, memo, out) + e(c, memo, out) + e(d, memo, out),
+                Stmt::Copy(a, b, c, d, f) => e(a, memo, out) + e(b, memo, out) + e(c, memo, out) + e(d, memo, out) + e(f, memo, out),
                 Stmt::Alloc { coll, .. } => e(coll, memo, out),
                 Stmt::If(c, t, f) => e(c, memo, out) + stmts(api, t, memo, out, rec) + stmts(api, f, memo, out, rec),
                 Stmt::Each(it, b) => {
@@ -1263,16 +1310,70 @@ fn outlined_fns(api: &Api, recursive: &[bool]) -> Vec<bool> {
 /// second build is kept only if every store it compiled still lies within the ranges it assumed. Nothing else writes plain state:
 /// a failed request puts back values those same stores wrote.
 fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str, tests: bool) -> Generated {
-    FIELD_RANGES.with(|f| *f.borrow_mut() = Default::default());
-    let first = generate_once(prog, api, source, linkage, tests);
-    let seen = FIELD_RANGES.with(|f| std::mem::take(&mut f.borrow_mut().1));
-    let assume: std::collections::HashMap<usize, (i64, i64)> = seen.iter().filter_map(|(off, r)| r.map(|(lo, hi)| (*off, (lo.min(0), hi.max(0))))).collect();
-    if !first.notes.is_empty() || assume.is_empty() { return first; }
-    FIELD_RANGES.with(|f| *f.borrow_mut() = (assume.clone(), Default::default()));
-    let second = generate_once(prog, api, source, linkage, tests);
-    let seen2 = FIELD_RANGES.with(|f| std::mem::take(&mut *f.borrow_mut()).1);
-    let holds = assume.iter().all(|(off, (lo, hi))| match seen2.get(off) { Some(Some((a, b))) => a >= lo && b <= hi, Some(None) => false, None => true });
-    if holds && second.notes.is_empty() { second } else { first }
+    type Ranges = std::collections::HashMap<usize, (i64, i64)>;
+    type Pools = std::collections::HashSet<usize>;
+    type Loops = std::collections::HashMap<(usize, u32), (i64, i64)>;
+    // One build with `ranges`, `never` (pools nothing removes from) and `loops` (intervals of loop-carried variables at the head of their loops) assumed. Returns it with what it saw, and
+    // whether everything it compiled agrees with what it assumed.
+    let build = |ranges: &Ranges, never: &Pools, loops: &Loops| -> (Generated, std::collections::HashMap<usize, Option<(i64, i64)>>, Pools, LoopInv, bool) {
+        FIELD_RANGES.with(|f| *f.borrow_mut() = (ranges.clone(), Default::default()));
+        REMOVAL.with(|r| *r.borrow_mut() = (never.clone(), Default::default()));
+        LOOP_INV.with(|l| *l.borrow_mut() = LoopInv { assumed: loops.clone(), ..Default::default() });
+        let g = generate_once(prog, api, source, linkage, tests);
+        let seen = FIELD_RANGES.with(|f| std::mem::take(&mut *f.borrow_mut()).1);
+        let removed = REMOVAL.with(|r| std::mem::take(&mut r.borrow_mut().1));
+        let inv = LOOP_INV.with(|l| std::mem::take(&mut *l.borrow_mut()));
+        let ranges_hold = ranges.iter().all(|(off, (lo, hi))| match seen.get(off) { Some(Some((a, b))) => a >= lo && b <= hi, Some(None) => false, None => true });
+        let loops_hold = loops.iter().all(|(k, (lo, hi))| {
+            let entry_ok = inv.entries.get(k).map_or(true, |(a, b)| a >= lo && b <= hi);
+            let assign_ok = match inv.assigns.get(k) { Some(Some((a, b))) => a >= lo && b <= hi, Some(None) => false, None => true };
+            entry_ok && assign_ok
+        });
+        let holds = ranges_hold && loops_hold && removed.is_disjoint(never) && g.notes.is_empty();
+        (g, seen, removed, inv, holds)
+    };
+    let (mut best, mut seen, mut removed, inv0, _) = build(&Default::default(), &Default::default(), &Default::default());
+    if !best.notes.is_empty() { return best; }
+    let mut entries = inv0.entries;
+    let mut assumed: Ranges = Default::default();
+    let mut never: Pools = Default::default();
+    // What one build learns lets the next prove more (a field fed by a loop counter, an array fed by that field, an index loaded from that array; a pool nothing removes from has no dead slot
+    // below its high-water mark): build again with what the last one saw, until it stops changing. A loop-carried variable has, at the head of its loop, an interval that is guessed (what it
+    // had on entering) and widened by what the loop's assignments give under the guess, until the guess holds. A build is kept only if what it compiled agrees with what it assumed.
+    for _ in 0..6 {
+        let next: Ranges = seen.iter().filter_map(|(off, r)| r.map(|(lo, hi)| (*off, (lo.min(0), hi.max(0))))).collect();
+        let next_never: Pools = (0..prog.colls.len()).filter(|c| matches!(prog.colls[*c].kind, Kind::Pool(_)) && !removed.contains(c)).collect();
+        // the loop guesses: from the entries, widened until a build agrees
+        let mut guess: Loops = entries.clone();
+        let mut verified = None;
+        for _ in 0..6 {
+            let (g, sn, rm, inv, holds) = build(&next, &next_never, &guess);
+            if holds { verified = Some((g, sn, rm, inv)); break; }
+            // widen: an assignment outside the guess sends that end to infinity; one with no known interval drops the variable's guess
+            let mut wide: Loops = Default::default();
+            for (k, (lo, hi)) in &guess {
+                match inv.assigns.get(k) {
+                    Some(None) => {}
+                    Some(Some((a, b))) => { wide.insert(*k, (if a < lo { i64::MIN } else { *lo }, if b > hi { i64::MAX } else { *hi })); }
+                    None => { wide.insert(*k, (*lo, *hi)); }
+                }
+                if let (Some((ea, eb)), Some(w)) = (inv.entries.get(k), wide.get_mut(k)) { if *ea < w.0 { w.0 = i64::MIN; } if *eb > w.1 { w.1 = i64::MAX; } }
+            }
+            if wide == guess { break; }
+            guess = wide;
+        }
+        // nothing assumed of loops (an empty guess) is always a verified build
+        let Some((g, sn, rm, inv)) = verified.or_else(|| { let (g, sn, rm, inv, h) = build(&next, &next_never, &Default::default()); if h { Some((g, sn, rm, inv)) } else { None } }) else { break };
+        let changed = next != assumed || next_never != never;
+        best = g;
+        assumed = next;
+        never = next_never;
+        seen = sn;
+        removed = rm;
+        entries = inv.entries;
+        if !changed { break; }
+    }
+    best
 }
 
 fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str, tests: bool) -> Generated {
@@ -1283,9 +1384,11 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
     OUTLINED.with(|o| *o.borrow_mut() = outlined_fns(api, &recursive));
     let mut done: Vec<Spec> = Vec::new(); // functions for recursive calls, generated by endpoints that compiled
     let mut zeros: Vec<Option<Vec<(usize, usize)>>> = Vec::new();
+    let mut reads: Vec<bool> = Vec::new();
     let mut costs: Vec<Costs> = Vec::new();
     for (k, ep) in api.eps.iter().enumerate() {
         let mut touched: Option<Vec<(usize, usize)>> = None;
+        let mut read_only = false;
         let mut lets = (0u32, 0usize, Vec::new());
         let (mut slot_kinds, mut ret_kinds): (Vec<((Option<u32>, u32), K)>, Vec<(u32, K)>) = (Vec::new(), Vec::new());
         let mut tries = 0;
@@ -1296,6 +1399,9 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
             let r = g.inputs(ep, &mut env).and_then(|_| g.block(&ep.body, &mut env));
             let (widen, body, at) = (g.widen, std::mem::take(&mut g.body), g.at);
+            read_only = !g.wrote_state.get() && !g.uses_spec; // a call of a recursive or outlined function is compiled apart: not known to be read-only
+            // the safety net: whatever the statements looked like, code that saves to the undo log, writes a table or frees an item is not read-only
+            if read_only && ["SAVE_(", "->tinsert(", "->tset(", "->tadd(", "->tdel(", "->tclear(", "->free_(", "->free_val(", "->alloc(", "->clear_coll(", "->store(", "->store_elem(", "->store_field(", "MOVE_(", "COPY_("].iter().any(|t| body.contains(t)) { read_only = false; }
             lets = (g.region_lets.len() as u32, g.region_peak, std::mem::take(&mut g.region_unbounded));
             touched = if g.uses_spec { None } else { let mut t = std::mem::take(&mut g.rq_touched); t.sort(); let mut m: Vec<(usize, usize)> = Vec::new(); for r in t { match m.last_mut() { Some(l) if r.0 <= l.1 => l.1 = l.1.max(r.1), _ => m.push(r) } } Some(m) };
             drop(g);
@@ -1327,11 +1433,13 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 }
                 done = specs;
                 zeros.push(touched);
+                reads.push(read_only);
                 costs.push(Costs { lets: lets.clone(), ..count_costs(&body) });
                 src += &format!("{}{}int {}(Ctx *c) {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", head, linkage, name, body);
             }
             Err(why) => {
                 zeros.push(None);
+                reads.push(false);
                 costs.push(Costs::default());
                 if let Some(sf) = source { src += &source_comment(ep, sf); src += &format!("// not compiled: {}\n", why); }
                 notes.push(match split_place(&why) { Some((place, rest)) => format!("{}{}: {}", place, ep.text, rest), None => format!("{}: {}", ep.text, why) });
@@ -1381,7 +1489,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
         }
     }
     let lits = LITS.with(|l| l.borrow().0.clone());
-    Generated { src, notes, lits, zeros, costs }
+    Generated { src, notes, lits, zeros, reads, costs }
 }
 
 /// What generating a C function's body for one guess of its result kind gave.
@@ -1400,12 +1508,14 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         }
     }
     stmts.iter().any(|s| match s {
-        Stmt::Alloc { .. } | Stmt::Move(..) | Stmt::Fill(..) | Stmt::Clear(..) | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
+        Stmt::Alloc { .. } | Stmt::Move(..) | Stmt::Copy(..) | Stmt::Sort(..) | Stmt::Fill(..) | Stmt::Clear(..) | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
         Stmt::Clear(c) => ex(api, c, seen),
         Stmt::Move(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
+        Stmt::Copy(d, src, f, t2, n) => ex(api, d, seen) || ex(api, src, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Fill(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
+        Stmt::Sort(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || writes(api, t, seen) || writes(api, e, seen),
         Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || writes(api, b, seen),
@@ -1431,7 +1541,9 @@ fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
         Stmt::Clear(c) => ex(api, c, seen),
         Stmt::Move(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
+        Stmt::Copy(d, src, f, t2, n) => ex(api, d, seen) || ex(api, src, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Fill(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
+        Stmt::Sort(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
         Stmt::If(c, t, e) => ex(api, c, seen) || allocates(api, t, seen) || allocates(api, e, seen),
         Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || allocates(api, b, seen),
@@ -1456,7 +1568,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { rq_touched: Vec::new(), uses_spec: false, narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), own_region: false, region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
+        G { var_iv: std::collections::HashMap::new(), loop_frames: Vec::new(), var_depth: std::collections::HashMap::new(), loop_stmts: None, loop_entry: None, loop_heads: None, rq_touched: Vec::new(), uses_spec: false, wrote_state: std::cell::Cell::new(false), narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), own_region: false, region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, u32_vars: std::collections::HashSet::new(), rest: &[], var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1530,7 +1642,58 @@ impl<'p> G<'p> {
     }
     fn module_err(&self, m: &crate::layout::ModInst, what: &str) -> String { format!("{} belongs to {} (module {}); change it through {}'s functions", what, m.name, m.module, m.name) }
     /// Writing column `path` of collection `c` from here: refused outside a module for its own state, and for its key.
+    /// `loop_stmt` for a loop whose body is `body`, with what is known of the variables set up as the handler of `Stmt::Each` says: `base` (the ones the loop assigns dropped),
+    /// plus the counters `range_loop` can bound from the `entry` state.
+    fn loop_vars(&mut self, it: &'p Iter, body: &'p [Stmt], env: &mut Vec<Option<CV>>, collect: bool, entry: &std::collections::HashMap<String, (i64, i64)>, base: &std::collections::HashMap<String, (i64, i64)>) -> R<()> {
+        self.var_iv = base.clone();
+        let loop_id = it as *const Iter as usize;
+        for slot in assigned_slots(body) {
+            if let Some(Some(CV::Int(n))) = env.get(slot as usize) {
+                if let (true, Some(iv)) = (entry.contains_key(n), LOOP_INV.with(|l| l.borrow().assumed.get(&(loop_id, slot)).copied())) { self.var_iv.insert(n.clone(), iv); }
+            }
+        }
+        self.loop_stmts = Some(body);
+        self.loop_entry = Some(entry.clone());
+        self.loop_heads = None;
+        self.loop_frames.push(loop_id);
+        let r = self.loop_stmt(it, body, env, collect);
+        self.loop_frames.pop();
+        self.loop_stmts = None;
+        self.loop_entry = None;
+        r
+    }
+    /// The variables a counted loop only steps up or down by constants (`n = n + 1`, `n = n - 2`; nowhere else assigned in the body, nor inside a loop of the body): each stays
+    /// within its entry interval widened by (the steps of one round) x (the most rounds), in the body and after the loop. `trips`: the most rounds, when known.
+    fn counter_heads(&self, stmts: &[Stmt], entry: &std::collections::HashMap<String, (i64, i64)>, trips: Option<i128>, env: &[Option<CV>]) -> std::collections::HashMap<String, (i64, i64)> {
+        let mut heads = std::collections::HashMap::new();
+        let Some(trips) = trips else { return heads };
+        for slot in assigned_slots(stmts) {
+            let Some(Some(CV::Int(name))) = env.get(slot as usize) else { continue };
+            let Some((lo, hi)) = entry.get(name).copied() else { continue };
+            let Some((up, down)) = step_sums(stmts, slot) else { continue };
+            let (l, h) = (lo as i128 - down * trips, hi as i128 + up * trips);
+            if l >= i64::MIN as i128 && h <= i64::MAX as i128 { heads.insert(name.clone(), (l as i64, h as i64)); }
+        }
+        heads
+    }
+    /// What a condition that holds tells of a variable: `x < e` and `x <= e` (and `e > x`, `e >= x`), joined by `&&`, give `x` the upper bound of `e`'s interval (below it).
+    fn refine(&mut self, c: &'p Expr, env: &mut Vec<Option<CV>>) -> R<()> {
+        let Expr::Bin(op, a, b) = c else { return Ok(()) };
+        if op == "&&" { self.refine(a, env)?; return self.refine(b, env); }
+        let (var, bound, strict) = match op.as_str() { "<" => (a, b, true), "<=" => (a, b, false), ">" => (b, a, true), ">=" => (b, a, false), _ => return Ok(()) };
+        let Expr::Var(_, VarRes::Local(slot)) = &**var else { return Ok(()) };
+        let Some(Some(CV::Int(name))) = env.get(*slot as usize).cloned() else { return Ok(()) };
+        if !self.var_names.contains(&name) || self.ranges.contains_key(&name) || !pure(bound) { return Ok(()); }
+        let bv = self.expr(bound, env, None)?;
+        let CV::Int(bc) = bv else { return Ok(()) };
+        let Some((_, bh)) = self.interval(&bc) else { return Ok(()) };
+        let h = if strict { bh.saturating_sub(1) } else { bh };
+        let (lo, hi) = self.var_iv.get(&name).copied().unwrap_or((i64::MIN, i64::MAX));
+        self.var_iv.insert(name, (lo, hi.min(h)));
+        Ok(())
+    }
     fn may_write_col(&self, c: usize, path: &str) -> R<()> {
+        self.wrote_state.set(true);
         let Some((m, data, items)) = self.coll_owner(c) else { return Ok(()) };
         if self.module_code().as_deref() == Some(m.name.as_str()) { return Ok(()); }
         if !data { return Err(self.module_err(m, &format!("`{}`", self.prog.colls[c].name))); }
@@ -1539,6 +1702,7 @@ impl<'p> G<'p> {
     }
     /// Writing the plain value at `off` from here: an instance's plain state is its own.
     fn may_write_plain(&self, off: usize) -> R<()> {
+        if self.prog.request.map_or(true, |(a, n)| off < a || off >= a + n) { self.wrote_state.set(true); } // the request struct is the request's own
         for m in &self.prog.instances {
             let Some((start, size)) = self.prog.plain_path(&m.name) else { continue };
             if off >= start && off < start + size && self.module_code().as_deref() != Some(m.name.as_str()) { return Err(self.module_err(m, &format!("the state of {}", m.name))); }
@@ -1547,6 +1711,8 @@ impl<'p> G<'p> {
     }
     /// Adding or freeing items of collection `c` from here: an instance's items and state change only through its functions.
     fn may_add_or_free(&self, c: usize, verb: &str) -> R<()> {
+        self.wrote_state.set(true);
+        if verb == "remove" { REMOVAL.with(|r| { r.borrow_mut().1.insert(c); }); }
         let Some((m, data, items)) = self.coll_owner(c) else { return Ok(()) };
         if self.module_code().as_deref() == Some(m.name.as_str()) || (data && !items) { return Ok(()); }
         Err(format!("{} items of {} with its functions, not `{}.{}()`", verb, m.name, self.prog.colls[c].name, verb))
@@ -1554,6 +1720,7 @@ impl<'p> G<'p> {
     /// A field store or free through a value whose kind is known only at run time: refused outside module code when it
     /// could reach a module's key or private state.
     fn may_write_dynamic(&self, field: Option<&str>) -> R<()> {
+        self.wrote_state.set(true);
         if self.prog.instances.is_empty() || self.module_code().is_some() { return Ok(()); }
         match field {
             None => Ok(()),
@@ -1803,7 +1970,8 @@ impl<'p> G<'p> {
     fn interval(&self, s: &str) -> Option<(i64, i64)> {
         if let Some(d) = s.strip_suffix("LL") { if let Ok(v) = d.parse::<i64>() { return Some((v, v)); } }
         if let Some(r) = load_interval(s) { return Some(r); }
-        self.ranges.get(s).copied()
+        let name = s.strip_prefix("(i64)").unwrap_or(s);
+        self.ranges.get(name).or_else(|| self.var_iv.get(name)).copied()
     }
     /// A value stored into a field declared with a range (`n: i64 in 0..100`): an integer, tested against the range unless the range analysis
     /// proves it inside; a value outside fails the request (400), naming the field.
@@ -1840,6 +2008,8 @@ impl<'p> G<'p> {
         if let Some((lo, hi)) = self.interval(k) { if lo >= 0 && (hi as u64) < n { return; } }
         // the same index against the same size, tested earlier in this straight run of code (as in `a[i] = a[i] + 1`)
         if self.checked.iter().any(|(x, m)| x == k && *m == n) { return; }
+        // MITO_EXPLAIN_INDEX=1: say which index tests are kept and what is known of each index (to see what a proof is missing)
+        if std::env::var_os("MITO_EXPLAIN_INDEX").is_some() { eprintln!("index test kept: line {}, index {} (known: {:?}), array of {}", self.at.0, k, self.interval(k), n); }
         self.line(&format!("if (RANGE_({k} < 0 || {k} >= {n}LL)) {{"));
         self.depth += 1;
         self.call(&format!("c->h->elem(c, {}, {})", k, n));
@@ -1990,7 +2160,8 @@ impl<'p> G<'p> {
                 };
                 let nonempty = format!("{} >= {}", vmax, vmin);
                 self.line(&format!("if ({guard} && {nonempty} && !({smin} >= 0 && {smax} < {n})) {guard} = 0;"));
-                if site.store { saves.push((nonempty, format!("{}ULL + (u64)({}) * {}ULL", off, smin, esz), format!("(u64)({} - {} + 1) * {}ULL", smax, smin, esz))); }
+                // an array kept out of the undo log has nothing to save before the loop stores into it
+                if site.store && !self.unlogged_at(off) { saves.push((nonempty, format!("{}ULL + (u64)({}) * {}ULL", off, smin, esz), format!("(u64)({} - {} + 1) * {}ULL", smax, smin, esz))); }
                 fast.insert(site.idx as *const Expr);
             }
         }
@@ -2092,7 +2263,12 @@ impl<'p> G<'p> {
             let q = self.tmp("q");
             self.open("{");
             self.line(&format!("i64 {} = {};", q, k));
-            self.line(&format!("if (RANGE_({q} < 0 || {q} >= {cap}LL || {q} >= (i64)LD_U32({hdr}, {inst}) || !((LD_U64({live}, (i64)({inst}) * {words} + ({q} >> 6)) >> ({q} & 63)) & 1))) {{"));
+            // below the high-water mark every slot is live when nothing in the program removes from the pool (a removal frees a slot; `clear` lowers the mark)
+            if REMOVAL.with(|r| r.borrow().0.contains(&c)) {
+                self.line(&format!("if (RANGE_({q} < 0 || {q} >= {cap}LL || {q} >= (i64)LD_U32({hdr}, {inst}))) {{"));
+            } else {
+                self.line(&format!("if (RANGE_({q} < 0 || {q} >= {cap}LL || {q} >= (i64)LD_U32({hdr}, {inst}) || !((LD_U64({live}, (i64)({inst}) * {words} + ({q} >> 6)) >> ({q} & 63)) & 1))) {{"));
+            }
             self.depth += 1;
             self.call(&format!("c->h->index(c, {}, {}, {}, &{})", c, inst, q, t));
             self.depth -= 1;
@@ -2106,6 +2282,10 @@ impl<'p> G<'p> {
     }
     /// Call a helper that returns 0 or -1.
     fn call(&mut self, s: &str) {
+        // a table write or a hand-off to another worker: not seen by the offset-aware checks of plain state and collections
+        if let Some(h) = s.strip_prefix("c->h->") {
+            if ["tset(", "tadd(", "tdel(", "tclear(", "tinsert(", "forward"].iter().any(|w| h.starts_with(w)) { self.wrote_state.set(true); }
+        }
         match self.or_dead.clone() { Some(l) => self.line(&format!("CALL_OR_DEAD({}, {});", s, l)), None => self.line(&format!("CALL({});", s)) }
     }
     fn fail(&mut self, code: u16, m: &str) { self.line(&format!("FAIL({}, {}, {});", code, c_lit(m.as_bytes()), m.len())); }
@@ -2210,6 +2390,7 @@ impl<'p> G<'p> {
                 }
             }
             self.own_region = false;
+            self.rest = &stmts[i + 1..];
             self.stmt(s, env)?;
             if matches!(s, Stmt::Let(..) | Stmt::Var(..)) && self.own_region && live_from.is_none() { *live_from = Some(self.body.len()); }
             self.own_region = false;
@@ -2266,6 +2447,7 @@ impl<'p> G<'p> {
         self.stmt_inner(s, env)
     }
     fn stmt_inner(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<()> {
+        let rest = std::mem::take(&mut self.rest); // the statements after this one in its block
         match s {
             Stmt::At(l, c) => { self.at = (*l, *c); self.line("#undef AT_"); self.line(&format!("#define AT_ {}", l)); }
             Stmt::Break => { let l = self.loops.last_mut().ok_or("`break` outside a loop")?; l.2 = true; let g = format!("goto {};", l.0); self.line(&g); }
@@ -2300,6 +2482,7 @@ impl<'p> G<'p> {
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
                 let v = self.expr(e, env, None)?;
+                let init_iv = match &v { CV::Int(x) => self.interval(x), _ => None };
                 // text lives in fields: a local is a window onto text (a field, an input, a literal, a piece of one), never its own copy
                 // or text it builds (tests may: their messages are built text)
                 if !self.test && matches!(v, CV::Txt(_) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)) {
@@ -2317,6 +2500,21 @@ impl<'p> G<'p> {
                     let kind = match &v { CV::StateStr(..) | CV::PlainStr(_) | CV::Sub(..) => "text (a window onto a field)".to_string(), CV::Lit(_) => "text (a literal)".to_string(), other => type_text(self.prog, other) };
                     if !name.contains("__mito__") { KINDS.with(|k| k.borrow_mut().push((place, self.at.0, name, kind))); }
                 }
+                // a `var` that starts as a constant and is only ever assigned constants or `x & mask` stays inside one range for its whole life
+                // (a hash kept to 32 bits: `h = (h * 33 + b) & 0xFFFFFFFF`): its uses may assume it, which drops overflow tests on its arithmetic
+                if mutable {
+                    if let (CV::Int(name), Some(r)) = (&v, masked_var_range(rest, *slot, e)) {
+                        self.ranges.insert(name.clone(), r);
+                        // a range inside 0..2^32-1: the C variable is a `u32` (a sum or hash kept to 32 bits then is a plain 32-bit reduction for the C compiler, which
+                        // vectorises it); every read casts it back to `i64`
+                        if r.0 >= 0 && r.1 <= u32::MAX as i64 {
+                            let decl = format!("i64 {} = ", name);
+                            if let Some(at) = self.body.rfind(&decl) { self.body.replace_range(at..at + 3, "u32"); self.u32_vars.insert(name.clone()); }
+                        }
+                    }
+                }
+                if mutable { if let CV::Int(name) = &v { self.var_depth.insert(name.clone(), self.loop_frames.len()); } }
+                if mutable { if let (CV::Int(name), Some(iv)) = (&v, init_iv) { if !self.ranges.contains_key(name) { self.var_iv.insert(name.clone(), iv); } } }
                 env[*slot as usize] = Some(v);
             }
             Stmt::Assign(target @ Expr::Var(n, VarRes::Local(slot)), rhs) => {
@@ -2336,6 +2534,20 @@ impl<'p> G<'p> {
                         self.widen = Some(Widen::Slot(self.frame, *slot, unify(a, b)));
                     }
                     return Err(e);
+                }
+                // what is now known of the variable: the interval of the value just assigned (nothing when there is none)
+                if let (CV::Int(name), CV::Int(c)) = (&cur, &v) {
+                    if !self.ranges.contains_key(name) {
+                        let now = self.interval(c);
+                        match now { Some(iv) => { self.var_iv.insert(name.clone(), iv); } None => { self.var_iv.remove(name); } }
+                        // every loop the variable is carried through must keep it inside the interval it assumes at its head: say what this assignment gives
+                        if let Some(&d) = self.var_depth.get(name) {
+                            for f in d..self.loop_frames.len() {
+                                let key = (self.loop_frames[f], *slot);
+                                LOOP_INV.with(|l| { let mut l = l.borrow_mut(); let e = l.assigns.entry(key).or_insert(now); *e = match (*e, now) { (Some(a), Some(b)) => Some(iv_union(a, b)), _ => None }; });
+                            }
+                        }
+                    }
                 }
             }
             Stmt::Assign(Expr::Field(base, f), rhs) => {
@@ -2469,6 +2681,9 @@ impl<'p> G<'p> {
                         let covered = self.fast_sites.contains(&(&**k_expr as *const Expr));
                         if !covered { self.elem_check(&k, n as u64); }
                         let v = self.expr(rhs, env, None)?;
+                        // what the whole program stores into this array is what its reads may assume (see `generate_with`)
+                        let stored = match &v { CV::Int(x) => self.interval(x), _ => None };
+                        self.field_store_seen(off, stored);
                         let esz = self.prog.plain_size(&e).0;
                         self.skip_save = covered || self.unlogged_at(off) || self.presaved(off, n as usize * esz as usize);
                         if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap), true, off % esz as usize == 0)? { self.skip_save = false; return Ok(()); }
@@ -2510,12 +2725,15 @@ impl<'p> G<'p> {
                     if yes != want || assigned_slots(branch).contains(&slot) { return None; }
                     let _ = g; env[slot as usize].replace(CV::Item(cl, k))
                 };
+                let iv_before = self.var_iv.clone();
+                self.refine(c, env)?; // inside the branch the condition holds
                 let kept = narrow(self, env, t, true);
                 let fk = match &field_key { Some((k, true)) => { self.narrowed.push(k.clone()); true } _ => false };
                 self.block(t, env)?;
                 if fk { self.narrowed.pop(); }
                 if let (Some(v), Some((slot, ..))) = (kept, narrowed.clone()) { env[slot as usize] = Some(v); }
                 self.close("}");
+                let iv_then = std::mem::replace(&mut self.var_iv, iv_before.clone());
                 if !e.is_empty() {
                     self.open("else {");
                     let kept = narrow(self, env, e, false);
@@ -2525,6 +2743,14 @@ impl<'p> G<'p> {
                     if let (Some(v), Some((slot, ..))) = (kept, narrowed.clone()) { env[slot as usize] = Some(v); }
                     self.close("}");
                 }
+                // after the `if`: what both ways agree on (a way that always leaves counts for nothing)
+                let leaves = |b: &[Stmt]| matches!(b.last(), Some(Stmt::Fail(..) | Stmt::Return(..) | Stmt::Respond(..) | Stmt::Break | Stmt::Continue));
+                let iv_else = std::mem::take(&mut self.var_iv);
+                self.var_iv = match (leaves(t), !e.is_empty() && leaves(e)) {
+                    (true, false) => iv_else,
+                    (false, true) => iv_then,
+                    _ => iv_then.iter().filter_map(|(k, a)| iv_else.get(k).map(|b| (k.clone(), (a.0.min(b.0), a.1.max(b.1))))).collect(),
+                };
             }
             Stmt::Each(it, body) => {
                 if let (Some(_), Some(n)) = (&it.via, crate::lang::path_of(&it.coll)) {
@@ -2547,6 +2773,19 @@ impl<'p> G<'p> {
                         }
                     }
                 }
+                // what is known of the variables the loop assigns is dropped for its body, except what a counted loop can say of a counter (see `counter_heads`); after it,
+                // the variables it does not assign keep what they had
+                let entry_iv = self.var_iv.clone();
+                let mut base_iv = entry_iv.clone();
+                for slot in assigned_slots(body) { if let Some(Some(CV::Int(n))) = env.get(slot as usize) { base_iv.remove(n); } }
+                let loop_id = it as *const Iter as usize;
+                for slot in assigned_slots(body) {
+                    if let Some(Some(CV::Int(n))) = env.get(slot as usize) {
+                        if let (true, Some(iv)) = (self.var_names.contains(n), entry_iv.get(n)) {
+                            LOOP_INV.with(|l| { let mut l = l.borrow_mut(); let e = l.entries.entry((loop_id, slot)).or_insert(*iv); *e = iv_union(*e, *iv); });
+                        }
+                    }
+                }
                 let (pre, n_pre) = (self.body.len(), self.n);
                 match self.version_guard(it, body, env)? {
                     Some((guard, sites, hints, counter)) => {
@@ -2559,14 +2798,14 @@ impl<'p> G<'p> {
                         let ranges_kept = self.ranges.clone();
                         for (name, iv) in hints { self.ranges.insert(name, iv); }
                         self.loop_hint = counter;
-                        self.loop_stmt(it, body, env, collect)?;
+                        self.loop_vars(it, body, env, collect, &entry_iv, &base_iv)?;
                         self.loop_hint = None;
                         self.ranges = ranges_kept;
                         self.fast_sites = kept;
                         self.close("}");
                         let slow_start = self.body.len();
                         self.open("else {");
-                        self.loop_stmt(it, body, env, collect)?;
+                        self.loop_vars(it, body, env, collect, &entry_iv, &base_iv)?;
                         self.close("}");
                         self.versioned -= 1;
                         // the two copies came out the same (the range analysis had already proved every access, nothing was left to drop):
@@ -2582,8 +2821,17 @@ impl<'p> G<'p> {
                             }
                         }
                     }
-                    None => self.loop_stmt(it, body, env, collect)?,
+                    None => self.loop_vars(it, body, env, collect, &entry_iv, &base_iv)?,
                 }
+                let mut heads = self.loop_heads.take().unwrap_or_default();
+                // a variable with no bound from the loop's rounds has what this build assumes of it at the loop's head, in the body and after (see `generate_with`)
+                for slot in assigned_slots(body) {
+                    if let Some(Some(CV::Int(n))) = env.get(slot as usize) {
+                        if let (false, Some(iv)) = (heads.contains_key(n), LOOP_INV.with(|l| l.borrow().assumed.get(&(loop_id, slot)).copied())) { if entry_iv.contains_key(n) { heads.insert(n.clone(), iv); } }
+                    }
+                }
+                self.var_iv = base_iv;
+                self.var_iv.extend(heads);
                 for off in cached { self.str_lens.remove(&off); }
             }
             Stmt::Move(arr, from, to, count) => {
@@ -2606,6 +2854,7 @@ impl<'p> G<'p> {
                     }
                     return Ok(());
                 }
+                let mut unlogged_plain = false;
                 let (base, esize, len) = match av {
                     CV::ArrCol(c, idx, ci) => {
                         self.may_write_col(c, &self.prog.colls[c].cols[ci].path.clone())?;
@@ -2613,11 +2862,55 @@ impl<'p> G<'p> {
                         let CKind::Arr(_, len) = col.kind else { unreachable!() };
                         (format!("{}ULL + (u64)({}) * {}ULL", col.off, idx, col.kind.size()), col.kind.size() / len, len)
                     }
-                    CV::PlainArr(off, e, len) => { self.may_write_plain(off)?; (format!("{}ULL", off), self.prog.plain_size(&e).0, len) }
+                    CV::PlainArr(off, e, len) => { self.may_write_plain(off)?; unlogged_plain = self.unlogged_at(off); (format!("{}ULL", off), self.prog.plain_size(&e).0, len) }
                     _ => return no("`move` works on a fixed array"),
                 };
                 self.line(&format!("if (UNLIKELY({f} < 0 || {f} > {len}LL || {t2} < 0 || {t2} > {len}LL || {n} < 0 || {n} > {len}LL || {f} + {n} > {len}LL || {t2} + {n} > {len}LL)) FAIL(400, \"move out of range\", 17);"));
-                self.call(&format!("c->h->move_elems(c, {}, {}, {}, {}, {})", base, esize, f, t2, n));
+                if unlogged_plain {
+                    // an unlogged array of plain state: committed at start and kept out of the undo log, so the move is the copy alone (as an inline store of a scalar there is)
+                    self.line(&format!("MOVE_({base} + (u64)({t2}) * {esize}ULL, {base} + (u64)({f}) * {esize}ULL, (u64)({n}) * {esize}ULL);"));
+                } else {
+                    self.call(&format!("c->h->move_elems(c, {}, {}, {}, {}, {})", base, esize, f, t2, n));
+                }
+            }
+            Stmt::Copy(dst, src, from, to, count) => {
+                let dv = self.expr(dst, env, None)?;
+                let sv = self.expr(src, env, None)?;
+                let mut pos = |g: &mut Self, e: &'p Expr, env: &mut Vec<Option<CV>>| -> R<String> { let v = g.expr(e, env, None)?; let k = g.int_or(v, 400, "a position and a count must be integers"); Ok(g.hold_int(k)) };
+                let (f, t2, n) = (pos(self, from, env)?, pos(self, to, env)?, pos(self, count, env)?);
+                let (CV::PlainArr(doff, de, dlen), CV::PlainArr(soff, se, slen)) = (&dv, &sv) else { return no("`copy_from` copies between two fixed arrays of plain state: `dst.copy_from(src, from, to, count)`") };
+                self.may_write_plain(*doff)?;
+                let from_src = FIELD_RANGES.with(|fr| fr.borrow().0.get(soff).copied());
+                self.field_store_seen(*doff, from_src);
+                let (desz, sesz) = (self.prog.plain_size(de).0, self.prog.plain_size(se).0);
+                if desz != sesz { return no("`copy_from` copies between arrays of the same element type"); }
+                self.line(&format!("if (UNLIKELY({f} < 0 || {f} > {slen}LL || {t2} < 0 || {t2} > {dlen}LL || {n} < 0 || {n} > {slen}LL || {f} + {n} > {slen}LL || {t2} + {n} > {dlen}LL)) FAIL(400, \"copy out of range\", 17);"));
+                // a logged destination first saves the lines it is about to overwrite (an `unlogged` one is scratch the program rebuilds, nothing to restore)
+                if !self.unlogged_at(*doff) {
+                    let (lo, hi) = (format!("({doff}ULL + (u64)({t2}) * {desz}ULL)"), format!("({doff}ULL + (u64)({t2} + {n}) * {desz}ULL)"));
+                    self.open(&format!("if ({n} > 0) for (u64 l_ = {lo} >> 6; l_ <= ({hi} - 1) >> 6; l_++) {{"));
+                    self.line("SAVE_(l_ << 6, 64);");
+                    self.close("}");
+                }
+                // two different arrays never overlap: a plain copy
+                self.line(&format!("COPY_({doff}ULL + (u64)({t2}) * {desz}ULL, {soff}ULL + (u64)({f}) * {desz}ULL, (u64)({n}) * {desz}ULL);"));
+            }
+            Stmt::Sort(arr, from, count, scratch) => {
+                let av = self.expr(arr, env, None)?;
+                let tv = self.expr(scratch, env, None)?;
+                let mut pos = |g: &mut Self, e: &'p Expr, env: &mut Vec<Option<CV>>| -> R<String> { let v = g.expr(e, env, None)?; let k = g.int_or(v, 400, "a position and a count must be integers"); Ok(g.hold_int(k)) };
+                let (f, n) = (pos(self, from, env)?, pos(self, count, env)?);
+                let (CV::PlainArr(aoff, Ty::Scalar(asc), alen), CV::PlainArr(toff, Ty::Scalar(tsc), tlen)) = (&av, &tv) else { return no("`sort` puts an array of integers in order, with another array of the same type to work in: `a.sort(from, count, scratch)`") };
+                let (code, tcode) = (plain_code(&Ty::Scalar(*asc)).map_or(0, |x| x.0), plain_code(&Ty::Scalar(*tsc)).map_or(0, |x| x.0));
+                if !(1..=8).contains(&code) || code != tcode { return no("`sort` puts an array of integers in order, with another array of the same type to work in"); }
+                if aoff == toff { return no("`sort` works in another array than the one it sorts"); }
+                self.may_write_plain(*aoff)?;
+                self.may_write_plain(*toff)?;
+                // the values only move: the array keeps what it was assumed to hold; the scratch array is given a copy of them
+                let held = FIELD_RANGES.with(|fr| fr.borrow().0.get(aoff).copied());
+                self.field_store_seen(*toff, held);
+                self.line(&format!("if (UNLIKELY({f} < 0 || {f} > {alen}LL || {n} < 0 || {n} > {alen}LL || {f} + {n} > {alen}LL || {n} > {tlen}LL)) FAIL(400, \"sort out of range\", 17);"));
+                self.call(&format!("c->h->sort_elems(c, {}ULL, {}, {}, {}, {}ULL)", aoff, code, f, n, toff));
             }
             Stmt::Fill(arr, from, count, value) => {
                 let av = self.expr(arr, env, None)?;
@@ -2631,7 +2924,12 @@ impl<'p> G<'p> {
                         let CKind::Arr(s, len) = col.kind else { unreachable!() };
                         (format!("{}ULL + (u64)({}) * {}ULL", col.off, idx, col.kind.size()), plain_code(&Ty::Scalar(s)).map_or(0, |x| x.0), len, 0)
                     }
-                    CV::PlainArr(off, e, len) => { self.may_write_plain(off)?; (format!("{}ULL", off), plain_code(&e).map_or(0, |x| x.0), len, 1) }
+                    CV::PlainArr(off, e, len) => {
+                        self.may_write_plain(off)?;
+                        let stored = match &v { CV::Int(x) => self.interval(x), _ => None };
+                        self.field_store_seen(off, stored);
+                        (format!("{}ULL", off), plain_code(&e).map_or(0, |x| x.0), len, 1)
+                    }
                     _ => return no("`fill` works on a fixed array"),
                 };
                 let esize = scalar_bytes(code);
@@ -2787,7 +3085,39 @@ impl<'p> G<'p> {
                 self.may_add_or_free(c, "add")?;
                 let t = self.tmp("i");
                 self.line(&format!("u32 {};", t));
-                self.call(&format!("c->h->alloc(c, {}, {}, {}, &{})", c, inst, *try_ as i32, t));
+                let coll = &self.prog.colls[c];
+                if matches!(coll.kind, Kind::Pool(false)) && coll.mult == 1 && coll.children.is_empty() && coll.unlogged {
+                    // the common pool (one instance, no generations, no nested collections) kept out of the undo log: adding at the high-water mark, with nothing freed below it, is done here
+                    // with the layout as constants, as the runtime does it for any pool; anything else (a freed slot to reuse, a full pool) is left to the runtime's helper
+                    let (hdr, live, cap) = (coll.hdr, coll.live, coll.cap);
+                    let cols: Vec<(usize, usize)> = coll.cols.iter().filter(|x| !matches!(x.kind, CKind::StrBytes(_))).map(|x| (x.off, x.kind.size())).collect();
+                    let (h0, h1, h2, h3, sl, wa, wd) = (self.tmp("h"), self.tmp("h"), self.tmp("h"), self.tmp("h"), self.tmp("s"), self.tmp("a"), self.tmp("w"));
+                    self.open("{");
+                    self.line(&format!("u32 {h0} = LD_U32({hdr}, 0), {h1} = LD_U32({}, 0), {h2} = LD_U32({}, 0), {h3} = LD_U32({}, 0);", hdr + 4, hdr + 8, hdr + 12));
+                    self.line(&format!("if (UNLIKELY(!({h2} == {h0} && {h0} < {cap}u))) {{"));
+                    self.depth += 1;
+                    self.call(&format!("c->h->alloc(c, {}, {}, {}, &{})", c, inst, *try_ as i32, t));
+                    self.depth -= 1;
+                    self.line("} else {");
+                    self.depth += 1;
+                    self.line(&format!("u64 {sl} = {h0};"));
+                    self.line(&format!("u64 {wa} = {live}ULL + 8 * ({sl} / 64);"));
+                    self.line(&format!("u64 {wd} = {sl} % 64 ? (u64)LD_U64({wa}, 0) : 0; // a word wholly above the high-water mark may be uncommitted: its bits are zero"));
+                    self.line(&format!("COMMIT_({wa}, 8);"));
+                    self.line(&format!("ST8_({wa}, {wd} | (1ULL << ({sl} % 64)));"));
+                    for (off, size) in &cols {
+                        self.line(&format!("COMMIT_({off}ULL + {sl} * {size}ULL, {size});"));
+                        self.line(&format!("if ({sl} < {h3}) ZERO_({off}ULL + {sl} * {size}ULL, {size}); // a reused slot is cleared; a never-used one is zero already"));
+                    }
+                    self.line(&format!("COMMIT_({hdr}ULL, 16);"));
+                    self.line(&format!("ST4_({hdr}ULL, {h0} + 1); ST4_({}ULL, {h1} + 1); ST4_({}ULL, {h0} + 1); ST4_({}ULL, {h3} > {h0} + 1 ? {h3} : {h0} + 1);", hdr + 4, hdr + 8, hdr + 12));
+                    self.line(&format!("{t} = (u32){sl};"));
+                    self.depth -= 1;
+                    self.line("}");
+                    self.close("}");
+                } else {
+                    self.call(&format!("c->h->alloc(c, {}, {}, {}, &{})", c, inst, *try_ as i32, t));
+                }
                 env[*slot as usize] = Some(if *try_ {
                     // try_add gives an item or null (a full collection): an item that may be null, narrowed by `if exists(x)` or
                     // `if !exists(x) { fail ...; }` as any other
@@ -2916,7 +3246,7 @@ impl<'p> G<'p> {
         if is_name(&e) { return e; }
         let t = self.tmp("v");
         self.line(&format!("i64 {} = {};", t, e));
-        if let Some(r) = load_interval(&e) { self.ranges.insert(t.clone(), r); } // a fresh name, never assigned again: it keeps the load's range
+        if let Some(r) = load_interval(&e).or_else(|| if e.starts_with("(i64)") { self.interval(&e) } else { None }) { self.ranges.insert(t.clone(), r); } // a fresh name, never assigned again: it keeps the load's range
         t
     }
 
@@ -3129,7 +3459,7 @@ impl<'p> G<'p> {
             Expr::Str(s) => Ok(CV::Lit(s.clone())),
             Expr::Null => Ok(CV::Null),
             Expr::Float(f) => Ok(CV::Flt(c_double(*f))),
-            Expr::Var(n, VarRes::Local(s)) => env.get(*s as usize).cloned().flatten().ok_or_else(|| format!("`{}` has no compiled value", n)),
+            Expr::Var(n, VarRes::Local(s)) => match env.get(*s as usize).cloned().flatten() { Some(CV::Int(name)) if self.u32_vars.contains(&name) => Ok(CV::Int(format!("(i64){}", name))), v => v.ok_or_else(|| format!("`{}` has no compiled value", n)) },
             Expr::Var(n, VarRes::Global(g)) => {
                 let gl = &self.prog.globals[*g as usize];
                 if let Some(c) = gl.coll { return Ok(CV::Coll(c, "0".into())); }
@@ -3173,7 +3503,10 @@ impl<'p> G<'p> {
                     CV::PlainArr(off, Ty::Scalar(sc), n) => {
                         let k = self.hold_int(k);
                         if !self.fast_sites.contains(&(&**k_expr as *const Expr)) { self.elem_check(&k, n as u64); }
-                        self.load(&off.to_string(), &k, sc)
+                        let v = self.load(&off.to_string(), &k, sc)?;
+                        // every store in the program put a value inside this range there (or none did: the array holds its starting zeros)
+                        let range = FIELD_RANGES.with(|fr| fr.borrow().0.get(&off).copied());
+                        Ok(self.with_field_range(v, range))
                     }
                     // a string's bytes are read by index (0..len); strings are never written by index
                     v @ (CV::Txt(_) | CV::Lit(_)) => {
@@ -3797,11 +4130,12 @@ impl<'p> G<'p> {
                         "&" => {
                             // with a non-negative operand the result is between 0 and that operand's largest value, whatever the other is
                             let hi = [nonneg(ix), nonneg(iy)].iter().flatten().map(|(_, h)| *h).min();
-                            self.line(&format!("BAND({}, {}, {});", r, x, y));
+                            self.line(&format!("BAND{}({}, {}, {});", width_of(hi), r, x, y));
                             if let Some(h) = hi { self.ranges.insert(r.clone(), (0, h)); }
                         }
                         "|" | "^" => {
-                            self.line(&format!("{}({}, {}, {});", if op == "|" { "BOR" } else { "BXOR" }, r, x, y));
+                            let hi = match (nonneg(ix), nonneg(iy)) { (Some((_, xh)), Some((_, yh))) => Some(xh.max(yh)), _ => None };
+                            self.line(&format!("{}{}({}, {}, {});", if op == "|" { "BOR" } else { "BXOR" }, width_of(hi), r, x, y));
                             if let (Some((_, xh)), Some((_, yh))) = (nonneg(ix), nonneg(iy)) {
                                 let m = xh.max(yh) as u64;
                                 let top = if m == 0 { 0 } else { u64::MAX >> m.leading_zeros() };
@@ -3839,6 +4173,8 @@ impl<'p> G<'p> {
                             "-" => Some((xl - yh, xh - yl)),
                             "*" => { let c = [xl * yl, xl * yh, xh * yl, xh * yh]; Some((*c.iter().min().unwrap(), *c.iter().max().unwrap())) }
                             "%" if yl > 0 => Some((if xl >= 0 { 0 } else { -(yh - 1) }, yh - 1)),
+                            // a positive divisor: the quotient (truncated toward zero, as the C division is) is monotone in each operand, so the corners bound it
+                            "/" if yl > 0 => { let c = [xl / yl, xl / yh, xh / yl, xh / yh]; Some((*c.iter().min().unwrap(), *c.iter().max().unwrap())) }
                             _ => None,
                         };
                     } else if let (None, Some((yl, yh))) = (ix, iy) {
@@ -3852,8 +4188,11 @@ impl<'p> G<'p> {
                         self.ranges.insert(r.clone(), (l as i64, h as i64));
                     } else if safe_div {
                         self.line(&format!("N{}({}, {}, {});", mac, r, x, y));
+                        if let (Some((l, h)), "/") = (proven, op) { self.ranges.insert(r.clone(), (l as i64, h as i64)); }
                     } else {
                         self.line(&format!("{}({}, {}, {});", mac, r, x, y));
+                        // a checked operation that passed: its result is inside what its operands allow, cut to the range of an i64
+                        if let Some((l, h)) = proven.filter(|_| matches!(op, "+" | "-" | "*")) { self.ranges.insert(r.clone(), (l.max(i64::MIN as i128) as i64, h.min(i64::MAX as i128) as i64)); }
                     }
                     return Ok(CV::Int(r));
                 }
@@ -4650,7 +4989,17 @@ impl<'p> G<'p> {
         // the counter is never assigned in the body: between the smallest lower bound and one below the largest upper bound
         if let (Some((lo_min, _)), Some((_, hi_max))) = (self.interval(&lo), self.interval(&hi)) { if hi_max > lo_min { self.ranges.insert(k.clone(), (lo_min, hi_max - 1)); } }
         if let Some(h) = self.loop_hint.take() { self.ranges.entry(k.clone()).or_insert(h); } // a versioning guard proved the bounds within 2^40
-        if let Some(w) = &it.whil { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) break;", wc)); }
+        // a counter this loop only steps by constants has, in the body and after it, the interval its entry value plus (steps per round x most rounds) gives
+        if let (Some(stmts), Some(entry)) = (self.loop_stmts.take(), self.loop_entry.take()) {
+            let by_range = match (self.interval(&lo), self.interval(&hi)) { (Some((lo_min, _)), Some((_, hi_max))) => Some((hi_max as i128 - lo_min as i128).max(0)), _ => None };
+            // a loop without a fixed extent charges its rounds to the request's budget, which the runtime never allows above 2^50 (the rounds it can run before failing: a little more)
+            let by_budget = if it.budget { Some(1i128 << 51) } else { None };
+            let trips = match (by_range, by_budget) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) };
+            let heads = self.counter_heads(stmts, &entry, trips, env);
+            for (n, iv) in &heads { self.var_iv.insert(n.clone(), *iv); }
+            self.loop_heads = Some(heads);
+        }
+        if let Some(w) = &it.whil { let wv = self.expr(w, env, None)?; let wc = self.cond(wv)?; self.line(&format!("if (!({})) break;", wc)); self.refine(w, env)?; }
         if let Some(w) = &it.wher {
             let wv = self.expr(w, env, None)?;
             let wc = self.cond(wv)?;
@@ -4840,7 +5189,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
@@ -4871,7 +5220,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
                 j += 1;
             }
         }
-        if ["ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "ABS_"].contains(&tok) && next == "(" { if let Some(r) = t.get(i + 2) { declared.push(r); } }
+        if ["ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "ABS_"].contains(&tok) && next == "(" { if let Some(r) = t.get(i + 2) { declared.push(r); } }
         if is_id(tok) && next == "(" {
             let member = prev == "->";
             if member {
@@ -4978,6 +5327,131 @@ mod profile_tests {
         let z = g.zeros[1].clone().unwrap();
         let total: usize = z.iter().map(|(a, b)| b - a).sum();
         assert!(total >= 8000 + 68 && total < 8200 && z.iter().all(|(a, _)| *a >= at("big")), "{:?}", z);
+    }
+
+    /// An endpoint is read-only (a reader may run it) when nothing in its code changes state: plain state, a collection and a table do; the request struct
+    /// and the text area are the request's own. `reads` is what the route table tells the runtime.
+    #[test]
+    fn endpoints_that_only_read_are_marked_for_readers() {
+        let src = "struct Work { a: i64; t: utf8<32>; }
+request work: Work;
+struct Node { v: i64; }
+struct A { n: i64; buf: u8[8]; xs: pool<Node, 4>; s: utf8<16>; }
+state app: A;
+            fn helper() -> i64 { return app.n + 1; }
+            @get(\"/read\") fn read() -> Response<{ n: i64 }> { return ok({ n: app.n + app.buf[2] + app.xs.count() }); }
+            @get(\"/call\") fn call() -> Response<{ n: i64 }> { return ok({ n: helper() }); }
+            @get(\"/scratch\") fn scratch() -> Response<{ n: i64 }> { work.a = app.n; work.t = \"x\"; return ok({ n: work.a }); }
+            @get(\"/plain\") fn plain() -> Response<{ n: i64 }> { app.n = 1; return ok({ n: app.n }); }
+            @get(\"/arr\") fn arr() -> Response<{ n: i64 }> { app.buf[1] = 3; return ok({ n: 1 }); }
+            @get(\"/add\") fn add() -> Response<{ n: i64 }> { let p = app.xs.add(); p.v = 1; return ok({ n: 1 }); }
+            @get(\"/text\") fn text() -> Response<{ n: i64 }> { app.s = \"hi\"; return ok({ n: 1 }); }
+            @get(\"/item\") fn item() -> Response<{ n: i64 }> { foreach p in app.xs { p.v = 2; } return ok({ n: 1 }); }
+";
+        let (state, api) = crate::source::load(src).unwrap();
+        let prog = Program::parse(&state).unwrap();
+        let mut api = crate::lang::parse(&api).unwrap();
+        crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+        let g = generate(&prog, &api);
+        assert!(g.notes.is_empty(), "{:?}", g.notes);
+        let want = [("read", true), ("call", true), ("scratch", true), ("plain", false), ("arr", false), ("add", false), ("text", false), ("item", false)];
+        for (k, (name, reads)) in want.iter().enumerate() { assert_eq!(g.reads[k], *reads, "endpoint {}", name); }
+    }
+
+    /// How many overflow-checked operations (`ADD`, `SUB`, `MUL`) an endpoint's generated code keeps, for a body written in a program with one range-typed field and one free field.
+    fn checked_ops(body: &str) -> usize {
+        let src = format!("struct A {{ n: i64 in 0..1000; big: i64; }}\nstate app: A;\n@get(\"/t\") fn t() -> Response<{{ x: i64 }}> {{ {} }}\n", body);
+        let (state, api) = crate::source::load(&src).unwrap();
+        let prog = Program::parse(&state).unwrap();
+        let mut api = crate::lang::parse(&api).unwrap();
+        crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+        let g = generate(&prog, &api);
+        assert!(g.notes.is_empty(), "{:?}", g.notes);
+        let code = &g.src[g.src.find("int ep0(Ctx").unwrap()..];
+        code.lines().map(|l| l.trim_start()).filter(|l| ["ADD(", "SUB(", "MUL("].iter().any(|m| l.starts_with(m))).count()
+    }
+
+    /// What the compiler knows of a variable as the code runs (its initial value, its assignments, `if` joins, a counted loop's counter, a `while` condition) decides which
+    /// overflow tests remain. Each case that must keep its test is the way a wrong proof would show.
+    #[test]
+    fn variable_ranges_drop_only_tests_that_cannot_fire() {
+        // gone: a counter stepped by 1 in a loop of at most 1000 rounds; in a `while` (its rounds are budgeted); an `if` whose arms both give small values; a bound from a condition
+        assert_eq!(checked_ops("var c = 0; foreach i in 0..app.n - 1 { c = c + 1; } return ok({ x: c });"), 0);
+        assert_eq!(checked_ops("var c = 0; var i = 0; while i < app.n { c = c + 1; i = i + 1; } return ok({ x: c });"), 0);
+        assert_eq!(checked_ops("var c = 0; if app.n > 5 { c = 100; } else { c = 7; } let y = c + 1; return ok({ x: y });"), 0);
+        assert_eq!(checked_ops("var c = 0; foreach i in 0..app.n - 1 { if i > 3 { c = c + 1; } else { c = c - 1; } } return ok({ x: c });"), 0);
+        // kept: the loop's rounds are not bounded; the step is large; the counter is also set or scaled; it is stepped inside an inner loop; the value is unknown on one way
+        assert!(checked_ops("var c = 0; foreach i in 0..app.big { c = c + 1; } return ok({ x: c });") > 0);
+        assert!(checked_ops("var c = 0; foreach i in 0..app.n - 1 { c = c + 2097152; } return ok({ x: c });") > 0);
+        assert!(checked_ops("var c = 0; foreach i in 0..app.n - 1 { c = c + 1; if i == 5 { c = app.big; } } return ok({ x: c });") > 0);
+        assert!(checked_ops("var c = 0; foreach i in 0..app.n - 1 { c = c * 2 + 1; } return ok({ x: c });") > 0);
+        assert!(checked_ops("var c = 0; foreach i in 0..app.n - 1 { foreach j in 0..app.n - 1 { c = c + 1; } } return ok({ x: c });") > 0);
+        assert!(checked_ops("var c = 0; if app.n > 5 { c = app.big; } let y = c + 1; return ok({ x: y });") > 0);
+        // a start close to the end of the i64 range stays checked: ten rounds can pass it
+        assert!(checked_ops("var c = 9223372036854775800; foreach i in 0..9 { c = c + 1; } return ok({ x: c });") > 0);
+    }
+
+    /// The endpoint code generated for `api` over `state`, from its first endpoint on.
+    fn endpoint_code(state: &str, api: &str) -> String {
+        let src = format!("{}\n{}\n", state, api);
+        let (state, api) = crate::source::load(&src).unwrap();
+        let prog = Program::parse(&state).unwrap();
+        let mut api = crate::lang::parse(&api).unwrap();
+        crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+        let g = generate(&prog, &api);
+        assert!(g.notes.is_empty(), "{:?}", g.notes);
+        g.src[g.src.find("int ep0(Ctx").unwrap()..].to_string()
+    }
+
+    /// What the compiler can show of an index decides whether its test stays; a quotient has the range its operands allow, so an index computed with a division is proven or not by them.
+    #[test]
+    fn index_tests_follow_the_ranges_of_what_is_computed() {
+        let state = "struct A { n: i64 in 0..1000; big: i64; xs: u8[10]; }\nstate app: A;";
+        let tests = |body: &str| endpoint_code(state, &format!("@get(\"/t\") fn t() -> Response<{{ x: i64 }}> {{ {} }}", body)).matches("RANGE_(").count();
+        assert_eq!(tests("let i = app.n / 200; return ok({ x: app.xs[i] });"), 0);        // 0..5
+        assert_eq!(tests("let i = (app.n + 199) / 200; return ok({ x: app.xs[i] });"), 0); // 0..5
+        assert!(tests("let i = app.n / 50; return ok({ x: app.xs[i] });") > 0);             // 0..20: can be out
+        assert!(tests("let i = app.big / 2; return ok({ x: app.xs[i] });") > 0);           // nothing known
+        assert!(tests("let i = (app.n - 500) / 100; return ok({ x: app.xs[i] });") > 0);   // -5..5: can be negative
+    }
+
+    /// A pool nothing in the program removes from has no dead slot below its high-water mark, so reaching an item by number tests the range and the mark only; any removal anywhere
+    /// brings the live-bit test back.
+    #[test]
+    fn a_pool_nothing_removes_from_is_reached_without_a_live_bit_test() {
+        let state = "struct N { v: i64; }\nstruct A { n: i64 in 0..7; nodes: pool<N, 8>; }\nstate app: A;";
+        let reach = "@get(\"/t\") fn t() -> Response<{ x: i64 }> { let p = app.nodes[app.n]; return ok({ x: p.v }); }\n";
+        let add = "@post(\"/add\") fn add() -> Response<{ x: i64 }> { let p = app.nodes.add(); p.v = 1; return ok({ x: 1 }); }\n";
+        let remove = "@post(\"/rm\") fn rm() -> Response<{ x: i64 }> { foreach p in app.nodes { app.nodes.remove(p); } return ok({ x: 1 }); }\n";
+        let live_tests = |api: &str| endpoint_code(state, api).matches(">> 6)) >> ").count();
+        assert_eq!(live_tests(&format!("{}{}", reach, add)), 0);
+        assert!(live_tests(&format!("{}{}{}", reach, add, remove)) > 0);
+        assert!(live_tests(&format!("{}{}", remove, reach)) > 0); // the removal is compiled before the reach: still seen
+    }
+
+    /// `add` to a plain pool kept out of the undo log is done in the endpoint (the runtime's helper stays as the fallback for a freed slot or a full pool); a pool in the undo log, a
+    /// checked pool (generations) and a pool with nested collections keep the helper alone.
+    #[test]
+    fn adding_to_a_plain_unlogged_pool_is_done_in_line() {
+        let add = "@post(\"/add\") fn add() -> Response<{ x: i64 }> { let p = app.nodes.add(); p.v = 1; return ok({ x: 1 }); }";
+        let inline = |state: &str| { let c = endpoint_code(state, add); (c.contains("ZERO_("), c.contains("->alloc(")) };
+        assert_eq!(inline("struct N { v: i64; }\nstruct A { nodes: pool<N, 8>; }\nstate app: A;"), (true, true));          // in line, helper as the fallback
+        assert_eq!(inline("struct N { v: i64; }\nstruct A { nodes: pool<N, 8>; }\nstate app: A logged;"), (false, true));   // in the undo log: the helper
+        assert_eq!(inline("struct N { v: i64; }\nstruct A { nodes: pool<N, 8> checked; }\nstate app: A;"), (false, true));  // generations: the helper
+        assert_eq!(inline("struct K { w: i64; }\nstruct N { v: i64; ks: list<K, 2>; }\nstruct A { nodes: pool<N, 8>; }\nstate app: A;"), (false, true)); // nested collections: the helper
+    }
+
+    /// A variable that a loop moves by amounts that are not constants still has an interval at the head of the loop: its first one, widened by what the loop's assignments give, until
+    /// the guess holds. A walking offset that only grows (`off = off + step` with `step` from an unsigned byte) and is bounded by the loop's condition needs no index test; one that can
+    /// go down, or grow by an unknown amount, keeps it.
+    #[test]
+    fn loop_carried_variables_have_intervals_from_a_guess_that_holds() {
+        let state = "struct A { n: i64 in 0..1000; step: u8; big: i64; xs: u8[2000]; }\nstate app: A;";
+        let tests = |body: &str| endpoint_code(state, &format!("@get(\"/t\") fn t() -> Response<{{ x: i64 }}> {{ {} }}", body)).matches("RANGE_(").count();
+        assert_eq!(tests("var off = 0; var s = 0; while off < app.n { s = s + app.xs[off + 1]; off = off + app.step; } return ok({ x: s });"), 0);
+        assert!(tests("var off = 0; var s = 0; while off < app.n { s = s + app.xs[off + 1]; off = off - app.step; } return ok({ x: s });") > 0);
+        assert!(tests("var off = 0; var s = 0; while off < app.n { s = s + app.xs[off + 1]; off = off + app.big; } return ok({ x: s });") > 0);
+        assert!(tests("var off = 0; var s = 0; while off < app.big { s = s + app.xs[off + 1]; off = off + app.step; } return ok({ x: s });") > 0);
     }
 
     #[test]
@@ -5170,6 +5644,61 @@ enum Bound<'p> { Range(&'p Expr, &'p Expr), Stepped(&'p Expr, bool, &'p Expr), C
 // Counted(lo, hi, step, after): a variable stepped up once per iteration of a loop over lo..hi; at most hi - lo iterations, so it stays below
 // its start plus (hi - lo) steps; `after`: the accesses come after the step in the body (one step more)
 
+/// The range a `var` stays in, when it starts as `init` and the statements after its declaration (its scope) only ever assign it a constant or
+/// `x & mask` (a non-negative constant mask): from 0 or the constants up to the largest mask or constant. None when anything else is assigned to it.
+fn masked_var_range(stmts: &[Stmt], slot: u32, init: &Expr) -> Option<(i64, i64)> {
+    fn of(e: &Expr) -> Option<(i64, i64)> {
+        match e {
+            Expr::Int(v) => Some((*v, *v)),
+            Expr::Bin(op, a, b) if op == "&" => match (&**a, &**b) { (_, Expr::Int(m)) | (Expr::Int(m), _) if *m >= 0 => Some((0, *m)), _ => None },
+            _ => None,
+        }
+    }
+    fn walk(stmts: &[Stmt], slot: u32, r: &mut (i64, i64)) -> bool {
+        for st in stmts {
+            match st {
+                Stmt::Assign(Expr::Var(_, VarRes::Local(s)), rhs) if *s == slot => match of(rhs) { Some((lo, hi)) => { r.0 = r.0.min(lo); r.1 = r.1.max(hi); } None => return false },
+                Stmt::Let(_, s, _) | Stmt::Var(_, s, _) if *s == slot => return false,
+                Stmt::Alloc { slot: s, .. } if *s == slot => return false,
+                Stmt::If(_, t, e) => { if !walk(t, slot, r) || !walk(e, slot, r) { return false; } }
+                Stmt::Each(it, b) => { if it.slot == slot || it.index.as_ref().map_or(false, |(_, s)| *s == slot) || !walk(b, slot, r) { return false; } }
+                _ => {}
+            }
+        }
+        true
+    }
+    let mut r = of(init)?;
+    if walk(stmts, slot, &mut r) { Some(r) } else { None }
+}
+/// The narrowest of 8, 16 or 32 bits that holds every value up to `hi` ("" when there is none, or `hi` is not known): the width a bitwise operation
+/// whose result is bounded by it may be done at.
+fn width_of(hi: Option<i64>) -> &'static str {
+    match hi { Some(h) if (0..=255).contains(&h) => "8", Some(h) if (0..=65535).contains(&h) => "16", Some(h) if (0..=u32::MAX as i64).contains(&h) => "32", _ => "" }
+}
+/// How much `slot` can go up and down in one pass of these statements, when everything that assigns it is `x = x + k` or `x = x - k` with a small constant `k` >= 0
+/// (anywhere but inside a loop of the statements); None when anything else assigns it. Of an `if`, the arm that moves it most counts.
+fn step_sums(stmts: &[Stmt], slot: u32) -> Option<(i128, i128)> {
+    const MAX_STEP: i64 = 1 << 20;
+    let (mut up, mut down) = (0i128, 0i128);
+    for st in stmts {
+        match st {
+            Stmt::Assign(Expr::Var(_, VarRes::Local(s)), rhs) if *s == slot => match rhs {
+                Expr::Bin(op, a, b) if op == "+" => match (&**a, &**b) {
+                    (Expr::Var(_, VarRes::Local(x)), Expr::Int(k)) | (Expr::Int(k), Expr::Var(_, VarRes::Local(x))) if *x == slot && (0..=MAX_STEP).contains(k) => up += *k as i128,
+                    _ => return None,
+                },
+                Expr::Bin(op, a, b) if op == "-" => match (&**a, &**b) {
+                    (Expr::Var(_, VarRes::Local(x)), Expr::Int(k)) if *x == slot && (0..=MAX_STEP).contains(k) => down += *k as i128,
+                    _ => return None,
+                },
+                _ => return None,
+            },
+            Stmt::If(_, t, e) => { let (a, b) = step_sums(t, slot)?; let (c, d) = step_sums(e, slot)?; up += a.max(c); down += b.max(d); }
+            other => { if assigns_slot(other, slot) { return None; } }
+        }
+    }
+    Some((up, down))
+}
 /// The local slots assigned anywhere in these statements (nested ones included).
 fn assigned_slots(stmts: &[Stmt]) -> std::collections::HashSet<u32> {
     let mut out = std::collections::HashSet::new();

@@ -9,7 +9,7 @@ fn next_int(max: i64) -> i64 {
     h.last = (h.last * 3877 + 29573) % 139968;
     return int(h.last / 139968.0 * max);
 }
-fn crc32() -> i64 {
+fn crc_of_buffer() -> i64 {
     var crc = 0xFFFFFFFF;
     foreach i in 0..h.size - 1 {
         crc = crc ^ h.data[i];
@@ -22,7 +22,7 @@ fn crc32() -> i64 {
 fn one_run() {
     let ch = next_int(256);
     h.data[next_int(h.size)] = ch;
-    h.result = (h.result + crc32()) % 4294967296;
+    h.result = (h.result + crc_of_buffer()) % 4294967296;
 }
 
 @post("/prepare/{size}")

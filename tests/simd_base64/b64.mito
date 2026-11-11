@@ -1,0 +1,10 @@
+struct S { n: i64; }
+state s: S;
+@post("/enc")
+fn enc(t: string<16384>) -> Response<{ r: string }> { return ok({ r: base64(t) }); }
+@post("/dec")
+fn dec(t: string<16384>) -> Response<{ r: string? }> {
+    let b = unbase64(t);
+    if b == null { return ok({ r: null }); }
+    return ok({ r: hex(b) });
+}

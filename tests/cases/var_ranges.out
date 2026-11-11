@@ -1,0 +1,14 @@
+POST /count/0 -> 200 {"up":0,"down":100,"both":0}
+POST /count/3 -> 200 {"up":3,"down":94,"both":-3}
+POST /count/10 -> 200 {"up":10,"down":80,"both":2}
+POST /count/1000 -> 200 {"up":1000,"down":-1900,"both":992}
+POST /while/0 -> 200 {"count":0,"i":0}
+POST /while/7 -> 200 {"count":21,"i":7}
+POST /while/1000 -> 200 {"count":3000,"i":1000}
+POST /join/0 -> 200 {"y":8,"z":8}
+POST /join/6 -> 200 {"y":101,"z":101}
+POST /join/501 -> 200 {"y":101,"z":1102}
+POST /near -> 500 {"error":"integer overflow","line":30}
+POST /near-ok -> 200 {"x":9223372036854775807}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

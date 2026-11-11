@@ -1357,6 +1357,38 @@ static int h_fill_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 count, i64 bi
 }
 /* `count` elements of `esize` bytes move within an array at byte offset `base`, from position `from` to `to`: one commit, one
    undo-log pass over the range they write, one memmove (the generated code checked the range). */
+
+/* ---- `array.sort(from, count, scratch)`: a stable merge sort of integer elements that skips the merge of two halves already in order, so data that is mostly sorted costs little more than reading it ---- */
+#define MITO_DEF_SORT(NAME, T) \
+static void NAME##_insert(T *a, u64 n) { for (u64 i = 1; i < n; i++) { T v = a[i]; u64 j = i; while (j > 0 && a[j - 1] > v) { a[j] = a[j - 1]; j--; } a[j] = v; } } \
+static void NAME##_sort(T *a, T *t, u64 n) { \
+    if (n <= 24) { NAME##_insert(a, n); return; } \
+    u64 mid = n / 2; \
+    NAME##_sort(a, t, mid); NAME##_sort(a + mid, t, n - mid); \
+    if (a[mid - 1] <= a[mid]) return; \
+    memcpy(t, a, mid * sizeof(T)); \
+    u64 i = 0, j = mid, o = 0; \
+    while (i < mid && j < n) { if (a[j] < t[i]) a[o++] = a[j++]; else a[o++] = t[i++]; } \
+    while (i < mid) a[o++] = t[i++]; \
+}
+MITO_DEF_SORT(s_i8, i8) MITO_DEF_SORT(s_i16, i16) MITO_DEF_SORT(s_i32, i32) MITO_DEF_SORT(s_i64, i64)
+MITO_DEF_SORT(s_u8, u8) MITO_DEF_SORT(s_u16, u16) MITO_DEF_SORT(s_u32, u32) MITO_DEF_SORT(s_u64, u64)
+static int h_sort_elems(Ctx *c, u64 base, u32 code, i64 from, i64 count, u64 tbase) {
+    static const u8 sz[9] = { 0, 1, 2, 4, 8, 1, 2, 4, 8 };
+    if (count > 1) { u64 es = sz[code]; RD_AT(M_(c), base + (u64)from * es, (u64)count * es); RD_AT(M_(c), tbase, (u64)count * es); }
+    if (count <= 1) return 0;
+    Mem *m = &M_(c)->mem;
+    u64 es = sz[code], lo = base + (u64)from * es, len = (u64)count * es;
+    save(m, lo, len); save(m, tbase, len / 2 + es); /* the merge copies at most the left half of the range into the scratch */
+    u8 *p = m->base + lo; u8 *t = m->base + tbase; u64 n = (u64)count;
+    switch (code) {
+    case 1: s_i8_sort((i8 *)p, (i8 *)t, n); break;   case 2: s_i16_sort((i16 *)p, (i16 *)t, n); break;
+    case 3: s_i32_sort((i32 *)p, (i32 *)t, n); break; case 4: s_i64_sort((i64 *)p, (i64 *)t, n); break;
+    case 5: s_u8_sort((u8 *)p, (u8 *)t, n); break;   case 6: s_u16_sort((u16 *)p, (u16 *)t, n); break;
+    case 7: s_u32_sort((u32 *)p, (u32 *)t, n); break; default: s_u64_sort((u64 *)p, (u64 *)t, n); break;
+    }
+    return 0;
+}
 static int h_move_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 to, i64 count) { if (count > 0) RD_AT(M_(c), base + (u64)(from < to ? from : to) * esize, (u64)(count + (from < to ? to - from : from - to)) * esize);
     if (count <= 0 || from == to) return 0;
     Mem *m = &M_(c)->mem;
@@ -1623,6 +1655,85 @@ static int b64_val(u8 ch) { return ch >= 'A' && ch <= 'Z' ? ch - 'A' : ch >= 'a'
 static int hex_val(u8 ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; }
 /* ASCII white space (\s), for split and the trims */
 static int split_ws(u8 b) { return b == ' ' || (b >= 9 && b <= 13); }
+
+/* ---- base64 with AVX2 (x86-64, when the CPU has it; checked once at run time). The scalar code in bytes_builtin stays: it does every case these loops leave (the tail, the URL alphabet,
+   anything that is not base64), so the answers are the same either way. The shuffles are the standard ones (Muła and Lemire's AVX2 base64). ---- */
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__) && !defined(MITO_NO_SIMD)
+#include <immintrin.h>
+#include <cpuid.h>
+#define MITO_B64_SIMD 1
+static int b64_avx2(void) {
+    static int has = -1;
+    if (has < 0) {
+        unsigned a, b, c, d; has = 0;
+        if (__get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 27)) && (c & (1u << 28))) {   /* OSXSAVE and AVX */
+            unsigned xl, xh; __asm__ volatile("xgetbv" : "=a"(xl), "=d"(xh) : "c"(0));
+            if ((xl & 6) == 6 && __get_cpuid_count(7, 0, &a, &b, &c, &d)) has = (b >> 5) & 1;   /* the OS saves the vector registers; AVX2 */
+        }
+    }
+    return has;
+}
+__attribute__((target("avx2"))) static inline __m256i b64_enc_reshuffle(__m256i in) {
+    in = _mm256_shuffle_epi8(in, _mm256_set_epi8(10, 11, 9, 10, 7, 8, 6, 7, 4, 5, 3, 4, 1, 2, 0, 1, 14, 15, 13, 14, 11, 12, 10, 11, 8, 9, 7, 8, 5, 6, 4, 5));
+    __m256i t0 = _mm256_and_si256(in, _mm256_set1_epi32(0x0FC0FC00));
+    __m256i t1 = _mm256_mulhi_epu16(t0, _mm256_set1_epi32(0x04000040));
+    __m256i t2 = _mm256_and_si256(in, _mm256_set1_epi32(0x003F03F0));
+    __m256i t3 = _mm256_mullo_epi16(t2, _mm256_set1_epi32(0x01000010));
+    return _mm256_or_si256(t1, t3);
+}
+__attribute__((target("avx2"))) static inline __m256i b64_enc_translate(__m256i in) {
+    const __m256i lut = _mm256_setr_epi8(65, 71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 0, 0, 65, 71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 0, 0);
+    __m256i indices = _mm256_subs_epu8(in, _mm256_set1_epi8(51));
+    __m256i mask = _mm256_cmpgt_epi8(in, _mm256_set1_epi8(25));
+    indices = _mm256_sub_epi8(indices, mask);
+    return _mm256_add_epi8(in, _mm256_shuffle_epi8(lut, indices));
+}
+/* Encode whole 24-byte groups of s[0..len) as 32 characters each (standard alphabet, no padding); returns the input bytes used. Reads 32 bytes at an offset of -4 after the first group, so it
+   stops with at least 4 input bytes left. */
+__attribute__((target("avx2"))) static u64 b64_encode_avx2(const u8 *s, u64 len, u8 *w) {
+    if (len < 32) return 0;
+    u64 rounds = (len - 4) / 24;
+    __m256i src = _mm256_loadu_si256((const __m256i *)s);
+    src = _mm256_permutevar8x32_epi32(src, _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6));
+    _mm256_storeu_si256((__m256i *)w, b64_enc_translate(b64_enc_reshuffle(src)));
+    const u8 *p = s + 20; u8 *o = w + 32;
+    for (u64 r = 1; r < rounds; r++) {
+        src = _mm256_loadu_si256((const __m256i *)p);
+        _mm256_storeu_si256((__m256i *)o, b64_enc_translate(b64_enc_reshuffle(src)));
+        p += 24; o += 32;
+    }
+    return rounds * 24;
+}
+__attribute__((target("avx2"))) static inline __m256i b64_dec_reshuffle(__m256i in) {
+    const __m256i merge_ab_and_bc = _mm256_maddubs_epi16(in, _mm256_set1_epi32(0x01400140));
+    __m256i out = _mm256_madd_epi16(merge_ab_and_bc, _mm256_set1_epi32(0x00011000));
+    out = _mm256_shuffle_epi8(out, _mm256_setr_epi8(2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1, 2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1));
+    return _mm256_permutevar8x32_epi32(out, _mm256_setr_epi32(0, 1, 2, 4, 5, 6, -1, -1));
+}
+/* Decode whole 32-character groups of the standard alphabet into 24 bytes each (each store writes 32 bytes: `room` bytes of output space are there), stopping at the first group that has any other
+   character; returns the characters used (a multiple of 32). */
+__attribute__((target("avx2"))) static u64 b64_decode_avx2(const u8 *s, u64 len, u8 *w, u64 room) {
+    const __m256i lut_lo = _mm256_setr_epi8(0x15, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x13, 0x1A, 0x1B, 0x1B, 0x1B, 0x1A, 0x15, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x13, 0x1A, 0x1B, 0x1B, 0x1B, 0x1A);
+    const __m256i lut_hi = _mm256_setr_epi8(0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, 0x08, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, 0x08, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10);
+    const __m256i lut_roll = _mm256_setr_epi8(0, 16, 19, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 19, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0);
+    const __m256i mask_2f = _mm256_set1_epi8(0x2F);
+    u64 i = 0, o = 0;
+    while (i + 32 <= len && o + 32 <= room) {
+        __m256i str = _mm256_loadu_si256((const __m256i *)(s + i));
+        const __m256i hi_nibbles = _mm256_and_si256(_mm256_srli_epi32(str, 4), mask_2f);
+        const __m256i lo_nibbles = _mm256_and_si256(str, mask_2f);
+        const __m256i hi = _mm256_shuffle_epi8(lut_hi, hi_nibbles);
+        const __m256i lo = _mm256_shuffle_epi8(lut_lo, lo_nibbles);
+        if (!_mm256_testz_si256(lo, hi)) break;
+        const __m256i eq_2f = _mm256_cmpeq_epi8(str, mask_2f);
+        const __m256i roll = _mm256_shuffle_epi8(lut_roll, _mm256_add_epi8(eq_2f, hi_nibbles));
+        str = _mm256_add_epi8(str, roll);
+        _mm256_storeu_si256((__m256i *)(w + o), b64_dec_reshuffle(str));
+        i += 32; o += 24;
+    }
+    return i;
+}
+#endif
 static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
     T x, y, z; u32 start = m->text.len; u8 *w;
     switch (code) {
@@ -1631,6 +1742,9 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
         const u8 *s = t_ptr(m, x); const char *al = code == 17 ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         if (!(w = t_room(m, ((u64)x.len + 2) / 3 * 4))) return -1;
         u64 o = 0, i = 0;
+#ifdef MITO_B64_SIMD
+        if (code == 17 && x.len >= 32 && b64_avx2()) { i = b64_encode_avx2(s, x.len, w); o = i / 3 * 4; }
+#endif
         for (; i + 3 <= x.len; i += 3) { u32 v = (u32)s[i] << 16 | (u32)s[i + 1] << 8 | s[i + 2]; w[o++] = (u8)al[v >> 18]; w[o++] = (u8)al[v >> 12 & 63]; w[o++] = (u8)al[v >> 6 & 63]; w[o++] = (u8)al[v & 63]; }
         if (x.len - i == 1) { u32 v = (u32)s[i] << 16; w[o++] = (u8)al[v >> 18]; w[o++] = (u8)al[v >> 12 & 63]; if (code == 17) { w[o++] = '='; w[o++] = '='; } }
         else if (x.len - i == 2) { u32 v = (u32)s[i] << 16 | (u32)s[i + 1] << 8; w[o++] = (u8)al[v >> 18]; w[o++] = (u8)al[v >> 12 & 63]; w[o++] = (u8)al[v >> 6 & 63]; if (code == 17) w[o++] = '='; }
@@ -1641,8 +1755,12 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
         while (len && s[len - 1] == '=' && x.len - len < 2) len--;
         if (len % 4 == 1 || (x.len != len && (len + (x.len - len)) % 4)) { *out = v_null(); return 0; }
         if (!(w = t_room(m, (u64)len / 4 * 3 + 3))) return -1;
-        u64 o = 0; u32 acc = 0, bits = 0;
-        for (u32 i = 0; i < len; i++) {
+        u64 o = 0; u32 acc = 0, bits = 0, from = 0;
+#ifdef MITO_B64_SIMD
+        /* whole groups of 32 standard-alphabet characters, 24 bytes each, while 32 bytes of room are left for the store; the scalar loop does the rest (a group is a multiple of 4 characters: no bits are pending) */
+        if (len >= 32 && b64_avx2()) { u64 room = (u64)m->text.cap - (u64)(w - m->text.p); from = (u32)b64_decode_avx2(s, len, w, room); o = (u64)from / 4 * 3; }
+#endif
+        for (u32 i = from; i < len; i++) {
             int v = b64_val(s[i]); if (v < 0) { *out = v_null(); return 0; }
             acc = acc << 6 | (u32)v; bits += 6;
             if (bits >= 8) { bits -= 8; w[o++] = (u8)(acc >> bits); }
@@ -2667,7 +2785,7 @@ static int h_txt_set(Ctx *c, Txt *dst, u32 cap, int clear, const Val *v, u32 nv)
 static const H mito_h = {
     h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
     h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
+    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_sort_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
     h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
     h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header, h_tinsert, h_found, h_split_next,
     h_txt_cap, h_txt_set,
@@ -2745,10 +2863,8 @@ MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return;
 MITO_API void *MITO(reader)(void *mp_, u32 k, char *why, u32 cap) {
     Mito *p = (Mito *)mp_;
     const char *no = 0;
-    u32 own_unlogged = 0; for (u32 r = 0; r < mito_prog.nunlogged; r++) if (!(mito_prog.req_size && mito_prog.unlogged[2 * r] == mito_prog.req_off)) own_unlogged++;
     if (p->shared_fd < 0) no = "the state is not in shared memory (this system cannot share it, or MITO(share_state) was not called)";
     else if (!p->mem.all) no = "readers need all of the state committed at start (no --soft/--hard marks, state of at most 1 GiB)";
-    else if (own_unlogged) no = "the program has unlogged state, whose changes skip the undo log a reader is stopped by";
     else if (mito_prog.req_size && (mito_prog.req_off % PAGE || mito_prog.req_size % PAGE)) no = "the request struct is not on whole pages";
     if (no) { u32 n = 0; while (no[n] && n + 1 < cap) { why[n] = no[n]; n++; } if (cap) why[n] = 0; return 0; }
     Mito *m = (Mito *)os_alloc(sizeof(Mito));
@@ -2783,7 +2899,10 @@ MITO_API void *MITO(reader)(void *mp_, u32 k, char *why, u32 cap) {
 }
 /* the last request on a reader wanted to change the state (or a socket): it must run again on the primary */
 MITO_API int MITO(wants_write)(void *mp_) { return ((Mito *)mp_)->wants_write; }
-MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n; }
+/* The most rounds a request's loops may be given: the compiler relies on it (a counter stepped by small constants in a loop without a fixed extent cannot overflow an i64 in that many
+   rounds). The command line refuses more with a message; this clamps for a program that embeds the runtime. */
+#define MITO_MAX_LOOP_BUDGET (1LL << 50)
+MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n > MITO_MAX_LOOP_BUDGET ? MITO_MAX_LOOP_BUDGET : n; }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
 MITO_API void MITO(set_web_etag)(void *mp_, int on) { ((Mito *)mp_)->web_etag = on; }
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn);
@@ -2847,6 +2966,8 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     m->html_err = (int)mito_prog.routes[ei].html;
     if (m->pr.on && m->pr.refusing && !c_eq("GET", (const u8 *)method, mn) && !c_eq("DELETE", (const u8 *)method, mn)) { out_err_c(m, "memory pressure: try again later"); return 503; }
     m->ei = ei; m->hdrs = hdrs; m->nhdrs = nh; m->fwd = fwd; m->nfwd = nf;
+    /* a reader runs only endpoints the compiler found read-only: any other runs again alone on the primary (state that is not logged has no undo log to notice a write) */
+    if (m->reader && !mito_prog.routes[ei].reads) { m->wants_write = 1; out_err_c(m, "not a read-only endpoint"); return 503; }
     /* a change asked for by a page of another site (a browser sends Origin with every form post): refused. A request without Origin
        (an API client, curl) is not a browser's cross-site one. */
     if (!c_eq("GET", (const u8 *)method, mn) && !c_eq("HEAD", (const u8 *)method, mn)) {
@@ -2933,7 +3054,7 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
     if (ok && !store_commit(&m->store)) { ok = 0; m->ctype = 0; m->head.len = 0; out_err(m, (const u8 *)m->store.err, c_len(m->store.err)); code = 500; }
     else if (!ok) store_rollback(&m->store);
 #endif
-    if (ok) { if (!m->reader && (m->mem.ja.len || m->tw || m->frees.len)) g_data_version++; u32 *f = (u32 *)m->frees.p; for (u64 i = 0; i < m->frees.len; i += 2) free_item(&m->mem, f[i], f[i + 1]); commit_changes(&m->mem); }
+    if (ok) { if (!m->reader && (m->mem.ja.len || m->tw || m->frees.len || mito_prog.routes[m->ei].writes)) g_data_version++; u32 *f = (u32 *)m->frees.p; for (u64 i = 0; i < m->frees.len; i += 2) free_item(&m->mem, f[i], f[i + 1]); commit_changes(&m->mem); }
     else rollback(&m->mem);
     if (m->pr.on) relieve(&m->mem, &m->pr);
     return code;

@@ -1,34 +1,12 @@
 // LangArena Compress::BWTEncode (kostya/LangArena, MIT): Burrows-Wheeler transform of a repeating text, `iterations` times.
 // The input is `size` bytes of the repeating pattern "ABRACADABRA". The Burrows-Wheeler transform is the reference's prefix-doubling suffix sort: counting-sort the suffixes by
-// first byte, rank them, then for k = 1, 2, 4, ... sort the suffix array by the pair (rank[i], rank[(i + k) % n]) with a stable sort and re-rank. The reference's `sort_by`
-// (a library stable sort that detects runs already in order) is a top-down merge sort here (as in the Sort::Merge port) that skips the merge when the two halves are already in order, the per-round pair and rank vectors live in state arrays, and the new ranks are written
-// over the old ones (the pairs hold the old ranks). The checksum adds the length of the result of every run, warmup included.
-struct BW { data: u8[131072]; trans: u8[131072] unlogged; sa: i32[131072] unlogged; rank: i32[131072] unlogged; pr0: i32[131072] unlogged; pr1: i32[131072] unlogged; tmp: i32[131072] unlogged; counts: i32[256]; positions: i32[256]; fill: i32[256]; size: i64; orig: i64; result: i64; }
+// first byte, rank them, then for k = 1, 2, 4, ... sort the suffixes by the pair (rank[i], rank[(i + k) % n]) and re-rank. The reference's `sort_by`
+// The reference's `sort_by` is a library stable sort that detects runs already in order; here the language's `sort` (a library merge sort that skips the merge of halves already in order) puts
+// one 64-bit key per suffix in order (the pair of ranks above the suffix's position in the last round's order, so ties keep the last round's order, as the reference's stable sort keeps them). The keys and the scratch array the sort works in live in state arrays, and the new ranks are written over the old ones. The checksum adds the
+// length of the result of every run, warmup included. main_merge.mito keeps the earlier version with a merge sort written in the language (closest-possible, 0.54 s).
+struct BW { data: u8[131072]; trans: u8[131072]; sa: i32[131072]; sa2: i32[131072]; rank: i32[131072]; keys: i64[131072]; scratch: i64[131072]; counts: i32[256]; positions: i32[256]; fill: i32[256]; size: i64; orig: i64; result: i64; }
 state bw: BW;
 
-// a before b (or equal): the reference's comparison of the pairs, ties keep their order
-fn before(left: i64, right: i64) -> bool {
-    return bw.pr0[left] < bw.pr0[right] || (bw.pr0[left] == bw.pr0[right] && bw.pr1[left] <= bw.pr1[right]);
-}
-fn merge(low: i64, mid: i64, high: i64) {
-    foreach x in low..high { bw.tmp[x] = bw.sa[x]; }
-    var i = low;
-    var j = mid + 1;
-    var k = low;
-    while i <= mid && j <= high {
-        if before(bw.tmp[i], bw.tmp[j]) { bw.sa[k] = bw.tmp[i]; i = i + 1; } else { bw.sa[k] = bw.tmp[j]; j = j + 1; }
-        k = k + 1;
-    }
-    while i <= mid { bw.sa[k] = bw.tmp[i]; i = i + 1; k = k + 1; }
-}
-fn msort(low: i64, high: i64) {
-    if low < high {
-        let mid = (low + high) / 2;
-        msort(low, mid);
-        msort(mid + 1, high);
-        if !before(bw.sa[mid], bw.sa[mid + 1]) { merge(low, mid, high); }
-    }
-}
 fn bwt_transform() {
     let n = bw.size;
     bw.counts.fill(0, 256, 0);
@@ -50,19 +28,21 @@ fn bwt_transform() {
     }
     var k = 1;
     foreach round in 0..63 while k < n {
-        foreach i in 0..n - 1 {
-            bw.pr0[i] = bw.rank[i];
-            bw.pr1[i] = bw.rank[(i + k) % n];
+        // each suffix, taken in the order the last round left them, as one key: its pair of ranks above its position in that order (17 bits each: ranks and positions are below 131072), so
+        // sorting the keys sorts by the pair and keeps the last round's order among equal pairs, as the reference's stable sort does
+        foreach j in 0..n - 1 {
+            let suffix = bw.sa[j];
+            bw.keys[j] = (bw.rank[suffix] << 34) | (bw.rank[(suffix + k) % n] << 17) | j;
         }
-        msort(0, n - 1);
-        bw.rank[bw.sa[0]] = 0;
+        bw.keys.sort(0, n, bw.scratch);
+        foreach i in 0..n - 1 { bw.sa2[i] = bw.sa[bw.keys[i] & 131071]; }
+        bw.rank[bw.sa2[0]] = 0;
         foreach i in 1..n - 1 {
-            let prev = bw.sa[i - 1];
-            let curr = bw.sa[i];
             var step = 1;
-            if bw.pr0[prev] == bw.pr0[curr] && bw.pr1[prev] == bw.pr1[curr] { step = 0; }
-            bw.rank[curr] = bw.rank[prev] + step;
+            if (bw.keys[i - 1] >> 17) == (bw.keys[i] >> 17) { step = 0; }
+            bw.rank[bw.sa2[i]] = bw.rank[bw.sa2[i - 1]] + step;
         }
+        bw.sa.copy_from(bw.sa2, 0, 0, n);
         k = k * 2;
     }
     foreach i in 0..n - 1 {

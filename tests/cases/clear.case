@@ -1,11 +1,12 @@
 // coll.clear(): every item leaves a pool or list at once, including what the items hold; references to cleared items are stale; the pool
 // can be filled again straight away (even in the same request); and a request that fails after clearing leaves everything as it was
+// (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
 struct Tag { t: i64; }
 struct Item { v: i64; tags: list<Tag, 3> drop_oldest; }
 struct Holder { it: i64; } // the held item's slot + 1; 0 for none
 struct App { items: pool<Item, 3> checked; holder: Holder; log: list<Tag, 3> drop_oldest; }
-state app: App;
+state app: App logged;
 
 @post("/add/{v}")
 fn post_add(v: i64) -> Response<{ slot: i64 }> { let x = app.items.add(); x.v = v; x.tags.add { t: v * 10 }; return created({ "slot": slot(x) }); }

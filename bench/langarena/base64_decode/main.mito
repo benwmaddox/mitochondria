@@ -1,80 +1,22 @@
 // LangArena Base64::Decode (kostya/LangArena, MIT): decode the standard Base64 text of `size` bytes of "a" (with padding), `iterations` times, checking the text is valid; the
 // checksum adds the decoded length of every run (warmup included) and the benchmark's final message names the first four characters of the encoded and of the decoded text. This
-// port builds that message in a request field and answers its hash (GET /checksum), as the reference does. The reference calls the
-// base64-simd library (SIMD); this is a plain scalar loop over four input characters at a time with a 256-entry lookup table (255 = not a Base64 character).
-struct B64 { encoded: u8[666672]; decoded: u8[500000] unlogged; alphabet: u8[64]; table: u8[256]; size: i64; encoded_len: i64; decoded_len: i64; result: i64; bad: i64; }
+// port builds that message in a request field and answers its hash (GET /checksum), as the reference does. The reference calls the base64-simd library (SIMD); this calls the
+// language's `unbase64` builtin, which uses AVX2 where the CPU has it (runtime/mito.c; it answers null for text that is not Base64). main_loop.mito keeps the earlier version that
+// is a plain scalar loop with a lookup table, written in the language.
+struct B64 { data: u8[500000]; encoded: ascii<666672>; size: i64 in 0..500000; decoded_len: i64; result: i64; bad: i64; head: ascii<8>; }
 state b: B64;
 struct Work { message: ascii<128>; }
 request work: Work; // the final message, built to be hashed
 
-fn encode_input() {
-    let full = b.size / 3;
-    // the input is `size` bytes of 'a' (97): the three-byte groups all encode to "YWFh"
-    foreach group in 0..full - 1 {
-        let to = group * 4;
-        b.encoded[to] = b.alphabet[97 >> 2];
-        b.encoded[to + 1] = b.alphabet[((97 & 3) << 4) | (97 >> 4)];
-        b.encoded[to + 2] = b.alphabet[((97 & 15) << 2) | (97 >> 6)];
-        b.encoded[to + 3] = b.alphabet[97 & 63];
-    }
-    let rest = b.size - full * 3;
-    let to = full * 4;
-    if rest == 1 {
-        b.encoded[to] = b.alphabet[97 >> 2];
-        b.encoded[to + 1] = b.alphabet[(97 & 3) << 4];
-        b.encoded[to + 2] = 61;
-        b.encoded[to + 3] = 61;
-    } else if rest == 2 {
-        b.encoded[to] = b.alphabet[97 >> 2];
-        b.encoded[to + 1] = b.alphabet[((97 & 3) << 4) | (97 >> 4)];
-        b.encoded[to + 2] = b.alphabet[(97 & 15) << 2];
-        b.encoded[to + 3] = 61;
-    }
-    b.encoded_len = (b.size + 2) / 3 * 4;
-}
 fn decode() {
-    let groups = b.encoded_len / 4;
-    var pad = 0;
-    if b.encoded[b.encoded_len - 1] == 61 { pad = 1; }
-    if b.encoded[b.encoded_len - 2] == 61 { pad = 2; }
-    // the last group is decoded on its own (padding); the others take four characters to three bytes
-    let plain = groups - 1;
-    var acc = 0;
-    foreach group in 0..plain - 1 {
-        let from = group * 4;
-        let to = group * 3;
-        let first = b.table[b.encoded[from]];
-        let second = b.table[b.encoded[from + 1]];
-        let third = b.table[b.encoded[from + 2]];
-        let fourth = b.table[b.encoded[from + 3]];
-        acc = acc | first | second | third | fourth;
-        b.decoded[to] = ((first << 2) | (second >> 4)) & 255;
-        b.decoded[to + 1] = ((second << 4) | (third >> 2)) & 255;
-        b.decoded[to + 2] = ((third << 6) | fourth) & 255;
-    }
-    let from = plain * 4;
-    let to = plain * 3;
-    let first = b.table[b.encoded[from]];
-    let second = b.table[b.encoded[from + 1]];
-    acc = acc | first | second;
-    b.decoded[to] = ((first << 2) | (second >> 4)) & 255;
-    if pad == 2 {
-        b.decoded_len = to + 1;
-    } else {
-        let third = b.table[b.encoded[from + 2]];
-        acc = acc | third;
-        b.decoded[to + 1] = ((second << 4) | (third >> 2)) & 255;
-        if pad == 1 {
-            b.decoded_len = to + 2;
-        } else {
-            let fourth = b.table[b.encoded[from + 3]];
-            acc = acc | fourth;
-            b.decoded[to + 2] = ((third << 6) | fourth) & 255;
-            b.decoded_len = to + 3;
-        }
-    }
+    let decoded = unbase64(b.encoded);
     b.bad = 0;
-    if acc > 63 { b.bad = 1; }
+    if decoded == null {
+        b.bad = 1;
+    } else {
+        b.decoded_len = len(decoded);
+        b.head = substr(decoded, 0, 4);
+    }
 }
 fn one_run() {
     decode();
@@ -85,13 +27,8 @@ fn one_run() {
 fn prepare(size: i64 in 4..500000) -> Response<{}> {
     b.size = size;
     b.result = 0;
-    foreach i in 0..25 { b.alphabet[i] = 65 + i; b.alphabet[26 + i] = 97 + i; }
-    foreach i in 0..9 { b.alphabet[52 + i] = 48 + i; }
-    b.alphabet[62] = 43;
-    b.alphabet[63] = 47;
-    b.table.fill(0, 256, 255);
-    foreach i in 0..63 { b.table[b.alphabet[i]] = i; }
-    encode_input();
+    b.data.fill(0, size, 97);
+    b.encoded = base64(text_from(b.data, 0, size));
     decode();
     return ok({});
 }
@@ -102,7 +39,7 @@ fn run(n: i64 in 1..100000) -> Response<{}> { foreach i in 0..n - 1 { one_run();
 // the reference's message, "decode YWFh... to aaaa...: <sum>", and its hash
 @get("/checksum")
 fn checksum() -> Response<{ checksum: i64 }> {
-    work.message = "decode " + text_from(b.encoded, 0, 4) + "... to " + text_from(b.decoded, 0, 4) + "...: " + b.result;
+    work.message = "decode " + substr(b.encoded, 0, 4) + "... to " + b.head + "...: " + b.result;
     var hash = 5381;
     foreach i in 0..len(work.message) - 1 { hash = (hash * 33 + work.message[i]) % 4294967296; }
     return ok({ checksum: hash });

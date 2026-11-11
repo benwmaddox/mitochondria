@@ -3,6 +3,7 @@ mod build;
 mod cases;
 #[cfg(test)]
 mod http_check;
+mod platform;
 #[cfg(test)]
 mod error_corpus;
 #[cfg(test)]
@@ -25,6 +26,7 @@ A program is one `.mito` file: a program, or a system of workers (a file holding
   check  <program> [--kinds|--costs] report the problems found, or say it loads; --kinds lists every local's kind; --costs each endpoint's work
   build  <program> [-o app.exe] [--tcc]
                                     an executable serving HTTP (clang -O3; --tcc builds in milliseconds, unoptimised)
+  run    <program> [--clang] [-- args]   serve, for a command-line program (`@main`): what follows `--` is its command line, stdin and stdout are yours
   serve  <program> [--clang] [--watch] [executable options]
                                     build with TinyCC (or clang) and run it at once; --watch rebuilds and restarts
                                     when the program changes (state starts empty each time)
@@ -106,6 +108,7 @@ fn quote(file: &str, text: &str, l: usize, c: usize, rest: &str) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().take_while(|a| *a != "--").any(|a| a == "--platform") { die("there is no --platform switch: the platform is the entry file's (`platform cli;` in it, or its entry points)".into()); }
     let rest = args.get(1..).unwrap_or(&[]);
     // `file("...")` in a program reads beside it
     if let Some(f) = inputs(rest).first() { lang::set_file_dir(std::path::Path::new(f.as_str()).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))); }
@@ -114,7 +117,7 @@ fn main() {
         Some("check") if rest.iter().any(|a| a == "--costs") => costs(rest),
         Some("check") => { let (_, name) = program(&inputs(rest)); println!("{}: loads", name); }
         Some("build") => build_exe(rest),
-        Some("serve") => serve(rest),
+        Some("serve") | Some("run") => serve(rest),
         Some("test") => test(rest),
         Some("emit-c") => emit_c(rest),
         Some("sigs") => sigs(rest),
@@ -200,8 +203,13 @@ fn compile(f: &str, text: &str, system: bool) -> Result<(Vec<String>, String), S
     let (s, code) = source::load(text).map_err(|e| report(f, text, &e))?;
     let prog = layout::Program::parse(&s).map_err(|e| report(f, text, &e))?;
     let a = cgen::check(&prog, &code).map_err(|e| report(f, text, &e))?;
+    // the platform is the entry file's: what it says (`platform cli;`), or what its entry points show
+    let declared = platform::declared(text).map_err(|e| format!("{}: {}", f, e))?;
+    let plat = platform::resolve(declared, &a, &code).map_err(|e| format!("{}: {}", f, e))?;
     let web = web.map_or(String::new(), |w| web::c(&w));
-    Ok((cgen::program_exe(&prog, &a, Some((&file, &code)), &web)?, name))
+    let units = cgen::program_exe(&prog, &a, Some((&file, &code)), &web)?;
+    if let Some(p) = plat { platform::check_bundle(p, &units).map_err(|e| format!("{}: {}", f, e))?; }
+    Ok((units, name))
 }
 
 /// `build <program> [-o app.exe] [--tcc]`
@@ -220,7 +228,9 @@ fn build_exe(args: &[String]) {
 fn serve(args: &[String]) {
     let files = inputs(args);
     let clang = args.iter().any(|a| a == "--clang");
-    let pass: Vec<&String> = args[files.len()..].iter().filter(|a| *a != "--clang" && *a != "--watch").collect();
+    // `mito run tool.mito -- a b < in.txt`: a command-line program (`@main`) built and run at once; what follows `--` is its command line
+    let mut pass: Vec<&String> = args[files.len()..].iter().filter(|a| *a != "--clang" && *a != "--watch").collect();
+    if let Some(k) = pass.iter().position(|a| *a == "--") { pass.remove(k); }
     if args.iter().any(|a| a == "--watch") { return serve_watch(&files, clang, &pass); }
     let (units, name) = program(&files);
     let exe = std::env::temp_dir().join(format!("mito-serve-{}-{}{}", name, std::process::id(), std::env::consts::EXE_SUFFIX));

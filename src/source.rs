@@ -40,6 +40,11 @@ pub fn split(src: &str) -> Result<(String, String), String> {
                 for c in src[i..e].chars() { if c == '\n' { state.push('\n'); code.push('\n'); } }
                 i = e;
             }
+            // `platform cli;` is neither state nor code (src/platform.rs reads it): its line is blank in both
+            "platform" => {
+                let e = src[i..].find('\n').map_or(b.len(), |e| i + e);
+                i = e;
+            }
             "system" => return Err(format!("line {}: a `system` block is a file of its own, not part of a program", line)),
             "global" => return Err(format!("line {}: `global` was replaced by `state`: a program has one state, a struct holding everything (`state game: Game;`)", line)),
             "" => return Err(format!("line {}: unexpected `{}`", line, &src[i..i + src[i..].chars().next().map_or(1, |c| c.len_utf8())])),

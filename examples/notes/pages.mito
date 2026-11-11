@@ -1,0 +1,80 @@
+// The pages: HTML written in the program, with a form for every change (no script needed).
+
+fn shell(title: text) -> html {
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{title} • Notes</title>
+        <link rel="stylesheet" href="/style.css">
+    </head>
+}
+
+fn sign_in_form(error: text) -> html {
+    shell("Sign in");
+    <body class="narrow">
+        <h1>Notes</h1>
+        {if error == "wrong" { <p class="error">Wrong email or password.</p> }}
+        {if error == "taken" { <p class="error">That email already has an account.</p> }}
+        <form method="post" action="/signin">
+            <h2>Sign in</h2>
+            <input name="email" type="email" placeholder="Email" required>
+            <input name="password" type="password" placeholder="Password" required>
+            <button>Sign in</button>
+        </form>
+        <form method="post" action="/signup">
+            <h2>New here?</h2>
+            <input name="email" type="email" placeholder="Email" required>
+            <input name="password" type="password" placeholder="Password (8 or more)" minlength="8" required>
+            <button>Create account</button>
+        </form>
+    </body>
+}
+
+// the list on the left, the open note (or the new-note form) on the right
+fn notes_page(me: User, q: text, tag: text, open: i64) -> html {
+    shell("Your notes");
+    <body>
+        <header>
+            <h1><a href="/">Notes</a></h1>
+            <form method="get" action="/"><input name="q" value="{q}" placeholder="Search titles"><input name="tag" value="{tag}" placeholder="Tag"><button>Search</button></form>
+            <form method="post" action="/signout"><span>{me.email}</span> <button>Sign out</button></form>
+        </header>
+        <main>
+            <nav>
+                <ul>
+                    {foreach n in me.notes reverse {
+                        if matches(n, q, tag) {
+                            <li class="{if slot(n) == open { "open" }}"><a href="/notes/{slot(n)}">{n.title}</a> <small>{n.tags}</small></li>
+                        }
+                    }}
+                </ul>
+                {if me.notes.count() == 0 { <p class="hint">No notes yet. Write one.</p> }}
+            </nav>
+            <section>
+                {if open >= 0 { note_form(me, open); } else { new_form(); }}
+            </section>
+        </main>
+    </body>
+}
+
+fn new_form() -> html {
+    <form method="post" action="/notes">
+        <h2>New note</h2>
+        <input name="title" placeholder="Title" required>
+        <textarea name="body" rows="12" placeholder="Write here"></textarea>
+        <input name="tags" placeholder="Tags, separated by spaces">
+        <button>Add</button>
+    </form>
+}
+
+fn note_form(me: User, id: i64) -> html {
+    let n = me.notes[id];
+    <form method="post" action="/notes/{id}">
+        <h2>Edit note</h2>
+        <input name="title" value="{n.title}" required>
+        <textarea name="body" rows="12">{n.body}</textarea>
+        <input name="tags" value="{n.tags}" placeholder="Tags, separated by spaces">
+        <button>Save</button>
+    </form>
+    <form method="post" action="/notes/{id}/delete"><button class="danger">Delete</button></form>
+}

@@ -1,0 +1,40 @@
+// Accounts: an email and a password. The password is kept only as a bcrypt digest; a cookie names the signed-in user
+// (`token(u)` is the row's id signed with the row's secret, so it cannot be guessed, and signing out changes the secret).
+
+@get("/signin")
+fn signin_page(me: User? from cookie("me"), error: ascii<40> = "") -> Response<html> {
+    if exists(me) { return see_other("/"); }
+    return ok(<!doctype html><html lang="en">{sign_in_form(error);}</html>);
+}
+
+@post("/signup")
+fn signup(email: ascii<3..100>, password: ascii<8..72>) -> Response<html> {
+    let mail = lower(trim(email));
+    foreach u in app.users where u.email == mail limit 1 { return see_other("/signin?error=taken"); }
+    let u = app.users.add();
+    u.email = mail;
+    u.hash = bcrypt_hash(password, 10);
+    u.secret = random();
+    set_cookie("me", token(u), 2592000);
+    return see_other("/");
+}
+
+@post("/signin")
+fn signin(email: ascii<3..100>, password: ascii<1..72>) -> Response<html> {
+    let mail = lower(trim(email));
+    foreach u in app.users where u.email == mail limit 1 {
+        if bcrypt_check(password, u.hash) {
+            set_cookie("me", token(u), 2592000);
+            return see_other("/");
+        }
+    }
+    return see_other("/signin?error=wrong");
+}
+
+// a new secret makes every cookie issued before it useless, on every browser
+@post("/signout")
+fn signout(me: User from cookie("me")) -> Response<html> {
+    me.secret = random();
+    set_cookie("me", "", 0);
+    return see_other("/signin");
+}

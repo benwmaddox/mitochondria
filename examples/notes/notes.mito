@@ -1,0 +1,18 @@
+// Notes: a small multi-user notebook, as one program in four files. Each file is one concern:
+//   notes.mito     this file: the state (tables); it `use`s the others
+//   accounts.mito  sign up, sign in, sign out (bcrypt passwords, a cookie that names the session)
+//   notebook.mito  create, edit, delete and search notes
+//   pages.mito     the HTML every page is made of
+// The data lives in SQLite (`--data dir`): users and each user's notes are tables, so they survive restarts. See README.md.
+
+struct Note { title: utf8<200>; body: utf8<20000>; tags: utf8<100>; updated: i64; }
+struct User { email: ascii<100>; hash: ascii<80>; secret: i64; notes: table<Note>; }
+struct App { users: table<User> unique(email); }
+state app: App;
+
+use "accounts.mito";
+use "notebook.mito";
+use "pages.mito";
+
+@get("/style.css")
+fn css() -> Response<css> { return ok(file("assets/style.css")); }

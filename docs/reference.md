@@ -42,6 +42,20 @@ Given to a built server, or to `serve`. A command-line program (`@main`) has non
 | `--seed N`, `--clock MS` | fix the random generator and the clock, for tests |
 | `--timing` | every answer carries `X-Handler-Ns`, the handler's own time in nanoseconds |
 
+## Options of a game
+
+A game (platform game, entry `@frame`) is a built executable that opens a window. It needs SDL3 (3.2 or newer) beside it or on the system's library path (`SDL3.dll`, `libSDL3.so.0`); it is loaded when the game starts and
+nothing is linked, so a build needs neither the library nor its headers. A game can also render a fixed number of frames in a window that is not shown, and save one.
+
+| Option | Meaning |
+| --- | --- |
+| `--size WxH` | the window's size in pixels (1280x720; from 16x16 to 8192x8192) |
+| `--frames N` | run N frames of 1/60 s in a window that is not shown, then stop (without it the game runs until the window is closed) |
+| `--screenshot FILE.ppm` | write the last frame as a PPM image (implies `--frames 1`) |
+| `--hold KEYS` | keys (`w,shift`) held down in every frame, to try a game's controls without a person |
+| `--mouse DX,DY` | pointer movement added to every frame |
+| `--seed N` | fix the random generator |
+
 ## Built-ins described here
 
 DESIGN.md describes most built-ins where they come up (text, JSON, time, crypto, HTML, collections). These are the rest.
@@ -49,8 +63,8 @@ DESIGN.md describes most built-ins where they come up (text, JSON, time, crypto,
 | Built-in | What it does |
 | --- | --- |
 | `abs(x)` | absolute value of an integer or a float |
-| `min(a, b)`, `max(a, b)` | the smaller or larger of two numbers |
-| `sqrt(x)`, `exp(x)`, `floor(x)` | the platform's math functions on a float (a negative square root is NaN); an integer is taken as a float |
+| `min(a, b)`, `max(a, b)` | the smaller or larger of two numbers: integers give an integer, and a float on either side gives a float |
+| `sqrt(x)`, `exp(x)`, `floor(x)`, `sin(x)`, `cos(x)`, `atan2(y, x)`, `pow(x, y)` | the platform's math functions on floats (a negative square root is NaN; angles are in radians); an integer is taken as a float |
 | `wrapping_add(a, b)`, `wrapping_sub(a, b)`, `wrapping_mul(a, b)` | two's-complement arithmetic that wraps at 64 bits (the operators `+ - *` fail the request on overflow); for hashes and generators |
 | `x as TYPE` | a conversion that keeps the low bits (DESIGN.md, Conversions) |
 | `add_years(t, n)` | a time `n` calendar years later (or earlier), the same day and time of day; February 29 becomes February 28 where the year has none |
@@ -64,7 +78,9 @@ DESIGN.md describes most built-ins where they come up (text, JSON, time, crypto,
 
 `@get("/p")`, `@post`, `@put`, `@patch` and `@delete` are endpoints (a function with an HTTP route and typed inputs; `@get` and `@delete` read their inputs from the query, the others from the body, a path
 `{param}`, `from header(...)` or `from cookie(...)`). `@socket`, `@socket_message` and `@socket_close` handle WebSockets, `@every(ms)` runs on a clock, `@start` once when the program starts, and
-`@main` is a command-line program's one function. A program has the entry points of its platform only.
+`@main` is a command-line program's one function. `@frame` and `@shader` are a game's: `@frame` is called every frame, `@shader fn name() -> Response<text>` gives one shader's source. A game's frame answers with a line for each pass: `scene@0.25 px=1 pz=2` draws the shader `scene` with those uniforms into an offscreen image a quarter of the window's size, and a later line, `paint`, draws on the window and reads that image as `uImage` (DESIGN.md, Games). A program has the entry points of its platform only.
+
+A game's `@frame` function takes its inputs from the window: `dt: f64 from time` (seconds since the last frame), `w: bool from key("w")` (whether a key is down; a letter, a digit, `space`, `up`, `down`, `left`, `right`, `shift` or `escape`) and `look: f64 from mouse("dx")` (`dx` or `dy`, the pointer's movement since the last frame; reading it captures the pointer).
 
 ## Library modules
 
@@ -90,3 +106,4 @@ A module is a `.mito` file in `lib/`, used with an `instance` declaration (DESIG
 | `examples/todomvc` | web | server-rendered pages, tables in SQLite, the answer cache (53 browser checks) |
 | `examples/notes` | web | a multi-file app on tables: accounts with bcrypt, per-user notes, search and tags |
 | `examples/jx` | cli | a small jq in three files: positions in the input text, no tree, no allocation |
+| `examples/world` | game | an open world to walk through, painted in broad brush strokes by one fragment shader from a seed: terrain, lakes, sky, sun, fog |

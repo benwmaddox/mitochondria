@@ -1,0 +1,62 @@
+// An open world to walk through, drawn by one fragment shader. The program is the game's state and rules; the picture is made on the GPU.
+//   W A S D walk, Shift runs, the mouse looks, Escape leaves.
+// The world has no edge and nothing stored: the shader makes the ground, the lakes, the sky and the fog from the seed and where you stand,
+// so every place has a fixed shape and the program keeps only the player and the time of day. See README.md.
+
+platform game;
+
+struct Player { x: f64; z: f64; yaw: f64; pitch: f64; }
+struct World {
+    seed: i64;       // which world: the shader shifts its noise by it
+    day: f64;        // time of day, 0..1 (0.25 is noon)
+    player: Player;
+}
+state world: World;
+
+@start
+fn init() {
+    world.seed = 20261111;
+    world.day = 0.10;
+    world.player.x = 330.0;
+    world.player.z = 60.0;
+    world.player.yaw = 0.35;
+    world.player.pitch = -0.03;
+}
+
+// the two shaders: `scene` draws the world small, `paint` lays that down in brush strokes over the whole window
+@shader
+fn scene() -> Response<text> { return ok(file("scene.frag")); }
+@shader
+fn paint() -> Response<text> { return ok(file("paint.frag")); }
+
+// Called every frame with what the window saw. The answer is the frame, a line for each pass: first `scene` into an image a quarter of the window's size, with the
+// world's uniforms, then `paint` over the window, which reads that image.
+@frame
+fn frame(dt: f64 from time, forward: bool from key("w"), back: bool from key("s"), left: bool from key("a"), right: bool from key("d"),
+         run: bool from key("shift"), look_x: f64 from mouse("dx"), look_y: f64 from mouse("dy")) -> Response<text> {
+    // looking: the pointer turns you, and you cannot look past straight up or down
+    world.player.yaw += look_x * 0.0025;
+    world.player.pitch = max(-1.4, min(1.4, world.player.pitch - look_y * 0.0025));
+
+    // walking, in the direction you face (yaw 0 faces +z; the right hand is +x)
+    var ahead = 0.0;
+    var aside = 0.0;
+    if forward { ahead += 1.0; }
+    if back { ahead -= 1.0; }
+    if right { aside += 1.0; }
+    if left { aside -= 1.0; }
+    var speed = 7.0;
+    if run { speed = 22.0; }
+    let s = sin(world.player.yaw);
+    let c = cos(world.player.yaw);
+    world.player.x += (s * ahead + c * aside) * speed * dt;
+    world.player.z += (c * ahead - s * aside) * speed * dt;
+
+    // a full day takes eight minutes
+    world.day += dt / 480.0;
+    if world.day >= 1.0 { world.day -= 1.0; }
+
+    return ok("scene@0.25 px=" + str(world.player.x) + " pz=" + str(world.player.z) + " yaw=" + str(world.player.yaw) + " pitch=" + str(world.player.pitch)
+        + " day=" + str(world.day) + " seed=" + str(world.seed % 1000) + "
+paint");
+}

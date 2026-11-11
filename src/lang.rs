@@ -87,7 +87,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { InRange, F32, Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
+pub enum B { Sin, Cos, Atan2, Pow, InRange, F32, Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
     Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored, SocketSend, SocketClose, SocketSubscribe, SocketUnsubscribe, Broadcast, SocketSendAll, SocketTag, ByteAt, Lower, Upper, CacheGet, CachePut, CacheStart, CacheHole, CachePart, CacheLabel, DataVersion, Replace, TrimStart, TrimEnd, AllEmoji,
     HtmlParse, HtmlParseIn, NodeKind, NodeName, NodeParent, NodeFirst, NodeLast, NodeNext, NodePrev, NodeContent, NodeAttr, NodeAttrCount, NodeAttrName, NodeAttrValue,
     NodeSetAttr, NodeRemoveAttr, NodeNewElement, NodeNewText, NodeAppend, NodeInsertBefore, NodeDetach, NodeClone, NodeHtml, NodeInnerHtml, NodeSetText, NodeHtmlEscaped, Chr, AllWord }
@@ -97,7 +97,7 @@ impl B {
         Some(match n {
             "body" => Body, "param" => Param, "query" => Query, "header" => Header, "fwd" => Fwd, "int" => Int, "str" => Str, "len" => Len, "now" => Now,
             "random" => Random, "min" => Min, "max" => Max, "count" => Count, "capacity" => Capacity, "slot" => Slot, "stat" => Stat, "token" => Token,
-            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "__mito__in" => InRange, "__mito__f32" => F32, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie, "set_header" => SetHeader, "__html_lit" => HtmlLit, "__html_esc" => HtmlEsc, "__html_esc_attr" => HtmlEscAttr, "__html_attr" => HtmlAttr, "html_raw" => HtmlRaw, "html_text" => HtmlEsc, "trim" => Trim,
+            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "__mito__in" => InRange, "__mito__f32" => F32, "sin" => Sin, "cos" => Cos, "atan2" => Atan2, "pow" => Pow, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie, "set_header" => SetHeader, "__html_lit" => HtmlLit, "__html_esc" => HtmlEsc, "__html_esc_attr" => HtmlEscAttr, "__html_attr" => HtmlAttr, "html_raw" => HtmlRaw, "html_text" => HtmlEsc, "trim" => Trim,
             "base64" => Base64, "base64_url" => Base64Url, "unbase64" => Unbase64, "hex" => Hex, "sha1" => Sha1, "sha256" => Sha256,
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
@@ -408,6 +408,8 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
 /// an initializer may appear here (not in a condition, a loop's clauses or a JSON array, where it would run at a
 /// different time); `tmp`: hidden locals made so far.
 /// `markup`: inside code in markup (`{if ...}`), where a bare string statement writes itself: Some(false) in content, Some(true) in an attribute.
+/// Keys besides a letter or a digit that `from key("...")` names (the game platform's).
+pub const GAME_KEYS: [&str; 7] = ["space", "up", "down", "left", "right", "shift", "escape"];
 /// The sized number types of code, by the code `__mito__in` is given: a value kept in a `let`, `var`, parameter or result of such a type is tested against its range
 /// (a value outside fails the request with 400; the range analysis drops the test where it proves the value inside). 6 is `f32`: a value rounded to a float. `i64` and `f64` are the
 /// plain kinds and need no test; `u64` is not a value in code yet.
@@ -546,10 +548,15 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             // function. The command line is its request: `from arg(N)` the Nth argument, `from stdin` what was piped in, any other input
             // the flag `--name value`; the answer's body goes to stdout and a status of 400 or more makes the exit code 1 (runtime/cli.c)
             "main" => "MAIN".into(),
-            v => return Err(format!("`@{}`: an endpoint is `@get`, `@post`, `@put`, `@patch`, `@delete`, `@socket`, `@socket_message`, `@socket_close` or `@main`", v)),
+            // `@frame fn frame(dt: f64 from time, fwd: bool from key("w"), turn: f64 from mouse("dx")) -> Response<text>`: a game's function, called every frame with
+            // what the window saw (`from time` the seconds since the last frame, `from key("w")` whether a key is down, `from mouse("dx")` the pointer's movement since the
+            // last frame); its answer is the frame: the name of a shader and its uniforms as `name=value` words (runtime/game.c). `@shader fn terrain() -> Response<text>` gives
+            // one shader's source (a fragment shader drawn over the whole window), asked for once when the game starts.
+            "frame" => "FRAME".into(), "shader" => "SHADER".into(),
+            v => return Err(format!("`@{}`: an endpoint is `@get`, `@post`, `@put`, `@patch`, `@delete`, `@socket`, `@socket_message`, `@socket_close`, `@main`, `@frame` or `@shader`", v)),
         };
-        let segs = if method == "MAIN" {
-            if api.eps.iter().any(|e| e.method == "MAIN") { return Err("a program has one `@main` function".into()); }
+        let mut segs = if matches!(method.as_str(), "MAIN" | "FRAME" | "SHADER") {
+            if method != "SHADER" && api.eps.iter().any(|e| e.method == method) { return Err(format!("a program has one `@{}` function", verb)); }
             Vec::new()
         } else {
             p.eat("(")?;
@@ -559,6 +566,11 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
         };
         p.kw("fn")?;
         let name = p.id()?;
+        // a shader is asked for by its name
+        if method == "SHADER" {
+            if api.eps.iter().any(|e| e.method == "SHADER" && e.name == name) { return Err(format!("two shaders named `{}`", name)); }
+            segs = vec![Seg::Lit(name.clone())];
+        }
         p.eat("(")?;
         let mut inputs: Vec<Input> = Vec::new();
         while !p.sym(")") { let i = p.input(&method, &segs)?; if inputs.iter().any(|x| x.name == i.name) { return Err(format!("endpoint `{}`: two inputs named `{}`", name, i.name)); } inputs.push(i); p.sym(","); }
@@ -640,6 +652,22 @@ impl P {
             else if self.is_kw("body") { self.i += 1; Src::Body }
             // a command-line program's input: the Nth argument, or what was piped in (named as headers, as `:socket` is)
             else if self.is_kw("stdin") { self.i += 1; Src::Header(":stdin".into()) }
+            // a game's inputs: the seconds since the last frame, whether a key is down, how far the pointer moved
+            else if self.is_kw("time") { self.i += 1; Src::Header(":dt".into()) }
+            else if self.is_kw("key") {
+                self.i += 1; self.eat("(")?;
+                let k = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from key(\"w\")`", name)) };
+                self.eat(")")?;
+                if !(k.len() == 1 && k.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())) && !GAME_KEYS.contains(&k.as_str()) { return Err(format!("input `{}`: `{}` is not a key the game platform reads: a letter, a digit, {}", name, k, GAME_KEYS.join(", "))); }
+                Src::Header(format!(":key_{}", k))
+            }
+            else if self.is_kw("mouse") {
+                self.i += 1; self.eat("(")?;
+                let k = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from mouse(\"dx\")` (dx or dy)", name)) };
+                self.eat(")")?;
+                if k != "dx" && k != "dy" { return Err(format!("input `{}`: `from mouse(\"dx\")` or `\"dy\"`, the pointer's movement since the last frame", name)); }
+                Src::Header(format!(":mouse_{}", k))
+            }
             else if self.is_kw("arg") {
                 self.i += 1; self.eat("(")?;
                 let n = self.int()?;
@@ -655,7 +683,7 @@ impl P {
                 Src::Cookie(c)
             }
             else { self.kw("header")?; self.eat("(")?; let h = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from header(\"Name\")`, `from cookie(\"name\")`, `from query` or `from body`", name)) }; self.eat(")")?; Src::Header(h) }
-        } else if forwarded { Src::Fwd } else if in_path { Src::Path } else if matches!(method, "GET" | "DELETE" | "MAIN") { Src::Query } else { Src::Body };
+        } else if forwarded { Src::Fwd } else if in_path { Src::Path } else if matches!(method, "GET" | "DELETE" | "MAIN" | "FRAME" | "SHADER") { Src::Query } else { Src::Body };
         if in_path && src != Src::Path { return Err(format!("input `{}` is named in the path, so it comes from the path", name)); }
         if let InTy::Item(..) = ty { if default.is_some() || (optional && !matches!(src, Src::Cookie(_))) { return Err(format!("input `{}`: an item cannot have a default, and only one from a cookie can be optional (null when absent or not valid)", name)); } }
         if optional && !matches!(ty, InTy::Str(..) | InTy::Item(..)) { return Err(format!("input `{}`: only a string can be optional (null when absent); give it a default instead", name)); }
@@ -1600,7 +1628,7 @@ pub fn suggest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Str
     best.map_or(String::new(), |(_, c)| format!(" (did you mean `{}`?)", c))
 }
 /// The builtin functions, for suggestions.
-pub const BUILTIN_NAMES: &[&str] = &["int", "str", "len", "now", "random", "min", "max", "slot", "stat", "token", "or", "exists", "maxlen", "sqrt", "exp", "floor", "abs", "substr", "text_from", "wrapping_add", "wrapping_sub", "wrapping_mul", "log", "ok", "created", "no_content", "status"];
+pub const BUILTIN_NAMES: &[&str] = &["int", "str", "len", "now", "random", "min", "max", "slot", "stat", "token", "or", "exists", "maxlen", "sqrt", "exp", "sin", "cos", "atan2", "pow", "floor", "abs", "substr", "text_from", "wrapping_add", "wrapping_sub", "wrapping_mul", "log", "ok", "created", "no_content", "status"];
 
 /// A loop without a fixed extent (`while`, a `for` that is not counted): a range as long as it needs, stopped by `cond`, and
 /// counted against the request's step budget.

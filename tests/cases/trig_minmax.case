@@ -1,0 +1,32 @@
+// sin, cos, atan2, pow on floats (the platform's math library); min and max on integers, on floats, and on a float and an integer (a float)
+--- program
+struct S { n: i64; }
+state s: S;
+
+@get("/trig/{x}")
+fn trig(x: i64) -> Response<{ s: f64, c: f64, a: f64, p: f64 }> {
+    let r = x * 0.5;
+    return ok({ s: sin(r), c: cos(r), a: atan2(1, x), p: pow(x, 3) });
+}
+@get("/minmax/{x}")
+fn minmax(x: i64) -> Response<{ i_min: i64, i_max: i64, f_min: f64, f_max: f64, mixed_min: f64, mixed_max: f64 }> {
+    let f = x * 0.25;
+    return ok({ i_min: min(x, 3), i_max: max(x, 3), f_min: min(f, 1.5), f_max: max(f, 1.5), mixed_min: min(x, 2.5), mixed_max: max(2.5, x) });
+}
+@get("/clamp/{x}")
+fn clamp(x: i64) -> Response<{ v: f64 }> {
+    let f = x * 0.1;
+    return ok({ v: max(-1.4, min(1.4, f)) });
+}
+--- requests
+GET /trig/2
+GET /trig/3
+GET /trig/-4
+GET /minmax/0
+GET /minmax/2
+GET /minmax/5
+GET /minmax/-3
+GET /clamp/0
+GET /clamp/20
+GET /clamp/-20
+GET /clamp/7

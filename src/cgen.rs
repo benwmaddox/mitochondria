@@ -166,12 +166,20 @@ struct H {
 /* maths: the compiler's inline instructions where it has them, the platform's math library otherwise (the library Rust also calls) */
 #ifdef __clang__
 #define SQRT_(x) __builtin_sqrt(x)
+#define SIN_(x) __builtin_sin(x)
+#define COS_(x) __builtin_cos(x)
+#define ATAN2_(y, x) __builtin_atan2(y, x)
+#define POW_(x, y) __builtin_pow(x, y)
 #define EXP_(x) __builtin_exp(x)
 #define FLOOR_(x) __builtin_floor(x)
 #define FABS_(x) __builtin_fabs(x)
 #else
-double sqrt(double); double exp(double); double floor(double); double fabs(double);
+double sqrt(double); double exp(double); double floor(double); double fabs(double); double sin(double); double cos(double); double atan2(double, double); double pow(double, double);
 #define SQRT_(x) sqrt(x)
+#define SIN_(x) sin(x)
+#define COS_(x) cos(x)
+#define ATAN2_(y, x) atan2(y, x)
+#define POW_(x, y) pow(x, y)
 #define EXP_(x) exp(x)
 #define FLOOR_(x) floor(x)
 #define FABS_(x) fabs(x)
@@ -854,8 +862,23 @@ pub fn program_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>, web:
         let stdin = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":stdin"));
         return Ok(vec![program_c(prog, api, source)? + if stdin { "#define MITO_CLI_STDIN 1\n" } else { "" } + CLI]);
     }
+    // a program whose entry is `@frame` is a game: its `main` is runtime/game.c, which loads SDL3 and OpenGL when it starts
+    if api.eps.iter().any(|e| e.method == "FRAME") {
+        let shaders: Vec<&str> = api.eps.iter().filter(|e| e.method == "SHADER").map(|e| e.name.as_str()).collect();
+        let mut keys: Vec<String> = Vec::new();
+        for e in api.eps.iter().filter(|e| e.method == "FRAME") {
+            for i in &e.inputs { if let Src::Header(h) = &i.src { if let Some(k) = h.strip_prefix(":key_") { if !keys.iter().any(|x| x == k) { keys.push(k.to_string()); } } } }
+        }
+        let mouse = api.eps.iter().filter(|e| e.method == "FRAME").any(|e| e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h.starts_with(":mouse_"))));
+        let list = |v: &[String]| v.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
+        let defs = format!("{}#define MITO_USES_SDL3 1\n#define MITO_NSHADERS {}\nstatic const char *const mito_shader_names[] = {{ {} }};\n#define MITO_NKEYS {}\nstatic const char *const mito_key_names[] = {{ {} }};\n",
+            if mouse { "#define MITO_MOUSE 1\n" } else { "" }, shaders.len(), list(&shaders.iter().map(|s| s.to_string()).collect::<Vec<_>>()), keys.len(), if keys.is_empty() { "0".to_string() } else { list(&keys) });
+        return Ok(vec![program_c(prog, api, source)? + &defs + GAME]);
+    }
     Ok(vec![program_c(prog, api, source)? + web + "#define HTTP_SINGLE\n" + HTTP])
 }
+/// The window driver and `main` (runtime/game.c), for programs with `@frame`.
+pub const GAME: &str = include_str!("../runtime/game.c");
 /// The command-line driver and `main` (runtime/cli.c), for programs with `@main`.
 pub const CLI: &str = include_str!("../runtime/cli.c");
 
@@ -4504,7 +4527,7 @@ impl<'p> G<'p> {
             }
         }
         let generic = match bi {
-            B::Min | B::Max => !matches!(a.as_slice(), [CV::Int(_), CV::Int(_)]),
+            B::Min | B::Max => !matches!(a.as_slice(), [CV::Int(_) | CV::Flt(_), CV::Int(_) | CV::Flt(_)]),
             B::Slot => !matches!(a.first(), Some(CV::Item(..) | CV::Ref(..))),
             _ => BUILTINS[..14].contains(&bi) || BUILTINS[17..].contains(&bi),
         };
@@ -4568,9 +4591,20 @@ impl<'p> G<'p> {
             }
             B::Min | B::Max => {
                 let mut it = a.into_iter();
-                let (Some(CV::Int(x)), Some(CV::Int(y))) = (it.next(), it.next()) else { return no("min/max of something other than integers") };
-                let (x, y) = (self.hold_int(x), self.hold_int(y));
-                CV::Int(format!("({} {} {} ? {} : {})", x, if bi == B::Min { "<" } else { ">" }, y, x, y))
+                let (Some(x), Some(y)) = (it.next(), it.next()) else { return no("min/max take two numbers") };
+                let op = if bi == B::Min { "<" } else { ">" };
+                match (x, y) {
+                    (CV::Int(x), CV::Int(y)) => { let (x, y) = (self.hold_int(x), self.hold_int(y)); CV::Int(format!("({} {} {} ? {} : {})", x, op, y, x, y)) }
+                    // a float and an integer give a float, as the arithmetic operators do
+                    (x @ (CV::Flt(_) | CV::Int(_)), y @ (CV::Flt(_) | CV::Int(_))) => {
+                        let f = |v: CV| match v { CV::Flt(e) => e, CV::Int(e) => format!("(double)({})", e), _ => unreachable!() };
+                        let (x, y) = (f(x), f(y));
+                        let (tx, ty) = (self.tmp("f"), self.tmp("f"));
+                        self.line(&format!("double {} = {}, {} = {};", tx, x, ty, y));
+                        CV::Flt(format!("({} {} {} ? {} : {})", tx, op, ty, tx, ty))
+                    }
+                    _ => return no("min/max of something other than numbers"),
+                }
             }
             B::Count => {
                 let Some(CV::Coll(c, inst)) = a.first() else { return no("count(collection)") };
@@ -4610,9 +4644,15 @@ impl<'p> G<'p> {
                 Some(CV::Ref(..)) => return no("`slot(x)` of a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`"),
                 _ => unreachable!("generic above"),
             },
-            B::Sqrt | B::Exp | B::Floor => {
+            B::Atan2 | B::Pow => {
+                let name = if bi == B::Atan2 { "atan2" } else { "pow" };
+                let num = |v: &CV| match v { CV::Flt(e) => Some(e.clone()), CV::Int(e) => Some(format!("(double)({})", e)), _ => None };
+                let (x, y) = match a.as_slice() { [p, q] => match (num(p), num(q)) { (Some(x), Some(y)) => (x, y), _ => return no(format!("`{}` takes two numbers", name)) }, _ => return no(format!("`{}` takes two numbers", name)) };
+                CV::Flt(format!("{}_({}, {})", name.to_uppercase(), x, y))
+            }
+            B::Sqrt | B::Exp | B::Floor | B::Sin | B::Cos => {
                 // IEEE results, as the platform's math library gives them (a negative square root is NaN)
-                let name = match bi { B::Sqrt => "sqrt", B::Exp => "exp", _ => "floor" };
+                let name = match bi { B::Sqrt => "sqrt", B::Exp => "exp", B::Sin => "sin", B::Cos => "cos", _ => "floor" };
                 let x = match a.as_slice() { [CV::Flt(e)] => e.clone(), [CV::Int(e)] => format!("(double)({})", e), _ => return no(format!("`{}` takes one number", name)) };
                 CV::Flt(format!("{}_({})", name.to_uppercase(), x))
             }
@@ -5227,7 +5267,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];

@@ -1,0 +1,44 @@
+// `x as TYPE`: conversions that keep the low bits (to a signed type, the top bit is the sign); the compiler's ranges for masks apply to them
+--- program
+struct S { f: f64; }
+state s: S;
+
+@get("/ints/{x}")
+fn ints(x: i64) -> Response<{ u8: i64, i8: i64, u16: i64, i16: i64, u32: i64, i32: i64, i64: i64 }> {
+    return ok({ u8: x as u8, i8: x as i8, u16: x as u16, i16: x as i16, u32: x as u32, i32: x as i32, i64: x as i64 });
+}
+// FNV-1a over a byte count, in u32: the product of a u32 and a 25-bit prime fits in an i64, so the compiler needs no overflow test
+@get("/fnv/{n}")
+fn fnv(n: i64 in 0..1000) -> Response<{ h: i64 }> {
+    var h = 2166136261;
+    foreach i in 1..n { h = ((h ^ (i & 255)) * 16777619) as u32; }
+    return ok({ h: h });
+}
+@get("/mix/{x}")
+fn mix(x: i64) -> Response<{ a: f64, b: i64, c: i64 }> {
+    return ok({ a: x as f64 / 2, b: (x * 3) as u8 + 1, c: -x as i16 });
+}
+@post("/f/{n}")
+fn setf(n: i64) -> Response<{ i: i64 }> { s.f = n * 0.75; return ok({ i: s.f as i32 }); }
+--- requests
+GET /ints/0
+GET /ints/255
+GET /ints/256
+GET /ints/-1
+GET /ints/127
+GET /ints/128
+GET /ints/65535
+GET /ints/65536
+GET /ints/32768
+GET /ints/4294967295
+GET /ints/4294967296
+GET /ints/2147483648
+GET /ints/-2147483649
+GET /ints/9223372036854775807
+GET /fnv/0
+GET /fnv/1
+GET /fnv/100
+GET /mix/7
+GET /mix/100
+POST /f/10
+POST /f/-10

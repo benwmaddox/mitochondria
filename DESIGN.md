@@ -118,6 +118,10 @@ of its own when it declares its cap, `var acc: text<8192> = "";`: that many byte
 live at a recursive call; given back at the scope's end); `var t = ""` without a cap is an error that says to declare one. A function may return text (`-> text`): built for the request in
 its text area, as a builtin's result is; the caller copies it where it keeps it.
 
+**Conversions.** `x as u8` (also `u16`, `u32`, `i8`, `i16`, `i32`, `i64`, `f64`) always succeeds: to a narrower integer it keeps the low bits (`x as u8` is `x & 255`; to a signed
+type the top bit is the sign, so `255 as i8` is -1), so the ranges the compiler works out for masks apply to it and a `u32` computation (`h = ((h ^ b) * 16777619) as u32`) needs no overflow test; a float
+becomes an integer by truncation, as `int(x)`. `as` binds tighter than `*` and looser than a prefix `-`. `u64` and `f32` are stored in fields but are not yet values in code.
+
 **Text.** A text literal takes the escapes `\n` `\t` `\r` `\0` `\"` `\\` `\'` and `\u{HEX}` (a code point); any other is an error.
 `len`, `substr`, `contains`, `starts_with`, `ends_with`, `index_of`, `last_index_of`, `trim` (and `trim_start`,
 `trim_end`), `replace(t, a, b)`, `byte_at`, `lower` / `upper` with Unicode's full case mappings (as Ruby's downcase and upcase), and

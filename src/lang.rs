@@ -1083,9 +1083,33 @@ impl P {
         }
         Ok(l)
     }
+    /// `e as TYPE`, binding tighter than `*` and looser than a prefix `-` (as in Rust): a conversion that always succeeds. To a narrower integer
+    /// it keeps the low bits (`x as u8` is `x & 255`; to a signed type the top bit is the sign), so the compiler's ranges for masks apply to it;
+    /// `as i64` leaves an integer as it is, `as f64` makes a number a float. A float becomes an integer by truncation, as `int(x)` does.
     fn unary(&mut self) -> R<Expr> {
-        if self.sym("!") { return Ok(Expr::Un('!', Box::new(self.unary()?))); }
-        if self.sym("-") { return Ok(Expr::Un('-', Box::new(self.unary()?))); }
+        let mut e = self.unary_operand()?;
+        while self.is_kw("as") {
+            self.i += 1;
+            let ty = self.id()?;
+            let bits = match ty.as_str() { "u8" | "i8" => 8, "u16" | "i16" => 16, "u32" | "i32" => 32, "i64" => 64, "f64" => 0, _ => return Err(format!("`as {}`: a number converts `as` u8, u16, u32, i8, i16, i32, i64 or f64 (u64 and f32 are not values in code yet)", ty)) };
+            let int = |x: Expr| Expr::Call("int".into(), vec![x], CallRes::Unbound);
+            e = if bits == 0 { Expr::Bin("*".into(), Box::new(e), Box::new(Expr::Float(1.0))) }
+                else if bits == 64 { int(e) }
+                else {
+                    let mask = (1i64 << bits) - 1;
+                    let low = Expr::Bin("&".into(), Box::new(int(e)), Box::new(Expr::Int(mask)));
+                    if ty.starts_with('u') { low } else {
+                        // sign: flip the top bit, then take it away
+                        let half = 1i64 << (bits - 1);
+                        Expr::Bin("-".into(), Box::new(Expr::Bin("^".into(), Box::new(low), Box::new(Expr::Int(half)))), Box::new(Expr::Int(half)))
+                    }
+                };
+        }
+        Ok(e)
+    }
+    fn unary_operand(&mut self) -> R<Expr> {
+        if self.sym("!") { return Ok(Expr::Un('!', Box::new(self.unary_operand()?))); }
+        if self.sym("-") { return Ok(Expr::Un('-', Box::new(self.unary_operand()?))); }
         self.postfix()
     }
     fn postfix(&mut self) -> R<Expr> {

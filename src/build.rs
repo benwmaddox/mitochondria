@@ -253,6 +253,52 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The open-world example through a real window (runtime/game.c): built, run for a few frames of a hidden window, and the frame it saved read back. Needs SDL3 and a GPU, so it
+    /// runs only when asked: `MITO_SDL3_DIR=<directory holding SDL3.dll> cargo test game_renders_the_world -- --ignored`.
+    #[test]
+    #[ignore]
+    fn game_renders_the_world() {
+        let Some(sdl) = std::env::var_os("MITO_SDL3_DIR") else { eprintln!("MITO_SDL3_DIR is not set: skipped"); return };
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/world/world.mito");
+        let text = std::fs::read_to_string(&example).unwrap();
+        crate::lang::set_file_dir(example.parent().unwrap());
+        let (st, code) = crate::source::load(&text).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap_or_else(|e| panic!("{}", e));
+        let dir = std::env::temp_dir().join(format!("mito-game-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(format!("world{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, true, &[]).unwrap();
+        let shot = dir.join("frame.ppm");
+        let path = format!("{};{}", sdl.to_string_lossy(), std::env::var("PATH").unwrap_or_default());
+        let out = std::process::Command::new(&exe).args(["--frames", "3", "--size", "320x180", "--screenshot"]).arg(&shot).env("PATH", path).output().unwrap();
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let ppm = std::fs::read(&shot).unwrap();
+        let header = b"P6\n320 180\n255\n";
+        assert!(ppm.starts_with(header) && ppm.len() == header.len() + 320 * 180 * 3, "a 320x180 frame");
+        let px = &ppm[header.len()..];
+        let at = |x: usize, y: usize| { let i = (y * 320 + x) * 3; (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32) };
+        // not blank, and a picture: the sky at the top is bluer than the ground at the bottom is blue, and the rows differ
+        let (top, bottom) = (at(160, 5), at(160, 170));
+        assert!(top != (0, 0, 0) && bottom != (0, 0, 0), "a black frame: {:?} {:?}", top, bottom);
+        assert!(top.2 > top.0, "the sky is blue: {:?}", top);
+        assert!(top != bottom, "the sky and the ground differ");
+        // the controls: the same world after running forward for two seconds, and after the pointer turned, is another picture (the same frames at rest are the same picture)
+        let render = |extra: &[&str], name: &str| -> Vec<u8> {
+            let f = dir.join(name);
+            let out = std::process::Command::new(&exe).args(["--size", "320x180", "--screenshot"]).arg(&f).args(extra).env("PATH", format!("{};{}", sdl.to_string_lossy(), std::env::var("PATH").unwrap_or_default())).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+            std::fs::read(&f).unwrap()[header.len()..].to_vec()
+        };
+        let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).abs() as f64).sum::<f64>() / a.len() as f64;
+        let rest = render(&["--frames", "1"], "rest.ppm");
+        assert!(differ(&rest, &render(&["--frames", "1"], "rest2.ppm")) == 0.0, "a frame at rest is repeatable");
+        assert!(differ(&rest, &render(&["--frames", "120", "--hold", "w,shift"], "walk.ppm")) > 3.0, "running forward moves the view");
+        assert!(differ(&rest, &render(&["--frames", "1", "--mouse", "160,0"], "turn.ppm")) > 2.0, "the pointer turns the view");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A command-line program (`@main`): arguments, flags and stdin are its inputs, its answer goes to stdout, an answer of 400 or more to stderr with exit code 1.
     #[test]
     fn a_main_program_is_a_command_line_tool() {

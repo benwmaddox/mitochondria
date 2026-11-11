@@ -1,0 +1,13 @@
+GET /trig/2 -> 200 {"s":0.8414709848078965,"c":0.5403023058681398,"a":0.4636476090008061,"p":8}
+GET /trig/3 -> 200 {"s":0.9974949866040544,"c":0.0707372016677029,"a":0.3217505543966422,"p":27}
+GET /trig/-4 -> 200 {"s":-0.9092974268256817,"c":-0.4161468365471424,"a":2.896613990462929,"p":-64}
+GET /minmax/0 -> 200 {"i_min":0,"i_max":3,"f_min":0,"f_max":1.5,"mixed_min":0,"mixed_max":2.5}
+GET /minmax/2 -> 200 {"i_min":2,"i_max":3,"f_min":0.5,"f_max":1.5,"mixed_min":2,"mixed_max":2.5}
+GET /minmax/5 -> 200 {"i_min":3,"i_max":5,"f_min":1.25,"f_max":1.5,"mixed_min":2.5,"mixed_max":5}
+GET /minmax/-3 -> 200 {"i_min":-3,"i_max":3,"f_min":-0.75,"f_max":1.5,"mixed_min":-3,"mixed_max":2.5}
+GET /clamp/0 -> 200 {"v":0}
+GET /clamp/20 -> 200 {"v":1.4}
+GET /clamp/-20 -> 200 {"v":-1.4}
+GET /clamp/7 -> 200 {"v":0.7000000000000001}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

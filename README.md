@@ -35,8 +35,8 @@ an out-of-memory kill, and peak memory is known before the program runs. In retu
 Start with the [tutorial](docs/tutorial.md). The design is in [DESIGN.md](DESIGN.md); every command, option, built-in and library module is listed in [docs/reference.md](docs/reference.md).
 
 **Kinds of programs.** A program is built for a *platform*, which is its entry file's: a **web** program has endpoints (`@get`, `@post`, ...) and is a server; a **cli** program has one `@main` function and is a
-command-line tool (arguments, stdin and flags in, stdout out, an exit code); a **test** program is tests only. `platform cli;` on a line of its own says so, or the entry points show it. A platform is a driver plus a list of
-named libraries, and the compiler refuses what does not belong to it (a cookie in a command-line tool, a table without SQLite). A game platform (a window and shaders through SDL3) is planned.
+command-line tool (arguments, stdin and flags in, stdout out, an exit code); a **game** program has an `@frame` function and `@shader`s and opens a window (SDL3 and OpenGL, loaded when it starts); a **test** program is tests only. `platform cli;` on a line of its own says so, or the entry points show it. A platform is a driver plus a list of
+named libraries, and the compiler refuses what does not belong to it (a cookie in a command-line tool, a table without SQLite).
 
 ```
 mito serve examples/todomvc/todomvc.mito --port 8080                       # a server
@@ -53,6 +53,7 @@ mito build examples/jx/jx.mito -o jx                                         # a
 | [examples/todomvc](examples/todomvc) | web | server-rendered pages, tables in SQLite, the answer cache |
 | [examples/notes](examples/notes) | web | a multi-file app on tables: accounts, per-user notes, search |
 | [examples/jx](examples/jx) | cli | a small jq in three files |
+| [examples/world](examples/world) | game | an open world to walk through, painted in broad brush strokes by one fragment shader |
 
 **Web pages.** Programs can answer HTML written as markup in the code, take HTML form posts and cookies, and serve their
 stylesheet and script compiled in. [examples/todomvc](examples/todomvc) is TodoMVC rendered on the server, checked in a browser

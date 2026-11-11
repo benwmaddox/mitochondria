@@ -51,7 +51,7 @@ mod tests {
             if !mentioned(&docs, &n) { missing.push(format!("built-in `{}`", n)); }
         }
         // executable options and the build's own
-        for src in [read("runtime/http.c"), read("src/main.rs")] {
+        for src in [read("runtime/http.c"), read("runtime/game.c"), read("src/main.rs")] {
             let mut rest = src.as_str();
             while let Some(i) = rest.find("\"--") {
                 let r = &rest[i + 1..];

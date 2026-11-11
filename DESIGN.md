@@ -338,7 +338,7 @@ no index or overflow test. A store whose value has no known interval (a value fr
 operands allow. `MITO_EXPLAIN_INDEX=1 mito emit-c prog.mito` lists the index tests that remain and what is known of each index.
 
 ## Platforms
-A program says what it is built for with `platform web;`, `platform cli;` or `platform test;` on a line of its own in its entry file (`game` is reserved: not built yet). The platform is the
+A program says what it is built for with `platform web;`, `platform cli;` or `platform test;` or `platform game;` on a line of its own in its entry file. The platform is the
 entry file's: the file given to `mito build`, `run`, `serve` or `check`, so a server and a tool can be two entry files over the same modules, each with its own platform. There is no
 command-line switch. An entry file that names none is the platform its entry points show: `@get` and the like make it web, `@main` cli.
 
@@ -349,7 +349,7 @@ A platform is a driver, the entry points it allows, the built-ins it allows and 
 | `web` | the HTTP server (runtime/http.c) | `@get` `@post` ... `@socket`, `@every`, `@start` | SQLite, zlib, HTML parsing, crypto | `@main` |
 | `cli` | the command-line driver (runtime/cli.c) | `@main`, `@start` | crypto | endpoints; `set_cookie`, the answer cache, `html_parse`, sockets; tables, `gzip;` |
 | `test` | the test runner (`mito test`) | none (`test "..." { }` blocks, `@start`) | as web | `@main`, endpoints |
-| `game` | a window loop (SDL3) | `@frame` | crypto | not built yet |
+| `game` | the window loop (runtime/game.c) | `@frame`, `@shader`, `@start` | sdl3, crypto | endpoints, `@main`; `set_cookie`, the answer cache, `html_parse`, sockets; tables |
 
 A build has exactly one platform (its entry file's). Libraries are named items (`sqlite`, `zlib`, `html`, `crypto`; `sdl3` with the game) and a platform is a driver plus a list of them, so
 platforms share libraries by name (web and a game both bundle `crypto`). Direction: developers are to be able to add libraries (a name, the C sources or system library to link, and what shows a
@@ -358,6 +358,30 @@ both are tables in src/platform.rs (`LIBRARIES`, and `Platform::libraries`), whi
 
 The checks run when the program is compiled (`check`, `build`, `run`, `serve`) and say which platform the program is for and what does not belong to it. The library check looks at what
 the generated C needs (`MITO_USES_SQLITE`, `_ZLIB`, `_HTML`, `_CRYPTO`) against the platform's bundle, so a command-line program that declares a table is refused at compile time, not when it runs.
+
+## Games
+A program whose entry is `@frame` is a game: `platform game;`, a `@frame` function and one or more `@shader` functions. The driver (runtime/game.c) opens a window with an OpenGL 3.3 core context, asks each `@shader` function for its source once, and
+calls `@frame` every frame. SDL3 (3.2 or newer) and the system's OpenGL are loaded when the game starts, with no header and nothing linked or vendored; a machine without SDL3 is told so.
+
+```
+@shader fn terrain() -> Response<text> { return ok(file("terrain.frag")); }
+
+@frame
+fn frame(dt: f64 from time, forward: bool from key("w"), look_x: f64 from mouse("dx")) -> Response<text> {
+    world.yaw += look_x * 0.0025;
+    if forward { world.z += 7.0 * dt; }
+    return ok("terrain z=" + str(world.z) + " yaw=" + str(world.yaw));
+}
+```
+
+The frame function's inputs are what the window saw (`from time` the seconds since the last frame, `from key("w")` whether a key is down, `from mouse("dx")` the pointer's movement since the last frame). Its answer is the
+frame: a line for each pass, the name of a shader and then its uniforms as `name=value` words. A shader is a fragment shader (`#version 330 core`) drawn over the whole of what it draws on with one triangle; the driver's vertex shader gives `in vec2 vUv`, 0..1 across it, and the
+driver sets `uniform vec2 uResolution`, its size in pixels. A `uniform float` the answer names gets its value. A frame that names a shader that does not exist, or a uniform without a number, stops the game with a message.
+A pass can draw into an image instead of the window: `scene@0.25 px=1 pz=2` draws the shader `scene` into an image a quarter of the window's width and height (one image, 16-bit floats so that light can exceed 1, kept between frames and made again when the window or the scale changes),
+and a pass after it that draws on the window reads that image as `uniform sampler2D uImage`. That is how an expensive picture is drawn small and used large: examples/world draws its world at a quarter of the window's size and paints from it, 23 times faster than doing both for every pixel (1.2 ms against 28 ms a frame at 1280x720).
+The picture is made on the GPU and the rules stay in the program: state and rules are ordinary Mitochondria (fixed-size state, `sin`, `cos`, `min`, `max` on floats), and the game's logic can be tested without a window like any other program's.
+`--frames N --screenshot f.ppm` renders N frames in a window that is not shown and saves the last, to look at or to test with (src/build.rs, `game_renders_the_world`, needs SDL3 and a GPU, so it runs only when asked).
+`examples/world` is an open world made this way. Not built yet: tables in a game, sound, mouse buttons, more than one offscreen image.
 
 ## Command-line programs
 A program whose entry is `@main` is a tool, not a server: `@main fn main(filter: utf8<1..1000> from arg(0), doc: utf8<33554432> from stdin, c: bool = false) -> Response<text>`.

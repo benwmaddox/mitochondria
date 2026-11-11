@@ -1,0 +1,50 @@
+// The notebook: a user's notes, newest first, searchable by a word in the title or by a tag.
+
+@get("/")
+fn home(me: User? from cookie("me"), q: utf8<60> = "", tag: utf8<30> = "") -> Response<html> {
+    if !exists(me) { return see_other("/signin"); }
+    return ok(<!doctype html><html lang="en">{notes_page(me, trim(q), trim(tag), -1);}</html>);
+}
+
+@get("/notes/{id}")
+fn open_note(me: User from cookie("me"), id: i64) -> Response<html> {
+    return ok(<!doctype html><html lang="en">{notes_page(me, "", "", id);}</html>);
+}
+
+@post("/notes")
+fn add_note(me: User from cookie("me"), title: utf8<200>, body: utf8<20000> = "", tags: utf8<100> = "") -> Response<html> {
+    let n = me.notes.add();
+    n.title = or_untitled(trim(title));
+    n.body = body;
+    n.tags = lower(trim(tags));
+    n.updated = now();
+    return see_other("/notes/" + str(slot(n)));
+}
+
+@post("/notes/{id}")
+fn save_note(me: User from cookie("me"), id: i64, title: utf8<200>, body: utf8<20000> = "", tags: utf8<100> = "") -> Response<html> {
+    let n = me.notes[id];
+    n.title = or_untitled(trim(title));
+    n.body = body;
+    n.tags = lower(trim(tags));
+    n.updated = now();
+    return see_other("/notes/" + str(id));
+}
+
+@post("/notes/{id}/delete")
+fn delete_note(me: User from cookie("me"), id: i64) -> Response<html> {
+    me.notes.remove(me.notes[id]);
+    return see_other("/");
+}
+
+fn or_untitled(t: text) -> text {
+    if len(t) == 0 { return "Untitled"; }
+    return t;
+}
+
+// does a note match what the search box and the tag filter ask for? (a word in the title, a whole tag)
+fn matches(n: Note, q: text, tag: text) -> bool {
+    if len(q) > 0 && !contains(lower(n.title), lower(q)) { return false; }
+    if len(tag) > 0 && !contains(" " + n.tags + " ", " " + tag + " ") { return false; }
+    return true;
+}

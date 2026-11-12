@@ -1,5 +1,5 @@
 //! `mito build`: a program or a system as one executable, its HTTP server included (runtime/http.c).
-//! clang (optimised) by default; `--tcc` builds with the bundled TinyCC in a few milliseconds, for development.
+//! clang (optimized) by default; `--tcc` builds with the bundled TinyCC in a few milliseconds, for development.
 
 /// The clang to build with: `MITO_CLANG`, or LLVM's default install on Windows, `clang` on the path elsewhere. None if not found.
 pub fn clang() -> Option<String> {
@@ -175,7 +175,7 @@ fn cached_object(what: &str, tag: &str, files: &[(&str, &str)], unit: &str, flag
     Ok(obj)
 }
 
-/// Build C translation units into the executable `out`: with TinyCC (`tcc`), or else clang with `flags` (default -O3, the optimisation level of Rust's release profile, which the benchmarks compare with).
+/// Build C translation units into the executable `out`: with TinyCC (`tcc`), or else clang with `flags` (default -O3, the optimization level of Rust's release profile, which the benchmarks compare with).
 pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -> Result<(), String> {
     let tcc_wanted = tcc;
     // a directory of its own per build: builds in one process (parallel tests) would otherwise remove each other's
@@ -190,7 +190,7 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
         cs.push(c);
     }
     let tcc = tcc && has_tcc();
-    let quick = flags.is_empty() && !tcc && tcc_wanted; // `--tcc` without a TinyCC: clang without optimising
+    let quick = flags.is_empty() && !tcc && tcc_wanted; // `--tcc` without a TinyCC: clang without optimizing
     let mut cmd = if tcc {
         let mut c = std::process::Command::new(tcc_exe());
         c.args(["-w"]).args(flags);

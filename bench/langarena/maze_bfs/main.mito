@@ -1,6 +1,6 @@
 // LangArena Maze::BFS (kostya/LangArena, MIT): breadth-first search for the shortest path through a generated maze, 70 times.
 // The reference's maze: a w x h grid (1400 x 1400 for the run parameters) of cell objects, each with its kind (wall, space, start, finish, border), its coordinates
-// and its own array of four neighbours in an order shuffled by the reference's random generator when the maze is built. A pool of cells, cell (x, y) is slot
+// and its own array of four neighbors in an order shuffled by the reference's random generator when the maze is built. A pool of cells, cell (x, y) is slot
 // y * w + x, built and linked in prepare with the reference's random sequence (the reference builds the maze in its constructor, with the generator at its
 // starting value, which is what a fresh program has). Kinds: 0 wall, 1 space, 2 start, 3 finish, 4 border; walkable is space, start or finish.
 // The checksum is the sum of the path lengths plus the x * y of the middle cell of the last path.
@@ -76,7 +76,7 @@ fn dig(y0: i64, x0: i64) {
         }
     }
 }
-// the reference's ensure_open_finish, recursive: which neighbours are walls is decided before any recursion, as the reference collects them first
+// the reference's ensure_open_finish, recursive: which neighbors are walls is decided before any recursion, as the reference collects them first
 fn ensure_open_finish(y: i64, x: i64) {
     let w = m.w;
     let c = m.cells[y * w + x];

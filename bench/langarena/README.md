@@ -69,7 +69,7 @@ Ported = verified here. Portable = expressible with the language as it is, not y
 | 41-42 | Compress::BWTEncode / BWTDecode | ported (encode's merge sort skips ordered merges: first version without that was 4.98x of Rust, because the reference's library sort detects ordered runs) |
 | 43-44 | Compress::HuffEncode / HuffDecode | ported |
 | 45-46 | Compress::ArithEncode / ArithDecode | ported |
-| 47-48 | Compress::LZWEncode / LZWDecode | ported (encode keys its dictionary by (prefix code, byte) instead of the whole string; decode keeps its entries in one array instead of one Vec each; both favour Mitochondria: excluded from the geometric mean) |
+| 47-48 | Compress::LZWEncode / LZWDecode | ported (encode keys its dictionary by (prefix code, byte) instead of the whole string; decode keeps its entries in one array instead of one Vec each; both favor Mitochondria: excluded from the geometric mean) |
 | 49-50 | Distance::Jaro / NGram | ported (NGram uses the new lib/intmap hash map) |
 
 Counts now: 41 ported (the 7 in the first batch, both BF tests, NeuralNet, TextRaytracer, then Nbody, CRC32, SHA256, GameOfLife, the three graph tests, the three maze tests, and both Binarytrees), 9 not comparable (the three threaded

@@ -118,7 +118,7 @@ GET /board?top=2    {"top":[{"name":"ada","points":400},{"name":"bo","points":34
 
 ## 5. All or nothing
 
-State is unlogged by default: a request that fails leaves what it wrote, which is the cheap behaviour and the right one when a program checks before it writes. Declare the state `logged` (`state game: Game logged;`) and a failed request is undone completely; this program does, because `record` counts the game and appends it before checking the score:
+State is unlogged by default: a request that fails leaves what it wrote, which is the cheap behavior and the right one when a program checks before it writes. Declare the state `logged` (`state game: Game logged;`) and a failed request is undone completely; this program does, because `record` counts the game and appends it before checking the score:
 
 ```
 GET /stats                                 {"players":3,"games":5,...}
@@ -204,7 +204,7 @@ GET /board
 ```
 
 With the environment variable `MITO_BLESS=1` set, `cargo test cases` records the answers; after that `cargo test`
-checks them on every build (TinyCC, clang, and clang with undefined-behaviour checks).
+checks them on every build (TinyCC, clang, and clang with undefined-behavior checks).
 
 ## 10. A command-line program
 
@@ -246,7 +246,7 @@ where the operators `+ - *` fail on overflow. `u64` is stored in fields but is n
 
 ## Next
 
-- `mito build examples/scoreboard/score.mito -o score.exe` makes an optimised executable; `emit-c` writes the C it is made of.
+- `mito build examples/scoreboard/score.mito -o score.exe` makes an optimized executable; `emit-c` writes the C it is made of.
 - [reference.md](reference.md) lists every command, option, built-in and library module; `examples/notes` is a multi-file app on tables and `examples/jx` a command-line tool.
 - `examples/chat` adds sessions (`who: Session from header("X-Session")`); `examples/chat-sharded` runs workers on
   several threads.

@@ -40,7 +40,7 @@ Decided against, for now: request-local scratch arrays (unlogged state, now the 
   last good build keeps serving.
 - State is lost on restart (the reservation is the process's). Optional: `--replay requests.txt` sends a request script after
   each restart to rebuild state (the same request format as test files, 3.1).
-- Done when: editing an example under `serve --watch` shows the new behaviour within a second.
+- Done when: editing an example under `serve --watch` shows the new behavior within a second.
 - Done: the watcher polls the program's modification time (a system: every `.mito` file beside it) every 100 ms; a save is
   answered by the new build 200-340 ms later (TinyCC build 30-45 ms, restart 50-80 ms). A compile error is printed and the old
   server keeps serving; the servers stop with the watcher (a job object). Not yet: `--replay`, which waits for the request
@@ -60,7 +60,7 @@ Decided against, for now: request-local scratch arrays (unlogged state, now the 
   past it the request fails (500, "loop ran too long", with its line), so a mistaken infinite loop cannot hold a worker.
 - `each ... while` and `[each ...]` (in answers) become `foreach`; old forms get a message saying what to write.
 - Done when: the ports and examples are rewritten without fake bounds (`each step in 0..1000000000 while ...`) or flag variables, and
-  the loop-versioning optimisations still apply (they key on a counter and its bounds, which `for` gives directly).
+  the loop-versioning optimizations still apply (they key on a counter and its bounds, which `for` gives directly).
 - Done: `foreach item[, i] in coll` (the index counts the live items visited, not slots), `for [var] i = e; cond; step` (`i` is a new
   variable of the loop), `while cond`, `break`, `continue` (in a `for` it still runs the step), parentheses optional on every head.
   `each` and `[each ...]` are errors that say what to write. A counted `for` (`i < n` / `i <= n`, step `i += 1`, neither changed in the
@@ -81,7 +81,7 @@ Decided against, for now: request-local scratch arrays (unlogged state, now the 
   `foreach i in 0..n - 1`, or better `foreach x, i in array` (no range at all). Every program is migrated by a one-time rewrite of loop
   ranges (`0..n` becomes `0..n - 1`), and for one release a loop range is flagged with a message saying it now includes its end.
 - Open: a half-open form for the many `0..n - 1` loops (`0..<n`, as Swift)? Proposal: decide after the rewrite shows how often it is needed.
-- Done when: the ports, examples, tests and docs use the new meaning, and the loop-versioning optimisations still apply.
+- Done when: the ports, examples, tests and docs use the new meaning, and the loop-versioning optimizations still apply.
 - Done: shipped together with `foreach` so no loop changed meaning silently: `each` (end excluded) is an error, `foreach` includes the
   end. A one-time rewrite turned 653 loops `each i in a..b` into `foreach i in a..b - 1` (numbers lowered by one, `+ 1` dropped); the
   parser takes a trailing `- 1` off again, so 47 of 52 programs give byte-identical C and 5 fold a `constant + 1` they computed before.
@@ -93,7 +93,7 @@ Decided against, for now: request-local scratch arrays (unlogged state, now the 
   and a body that returns something other than its declared result is an error in the body.
 - This removes the recursion rule (below) and the guessing behind it, gives better errors, and lets functions be compiled once
   instead of once per argument kind.
-- Done when: the library modules, ports and examples are typed, and the per-kind specialisation of recursive functions is gone.
+- Done when: the library modules, ports and examples are typed, and the per-kind specialization of recursive functions is gone.
 - Done: parameters and results are required and checked at each call and `return` (`parameter `p` of `f` is `P`, given a string`;
   a value that may be null passed for `P` says to check it or declare `P?`; an integer widens to `f64`). Types: integers, `f32`/`f64`,
   `bool`, `string`, item types (`Player`, or `Player in game.players` when several collections hold it; inside a module instance
@@ -260,7 +260,7 @@ or had the benchmark harness generate the text). There are two text kinds, both 
 
 ## Phase 6: from the Campfire port (review of 2026-11-06)
 
-A 2,300-line Campfire app (Rails' behaviour, on Rails' database) showed the memory model paying off (49 MB under load, reads in
+A 2,300-line Campfire app (Rails' behavior, on Rails' database) showed the memory model paying off (49 MB under load, reads in
 parallel with no app changes, 0.07-0.14 ms a sidebar) and where it costs the developer. Worked through in this order.
 
 ### 6.1 Request scratch zeroed only where an endpoint can touch it

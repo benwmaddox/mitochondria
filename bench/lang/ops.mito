@@ -1,5 +1,5 @@
 // One common operation per endpoint, repeated n times inside the request: the cost of each, read from the server's own
-// timer (bench/lang/ops.py). Each endpoint answers a sum so the work is not optimised away.
+// timer (bench/lang/ops.py). Each endpoint answers a sum so the work is not optimized away.
 struct Item { id: i64; x: i64; f: f64; b: bool; name: string<16>; next: i64; } // next: an item's slot
 struct Ev { at: i64; v: i64; }
 struct Ops {

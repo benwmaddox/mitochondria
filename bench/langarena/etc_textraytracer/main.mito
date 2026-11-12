@@ -11,7 +11,7 @@ fn one_run() {
     var total = sc.result;
     foreach row in 0..sc.h - 1 {
         foreach column in 0..sc.w - 1 {
-            // the primary ray, normalised
+            // the primary ray, normalized
             let raw_x = (column * 1.0 - fw / 2.0) / fw;
             let raw_y = (row * 1.0 - fh / 2.0) / fh;
             let inverse = 1.0 / sqrt(raw_x * raw_x + raw_y * raw_y + 1.0 * 1.0);

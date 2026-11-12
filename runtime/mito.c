@@ -3,7 +3,7 @@
    Runs a compiled program: one reservation for the declared layout with pages committed where bytes are live, a write
    journal for exact rollback, requests in a fixed text area and response area, and the helper table (`H`) the
    generated endpoints call. It uses no heap: everything comes from reservations made at start and committed as used.
-   It reproduces the Rust runtime's behaviour exactly (tests/cases check both against the same records). */
+   It reproduces the Rust runtime's behavior exactly (tests/cases check both against the same records). */
 
 /* The operating system's part (memory, clock, randomness, standard error) is runtime/os.c, included before this file. */
 static u64 up(u64 n, u64 to) { return (n + to - 1) / to * to; }

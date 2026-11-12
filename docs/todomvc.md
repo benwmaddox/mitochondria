@@ -18,7 +18,7 @@ what it needs is added to the language as general features.
 | Tests | crudspec's app-spec checks (e2e.mjs, Playwright) ported and run against the server. |
 | Benchmark | Page render and action latency and memory against crudspec's Go build of the same app. |
 
-## Behaviour
+## Behavior
 
 - `GET /`, `/active`, `/completed`: the whole page. Each form posts and the answer is `303 See Other` back to the page it came from.
 - New todo: the title is trimmed; an empty one is ignored. Toggle one, toggle all (all complete, or all active again when all

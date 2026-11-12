@@ -202,7 +202,7 @@ def run_mito(test, name, exe, cfg, params, float_result):
         call("POST", f"/warmup/{warm}")
         secs, _ = call("POST", f"/run/{iters}")
         _, res = call("GET", "/result" if float_result else "/checksum")
-        if float_result == "matmul":      # the centre value is the same every run: the reference adds its hash once per run
+        if float_result == "matmul":      # the center value is the same every run: the reference adds its hash once per run
             got = (checksum_f64(res["result"]) * (warm + iters)) % 4294967296
         elif float_result == "nbody":     # (hash(energy before) << 5) & hash(energy after), in 32 bits
             got = ((checksum_f64(res["v1"]) << 5) & 0xFFFFFFFF) & checksum_f64(res["v2"])

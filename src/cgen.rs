@@ -121,7 +121,7 @@ struct H {
 };
 /* The safety profile (see `check_profile`). Endpoint bodies touch memory, do integer arithmetic and call helpers only
    through these forms. Loads under clang go through memcpy (one instruction), so reading bytes the runtime wrote is
-   defined behaviour whatever the aliasing rules; TinyCC does no alias analysis, so a plain load is the same thing there. */
+   defined behavior whatever the aliasing rules; TinyCC does no alias analysis, so a plain load is the same thing there. */
 #define AT(off, idx, size) (b + (off) + (i64)(idx) * (size))
 #ifdef __clang__
 #define LD_(T, off, idx, size) ({ T v_; __builtin_memcpy(&v_, AT(off, idx, size), size); v_; })
@@ -210,7 +210,7 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 #define NMOD(r, x, y) i64 r = (x) % (y)
 #define TX_(i) (tx_[(i)]) /* a byte of the request's text area, where strings that are not in state live */
 /* MITO_MEASURE_NO_JOURNAL, MITO_MEASURE_NO_COMMIT and MITO_MEASURE_NO_RANGE are for measuring what the tests cost only: without the undo log a failed
-   request is not rolled back; without commit tests all state is committed at start; without range tests an index out of range is undefined behaviour */
+   request is not rolled back; without commit tests all state is committed at start; without range tests an index out of range is undefined behavior */
 #ifdef MITO_MEASURE_NO_JOURNAL
 #define SAVE_(a, size) do { } while (0)
 #else
@@ -2132,7 +2132,7 @@ impl<'p> G<'p> {
     /// stepped variable) plus or minus a value the loop does not change. Emit, before the loop, a test that every such index
     /// stays inside its array for the whole loop, and save the ranges the loop stores into to the undo log in one pass when it
     /// does. Returns the test's C name and the accesses the fast copy may do without their own range test and undo-log test;
-    /// None when the loop has no such access. The checked copy runs when the test fails, so behaviour is unchanged.
+    /// None when the loop has no such access. The checked copy runs when the test fails, so behavior is unchanged.
     fn version_guard(&mut self, it: &'p Iter, body: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<Option<(String, std::collections::HashSet<*const Expr>, Vec<(String, (i64, i64))>, Option<(i64, i64)>)>> {
         let (Some(hi), None) = (&it.hi, &it.via) else { return Ok(None) };
         if self.versioned >= 3 { return Ok(None); }
@@ -2592,7 +2592,7 @@ impl<'p> G<'p> {
                     if let (CV::Int(name), Some(r)) = (&v, masked_var_range(rest, *slot, e)) {
                         self.ranges.insert(name.clone(), r);
                         // a range inside 0..2^32-1: the C variable is a `u32` (a sum or hash kept to 32 bits then is a plain 32-bit reduction for the C compiler, which
-                        // vectorises it); every read casts it back to `i64`
+                        // vectorizes it); every read casts it back to `i64`
                         if r.0 >= 0 && r.1 <= u32::MAX as i64 {
                             let decl = format!("i64 {} = ", name);
                             if let Some(at) = self.body.rfind(&decl) { self.body.replace_range(at..at + 3, "u32"); self.u32_vars.insert(name.clone()); }

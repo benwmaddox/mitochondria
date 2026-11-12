@@ -1,7 +1,7 @@
 // a module instance (lib/bag.mito): its functions, its state read from outside, and references to its items
 --- program
 struct Score { name: string<16>; points: i64; }
-struct Fav { s: i64; } // the favourite's slot + 1; 0 for none
+struct Fav { s: i64; } // the favorite's slot + 1; 0 for none
 struct App {
     scores: bag<Score, 3>;
     others: bag<Score, 2>;

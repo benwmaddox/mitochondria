@@ -1,5 +1,5 @@
 //! Cases (`tests/cases/*.case`): a state, an api and a request script each. Every case runs on every backend (the C
-//! runtime built by TinyCC, by clang, and by clang with undefined-behaviour checks); the logs must match each other and
+//! runtime built by TinyCC, by clang, and by clang with undefined-behavior checks); the logs must match each other and
 //! the recorded `.out` file. `MITO_BLESS=1 cargo test cases` records the TinyCC build's log.
 //!
 //! A case is one program (`--- program`, a `.mito` file) or a system of workers (`--- system` holding a system file,
@@ -71,7 +71,7 @@ pub struct CBackend { _code: Code, m: *mut std::ffi::c_void, f: CFns, pairs: Vec
 pub struct MitoPair { pub k: *const u8, pub kn: u32, pub v: *const u8, pub vn: u32 }
 enum Code { Tcc(crate::tcc::Unit), Dll(*mut std::ffi::c_void) }
 use crate::tcc::{dl_open, dl_sym};
-/// clang's undefined-behaviour checks in trap mode (no runtime library: a violation stops the process at once), and
+/// clang's undefined-behavior checks in trap mode (no runtime library: a violation stops the process at once), and
 /// array bounds: overflow of signed integers, shifts, out-of-range indexes into the C runtime's fixed arrays.
 pub const UBSAN: &[&str] = &["-O1", "-fsanitize=undefined,bounds", "-fsanitize-trap=undefined,bounds"];
 pub use crate::build::clang;
@@ -585,7 +585,7 @@ MITO_API int t_reply(void *sp) {
         let mut bes: Vec<(&str, Box<dyn Backend>)> = vec![("C runtime, TinyCC", Box::new(CBackend::start(&case)))];
         if clang().is_some() {
             bes.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true))));
-            bes.push(("C runtime, clang, undefined-behaviour checks", Box::new(CBackend::start_flags(&case, true, UBSAN))));
+            bes.push(("C runtime, clang, undefined-behavior checks", Box::new(CBackend::start_flags(&case, true, UBSAN))));
         }
         for (name, be) in bes.iter_mut() {
             let mut model: Vec<(i64, i64, i64)> = Vec::new(); // (slot, key, id), in order
@@ -697,7 +697,7 @@ MITO_API int t_reply(void *sp) {
                 let mut v: Vec<(&str, Box<dyn Backend>)> = vec![("C system", Box::new(CSystemBackend::start(&case, false, &[])))];
                 if clang().is_some() {
                     v.push(("C system, clang", Box::new(CSystemBackend::start(&case, true, &[]))));
-                    if std::env::var("MITO_SKIP_UBSAN").is_err() { v.push(("C system, clang, undefined-behaviour checks", Box::new(CSystemBackend::start(&case, true, UBSAN)))); }
+                    if std::env::var("MITO_SKIP_UBSAN").is_err() { v.push(("C system, clang, undefined-behavior checks", Box::new(CSystemBackend::start(&case, true, UBSAN)))); }
                 }
                 v
             } else {
@@ -705,7 +705,7 @@ MITO_API int t_reply(void *sp) {
             };
             if case.system.is_none() && clang().is_some() {
                 backends.push(("C runtime, clang", Box::new(CBackend::start_with(&case, true))));
-                backends.push(("C runtime, clang, undefined-behaviour checks", Box::new(CBackend::start_flags(&case, true, UBSAN))));
+                backends.push(("C runtime, clang, undefined-behavior checks", Box::new(CBackend::start_flags(&case, true, UBSAN))));
             }
             let mut logs = Vec::new();
             for (name, be) in backends.iter_mut() {

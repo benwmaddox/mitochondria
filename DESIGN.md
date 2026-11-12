@@ -94,7 +94,7 @@ the system's commit charge, not physical memory (a page is backed when first wri
 helper tests or commits pages. Larger state, or any program with pressure marks, commits pages when first written. A trim returns pages
 holding no live byte, one collection at a time, driven by pressure:
 
-| Committed memory | Behaviour |
+| Committed memory | Behavior |
 |---|---|
 | below `--soft` | never trim |
 | above `--soft` | after each request, trim the collection with the most committed memory |
@@ -487,7 +487,7 @@ the last good build when a change does not compile. Errors name `file:line:col` 
 name for a misspelt one, list every independent error of a file, and say what to write for a habit from other languages (`i++`,
 `each`); `tests/errors` holds a program per mistake with its expected message. The 51 cases in `tests/cases` and
 `tests/http.record` must give the same answers on the TinyCC build, the clang build and a clang build with
-undefined-behaviour checks. VS Code highlighting is in `editors/vscode`. Windows and Linux: everything the runtime asks of the
+undefined-behavior checks. VS Code highlighting is in `editors/vscode`. Windows and Linux: everything the runtime asks of the
 system is runtime/os.c (memory, clock, randomness, threads, locks, sockets and poll); on Linux programs build with the system's
 clang (`--tcc` uses a `tcc` on the path, else clang -O0), and the cases, the HTTP record and the test runner pass there (WSL2,
 Ubuntu 24.04, clang 18).

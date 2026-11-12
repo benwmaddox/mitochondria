@@ -8,10 +8,13 @@
 //! ```
 //!
 //! Every distinct use (`Stack<i64, 64>`: the template and its evaluated arguments) becomes one struct named
-//! `__mito__Stack__i64__64` (generated names start with `__mito__`, which programs do not use) and one copy of each
-//! function of `Stack<T, N>` for it, a plain function of a type (`fn push(self: __mito__Stack__i64__64, x: i64)`), found
-//! by the receiver's type like any other. Copies are made by replacing the parameters' identifiers token by token (outside
-//! strings and comments, and not after a `.`), then expanded again, to a fixed point: a copy may use further generics.
+//! `__mito__Stack__i64__64` (generated names start with `__mito__`, which programs do not use). A function of `Stack<T, N>`
+//! is copied for an instance only where a call `x.f(...)` on it asks (`expand` and `note_missing`: the program is compiled
+//! once to see which calls lack a copy, until none does): a plain function of a type
+//! (`fn push(self: __mito__Stack__i64__64, x: i64)`), found by the receiver's type like any other, that keeps its template's
+//! line numbers (`//# line N`). Copies are made by replacing the parameters' identifiers token by token (outside
+//! strings and comments, and not after a `.`, except a parameter that names a field, `key: field of T`), then expanded
+//! again, to a fixed point: a copy may use further generics. A function without `pub` is private to its file (`check_call`).
 //! Limits: instances nest 64 deep and there are at most 1000, so a recursive generic type is an error, not a hang.
 //! `name_instances` turns the generated names back into `Stack<i64, 64>` in a message.
 use std::cell::RefCell;
@@ -236,7 +239,7 @@ impl Ctx {
         }
     }
 
-    /// The name of the instance of template `ti` with these arguments (already expanded), making it, its struct and its functions if new.
+    /// The name of the instance of template `ti` with these arguments (already expanded), making it and its struct if new (its functions are copied where calls ask).
     fn instantiate(&mut self, ti: usize, args: Vec<String>) -> Result<String, String> {
         let key = format!("{}<{}>", self.templates[ti].name, args.iter().map(|a| a.split_whitespace().collect::<String>()).collect::<Vec<_>>().join(","));
         if let Some(&k) = self.by_key.get(&key) { return Ok(self.insts[k].name.clone()); }
@@ -433,10 +436,15 @@ thread_local! { static TEMPLATE_METHODS: RefCell<HashSet<String>> = RefCell::new
 pub fn is_template_method(name: &str) -> bool { TEMPLATE_METHODS.with(|m| m.borrow().contains(name)) }
 
 /// The code generator found `x.f(...)` on a receiver of type `ty` and no function `f` for it. If `ty` is an instance of a
-/// generic struct, that is a request for the copy of the template's `f` for this instance (`expand` answers it).
-pub fn note_missing(ty: &str, method: &str) {
-    if let Some(shown) = NAMES.with(|n| n.borrow().get(ty).cloned()) { MISSING.with(|m| m.borrow_mut().push((shown, method.to_string()))); }
+/// generic struct, that is a request for the copy of the template's `f` for this instance (`expand` answers it). While
+/// `expand` is probing, the answer is true: the generator goes on past the call (with a placeholder number), so one probe
+/// finds every call of the endpoint that lacks a copy, not just the first.
+pub fn note_missing(ty: &str, method: &str) -> bool {
+    let Some(shown) = NAMES.with(|n| n.borrow().get(ty).cloned()) else { return false };
+    MISSING.with(|m| m.borrow_mut().push((shown, method.to_string())));
+    PROBING.with(|p| p.get())
 }
+thread_local! { static PROBING: std::cell::Cell<bool> = std::cell::Cell::new(false); }
 
 /// One expansion of the program with the copies `asked` for; the text, and whether any function of a generic type exists
 /// (then calls may ask for more).
@@ -469,16 +477,21 @@ fn expand_once(state: &str, api: &str, asked: &HashSet<(String, String)>) -> Res
 /// compile asks for nothing new. The last text is returned; its errors are the caller's to report, as for any program.
 pub fn expand(state: &str, api: &str, finish: &dyn Fn(&str, &str) -> Result<(String, String), String>) -> Result<(String, String), String> {
     let mut asked: HashSet<(String, String)> = HashSet::new();
+    let mut probes = 1;
     loop {
         let (s, a, calls) = expand_once(state, api, &asked)?;
         let (s, a) = finish(&s, &a)?;
         if !calls { return Ok((s, a)); }
         MISSING.with(|m| m.borrow_mut().clear());
+        PROBING.with(|p| p.set(true));
         if let Ok(prog) = crate::layout::Program::parse(&s) { let _ = crate::cgen::check(&prog, &a); }
+        PROBING.with(|p| p.set(false));
         let found: Vec<(String, String)> = MISSING.with(|m| m.borrow_mut().drain(..).collect());
         let before = asked.len();
         asked.extend(found);
+        if std::env::var_os("MITO_EXPLAIN_GENERICS").is_some() { eprintln!("generics: probe {} asked for {} more function copies", probes, asked.len() - before); }
         if asked.len() == before { return Ok((s, a)); }
+        probes += 1;
     }
 }
 
@@ -633,6 +646,11 @@ fn go() { g.show(); }
         // a call of a function no generic struct has is the ordinary error
         let e = load(&format!("{}@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.nothing(); return ok({{}}); }}\n", POP_HEAD)).unwrap_err();
         assert!(e.contains("unknown function `g.a.nothing`"), "{}", e);
+        // a function only another generic struct has: the ordinary message, without a list of types that has nothing in it
+        let other = format!("struct Other<T> {{ v: T; }}\nfn only_here(self: Other<T>) -> i64 {{ return 1; }}\n{}", POP_HEAD);
+        let e = load(&format!("{}@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.only_here(); return ok({{}}); }}\n", other.replace("state g: G;", "state g: G;\nstruct H { o: Other<i64>; }"))).unwrap_err();
+        assert!(e.contains("`Stack<i64, 8>` has no function `only_here` (declare `fn only_here(self: Stack<i64, 8>, ...)`)") || e.contains("`Stack<i64, 8>` has no function `only_here`"), "{}", e);
+        assert!(!e.contains("is declared for )") && !e.contains("__mito__"), "{}", e);
         // a copy asks for another function: the copies follow the calls, however deep
         let deep = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct G { a: Stack<i64, 8>; b: Stack<string<12>, 8>; }\nstate g: G;\nfn size(self: Stack<T, N>) -> i64 { return self.len; }\nfn twice(self: Stack<T, N>) -> i64 { return self.size() + self.size(); }\nfn bad(self: Stack<T, N>) -> T { return self.items[0]; }\n@post(\"/p\") fn p() -> Response<{ n: i64 }> { return ok({ n: g.a.twice() }); }\n";
         assert_eq!(load(deep), Ok(()));

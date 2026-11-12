@@ -25,7 +25,7 @@ fn push(self: Stack<T, N>, x: T) {
     self.items[self.len] = x;
     self.len = self.len + 1;
 }
-// no `-> T`: a function cannot return a text or a struct by value, and a function is copied for every instance
+// no `-> T` here (see generics_2.case): this function is called on every instance, and none can return a text or a struct by value
 fn drop_top(self: Stack<T, N>) {
     if self.len == 0 { fail 409 "stack is empty"; }
     self.len = self.len - 1;

@@ -1,0 +1,32 @@
+GET /state -> 200 {"ox":0,"oy":0,"hx":0,"hy":0,"n":0,"sum":0,"len2":0}
+POST /origin/3/4 -> 200 {"x":3,"y":4,"len2":25,"norm1":7}
+POST /origin/1/2 -> 200 {"x":4,"y":6,"len2":52,"norm1":10}
+POST /hero/5/12 -> 200 {"x":5,"y":12,"len2":169}
+POST /hero/1/1 -> 200 {"x":6,"y":13,"len2":205}
+POST /double -> 200 {"x":8,"y":12}
+POST /merge -> 200 {"x":14,"y":25}
+POST /pt/2/3 -> 201 {"slot":0}
+POST /pt/0/by/7 -> 200 {"x":9,"y":4,"len2":97,"norm1":13,"origin_len2":821}
+POST /pt/0/by/1 -> 200 {"x":10,"y":5,"len2":125,"norm1":15,"origin_len2":821}
+POST /pt/9/by/1 -> 404 {"error":"slot 9 is not live","line":52}
+POST /gauge/set/60 -> 200 {"n":60}
+POST /gauge/set/100 -> 200 {"n":100}
+POST /gauge/set/101 -> 400 {"error":"`n` must be in 0..100","line":14}
+POST /gauge/set/50 -> 200 {"n":50}
+GET /state -> 200 {"ox":14,"oy":25,"hx":6,"hy":13,"n":50,"sum":0,"len2":821}
+POST /shift/30 -> 200 {"x":44,"n":80}
+POST /shift/10 -> 200 {"x":54,"n":90}
+POST /shift/11 -> 400 {"error":"`n` must be in 0..100","line":13}
+GET /state -> 200 {"ox":65,"oy":25,"hx":6,"hy":13,"n":90,"sum":0,"len2":4850}
+POST /hist/0/10 -> 200 {"sum":10}
+POST /hist/3/5 -> 200 {"sum":15}
+POST /hist/1/7 -> 200 {"sum":22}
+POST /hist/4/1 -> 400 {"error":"`i`: 4 is outside 0..3"}
+POST /walk/3 -> 200 {"x":68,"up":9,"x2":9}
+POST /walk/0 -> 200 {"x":68,"up":9,"x2":9}
+POST /walk/20 -> 200 {"x":88,"up":29,"x2":29}
+POST /herofail/2 -> 400 {"error":"`n` must be in 0..100","line":14}
+GET /state -> 200 {"ox":88,"oy":25,"hx":29,"hy":13,"n":90,"sum":22,"len2":8369}
+state <plain values> 192
+state world.pts 40
+memory reserved=8192 committed=8192 live=232

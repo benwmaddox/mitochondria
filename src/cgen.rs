@@ -642,7 +642,8 @@ fn kname(prog: &Program, k: K) -> String {
     match k {
         K::Int => "an integer".into(), K::Flt => "a number".into(), K::Bool => "a bool".into(), K::Txt => "a string".into(), K::Null => "null".into(),
         K::Item(c) | K::Ref(c) => if tab(c).is_some() { format!("a row of {}", coll_name(prog, c)) } else { format!("an item of {}", prog.colls[c].name) }, K::Any => "a value of any kind".into(),
-        _ => "a collection or struct".into(),
+        K::Plain(sd, _) => format!("a struct `{}`", prog.structs[sd].name),
+        _ => "a collection".into(),
     }
 }
 
@@ -1878,7 +1879,7 @@ impl<'p> G<'p> {
         let rec = self.recursive[k as usize];
         self.specs.borrow_mut().push(Spec { key, name, ret: K::Null, proto: String::new(), body: None, rec, peak: 0, kept: 0, ret_bound: None });
         // the declared result (a function without one gives no value)
-        let cand = match &self.api.fns[k as usize].ret { Some(t) => self.decl_kind(t, &self.api.fns[k as usize].name)?, None => K::Null };
+        let cand = match &self.api.fns[k as usize].ret { Some(t) => self.ret_kind(t, &self.api.fns[k as usize].name)?, None => K::Null };
         {
             self.specs.borrow_mut()[si].ret = cand;
             match self.spec_body(k, pks, cand) {
@@ -1951,6 +1952,25 @@ impl<'p> G<'p> {
         Err(SpecErr::Other("kinds did not settle".into()))
     }
 
+    /// Is struct `sid` a field of the state, directly or inside plain structs (so that a function can be given it as a view)?
+    fn plain_used(&self, sid: usize) -> bool {
+        fn walk(prog: &Program, ty: &Ty, sid: usize, seen: &mut Vec<usize>) -> bool {
+            match ty {
+                Ty::Struct(s) if *s == sid => true,
+                Ty::Struct(s) => { if seen.contains(s) { return false; } seen.push(*s); prog.structs[*s].fields.iter().any(|f| walk(prog, &f.1, sid, seen)) }
+                _ => false,
+            }
+        }
+        let mut seen = Vec::new();
+        self.prog.globals.iter().any(|g| walk(self.prog, &g.ty, sid, &mut seen))
+    }
+    /// The kind a function's declared result stands for: a struct that is part of the state cannot be returned (it has no place of its own to point at).
+    fn ret_kind(&self, t: &crate::lang::PTy, f: &str) -> R<K> {
+        match self.decl_kind(t, f)? {
+            K::Plain(sd, _) => no(format!("`{}` returns `{}`, a struct that is part of the state: a function can take it as a parameter but not return it (return its fields, or an item)", f, self.prog.structs[sd].name)),
+            k => Ok(k),
+        }
+    }
     /// The kind a signature's type stands for (an item type `T?` is a reference; a scalar `T?` is its scalar, and also takes null).
     /// `f`: the function whose signature it is; in a module instance's function (`inst.f`), an item type names the instance's own items.
     fn decl_kind(&self, t: &crate::lang::PTy, f: &str) -> R<K> {
@@ -1987,6 +2007,11 @@ impl<'p> G<'p> {
         if holders.len() > 1 { if let Some(i) = &inst { let own: Vec<usize> = holders.iter().copied().filter(|&c| coll_name(self.prog, c).starts_with(i.as_str())).collect(); if own.len() == 1 { holders = own; } } }
         let c = match holders.as_slice() {
             [c] => *c,
+            // a struct that is a field of the state (not an item) is passed as a view of where it lives: the argument's own place decides, so this only stands for "that struct"
+            [] if t.coll.is_none() && self.plain_used(sid) => {
+                if t.opt { return no(format!("`{}?`: a plain struct is part of the state, it cannot be null", t.name)); }
+                return Ok(K::Plain(sid, usize::MAX));
+            }
             [] => return no(match &t.coll { Some(p) => format!("`{}` is not held by `{}`", t.name, p), None => format!("no collection holds `{}` items", t.name) }),
             _ => return no(format!("several collections hold `{}` items: write `{} in path` with the one this takes ({})", t.name, t.name, holders.iter().map(|&c| coll_name(self.prog, c)).collect::<Vec<_>>().join(", "))),
         };
@@ -1995,6 +2020,10 @@ impl<'p> G<'p> {
     /// A value given where a signature declares type `t` (`what`: "parameter `x` of `f`" or "result of `f`"): checked, an integer
     /// widened to a number for a `f64`, an item kept as an item for `T?`.
     fn to_declared(&mut self, v: CV, t: &crate::lang::PTy, f: &str, what: &str) -> R<CV> {
+        // a plain struct (a field of the state) given for its own type: a view, whether or not the same struct is also an item type somewhere
+        if let CV::Plain(sd, _) = &v {
+            if t.name == self.prog.structs[*sd].name && t.arg.is_none() && t.field.is_none() && t.coll.is_none() && !t.opt { return Ok(v); }
+        }
         let want = self.decl_kind(t, f)?;
         let got = kind(&v);
         let ok = match (got, want) {
@@ -4813,6 +4842,7 @@ impl<'p> G<'p> {
             let (want, given) = (f.params.len() - skip, vals.len().saturating_sub(skip));
             return no(format!("`{}` takes {} argument{}, given {}", shown, want, if want == 1 { "" } else { "s" }, given));
         }
+        if let Some(t) = &f.ret { self.ret_kind(t, &f.name)?; } // (a one-line function never reaches its result kind otherwise)
         let mut checked = Vec::with_capacity(vals.len());
         for (i, v) in vals.into_iter().enumerate() {
             checked.push(match &f.ptys[i] { Some(t) => self.to_declared(v, t, &f.name, &format!("parameter `{}` of `{}`", f.params[i], f.name))?, None => v });
@@ -4873,7 +4903,7 @@ impl<'p> G<'p> {
         let (var, label) = (self.tmp("ret"), self.tmp("end"));
         let saved = std::mem::take(&mut self.body);
         self.inlining.push(k);
-        let forced = match &f.ret { Some(t) => Some(self.decl_kind(t, &f.name)?), None => self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1) };
+        let forced = match &f.ret { Some(t) => Some(self.ret_kind(t, &f.name)?), None => self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1) };
         let sel = if has_collecting_loop(self.api, &f.body) { Some(self.tmp("hm")) } else { None };
         let rmark = self.tmp("rm");
         self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone(), bound: None, unbounded: false, mark: rmark.clone(), ivs: Vec::new() });
@@ -5509,6 +5539,48 @@ state app: A;
         // `bump` writes for a Node and only reads for a Leaf: what a GET does is what its generated code does, so the call follows the function its receiver's type names
         let want = [("peek", true), ("leaf", true), ("bump", false)];
         for (k, (name, reads)) in want.iter().enumerate() { assert_eq!(g.reads[k], *reads, "endpoint {}", name); }
+    }
+
+    fn gen_of(src: &str) -> Generated {
+        let (state, api) = crate::source::load(src).unwrap();
+        let prog = Program::parse(&state).unwrap();
+        let mut api = crate::lang::parse(&api).unwrap();
+        crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+        let g = generate(&prog, &api);
+        assert!(g.notes.is_empty(), "{:?}", g.notes);
+        g
+    }
+
+    /// A function given a plain struct counts as what its body does: one that writes through the parameter makes a GET not a reader, one that only reads leaves it one.
+    #[test]
+    fn plain_struct_parameters_count_as_what_they_do_for_readers() {
+        let head = "struct P { v: i64; }\nstruct A { p: P; q: P; }\nstate app: A;\nfn peek(p: P) -> i64 { return p.v; }\nfn bump(p: P) { p.v += 1; }\nfn look(self: P) -> i64 { return self.v; }\nfn poke(self: P) { self.v = 2; }\n";
+        let g = gen_of(&format!("{}@get(\"/a\") fn a() -> Response<{{ n: i64 }}> {{ return ok({{ n: peek(app.p) + app.q.look() }}); }}\n@get(\"/b\") fn b() -> Response<{{ n: i64 }}> {{ bump(app.p); return ok({{ n: 1 }}); }}\n@get(\"/c\") fn c() -> Response<{{ n: i64 }}> {{ app.q.poke(); return ok({{ n: 1 }}); }}\n", head));
+        let want = [("a", true), ("b", false), ("c", false)];
+        for (k, (name, reads)) in want.iter().enumerate() { assert_eq!(g.reads[k], *reads, "endpoint {}", name); }
+    }
+
+    /// A range-declared field written through a parameter keeps its check unless the value is proven inside the range; a field without a range that is only ever
+    /// given small values lets an index into a larger array go unchecked, until a function writes it through a parameter with a value nothing is known of.
+    #[test]
+    fn plain_struct_parameters_are_seen_by_the_range_analyses() {
+        let head = "struct P { n: i64 in 0..100; v: i64; }\nstruct A { p: P; buf: i64[8]; }\nstate app: A;\nfn set_n(p: P, x: i64) { p.n = x; }\nfn set_v(p: P, x: i64) { p.v = x; }\n";
+        let msg = "`n` must be in 0..100";
+        // a value the endpoint's own range proves inside: no check; an unbounded one: checked
+        let g = gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in 0..50) -> Response<{{}}> {{ set_n(app.p, x); return ok({{}}); }}\n", head));
+        assert!(!g.src.contains(msg), "a value inside the range needs no check");
+        let g = gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in 0..500) -> Response<{{}}> {{ set_n(app.p, x); return ok({{}}); }}\n", head));
+        assert!(g.src.contains(msg), "a value outside the range is still checked through a parameter");
+        // the whole-program range of `v`: stores of 0..3 only, so `buf[app.p.v]` needs no index test ...
+        let read = "@get(\"/r\") fn r() -> Response<{ n: i64 }> { return ok({ n: app.buf[app.p.v] }); }\n";
+        let g = gen_of(&format!("{}@post(\"/w\") fn w() -> Response<{{}}> {{ app.p.v = 3; return ok({{}}); }}\n{}", head, read));
+        assert!(!g.src.contains("c->h->elem("), "every store to `v` is 3, so the index is inside buf");
+        // ... and the same program with a store through a parameter of an unbounded value keeps the test
+        let g = gen_of(&format!("{}@post(\"/w\") fn w() -> Response<{{}}> {{ app.p.v = 3; return ok({{}}); }}\n@post(\"/s/{{x}}\") fn s(x: i64) -> Response<{{}}> {{ set_v(app.p, x); return ok({{}}); }}\n{}", head, read));
+        assert!(g.src.contains("c->h->elem("), "a store through a parameter widens the range of the field");
+        // a proven small value written through a parameter keeps the range small
+        let g = gen_of(&format!("{}@post(\"/w\") fn w() -> Response<{{}}> {{ app.p.v = 3; return ok({{}}); }}\n@post(\"/s/{{x}}\") fn s(x: i64 in 0..7) -> Response<{{}}> {{ set_v(app.p, x); return ok({{}}); }}\n{}", head, read));
+        assert!(!g.src.contains("c->h->elem("), "stores of 0..7 through a parameter keep the index inside buf");
     }
 
     /// How many overflow-checked operations (`ADD`, `SUB`, `MUL`) an endpoint's generated code keeps, for a body written in a program with one range-typed field and one free field.

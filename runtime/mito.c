@@ -22,8 +22,17 @@ static void fatal(const char *why) { (void)why; *(volatile int *)0 = 0; } /* a r
 
 /* ---------------------------------------------------------------- text */
 /* A fixed block filled from the start: the request's text area and its response. */
-typedef struct { u8 *p; u32 cap, len; } Area;
-static int a_put(Area *a, const void *s, u64 n) { if ((u64)a->len + n > a->cap) return 0; if (n) memcpy(a->p + a->len, s, n); a->len += (u32)n; return 1; }
+/* An area is written in place up to `cap` bytes (committed); `max` is how far it may grow (reserved address space, committed as it fills: a_grow). max 0: it does not grow. */
+typedef struct { u8 *p; u32 cap, len, max; } Area;
+static int a_grow(Area *a, u64 end) {
+    if (end > a->max) return 0;
+    u64 step = a->cap / 16; if (step < (1u << 20)) step = 1u << 20;
+    u64 nc = a->cap + step; if (nc < end) nc = up(end, 65536); if (nc > a->max) nc = a->max;
+    if (!os_commit(a->p + a->cap, nc - a->cap)) return 0;
+    a->cap = (u32)nc; return 1;
+}
+static int a_put(Area *a, const void *s, u64 n) { if ((u64)a->len + n > a->cap && !a_grow(a, (u64)a->len + n)) return 0;
+ if (n) memcpy(a->p + a->len, s, n); a->len += (u32)n; return 1; }
 static int a_str(Area *a, const char *s) { u64 n = 0; while (s[n]) n++; return a_put(a, s, n); }
 static int a_u64(Area *a, u64 v) { char b[24]; int n = 0; do { b[23 - n++] = (char)('0' + v % 10); v /= 10; } while (v); return a_put(a, b + 24 - n, n); }
 static int a_i64(Area *a, i64 v) { if (v < 0) { if (!a_put(a, "-", 1)) return 0; return a_u64(a, (u64)0 - (u64)v); } return a_u64(a, (u64)v); }
@@ -586,7 +595,7 @@ typedef struct { T k; Val v; } JField;
 typedef struct Mito {
     Mem mem;
     Area out, text;
-    u8 *areas;
+    u8 *areas; u64 areas_n;
     i64 clock; int fixed_clock; u64 rng;
     int web_etag; /* the web block says `etag;`: the front end tags every answer, so a literal answer adds no ETag of its own */
     int starting; /* MITO(begin) is running the program's `@start` function */
@@ -775,7 +784,7 @@ static int col_txt(Mito *m, u32 c, u64 idx, u32 ci, T *out) {
 static int show(Mito *m, const Val *v) { /* append a value's text to the text area */
     int ok;
     switch (v->tag) {
-        case 4: { u32 n = v->b; if (m->text.len + (u64)n > m->text.cap) return text_full(m); memmove(m->text.p + m->text.len, m->text.p + v->a, n); m->text.len += n; return 0; }
+        case 4: { u32 n = v->b; if (m->text.len + (u64)n > m->text.cap && !a_grow(&m->text, m->text.len + (u64)n)) return text_full(m); memmove(m->text.p + m->text.len, m->text.p + v->a, n); m->text.len += n; return 0; }
         case 1: ok = a_i64(&m->text, v->i); break;
         case 2: ok = a_float(&m->text, v->f); break;
         case 3: ok = a_str(&m->text, v->i ? "true" : "false"); break;
@@ -1165,7 +1174,7 @@ static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, 
             return 0;
         case 4: case 7: {
             T t;
-            if (text) { if (t_push(m, tp, tn, &t)) return -1; }
+            if (text) { if ((i64)tn > hi) { in_bad(m, 413, name, nn, ": "); a_u64(&m->emsg, tn); a_str(&m->emsg, " bytes, at most "); a_i64(&m->emsg, hi); return -1; } if (t_push(m, tp, tn, &t)) return -1; }
             else { if (v.tag != 4) return in_bad(m, 400, name, nn, ": expected a string"); t.off = v.a; t.len = v.b; }
             if ((i64)t.len > hi) { in_bad(m, 413, name, nn, ": "); a_u64(&m->emsg, t.len); a_str(&m->emsg, " bytes, at most "); a_i64(&m->emsg, hi); return -1; }
             if ((i64)t.len < lo) { in_bad(m, 400, name, nn, ": at least "); a_i64(&m->emsg, lo); a_str(&m->emsg, lo == 1 ? " byte" : " bytes"); return -1; }
@@ -1650,7 +1659,7 @@ static int c_put(Mito *m, T key) {
 /* ---- bytes, encodings and cryptography: builtins 17 to 34 (the primitives in runtime/crypto.c) ----
    Texts here are bytes (any bytes; a utf8 field holds them as they are). Results go in the text area. */
 /* room for `need` more bytes at the end of the text area, or 0 (the request fails: 507) */
-static u8 *t_room(Mito *m, u64 need) { if ((u64)m->text.len + need > m->text.cap) { text_full(m); return 0; } return m->text.p + m->text.len; }
+static u8 *t_room(Mito *m, u64 need) { if ((u64)m->text.len + need > m->text.cap && !a_grow(&m->text, (u64)m->text.len + need)) { text_full(m); return 0; } return m->text.p + m->text.len; }
 static int t_done(Mito *m, u32 start, u64 wrote, Val *out) { m->text.len = (u32)(start + wrote); *out = v_str(t_since(m, start)); return 0; }
 static int b64_val(u8 ch) { return ch >= 'A' && ch <= 'Z' ? ch - 'A' : ch >= 'a' && ch <= 'z' ? ch - 'a' + 26 : ch >= '0' && ch <= '9' ? ch - '0' + 52 : ch == '+' || ch == '-' ? 62 : ch == '/' || ch == '_' ? 63 : -1; }
 static int hex_val(u8 ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; }
@@ -1869,6 +1878,7 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
         if (!ok) return fail(m, 500, "read_stored: a relative path of letters, digits and . _ - / (no ..)");
         char path[1200]; u32 pn = 0; for (const char *d = g_files_dir; *d && pn < 600; d++) path[pn++] = *d;
         path[pn++] = '/'; memcpy(path + pn, s, x.len); pn += x.len; path[pn] = 0;
+        if (m->text.max > m->text.cap) a_grow(&m->text, m->text.max < m->text.len + (64ULL << 20) ? m->text.max : m->text.len + (64ULL << 20)); /* room for a file: up to 64 MB more */
         u64 cap = m->text.cap - m->text.len, got = 0;
         int r = os_read_file(path, m->text.p + m->text.len, cap, &got);
         if (r == 0) { *out = v_null(); return 0; }
@@ -2753,7 +2763,7 @@ static int h_found(Ctx *c, const Txt *t) {
 /* `var acc: text<cap>`: its bytes reserved in the text area, in its scope's region (the scope's end gives them back) */
 static int h_txt_cap(Ctx *c, u32 cap, Txt *out) {
     Mito *m = M_(c);
-    if ((u64)m->text.len + cap > m->text.cap) return text_full(m);
+    if ((u64)m->text.len + cap > m->text.cap && !a_grow(&m->text, (u64)m->text.len + cap)) return text_full(m);
     out->off = m->text.len; out->len = 0; out->present = 1; m->text.len += cap;
     return 0;
 }
@@ -2798,6 +2808,19 @@ static const H mito_h = {
 static int g_share_state;
 /* Before MITO(start): keep the state in memory readers can map too (MITO(reader)). 0 when this system cannot. */
 MITO_API int MITO(share_state)(int on) { if (on && !os_can_share()) return 0; g_share_state = on; return 1; }
+/* The request's text area and the answer's area: address space of the declared size (a command-line program asks for 4 GiB each: MITO(set_areas)), of which
+   the first TEXT_CAP and RESPONSE_CAP bytes are committed; a_grow commits more as the area fills, so only the pages a request uses cost memory. */
+static u64 g_text_max = TEXT_CAP, g_out_max = RESPONSE_CAP;
+MITO_API void MITO(set_areas)(u64 text_max, u64 out_max) { g_text_max = text_max < TEXT_CAP ? TEXT_CAP : text_max > 0xFFFFFFFFULL ? 0xFFFFFFFFULL : text_max; g_out_max = out_max < RESPONSE_CAP ? RESPONSE_CAP : out_max > 0xFFFFFFFFULL ? 0xFFFFFFFFULL : out_max; }
+static int areas_init(Mito *m) {
+    u64 tr = up(g_text_max, 65536), orr = up(g_out_max, 65536);
+    m->areas_n = tr + orr;
+    m->areas = (u8 *)os_reserve(m->areas_n);
+    if (!m->areas || !os_commit(m->areas, TEXT_CAP) || !os_commit(m->areas + tr, RESPONSE_CAP)) return 0;
+    m->text.p = m->areas; m->text.cap = TEXT_CAP; m->text.max = (u32)g_text_max; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN;
+    m->out.p = m->areas + tr; m->out.cap = RESPONSE_CAP; m->out.max = (u32)g_out_max;
+    return 1;
+}
 MITO_API void *MITO(start)(u64 budget, u64 seed) {
     const MitoProg *pg = &mito_prog;
     if (pg->total > budget) return 0;
@@ -2822,11 +2845,9 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
     mem->shrinks = (u64 *)(s + up(mem->npages * 3, 8));
     m->pr.stuck = mem->shrinks + pg->ncolls + 1;
     if (!grow_init(&mem->jb, 1ULL << 32) || !grow_init(&mem->ja, 1ULL << 32) || !grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
-    m->areas = (u8 *)os_alloc(TEXT_CAP + RESPONSE_CAP);
+    if (!areas_init(m)) return 0;
     m->ops.p = (u8 *)os_alloc(1 << 20); m->ops.cap = 1 << 20; m->ops.len = 0; /* socket operations: 1 MB a request */
     if (!m->ops.p) return 0;
-    if (!m->areas) return 0;
-    m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
     m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf; m->head.p = m->hbuf; m->head.cap = sizeof m->hbuf;
     m->rng = seed;
     m->loop_budget = 100000000;
@@ -2839,6 +2860,11 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
         mem->cpages = mem->npages;
         mem->all = 1;
     }
+    // the plain values commit themselves on first touch when they are huge (over COMMIT_ALL_MAX: a declared 4 GiB output string that a run uses a little of)
+#ifdef OS_FAULT_COMMIT
+    if (pg->plain_end > COMMIT_ALL_MAX) { if (!os_lazy_add(mem->base, pg->plain_end) || !os_lazy_add(mem->dirty, up(mem->npages * (PAGE / 64 / 8), PAGE))) return 0; }
+    else
+#endif
     ensure(mem, 0, pg->plain_end);
     if (pg->scr_size) ensure(mem, pg->scr_off, pg->scr_off + pg->scr_size);
     for (u32 c = 0; c < pg->ncolls; c++) { const MitoColl *k = &pg->colls[c]; if (k->parent < 0) ensure(mem, k->hdr, k->hdr + hdr_fields(k) * 4); }
@@ -2857,7 +2883,7 @@ MITO_API void MITO(stop)(void *mp_) { Mito *m = (Mito *)mp_; if (!m) return;
 #ifdef MITO_USES_SQLITE
     store_close(&m->store);
 #endif
-    os_release(m->mem.base, m->mem.reserved); os_release(m->mem.committed, m->small); os_release(m->mem.dirty, up(m->mem.npages * (PAGE / 64 / 8), PAGE)); os_release(m->mem.jb.p, m->mem.jb.reserved); os_release(m->mem.ja.p, m->mem.ja.reserved); os_release(m->frees.p, m->frees.reserved); os_release(m->sel.p, m->sel.reserved); os_release(m->areas, TEXT_CAP + RESPONSE_CAP); os_release(m, sizeof(Mito)); }
+    os_release(m->mem.base, m->mem.reserved); os_release(m->mem.committed, m->small); os_release(m->mem.dirty, up(m->mem.npages * (PAGE / 64 / 8), PAGE)); os_release(m->mem.jb.p, m->mem.jb.reserved); os_release(m->mem.ja.p, m->mem.ja.reserved); os_release(m->frees.p, m->frees.reserved); os_release(m->sel.p, m->sel.reserved); os_release(m->areas, m->areas_n); os_release(m, sizeof(Mito)); }
 /* A reader of the primary instance `mp_` (after its tables are open and its `@start` ran): requests that only read run on readers at
    once, each on its own thread, while no request runs on the primary (runtime/http.c holds a readers-writer lock). The state is the
    primary's, mapped read-only; the request struct, text, answer and database connection are the reader's own. 0 with the reason in
@@ -2882,10 +2908,9 @@ MITO_API void *MITO(reader)(void *mp_, u32 k, char *why, u32 cap) {
     if (!mem->dirty) return 0;
     Grow none = { 0, 0, 0, 0 }; mem->jb = none; mem->ja = none; mem->jon = 0;
     if (!grow_init(&m->frees, (u64)MAX_FREES * 8) || !grow_init(&m->sel, (u64)MAX_SEL * 4)) return 0;
-    m->areas = (u8 *)os_alloc(TEXT_CAP + RESPONSE_CAP);
+    if (!areas_init(m)) return 0;
     m->ops.p = (u8 *)os_alloc(1 << 20); m->ops.cap = 1 << 20; m->ops.len = 0;
-    if (!m->areas || !m->ops.p) return 0;
-    m->text.p = m->areas; m->text.cap = TEXT_CAP; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN; m->out.p = m->areas + TEXT_CAP; m->out.cap = RESPONSE_CAP;
+    if (!m->ops.p) return 0;
     m->emsg.p = m->ebuf; m->emsg.cap = sizeof m->ebuf; m->head.p = m->hbuf; m->head.cap = sizeof m->hbuf;
     m->rng = p->rng ? p->rng + 0x9E3779B97F4A7C15ULL * (k + 1) : 0;
     m->loop_budget = p->loop_budget; m->text_base = MITO_LITS_LEN; m->web_etag = p->web_etag; m->clock = p->clock; m->fixed_clock = p->fixed_clock;

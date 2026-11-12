@@ -46,6 +46,29 @@ static int os_commit(void *p, u64 n) { return VirtualAlloc(p, n, 0x1000, 4) != 0
 static void os_decommit(void *p, u64 n) { VirtualFree(p, n, 0x4000); }                   /* MEM_DECOMMIT */
 static void os_release(void *p, u64 n) { (void)n; if (p) VirtualFree(p, 0, 0x8000); }    /* MEM_RELEASE */
 static void *os_alloc(u64 n) { return VirtualAlloc(0, n, 0x3000, 4); }                   /* reserved and committed, zeroed */
+/* Address space that commits itself when first touched (Windows has no lazy commit: a handler for access violations commits the 256 KB around the
+   address, in ranges that os_lazy_add registered, and the access runs again). Linux commits whole ranges with mprotect, and the kernel backs a page only when it
+   is written, so it needs no handler: OS_FAULT_COMMIT is defined only here. */
+#define OS_FAULT_COMMIT 1
+typedef struct { u64 lo, hi; } LazyRange;
+static LazyRange g_lazy[8]; static u32 g_nlazy; static int g_lazy_on;
+void *AddVectoredExceptionHandler(u32 first, long (*h)(void **ep));
+static long os_lazy_fault(void **ep) {
+    u8 *rec = (u8 *)ep[0];
+    if (*(u32 *)rec != 0xC0000005u || *(u32 *)(rec + 24) < 2 || (*(u64 *)(rec + 32) != 0 && *(u64 *)(rec + 32) != 1)) return 0; /* not a read or write of an uncommitted page */
+    u64 a = *(u64 *)(rec + 40);
+    for (u32 i = 0; i < g_nlazy; i++) if (a >= g_lazy[i].lo && a < g_lazy[i].hi) {
+        u64 s = a & ~(u64)(256 * 1024 - 1), e = s + 256 * 1024; if (s < g_lazy[i].lo) s = g_lazy[i].lo; if (e > g_lazy[i].hi) e = g_lazy[i].hi;
+        if (!VirtualAlloc((void *)s, e - s, 0x1000, 4)) return 0;
+        return -1; /* EXCEPTION_CONTINUE_EXECUTION */
+    }
+    return 0;
+}
+static int os_lazy_add(void *p, u64 n) {
+    if (g_nlazy == 8) return 0;
+    if (!g_lazy_on) { if (!AddVectoredExceptionHandler(1, os_lazy_fault)) return 0; g_lazy_on = 1; }
+    g_lazy[g_nlazy].lo = (u64)p; g_lazy[g_nlazy].hi = (u64)p + n; g_nlazy++; return 1;
+}
 /* shared state for readers (os_reserve_shared, os_map_shared_ro, os_map_private_at): Linux only for now */
 static int os_can_share(void) { return 0; }
 static u32 os_cpu_count(void) { return 1; } /* readers are Linux only for now: one */

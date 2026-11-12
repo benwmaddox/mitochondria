@@ -84,7 +84,7 @@ with no index. A parent that does not exist costs nothing; removing it empties w
 **Access is a lookup.** An id is a slot; every column's place is known, so reading is address arithmetic.
 
 **Epochs.** Each request gets a text area for its input (path, query, headers and body fields, decoded) and the program's
-literals, and a response area, both reset when it ends. Text a request builds goes in declared fields, not there: the state's,
+literals, and a response area, both reset when it ends. Both are address space reserved at start and committed as they fill (`a_grow`, 1 MB or 1/16th more at a time): a server's are 4 MB each, a command-line program's (`@main`) 4 GiB - 1 each, the most a 32-bit length holds, of which a small input commits only what it touches. Plain state over 1 GiB (`COMMIT_ALL_MAX`) is not committed at start either: on Windows a fault handler commits 256 KB around each first touch, on Linux the kernel backs a page when it is first written. A command-line program's loop budget grows with its stdin (100 million steps plus 64 per byte). Text a request builds goes in declared fields, not there: the state's,
 or those of the `request` struct, a struct of plain fields declared beside the state (`request work: Work;`), zeroed before each
 request, kept out of the undo log and never kept. Running out of an area fails that request (413 if the request itself does not
 fit, 507 otherwise). There is no heap allocator anywhere.
@@ -448,8 +448,8 @@ The state hash (`mito_state_hash` in runtime/mito.c, 64 bits, not cryptographic)
 `examples/world` is an open world made this way. Not built yet: tables in a game, sound, mouse buttons, more than one offscreen pass.
 
 ## Command-line programs
-A program whose entry is `@main` is a tool, not a server: `@main fn main(filter: utf8<1..1000> from arg(0), doc: utf8<33554432> from stdin, c: bool = false) -> Response<text>`.
-The command line is the request: `from arg(N)` is the Nth argument, `from stdin` what is piped in (read only when the program has such an input, up to 64 MB), and any
+A program whose entry is `@main` is a tool, not a server: `@main fn main(filter: utf8<1..1000> from arg(0), doc: utf8<4294967295> from stdin, c: bool = false) -> Response<text>`.
+The command line is the request: `from arg(N)` is the Nth argument, `from stdin` what is piped in (read only when the program has such an input, up to 4 GiB - 1 bytes: a length is 32 bits), and any
 other input is a flag: `--name value`, `--name=value`, a bare `--name` or a short `-c` is true. Inputs are checked as for an endpoint (a missing or out-of-range one
 answers 400). The answer's body goes to standard output with exit code 0; an answer of status 400 or more goes to standard error with exit code 1; a program that
 fails to start exits 2. A program with `@main` has no endpoints beside it (`@start` is allowed), and no tables yet. `mito run tool.mito -- args < in` builds and

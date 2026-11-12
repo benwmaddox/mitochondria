@@ -2080,7 +2080,7 @@ impl<'p> G<'p> {
         if !rec {
             // its region text on top of the caller's; what it returns stays until the caller's scope ends, as an inlined call's does
             self.region_peak = self.region_peak.max(self.region_live + peak);
-            if self.region_peak > TEXT_AREA { return no(format!("`{}`: the text in this endpoint's scopes can reach {} bytes, more than the request's text area holds ({} bytes): build less at once, or keep it in a field", self.api.fns[k as usize].name, self.region_peak, TEXT_AREA)); }
+            if self.region_peak > self.text_area() { return no(format!("`{}`: the text in this endpoint's scopes can reach {} bytes, more than the request's text area holds ({} bytes): build less at once, or keep it in a field", self.api.fns[k as usize].name, self.region_peak, self.text_area())); }
             if kept > 0 { self.region_lets.push(Some(kept)); self.region_live += kept; }
         }
         self.uses_spec = true;
@@ -2675,12 +2675,14 @@ impl<'p> G<'p> {
     }
     /// A `let` or capped `var` of region text, of at most `b` bytes: its size must be known when compiling (from its parts' sizes), and
     /// the endpoint's region text must fit the request's text area
+    /// How much text one request may build: 4 MB, or for a command-line program (`@main`) its text area of 4 GiB - 1 (address space, committed as used)
+    fn text_area(&self) -> usize { if self.api.eps.iter().any(|e| e.method == "MAIN") { 0xFFFF_FFFF } else { TEXT_AREA } }
     fn region_add(&mut self, b: Option<usize>, name: &str) -> R<()> {
         self.region_lets.push(b);
         let Some(b) = b else { return no(format!("`let {}` builds text whose size is not known when compiling (a part from a header, the environment, stored data or a recursive function): give it a cap, `var {}: text<N> = ...;`", name, name)) };
         self.region_live += b;
         self.region_peak = self.region_peak.max(self.region_live);
-        if self.region_peak > TEXT_AREA { return no(format!("`{}`: the text in this endpoint's scopes can reach {} bytes, more than the request's text area holds ({} bytes): build less at once, or keep it in a field", name, self.region_peak, TEXT_AREA)); }
+        if self.region_peak > self.text_area() { return no(format!("`{}`: the text in this endpoint's scopes can reach {} bytes, more than the request's text area holds ({} bytes): build less at once, or keep it in a field", name, self.region_peak, self.text_area())); }
         Ok(())
     }
     /// Where code is being generated, for messages: the function being inlined (or the endpoint) and the line

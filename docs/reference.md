@@ -12,7 +12,7 @@ A test (`docs_mention_everything` in src/platform.rs) fails when a built-in, opt
 | --- | --- |
 | `check <program>` | reports the problems found, or says the program loads. `--kinds` lists the kind of every local; `--costs` lists each endpoint's work (bytes zeroed, queries, row reads, table writes, text built). |
 | `build <program> [-o app.exe] [--tcc] [--cflag X]` | an executable: a server (platform web) or a tool (platform cli). Built with clang `-O3`; `--tcc` builds in milliseconds with TinyCC, unoptimized; `--cflag X` (repeatable) hands X to clang in place of `-O3` (`--cflag -O2 --cflag -mavx2`). |
-| `run <program> [--clang] [-- args]` | builds and runs a command-line program (`@main`) at once. What follows `--` is its command line; stdin and stdout are yours. The exit code is the program's. |
+| `run <program> [--clang] [-- args]` | builds and runs a command-line program (`@main`) at once. Its stdin may be up to 4 GiB - 1 bytes and its answer as long (address space reserved, committed as used). What follows `--` is its command line; stdin and stdout are yours. The exit code is the program's. |
 | `serve <program> [--clang] [--watch] [executable options]` | builds with TinyCC (or clang) and runs a server at once; `--watch` rebuilds and restarts when a file of the program changes (state starts empty each time). |
 | `test <program> [--clang]` | runs the program's `test "name" { ... }` blocks, each on a fresh state with the clock fixed; exit code 1 if one fails. |
 | `emit-c <program> [-o file.c]` | the generated C, to read or build yourself (a system: `-o dir`, one file per worker kind and system.c). |

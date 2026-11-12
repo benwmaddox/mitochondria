@@ -92,3 +92,23 @@ Both sync every commit to disk before answering (SQLite `synchronous=FULL`): an 
 | add a todo (100 to 300 todos), 99th percentile (us) | 2901 | 1901 | 1.53x |
 | peak memory (MB, VmHWM) | 4.8 | 35.2 | 0.14x |
 
+
+## Struct views, before and after (2026-11-12)
+
+`cd62aba` (before) against `6dc5b9f` (after, main with struct views), the unchanged `examples/todomvc` built with each compiler, against one crudspec build (the existing `~/cs-todomvc-out/app`). Same `bench.py`, run as 4 alternating single-round runs (before, after, before, after, ...) under the bench lock; each cell is the median of the 4 runs, page-cache mode (the example's default). Mitochondria columns marked "noise" differ by less than the spread between runs on either side.
+
+| Measure | Before | After | Difference | crudspec |
+|---|---:|---:|---|---:|
+| 10 todos: page, median (us) | 85 | 86 | noise | 101 |
+| 10 todos: page, 99th percentile (us) | 182 | 176 | noise | 233 |
+| 10 todos: toggle a todo, median (us) | 105 | 105 | noise | 171 |
+| 10 todos: pages per second, 4 clients | 37,173 | 36,126 | noise | 32,561 |
+| 100 todos: page, median (us) | 98 | 100 | noise | 104 |
+| 100 todos: page, 99th percentile (us) | 207 | 212 | noise | 232 |
+| 100 todos: toggle a todo, median (us) | 104 | 106 | noise | 160 |
+| 100 todos: pages per second, 4 clients | 27,171 | 28,447 | noise | 27,380 |
+| add a todo (100 to 300 todos), median (us) | 111 | 115 | noise | 189 |
+| add a todo (100 to 300 todos), 99th percentile (us) | 1449 | 1547 | noise | 891 |
+| peak memory (MB, VmHWM) | 4.8 | 4.8 | noise | 35.2 |
+
+Struct views changed nothing measurable here: every one of the 13 measures in each of the four modes (none, fragment, page, page with `--db-sync full`) is within run-to-run spread, and peak memory is identical. The app needed no source change on the new compiler. Single runs are noisy (a few outliers in page mode, for example 16k pages per second once); medians of 4 absorb them.

@@ -449,7 +449,7 @@ The state hash (`mito_state_hash` in runtime/mito.c, 64 bits, not cryptographic)
 
 ## Command-line programs
 A program whose entry is `@main` is a tool, not a server: `@main fn main(filter: utf8<1..1000> from arg(0), doc: utf8<4294967295> from stdin, c: bool = false) -> Response<text>`.
-The command line is the request: `from arg(N)` is the Nth argument, `from stdin` what is piped in (read only when the program has such an input, up to 4 GiB - 1 bytes: a length is 32 bits), and any
+The command line is the request: `from arg(N)` is the Nth argument, `from stdin` what is piped in (read only when the program has such an input, up to 4 GiB - 1 bytes: a length is 32 bits; it is read straight into the request text area and the program's text input points at it, so the input is held once, not copied), and any
 other input is a flag: `--name value`, `--name=value`, a bare `--name` or a short `-c` is true. Inputs are checked as for an endpoint (a missing or out-of-range one
 answers 400). The answer's body goes to standard output with exit code 0; an answer of status 400 or more goes to standard error with exit code 1; a program that
 fails to start exits 2. A program with `@main` has no endpoints beside it (`@start` is allowed), and no tables yet. `mito run tool.mito -- args < in` builds and

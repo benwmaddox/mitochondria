@@ -604,6 +604,7 @@ typedef struct Mito {
     Area ops; /* what the request asks of sockets (runtime/http.c applies it once the request succeeds): records, see sock_op */
     i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
     u64 small;       /* bytes of the block holding the page flags (released with the instance) */
+    u32 stdin_off, stdin_n; /* a command-line program's stdin, read straight into the text area (MITO(text_input)): where it is and how long, so the ":stdin" input aliases it */
     u32 text_base;   /* where a request's text starts: after the literals, or after a running test's own text */
     /* a test's request being made: its body (JSON), its headers, as names and values in the text area */
     u8 rqbuf[16384]; u32 nrqh; struct { T k, v; } rqh[16];
@@ -1174,7 +1175,7 @@ static int h_input(Ctx *c, int src, const char *name, u32 nn, int kind, i64 lo, 
             return 0;
         case 4: case 7: {
             T t;
-            if (text) { if ((i64)tn > hi) { in_bad(m, 413, name, nn, ": "); a_u64(&m->emsg, tn); a_str(&m->emsg, " bytes, at most "); a_i64(&m->emsg, hi); return -1; } if (t_push(m, tp, tn, &t)) return -1; }
+            if (text) { if ((i64)tn > hi) { in_bad(m, 413, name, nn, ": "); a_u64(&m->emsg, tn); a_str(&m->emsg, " bytes, at most "); a_i64(&m->emsg, hi); return -1; } if (m->stdin_n && tp == m->text.p + m->stdin_off && tn == m->stdin_n) { t.off = m->stdin_off; t.len = m->stdin_n; } else if (t_push(m, tp, tn, &t)) return -1; }
             else { if (v.tag != 4) return in_bad(m, 400, name, nn, ": expected a string"); t.off = v.a; t.len = v.b; }
             if ((i64)t.len > hi) { in_bad(m, 413, name, nn, ": "); a_u64(&m->emsg, t.len); a_str(&m->emsg, " bytes, at most "); a_i64(&m->emsg, hi); return -1; }
             if ((i64)t.len < lo) { in_bad(m, 400, name, nn, ": at least "); a_i64(&m->emsg, lo); a_str(&m->emsg, lo == 1 ? " byte" : " bytes"); return -1; }
@@ -2820,6 +2821,16 @@ static int areas_init(Mito *m) {
     m->text.p = m->areas; m->text.cap = TEXT_CAP; m->text.max = (u32)g_text_max; memcpy(m->areas, mito_lits, MITO_LITS_LEN); m->text.len = MITO_LITS_LEN;
     m->out.p = m->areas + tr; m->out.cap = RESPONSE_CAP; m->out.max = (u32)g_out_max;
     return 1;
+}
+/* A command-line program's stdin is read straight into the text area, after the literals (nothing else is in it between start and the request):
+   MITO(text_room) makes `n` bytes there writable (committing as needed; 0 when they do not fit), MITO(text_input) says `n` bytes were written: they stay
+   as the request's text base, and an input that points at them (a pair whose value is the returned pointer, `n` long) is a text value over them, not a copy. */
+MITO_API u8 *MITO(text_room)(void *mp_, u64 n) { Mito *m = (Mito *)mp_;
+    if ((u64)m->text.len + n > m->text.cap && !a_grow(&m->text, (u64)m->text.len + n)) return 0;
+    return m->text.p + m->text.len;
+}
+MITO_API void MITO(text_input)(void *mp_, u64 n) { Mito *m = (Mito *)mp_;
+    m->stdin_off = m->text.len; m->stdin_n = (u32)n; m->text.len += (u32)n; m->text_base = m->text.len;
 }
 MITO_API void *MITO(start)(u64 budget, u64 seed) {
     const MitoProg *pg = &mito_prog;

@@ -54,13 +54,13 @@ if [ "$got" = '"item 19998" "item 19999" ' ]; then pass=$((pass+1)); else fail=$
 
 # an input of about 8 MB (more than the 4 MB the request text area held before it grew with the input) and its output
 f=${TMPDIR:-/tmp}/jx-e2e-big.$$
-awk 'BEGIN { printf "{\"users\":["; for (i = 0; i < 100000; i++) { if (i) printf ","; printf "{\"n\":\"user%d\",\"age\":%d,\"tags\":[\"a\",\"b\"],\"addr\":{\"city\":\"c%d\",\"zip\":%d}}", i, i % 90, i % 100, i % 99999 } printf "]}" }' > "$f"
+awk 'BEGIN { printf "{\"users\":["; for (i = 0; i < 300000; i++) { if (i) printf ","; printf "{\"n\":\"user%d\",\"age\":%d,\"tags\":[\"a\",\"b\"],\"addr\":{\"city\":\"c%d\",\"zip\":%d}}", i, i % 90, i % 100, i % 99999 } printf "]}" }' > "$f"
 got=$("$JX" -c '.users | length' < "$f" 2>&1); rc=$?
-if [ "$rc" = 0 ] && [ "$got" = 100000 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL big-length: ($rc) $got"; fi
-got=$("$JX" -c '.users[99999].n' < "$f" 2>&1)
-if [ "$got" = '"user99999"' ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL big-last: $got"; fi
+if [ "$rc" = 0 ] && [ "$got" = 300000 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL big-length: ($rc) $got"; fi
+got=$("$JX" -c '.users[299999].n' < "$f" 2>&1)
+if [ "$got" = '"user299999"' ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL big-last: $got"; fi
 got=$("$JX" -c '.users[] | select(.age == 7) | .n' < "$f" 2>&1 | wc -l | tr -d ' ')
-if [ "$got" = 1112 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL big-select: $got"; fi
+if [ "$got" = 3334 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL big-select: $got"; fi
 rm -f "$f"
 
 echo "$pass passed, $fail failed"

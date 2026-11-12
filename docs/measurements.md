@@ -1021,3 +1021,87 @@ in the answer cache under a per-list version (every change to a list moves it; o
 CRUDSPEC_NO_CACHE=1, fragment: CRUDSPEC_NO_PAGE_CACHE=1, page: its default). 100 todos, page render median / pages per second on one core: none 135 us and 16,251 against crudspec 532 us and 2,049; fragment 96 us and 32,745 against 260 us and 5,312; page 104 us
 and 30,512 against 100 us and 29,157. Both servers now sync the log at checkpoints by default (`--db-sync normal`); with `--db-sync full` (every commit on disk before the answer) writes cost 0.7-1.3 ms in both (Mitochondria 0.80-0.91x of crudspec's time).
 The browser tests (examples/todomvc/e2e.mjs, 53 checks) pass in all three modes.
+
+## Struct views: before and after (2026-11-12)
+
+Did PR #35 (struct values, step 1, then `write` parameters, struct returns and views: `main` at 0332c6a) change speed against `cd62aba`, the commit before any of it? Both compilers built in release mode and run alternately (ABBA), Linux/WSL2, pinned cores, under the shared bench lock; the Windows world example was timed on Windows. "Noise" means a ratio within 2 percent. Nothing in the compiler or libraries was changed to measure.
+
+### LangArena ports (all 41, Linux, 3 rounds per run, best of the rounds of 4 runs: base, new, new, base)
+
+All 41 ports compile and give the right checksum on both sides (no `write` fix was needed). After / before over all ports: geometric mean 0.997x. 37 ports are within 2 percent (noise). Four are beyond it by best-of, in both directions, all inside the run-to-run spread (3 to 23 percent for these): Binarytrees::Arena 1.022x, Etc::GameOfLife 1.032x, Compress::ArithEncode 0.979x, Maze::BFS 0.967x. Reruns of the outliers (5 rounds, ABBAAB) gave Etc::GameOfLife 1.19 s before and 1.19 s after (the 1.150 s in the table is one fast base run that did not repeat), and Graph::AStar 0.65 s and 0.65 s (one new run measured 0.705 s in the first pass, not repeated). The struct-heavy ports (CLBG::Nbody 0.996x, Etc::TextRaytracer 0.993x, Matmul::Single 0.996x, Etc::NeuralNet 1.006x, CLBG::Spectralnorm 1.000x, CLBG::Mandelbrot 0.993x) did not move: none passes a struct to a function, so the change does not touch their code.
+
+| Port | before (s) | after (s) | after / before | |
+|---|---:|---:|---:|---|
+| BF::Array | 0.884 | 0.872 | 0.987x | noise |
+| BF::Recursion | 1.634 | 1.608 | 0.984x | noise |
+| Base64::Decode | 0.141 | 0.144 | 1.019x | noise |
+| Base64::Encode | 0.138 | 0.137 | 0.992x | noise |
+| Binarytrees::Arena | 0.431 | 0.440 | 1.022x | slower |
+| Binarytrees::Obj | 1.949 | 1.955 | 1.003x | noise |
+| CLBG::Fannkuchredux | 0.949 | 0.950 | 1.000x | noise |
+| CLBG::Mandelbrot | 0.624 | 0.620 | 0.993x | noise |
+| CLBG::Nbody | 0.725 | 0.722 | 0.996x | noise |
+| CLBG::Spectralnorm | 0.694 | 0.694 | 1.000x | noise |
+| CSV::Parse | 0.486 | 0.485 | 0.998x | noise |
+| Calculator::Ast | 0.136 | 0.135 | 0.994x | noise |
+| Calculator::Interpreter | 0.305 | 0.306 | 1.006x | noise |
+| Compress::ArithDecode | 0.871 | 0.860 | 0.987x | noise |
+| Compress::ArithEncode | 0.871 | 0.853 | 0.979x | faster |
+| Compress::BWTDecode | 0.770 | 0.764 | 0.991x | noise |
+| Compress::BWTEncode | 0.265 | 0.260 | 0.982x | noise |
+| Compress::HuffDecode | 0.752 | 0.752 | 1.000x | noise |
+| Compress::HuffEncode | 0.539 | 0.540 | 1.000x | noise |
+| Compress::LZWDecode | 0.081 | 0.080 | 0.994x | noise |
+| Compress::LZWEncode | 0.083 | 0.082 | 0.989x | noise |
+| Distance::Jaro | 0.858 | 0.856 | 0.998x | noise |
+| Distance::NGram | 0.341 | 0.341 | 0.999x | noise |
+| Etc::CacheSimulation | 0.330 | 0.330 | 0.999x | noise |
+| Etc::GameOfLife | 1.150 | 1.187 | 1.032x | slower |
+| Etc::NeuralNet | 0.446 | 0.448 | 1.006x | noise |
+| Etc::Sieve | 1.108 | 1.119 | 1.011x | noise |
+| Etc::TextRaytracer | 0.656 | 0.651 | 0.993x | noise |
+| Etc::Words | 0.451 | 0.454 | 1.008x | noise |
+| Graph::AStar | 0.648 | 0.647 | 0.999x | noise |
+| Graph::BFS | 0.902 | 0.903 | 1.001x | noise |
+| Graph::DFS | 0.826 | 0.824 | 0.998x | noise |
+| Hash::CRC32 | 0.761 | 0.749 | 0.985x | noise |
+| Hash::SHA256 | 0.607 | 0.604 | 0.994x | noise |
+| Matmul::Single | 2.730 | 2.718 | 0.996x | noise |
+| Maze::AStar | 0.847 | 0.839 | 0.992x | noise |
+| Maze::BFS | 0.400 | 0.387 | 0.967x | faster |
+| Maze::Generator | 0.427 | 0.429 | 1.004x | noise |
+| Sort::Merge | 1.356 | 1.348 | 0.994x | noise |
+| Sort::Quick | 1.208 | 1.197 | 0.991x | noise |
+| Template::Parse | 0.514 | 0.510 | 0.993x | noise |
+### bench/msgbatch (Linux, 500,000 batches after 100,000 warmup, best of 5, one pinned core, ABBA)
+
+The machine ran 9 percent faster in the two `new` runs than in the two `base` runs (Rust, the same binary, 1.057 s and 1.044 s then 0.966 s and 0.965 s), so the ratio to Rust is the fair figure; checksums equal in every run.
+
+| | before | after | after / before |
+|---|---:|---:|---:|
+| Mitochondria (best, s) | 1.026 | 0.950 | 0.926x (machine drift, see next row) |
+| Rust, same binary (best, s) | 1.044 | 0.965 | 0.924x |
+| Mitochondria / Rust | 0.983x | 0.985x | 1.002x (noise) |
+| Go / Rust | 1.94x | 1.94x | noise |
+
+Struct views did not change this program (it has no struct parameters). Peak RSS: Mitochondria 2.2 MB, Rust 1.5 MB, Go 1.9 MB.
+
+### examples/world (Windows, 1280x720, 400 frames, wall time including start-up and the screenshot, best of 10 alternating runs)
+
+| | before | after | after / before |
+|---|---:|---:|---:|
+| seconds per run | 1.17 | 1.20 | 1.026x (medians 1.22 and 1.23: 1.008x, noise) |
+
+The two builds are not the same program: `cd62aba` predates the merged shading change (PR #34, f0957b4), so the world's shaders and scene differ, and the run includes start-up, so this is a coarse check that nothing got slower, not a measure of the CPU side of a frame.
+
+### bench/structs: particle update with `std/vec.mito` (Linux, 20 million steps, best of 5 rounds, 8 runs in the order base, new, new, base, base, new, new, base; same answer on both sides)
+
+A step sets an acceleration, updates velocity and position, damps the position and adds the length to a sum (`base.mito` and `new.mito`; the only source difference is `self: write Vec3` on the user's `damp`).
+
+| loop | before ns/step | after ns/step | after / before |
+|---|---:|---:|---:|
+| library functions (`set`, `add_scaled`, `plus`, `damp`, `length`) | 2.608 | 2.628 | 1.008x (noise) |
+| the same arithmetic on the fields | 2.608 | 2.608 | 1.000x (noise) |
+| struct locals and returns: `let t = plus3(w.pos, w.vel); w.pos = scaled3(t, 0.99999999);` | not expressible | 6.744 | 2.59x the field loop on the same side |
+
+The library path costs nothing over field arithmetic on either side (the helpers inline to the same C). The struct-return form is new in 0332c6a and costs about 4.1 ns more per step than the same arithmetic written on the fields: a returned struct is built in the scratch area and then copied into `w.pos` (I did not look at the generated C to say why it is not kept in registers). Writing the update with the in-place functions (`w.pos.plus(w.vel); w.pos.scale(k);`) stays at the field speed, so hot loops should prefer them until the struct-return step 3 lowers non-escaping locals to scalars.

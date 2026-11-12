@@ -1,0 +1,28 @@
+// `write` parameters of numbers on a field of a table's row: stored the way `row.field = value` is (an integer's type and range, a bool)
+--- program
+struct Row { name: ascii<8>; hits: i64; level: u8; done: bool; }
+struct App { rows: table<Row> index(name); }
+state app: App;
+
+fn bump(n: write i64) { n += 1; }
+fn set_level(v: write u8, x: i64) { v = x; }
+fn flip(f: write bool) { f = !f; }
+
+@post("/add/{name}")
+fn add(name: ascii<8>) -> Response<{ id: Row }> { let r = app.rows.add(); r.name = name; return created({ id: r }); }
+@post("/work/{name}/{level}")
+fn work(name: ascii<8>, level: i64 in 0..1000) -> Response<{ hits: i64, level: i64, done: bool }> {
+    let r = first r in app.rows where r.name == name;
+    if !exists(r) { fail 404 "no row"; }
+    bump(r.hits);
+    bump(r.hits);
+    flip(r.done);
+    set_level(r.level, level);
+    return ok({ "hits": r.hits, "level": r.level, "done": r.done });
+}
+--- requests
+POST /add/ann
+POST /work/ann/7
+POST /work/ann/200
+POST /work/ann/300
+POST /work/bob/1

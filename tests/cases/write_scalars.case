@@ -1,0 +1,159 @@
+// `write` parameters of numbers and bool: the argument is a place (a `var`, a field of the state or of an item, an element of an array) and the function reads and assigns
+// that place itself; a store goes the way a direct assignment does (type and range checks, undo log), and what a caller knew of a `var` it handed over is forgotten
+--- program
+struct Item { n: i64; hits: i64[3]; }
+struct S { count: i64; ratio: f64; flag: bool; arr: i64[4]; ranged: i64 in 0..9; small: u8; k: i64; lo: i64; hi: i64; items: pool<Item, 4>; }
+state g: S;
+
+fn bump(n: write i64) { n += 1; }
+fn twice(n: write i64) { bump(n); bump(n); }
+fn two(a: write i64, b: write i64) { a += 1; b += 1; }
+fn minmax(a: i64, b: i64, lo: write i64, hi: write i64) { if a < b { lo = a; hi = b; } else { lo = b; hi = a; } }
+fn toggle(f: write bool) { f = !f; }
+fn add_to(acc: write f64, x: f64) { acc += x; }
+fn set_small(v: write u8, x: i64) { v = x; }
+fn redo(n: write i64) { n = n * 2; let seen = n; n = seen + 1; }
+fn bump_peek(n: write i64) -> i64 { n += 1; return g.count; }
+fn grow_until(n: write i64, limit: i64) { while n < limit { n += 1; } }
+
+@post("/count")
+fn post_count() -> Response<{ count: i64, peek: i64 }> {
+    g.count = 1;
+    bump(g.count);
+    bump(g.count);
+    twice(g.count);
+    two(g.count, g.count);
+    let p = bump_peek(g.count);
+    return ok({ "count": g.count, "peek": p });
+}
+@post("/local")
+fn post_local() -> Response<{ x: i64, y: i64, z: i64 }> {
+    var x = 10;
+    bump(x);
+    twice(x);
+    two(x, x);
+    var y = 3;
+    redo(y);
+    var z = 0;
+    grow_until(z, 7);
+    return ok({ "x": x, "y": y, "z": z });
+}
+@post("/pair")
+fn post_pair() -> Response<{ lo: i64, hi: i64, glo: i64, ghi: i64 }> {
+    var lo = 0;
+    var hi = 0;
+    minmax(7, 3, lo, hi);
+    minmax(9, 2, g.lo, g.hi);
+    return ok({ "lo": lo, "hi": hi, "glo": g.lo, "ghi": g.hi });
+}
+@post("/flag")
+fn post_flag() -> Response<{ flag: bool, local: bool }> {
+    toggle(g.flag);
+    var b = false;
+    toggle(b);
+    toggle(b);
+    toggle(b);
+    return ok({ "flag": g.flag, "local": b });
+}
+@post("/acc")
+fn post_acc() -> Response<{ ratio: f64, local: f64 }> {
+    add_to(g.ratio, 1.5);
+    add_to(g.ratio, 0.25);
+    var t = 0.25;
+    add_to(t, 0.5);
+    return ok({ "ratio": g.ratio, "local": t });
+}
+@post("/arr")
+fn post_arr() -> Response<{ a1: i64, a2: i64, a3: i64, i: i64 }> {
+    g.arr[1] = 5;
+    bump(g.arr[1]);
+    var i = 2;
+    bump(g.arr[i]);
+    two(g.arr[i], i);
+    return ok({ "a1": g.arr[1], "a2": g.arr[2], "a3": g.arr[3], "i": i });
+}
+@post("/item")
+fn post_item() -> Response<{ n: i64, h1: i64, sum: i64 }> {
+    let it = g.items.add();
+    it.n = 4;
+    it.hits[1] = 1;
+    bump(it.n);
+    bump(it.hits[1]);
+    foreach t in g.items { bump(t.n); twice(t.hits[2]); }
+    return ok({ "n": it.n, "h1": it.hits[1], "sum": it.n + it.hits[2] });
+}
+@post("/ranged/{times}")
+fn post_ranged(times: i64 in 0..5) -> Response<{ ranged: i64 }> {
+    g.ranged = 7;
+    foreach r in 1..times { bump(g.ranged); bump(g.count); }
+    return ok({ "ranged": g.ranged });
+}
+@get("/peek")
+fn get_peek() -> Response<{ ranged: i64, count: i64 }> { return ok({ "ranged": g.ranged, "count": g.count }); }
+@post("/small/{v}")
+fn post_small(v: i64 in 0..1000) -> Response<{ small: i64, local: i64 }> {
+    set_small(g.small, v);
+    var w = 0;
+    set_small(w, v);
+    return ok({ "small": g.small, "local": w });
+}
+// what the caller knew of a `var` is forgotten: `i` is 0..2 by its assignments as far as the code can see, and bump pushes it out of range
+@get("/stale1")
+fn get_stale1() -> Response<{ v: i64 }> {
+    var i = 0;
+    bump(i);
+    bump(i);
+    return ok({ "v": g.arr[i] });
+}
+@get("/stale2")
+fn get_stale2() -> Response<{ v: i64 }> {
+    var i = 0;
+    twice(i);
+    twice(i);
+    bump(i);
+    return ok({ "v": g.arr[i] });
+}
+@get("/stale3/{n}")
+fn get_stale3(n: i64 in 0..10) -> Response<{ v: i64 }> {
+    var i = 0;
+    foreach r in 1..n { bump(i); }
+    return ok({ "v": g.arr[i] });
+}
+@get("/stale4/{n}")
+fn get_stale4(n: i64 in 0..10) -> Response<{ v: i64 }> {
+    var i = 0;
+    if n > 3 { twice(i); twice(i); twice(i); }
+    return ok({ "v": g.arr[i] });
+}
+@post("/fieldk/{n}")
+fn post_fieldk(n: i64 in 0..10) -> Response<{ v: i64 }> {
+    g.k = 0;
+    foreach r in 1..n { bump(g.k); }
+    return ok({ "v": g.arr[g.k] });
+}
+@get("/readk")
+fn get_readk() -> Response<{ v: i64 }> { return ok({ "v": g.arr[g.k] }); }
+--- requests
+POST /count
+POST /local
+POST /pair
+POST /flag
+POST /acc
+POST /arr
+POST /item
+POST /ranged/2
+GET /peek
+POST /ranged/3
+GET /peek
+POST /small/200
+POST /small/300
+GET /stale1
+GET /stale2
+GET /stale3/2
+GET /stale3/9
+GET /stale4/2
+GET /stale4/5
+POST /fieldk/2
+GET /readk
+POST /fieldk/9
+GET /readk

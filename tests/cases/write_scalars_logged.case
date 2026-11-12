@@ -1,0 +1,41 @@
+// `write` parameters on a logged state: a store through a parameter is in the undo log like a direct one, so a request that fails afterwards leaves every place it changed as it was
+--- program
+struct Item { n: i64; }
+struct H { c: i64; r: i64 in 0..9; arr: i64[2]; ratio: f64; flag: bool; items: pool<Item, 4>; }
+state h: H logged;
+
+fn bump(n: write i64) { n += 1; }
+fn add_to(acc: write f64, x: f64) { acc += x; }
+fn toggle(f: write bool) { f = !f; }
+
+@post("/seed")
+fn post_seed() -> Response<{}> {
+    let it = h.items.add();
+    it.n = 1;
+    return ok({});
+}
+@post("/go/{times}")
+fn post_go(times: i64 in 0..5) -> Response<{ r: i64 }> {
+    h.r = 7;
+    foreach i in 1..times {
+        bump(h.c);
+        bump(h.arr[1]);
+        add_to(h.ratio, 0.5);
+        toggle(h.flag);
+        foreach t in h.items { bump(t.n); }
+        bump(h.r);
+    }
+    return ok({ "r": h.r });
+}
+@get("/peek")
+fn get_peek() -> Response<{ c: i64, r: i64, a: i64, ratio: f64, flag: bool, n: i64 }> {
+    var n = 0;
+    foreach t in h.items { n = t.n; }
+    return ok({ "c": h.c, "r": h.r, "a": h.arr[1], "ratio": h.ratio, "flag": h.flag, "n": n });
+}
+--- requests
+POST /seed
+POST /go/2
+GET /peek
+POST /go/3
+GET /peek

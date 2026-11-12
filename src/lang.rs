@@ -205,7 +205,10 @@ pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt
 
 /// A typed input: where it comes from, its type, and what an absent one is (`= default`, or `?`: null).
 #[derive(Debug, Clone)]
-pub struct Input { pub name: String, pub src: Src, pub ty: InTy, pub default: Option<Expr>, pub optional: bool }
+pub struct Input { pub name: String, pub src: Src, pub ty: InTy, pub default: Option<Expr>, pub optional: bool, pub pending: Vec<PendingBound>, pub limits: (i64, i64) }
+/// A range bound written as a constant (`in 0..Limits.MAX`), resolved by the binder, which knows the constants: `hi` says which end, `neg` a minus sign.
+#[derive(Debug, Clone)]
+pub struct PendingBound { pub hi: bool, pub group: String, pub name: String, pub neg: bool }
 /// Where an input comes from: a path segment, the JSON body, the query string, a header, or a field forwarded by
 /// another worker.
 #[derive(Debug, Clone, PartialEq)]
@@ -640,11 +643,22 @@ impl P {
         let forwarded = if self.is_kw("forwarded") { self.i += 1; true } else { false };
         let name = self.id()?; self.eat(":")?;
         let tn = self.id()?;
-        let range = |p: &mut Self, lo: i64, hi: i64| -> R<(i64, i64)> {
+        let mut pending: Vec<PendingBound> = Vec::new();
+        let mut limits = (i64::MIN, i64::MAX);
+        let mut range = |p: &mut Self, lo: i64, hi: i64| -> R<(i64, i64)> {
+            limits = (lo, hi);
             if !p.is_kw("in") { return Ok((lo, hi)); }
             p.i += 1;
-            let a = p.signed()?; p.eat("..")?; let b = p.signed()?;
-            if a > b || a < lo || b > hi { return Err(format!("input `{}`: range {}..{} does not fit its type", name, a, b)); }
+            // each end is a number or a constant of a group (`Limits.MAX`): a constant's value is only known to the binder, so for now the end is the type's own
+            let mut end = |p: &mut Self, is_hi: bool, own: i64| -> R<i64> {
+                let neg = p.sym("-");
+                if let (Some(Tok::Id(g)), Some(Tok::Sym(d)), Some(Tok::Id(n))) = (p.t.get(p.i).cloned(), p.t.get(p.i + 1).cloned(), p.t.get(p.i + 2).cloned()) {
+                    if d == "." { p.i += 3; pending.push(PendingBound { hi: is_hi, group: g, name: n, neg }); return Ok(own); }
+                }
+                let v = p.int()?; Ok(if neg { -v } else { v })
+            };
+            let a = end(p, false, lo)?; p.eat("..")?; let b = end(p, true, hi)?;
+            if pending.is_empty() && (a > b || a < lo || b > hi) { return Err(format!("input `{}`: range {}..{} does not fit its type", name, a, b)); }
             Ok((a, b))
         };
         let ty = match tn.as_str() {
@@ -720,7 +734,7 @@ impl P {
         if let (InTy::Int(lo, hi), Some(Expr::Int(d))) = (&ty, &default) { if d < lo || d > hi { return Err(format!("input `{}`: the default {} is outside {}..{}", name, d, lo, hi)); } }
         if matches!(ty, InTy::Item(..)) && !matches!(src, Src::Path | Src::Header(_) | Src::Cookie(_)) { return Err(format!("input `{}`: an item comes from the path (an id), a header or a cookie (a session token)", name)); }
         if let Src::Header(h) = &src { if matches!(ty, InTy::Item(..)) && !h.eq_ignore_ascii_case("X-Session") { return Err(format!("input `{}`: a session item comes from `header(\"X-Session\")`", name)); } }
-        Ok(Input { name, src, ty, default, optional })
+        Ok(Input { name, src, ty, default, optional, pending, limits })
     }
     fn signed(&mut self) -> R<i64> { if self.sym("-") { Ok(-self.int()?) } else { self.int() } }
 
@@ -1408,6 +1422,7 @@ fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums
     }
     for e in &mut api.eps {
         let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
+        for i in &mut e.inputs { if let Err(m) = resolve_bounds(i, consts) { errs.push(format!("endpoint {} ({}): {}", e.name, e.text, m)); } }
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         if let Err(e) = b.block(&mut e.body) { errs.push(e); continue; }
         e.slots = b.max;
@@ -1415,6 +1430,21 @@ fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums
     }
     // every function and endpoint is bound on its own: their errors are independent, one per line
     if errs.is_empty() { Ok(()) } else { Err(errs.join("\n")) }
+}
+
+/// An input's range written with constants (`in 0..Limits.MAX`): the constants' values go in, and the range is checked as a written one is.
+fn resolve_bounds(i: &mut Input, consts: &Consts) -> R<()> {
+    let InTy::Int(lo, hi) = &mut i.ty else { return Ok(()) };
+    for pb in std::mem::take(&mut i.pending) {
+        let Some((_, items)) = consts.iter().find(|x| x.0 == pb.group) else { return Err(format!("input `{}`: `{}` is not a const group", i.name, pb.group)) };
+        let Some(x) = items.iter().find(|x| x.0 == pb.name) else { return Err(format!("input `{}`: const group `{}` has no `{}`", i.name, pb.group, pb.name)) };
+        let crate::layout::CVal::Int(v) = x.1 else { return Err(format!("input `{}`: `{}.{}` is not an integer", i.name, pb.group, pb.name)) };
+        let v = if pb.neg { v.checked_neg().ok_or_else(|| format!("input `{}`: `{}.{}` is out of range", i.name, pb.group, pb.name))? } else { v };
+        if pb.hi { *hi = v } else { *lo = v }
+    }
+    if *lo > *hi || *lo < i.limits.0 || *hi > i.limits.1 { return Err(format!("input `{}`: range {}..{} does not fit its type", i.name, lo, hi)); }
+    if let Some(Expr::Int(d)) = &i.default { if d < lo || d > hi { return Err(format!("input `{}`: the default {} is outside {}..{}", i.name, d, lo, hi)); } }
+    Ok(())
 }
 
 /// Does every path through `body` end in an answer, a `fail`, a `forward` (or the test hook `__crash()`)?

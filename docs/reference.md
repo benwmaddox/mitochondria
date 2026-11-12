@@ -96,7 +96,7 @@ Not yet: returning a struct, taking one by copy, comparing, answering with one, 
 
 ## Const groups
 
-`const Limits { MAX_HP: i64 = 100; MAX_NAME = 16; DOUBLE: i64 = Limits.MAX_HP * 2; }` names compile-time constants, used as `Limits.MAX_HP`. The type is optional for integers (a value that does not fit the type is an error); a float needs one (`const Tune { GRAVITY: f64 = 9.8; }`). A value is a number, an earlier constant of any group, and `- + * / % << >> & | ^ ( )` of them, folded when read; overflow is an error naming the constant. A constant is usable in code (also as a `match` arm), in a field's `in lo..hi`, and in a size (`string<Limits.MAX_NAME>`, `u8[Limits.MAX_NAME]`, `pool<Item, Limits.N>`), not yet in an endpoint input's range (`DESIGN.md`, Const groups).
+`const Limits { MAX_HP: i64 = 100; MAX_NAME = 16; DOUBLE: i64 = Limits.MAX_HP * 2; }` names compile-time constants, used as `Limits.MAX_HP`. The type is optional for integers (a value that does not fit the type is an error); a float needs one (`const Tune { GRAVITY: f64 = 9.8; }`). A value is a number, an earlier constant of any group, and `- + * / % << >> & | ^ ( )` of them, folded when read; overflow is an error naming the constant. A constant is usable in code (also as a `match` arm), in a field's `in lo..hi`, and in a size (`string<Limits.MAX_NAME>`, `u8[Limits.MAX_NAME]`, `pool<Item, Limits.N>`), not yet in an endpoint input's range (`DESIGN.md`, Const groups). An endpoint input's range may use them: `fn get(n: i64 in 0..Limits.MAX_HP)` (either end, with an optional minus sign).
 
 ## Generic structs
 

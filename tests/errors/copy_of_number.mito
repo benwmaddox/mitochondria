@@ -1,4 +1,0 @@
-// expect: `.copy()` of a number or bool is not needed
-struct G { n: i64; }
-state g: G;
-@get("/a") fn a() -> Response<{ n: i64 }> { let m = g.n.copy(); return ok({ "n": m }); }

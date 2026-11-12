@@ -478,14 +478,14 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             while p.sym(".") { name = format!("{}.{}", name, p.id()?); } // instance.function, from module expansion
             p.eat("(")?;
             let (mut params, mut ptys, mut modes) = (Vec::new(), Vec::new(), Vec::new());
-            // `p: Player` is read-only; `p: write Player` may change the caller's struct (a type named `write` is still a type); a copy is made at the call, `f(x.copy())`
+            // `p: Player` is read-only; `p: write Player` may change the caller's struct (a type named `write` is still a type); a copy is made at the call, `var c = V { ..x }; f(c);`
             while !p.sym(")") {
                 params.push(p.id()?);
                 let mut mode = 0u8;
                 ptys.push(if p.sym(":") {
                     if matches!(p.t.get(p.i + 1), Some(Tok::Id(_))) {
                         if p.is_kw("write") { mode = 1; p.i += 1; }
-                        else if p.is_kw("copy") { return Err("a parameter is never a copy: pass `x.copy()` at the call to give a function its own copy".into()); }
+                        else if p.is_kw("copy") { return Err("a parameter is never a copy: write `var c = V { ..x };` and pass `c` to give a function its own copy".into()); }
                     }
                     Some(p.pty()?)
                 } else { None });
@@ -1544,7 +1544,7 @@ impl Binder<'_> {
         if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
         let Some((recv, op)) = n.rsplit_once('.') else { return };
         let declared = self.declared_method(op);
-        if !declared && !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity" | "copy") { return; }
+        if !declared && !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
         let mut parts = recv.split('.');
         let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
         for f in parts { r = Expr::Field(Box::new(r), f.to_string()); }
@@ -1683,7 +1683,6 @@ impl Binder<'_> {
                 for a in args.iter_mut() { self.expr(a)?; }
                 *res = match (n.as_str(), args.len()) {
                     _ if AMBIGUOUS_OPS.contains(&&n[1..]) && self.declared_method(&n[1..]) => CallRes::Unbound,
-                    (".copy", 1) => CallRes::Unbound, // `x.copy()`: the code generator decides (a function of the receiver's type named `copy`, or the built-in copy)
                     (".count", 1) => CallRes::Builtin(B::Count),
                     (".capacity", 1) => CallRes::Builtin(B::Capacity),
                     (".add" | ".try_add", 1) => return self.err(format!("`{}()` makes an item: write `let x = coll{}();` or `coll{}();` as a statement", &n[1..], n, n)),

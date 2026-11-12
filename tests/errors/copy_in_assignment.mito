@@ -1,5 +1,0 @@
-// expect: an assignment copies already
-struct P { x: i64; }
-struct G { p: P; q: P; }
-state g: G;
-@get("/a") fn a() -> Response<{ n: i64 }> { g.q = g.p.copy(); return ok({ "n": g.q.x }); }

@@ -1917,14 +1917,6 @@ impl<'p> G<'p> {
         self.line(&format!("{}({}ULL, {}ULL, {});", if own { "SCRMOVE" } else { "MOVE_" }, dst, src, n));
         Ok(())
     }
-    /// What a `let` or `var` of a struct becomes: a new place in the scratch area holding a copy. `src`: the place the value is (a hidden temporary of a literal is the place itself).
-    fn struct_local(&mut self, sid: usize, src: usize, hidden: bool) -> R<CV> {
-        if hidden { return Ok(CV::Plain(sid, src)); }
-        self.prog.value_check(sid)?;
-        let off = self.scratch_alloc(self.prog.structs[sid].size)?;
-        self.copy_struct(sid, off, src)?;
-        Ok(CV::Plain(sid, off))
-    }
     /// `Name { f: e, ..base }` (the parser's `__mito__struct("Name", mode, fields...)`): a new struct place, all zero: its fields are set by the assignments that follow.
     /// `mode`: "full" (every field given), "zero" (`Name {}`), "update" (`..base` and the fields listed, copied over a copy of `base`).
     fn struct_new(&mut self, args: &[Expr]) -> R<CV> {
@@ -2729,13 +2721,6 @@ impl<'p> G<'p> {
         if !list.contains(&(off, size)) { list.push((off, size)); }
         true
     }
-    /// `x.copy()` as the whole right side of an assignment is an error: the assignment copies the struct into its target already, once, so the copy would only be a second one.
-    fn refuse_copy(&self, e: &'p Expr) -> R<&'p Expr> {
-        match e {
-            Expr::Call(n, args, _) if n == ".copy" && args.len() == 1 && !self.api.fns.iter().any(|f| f.recv && f.name.ends_with(".copy")) => no("an assignment copies already: write `target = source;` without `.copy()`"),
-            e => Ok(e),
-        }
-    }
     /// Is this receiver one a function of a type was declared for (`fn clear(self: write Grid)`)? A name that is also a collection operation means the function
     /// when the receiver's type has one declared, and the collection operation otherwise.
     fn user_method_for(&mut self, op: &str, recv: &'p Expr, env: &mut Vec<Option<CV>>) -> R<bool> {
@@ -2814,14 +2799,14 @@ impl<'p> G<'p> {
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
                 self.immut.remove(&(self.frame, *slot));
-                // a struct bound to a name is a view of the place it names (`x.copy()` makes a place of its own); a struct literal builds one in the scratch area
+                // a struct bound to a name is a view of the place it names (`V { ..x }` makes a place of its own); a struct literal builds one in the scratch area
                 if let Expr::Call(f, args, _) = e { if f == "__mito__struct" { let v = self.struct_new(args)?; env[*slot as usize] = Some(v); return Ok(()); } }
                 if matches!(e, Expr::Call(..)) { self.ret_ctx = Some(None); }
                 let v = self.expr(e, env, None);
                 self.ret_ctx = None;
                 let v = v?;
                 if let CV::Plain(sid, src) = v {
-                    // a struct bound to a name is a view of it, never a copy (`let c = world.pos.copy();` is one): a literal's hidden temporary is its own place
+                    // a struct bound to a name is a view of it, never a copy (`let c = Pos { ..world.pos };` is a copy): a literal's hidden temporary is its own place
                     let v = CV::Plain(sid, src);
                     if !mutable && !matches!(s, Stmt::Let(n, ..) if n.starts_with("__mito__lit")) { self.immut.insert((self.frame, *slot)); }
                     env[*slot as usize] = Some(v);
@@ -2866,7 +2851,6 @@ impl<'p> G<'p> {
                 let cur = env[*slot as usize].clone().ok_or_else(|| format!("`{}` has no compiled value", n))?;
                 // a struct local: the whole struct is copied in (its place stays where it is)
                 if let CV::Plain(sid, off) = cur {
-                    let rhs = self.refuse_copy(rhs)?;
                     if matches!(rhs, Expr::Call(..)) { self.ret_ctx = Some(Some(off)); }
                     let v = self.expr(rhs, env, None);
                     self.ret_ctx = None;
@@ -2953,7 +2937,6 @@ impl<'p> G<'p> {
                         // a struct-valued field: the whole struct is copied in (`world.pos = v;`)
                         if let Ty::Struct(s2) = sd.fields[k].1 {
                             let at = off + sd.offs[k];
-                            let rhs = self.refuse_copy(rhs)?;
                             if matches!(rhs, Expr::Call(..)) { self.ret_ctx = Some(Some(at)); }
                             let v = self.expr(rhs, env, None);
                             self.ret_ctx = None;
@@ -4691,19 +4674,6 @@ impl<'p> G<'p> {
             // `x.f(args)` on a receiver whose function depends on its type: the receiver is evaluated, its type names the function (`Type.f`), and it is called with the receiver first
             CallRes::Unbound if n.starts_with('.') && !args.is_empty() => {
                 // a name that is also a collection operation (`count`, `capacity`, `truncate`): the collection's own unless the receiver's type declares the function
-                if n == ".copy" && args.len() == 1 && !self.user_method_for("copy", &args[0], env)? {
-                    // `x.copy()`: a struct in a place of its own (the scratch area), a number or bool as it is
-                    let v = self.expr(&args[0], env, dead)?;
-                    // a struct that is already a temporary of its own (a literal being built, a call's result) and a number or bool are fresh values: a copy would change nothing
-                    let temp = matches!(&args[0], Expr::Call(..)) || matches!(&args[0], Expr::Var(n, _) if n.starts_with("__mito__lit"));
-                    return match v {
-                        CV::Plain(..) if temp => no("`.copy()` of a struct that was just built is not needed: it is already a value of its own"),
-                        CV::Plain(sid, src) => self.struct_local(sid, src, false),
-                        CV::Int(_) | CV::Flt(_) | CV::Bool(_) => no("`.copy()` of a number or bool is not needed: it is already a value"),
-                        CV::Item(..) | CV::Ref(..) => no("`.copy()` of an item is not supported yet: assign its fields to a struct of your own"),
-                        _ => no("`.copy()` of text is not supported yet: build a `text` instead"),
-                    };
-                }
                 let own = match (&n[1..], args.len()) { ("count", 1) => Some(B::Count), ("capacity", 1) => Some(B::Capacity), ("truncate", 2) => Some(B::Truncate), _ => None };
                 if let Some(b) = own { if !self.user_method_for(&n[1..], &args[0], env)? { return self.callx(n, args, CallRes::Builtin(b), env, dead); } }
                 let mut vals = Vec::new();
@@ -5208,7 +5178,7 @@ impl<'p> G<'p> {
                 if mode == 0 && f.test.is_none() {
                     if param_written(self.api, &f.body, i as u32) {
                         let ty = self.prog.structs[sid].name.clone();
-                        return no(format!("`{}` is read-only here, and this changes it (or hands it to a `write` parameter): declare `{}: write {}` to change the caller's struct, or work on `{}.copy()`", f.params[i], f.params[i], ty, f.params[i]));
+                        return no(format!("`{}` is read-only here, and this changes it (or hands it to a `write` parameter): declare `{}: write {}` to change the caller's struct, or work on `var c = {} {{ ..{} }}`", f.params[i], f.params[i], ty, ty, f.params[i]));
                     }
                 }
             }

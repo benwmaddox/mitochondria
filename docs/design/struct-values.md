@@ -5,11 +5,11 @@
 This block supersedes everything below that speaks of copy parameters, copy elision, or a `view` keyword (those sections are marked). The rules, in one place:
 
 - **A struct is always a view of a place.** `let c = world.pos;` and `var v = other;` name the same place (a second name, not a copy); a struct literal (`Vec3 { x: 1.0 }`) builds a new place in the scratch area. Nothing is copied unless a copy is written.
-- **A copy is explicit: `x.copy()`.** It makes a place of its own in the scratch area (one move). Assignment copies contents already (`world.pos = v;`, `v = w;`), so `a = b.copy()` is a compile error ("an assignment copies already"); `.copy()` of a number, a `bool`, or a struct that was just built (a literal, a call result) is an error too (already a value). `.copy()` of an item or of text is not supported yet.
+- **A copy is explicit: `var c = V { ..src };`.** The literal with a base makes a place of its own in the scratch area (one move); `V { ..src, x: 5 }` is a copy with one field changed. There is no `.copy()`. Assignment copies contents already (`world.pos = v;`, `v = w;`). A literal is legal only as the whole right side of `let`, `var` or `=`, so a copy passed to a function takes two steps: `var c = V { ..x }; f(c);`.
 - **Parameters.** `p: T` is read-only: the function cannot change it, nor hand it to a callee's `write` parameter (a check on the callee's signature only, never its body). `p: write T` may change the caller's struct. `write` is allowed on a plain struct, on a text field of the state or of an item (assigning or appending stores into the caller's field), and on an item (already a handle; changes nothing, so one signature serves a state struct and an item); it is refused on a literal or computed text, and `write` of a number or `bool` is not supported yet. There is no `copy` parameter mode and no automatic copy: to give a function its own copy, write `f(x.copy())`. The receiver is the first parameter under any name.
 - **A struct value never exists as a hidden temporary** (step 3). A function returning a struct writes it straight into its destination: `world.pos = a.plus(b);` (one move, into `world.pos`). A struct-valued call is only legal as the whole right side of an assignment, a `let` or `var` (`let t = f(x);` makes `t` name the new place the result was written into); as an argument or a receiver it is an error, so a nested one, `a.plus(b).scaled(2.0)`, is an error ("name the middle": `let t = a.plus(b); world.pos = t.scaled(2.0);`).
-- **Memory.** Struct locals and `.copy()` results take places in the fixed 16,384-byte scratch area; `mito check --costs` reports it. A program without them is laid out as before.
-- **Aliasing is the user's to manage.** A read-only parameter is a view: if the function writes the place the argument names, it sees the write (`snapshot(g.p)` sees it; `snapshot(g.p.copy())` does not).
+- **Memory.** Struct locals and `..base` copies take places in the fixed 16,384-byte scratch area; `mito check --costs` reports it. A program without them is laid out as before.
+- **Aliasing is the user's to manage.** A read-only parameter is a view: if the function writes the place the argument names, it sees the write (`snapshot(g.p)` sees it; `var cp = P { ..g.p }; snapshot(cp)` does not).
 
 Stasis passes structs as views with no modes and returns them only through a destination; this design adds the read-only default and `write`, and keeps struct returns written straight into the destination.
 
@@ -114,7 +114,7 @@ Migration: (1) mangle by first-parameter type for *every* function with a typed 
 type" instead of the name; (3) module code needs its own spelling for the instance (keep `self` meaning "the instance" there only if the owner wants one special name; otherwise the module's functions name their first parameter
 and the binder maps *that* parameter); (4) `f(x, y)` free-call syntax resolves by first-argument type when several functions share a name. None of this is done in step 1.
 
-### Copy elision (dropped: superseded by the final decision at the top, nothing is copied unless `.copy()` is written)
+### Copy elision (dropped: superseded by the final decision at the top, nothing is copied unless a `V { ..x }` literal is written)
 
 A copy parameter that the callee tree never writes, with a source place that the callee tree never writes either, is passed as a view: observationally identical, no copy.
 The compiler already walks the call tree for writes (`fn writes`, ~1554); this needs the walk to report *which places* (struct id and offset range) instead of yes/no,

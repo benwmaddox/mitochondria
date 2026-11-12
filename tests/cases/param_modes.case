@@ -1,5 +1,5 @@
 // a struct is always passed as a view of the caller's: `p: T` is read-only (it cannot be changed or handed to a `write` parameter), `p: write T` changes the caller's struct;
-// a copy is explicit, `x.copy()`: a read-only parameter sees later writes to the place it views (`snapshot(g.p)` gives 50) unless it was given a copy (`snapshot(g.p.copy())` gives 7)
+// a copy is explicit, `var c = P { ..x };`: a read-only parameter sees later writes to the place it views (`snapshot(g.p)` gives 50) unless it was given a copy (`snapshot(cp)` gives 7)
 --- program
 struct P { x: i64; y: i64; }
 struct Pet { name: string<16>; }
@@ -8,7 +8,7 @@ state g: G;
 
 fn bump(p: write P) { p.x += 1; }
 fn twice(p: write P) { bump(p); bump(p); }
-fn with_hundred(p: P) -> i64 { var q = p.copy(); q.x += 100; return q.x; }
+fn with_hundred(p: P) -> i64 { var q = P { ..p }; q.x += 100; return q.x; }
 fn sum(p: P) -> i64 { return p.x + p.y; }
 fn snapshot(p: P) -> i64 { g.p.x = 50; return p.x; }
 
@@ -36,9 +36,10 @@ fn post_go() -> Response<{ twice: i64, copied: i64, kept: i64, view: i64, now: i
     let k = g.p.x;
     let v = snapshot(g.p);
     g.p.x = 7;
-    let s = snapshot(g.p.copy());
+    var cp = P { ..g.p };
+    let s = snapshot(cp);
     g.q = g.p;
-    var l = g.p.copy();
+    var l = P { ..g.p };
     g.p.x = 0;
     return ok({ "twice": a, "copied": c, "kept": k, "view": v, "now": g.p.x, "snap": s, "sum": sum(g.q), "field": g.q.x, "local": l.x });
 }

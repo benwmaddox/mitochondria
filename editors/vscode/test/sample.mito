@@ -1,0 +1,75 @@
+// A sample that uses every construct of the language; test/check.js checks how it is colored.
+platform web;
+use "pages.mito";
+
+module sorted<T: struct, N: count, key: field of T>
+
+enum Color: u8 { Red = 1, Green, Blue }
+struct Player { name: utf8<24>; hp: i32; ratio: f32; tags: u8[4]; ok: bool; }
+struct App {
+    players: pool<Player, 1000> checked;
+    log: list<Player, 20> drop_oldest;
+    users: table<Player> unique(name) index(hp);
+    board: sorted<Player, 10, hp> logged;
+    mask: u64;
+}
+state app: App;
+request seen: i64;
+
+system {
+    worker rooms { program "rooms.mito"; count 4; mailbox 1024; }
+    budget 8192;   // MB
+}
+web {
+    gzip;
+    static "/" from "public" { "Cache-Control": "public"; }
+}
+
+fn hurt(self: Player, n: i64) { self.hp -= n; }
+
+pub fn big(x: i64) -> i64? {
+    let a = 0xFF + 12 + 1.5;
+    var b = x as u8;
+    for var i = 0; i < 3; i += 1 { if i == 1 { continue; } else { break; } }
+    foreach p in app.players reverse where p.hp > 0 limit 5 { p.hurt(3); }
+    foreach i in 0..10 while i < 8 { b = wrapping_add(b, 1); }
+    foreach u in app.users by name after null { app.log.add(); }
+    match x { 1 => return 1, 2..5 => return 2, else => fail(404, "no\n\t\"quoted\" \u{1F600} \q") }
+    return min(abs(x), or(len("t"), 0));
+}
+
+test "big works" { return big(1) == 1 && true || false; }
+
+@get("/players/{p}")
+fn show(p: Player, q: string<1..8> from query, h: string from header("X-A"), c: i64 from cookie("c"), b: i64 from body) -> Response<Player> {
+    return ok(p);
+}
+
+@post("/players") fn add(name: utf8<1..24>) -> Response<{ id: i64 }> { return created({ id: 1 }); }
+@put("/p") fn p1() -> Response<text> { return no_content(); }
+@patch("/p") fn p2() { }
+@delete("/p") fn p3() { }
+@socket("/ws") fn s1() { }
+@socket_message("/ws") fn s2() { }
+@socket_close("/ws") fn s3() { }
+@every(1000) fn tick() { }
+@start fn init() { }
+
+@main fn main(f: utf8<1..100> from arg(0), doc: utf8<100> from stdin, c: bool = false) -> Response<text> {
+    forward rooms[0] { user: "x" };
+    return ok(f);
+}
+
+@frame fn frame(dt: f64 from time, w: bool from key("w"), look: f64 from mouse("dx")) -> Response<text> { return ok(""); }
+@shader fn scene() -> Response<text> { return ok("void main() {}"); }
+
+fn row(t: Player) -> html {
+    <li class="item {t.hp}" checked={t.ok} data-x="a &amp; z">{t.name}<br><input type="text" /><b>{if t.ok { <i>yes</i> }}</b></li>
+}
+
+@get("/") fn page() -> Response<html> {
+    return ok(<!doctype html><html lang="en"><body>
+        <h1>Hello, it's "{app.mask}" // not a comment</h1>
+        {row(app.users[1]);}
+    </body></html>);
+}

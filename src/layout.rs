@@ -201,7 +201,7 @@ impl Program {
         let (t, pos) = tokenize(src);
         let mut p = P { t, i: 0, pos, consts: Vec::new() };
         let places = declared_places(&p);
-        Self::parse_tokens(&mut p).map_err(|e| {
+        Self::parse_tokens(&mut p).map_err(|e| crate::generics::name_instances(&e)).map_err(|e| {
             if crate::lang::starts_with_place(&e) { return e; }
             // stopped while reading: where it stopped (a missing `;` at the end of what came before)
             if p.i < p.t.len() {

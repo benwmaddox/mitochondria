@@ -1,0 +1,4 @@
+// expect: `Stack<i64>`: Stack takes 2 arguments, given 1
+struct Stack<T, N: count> { items: T[N]; len: i64; }
+struct G { b: Stack<i64>; }
+state g: G;

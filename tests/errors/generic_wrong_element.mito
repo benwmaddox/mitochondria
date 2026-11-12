@@ -1,0 +1,6 @@
+// expect: parameter `x` of `Stack<i64, 16>.push` is `i64`, given a string
+struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }
+struct G { a: Stack<i64, 16>; }
+state g: G;
+fn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.len = self.len + 1; }
+@post("/p") fn p() -> Response<{}> { g.a.push("hi"); return ok({}); }

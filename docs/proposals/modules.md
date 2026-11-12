@@ -1,5 +1,7 @@
 # Modules and a standard library (decided and built, 2026-11-04)
 
+**Being superseded by generics** (docs/design/generics.md, decided 2026-11-11): generic structs and functions of a generic type will replace modules; library modules move one at a time (`intmap` first, `sorted` last) and `src/modules.rs` is deleted with the last. When the last has moved this text is rewritten in the generic form.
+
 **Why.** Ordered data should be a collection written in the language, in a standard library, not a new built-in; the
 same mechanism should carry later structures (priority queues, keyed indexes) without growing the core.
 

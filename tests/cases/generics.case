@@ -1,0 +1,162 @@
+// generic structs: one `Stack<T, N>` is declared once and used with different element types and sizes; every distinct use is its own struct with its own storage, and its functions are plain functions of that type; an instance is ordinary state (its declared range, its place in a pool, its undo log)
+--- program
+struct Stack<T, N: count> {
+    items: T[N];
+    len: i64 in 0..N;
+}
+// elements that are structs live in a pool: a field type may use the parameters too
+struct Slots<T, N: count> { items: pool<T, N>; }
+struct Pair<A, B> { a: A; b: B; }
+struct Player { name: string<8>; hp: i64; }
+// instances as plain struct fields, a pool item and a logged field
+struct Game {
+    undo: Stack<i64, 4>;
+    other: Stack<i64, 2>;
+    names: Stack<string<12>, 3>;
+    pairs: Slots<Pair<i64, i64>, 2>;
+    team: Slots<Player, 2>;
+    spares: pool<Stack<i64, 2>, 3>;
+    undone: Stack<i64, 3> logged;
+}
+state game: Game;
+
+fn push(self: Stack<T, N>, x: T) {
+    if self.len == N { fail 409 "stack is full"; }
+    self.items[self.len] = x;
+    self.len = self.len + 1;
+}
+// no `-> T`: a function cannot return a text or a struct by value, and a function is copied for every instance
+fn drop_top(self: Stack<T, N>) {
+    if self.len == 0 { fail 409 "stack is empty"; }
+    self.len = self.len - 1;
+}
+fn size(self: Stack<T, N>) -> i64 { return self.len; }
+fn size(self: Slots<T, N>) -> i64 { return self.items.count(); }
+fn room(self: Stack<T, N>) -> i64 { return N - self.len; }
+fn clear_all(self: Stack<T, N>) { self.len = 0; }
+fn total(s: Stack<i64, 4>) -> i64 {
+    var t = 0;
+    var i = 0;
+    while i < s.len { t += s.items[i]; i += 1; }
+    return t;
+}
+
+@post("/play/{score}")
+fn play(score: i64 in 0..1000) -> Response<{ size: i64, room: i64, total: i64 }> {
+    game.undo.push(score);
+    return ok({ size: game.undo.size(), room: game.undo.room(), total: total(game.undo) });
+}
+@post("/undo")
+fn undo() -> Response<{ score: i64, size: i64 }> {
+    game.undo.drop_top();
+    let s = game.undo.items[game.undo.len];
+    return ok({ score: s, size: game.undo.size() });
+}
+@post("/other/{x}")
+fn other(x: i64 in 0..1000) -> Response<{ size: i64, room: i64 }> {
+    game.other.push(x);
+    return ok({ size: game.other.size(), room: game.other.room() });
+}
+@post("/name/{name}")
+fn name(name: string<1..12>) -> Response<{ size: i64, room: i64 }> {
+    game.names.push(name);
+    return ok({ size: game.names.size(), room: game.names.room() });
+}
+@post("/pair/{a}/{b}")
+fn pair(a: i64 in 0..100, b: i64 in 0..100) -> Response<{ size: i64 }> {
+    let p = game.pairs.items.add();
+    p.a = a;
+    p.b = b;
+    return ok({ size: game.pairs.size() });
+}
+@get("/pairsum")
+fn pair_sum() -> Response<{ sum: i64, size: i64 }> {
+    var t = 0;
+    foreach p in game.pairs.items { t += p.a * 100 + p.b; }
+    return ok({ sum: t, size: game.pairs.size() });
+}
+@post("/team/{name}/{hp}")
+fn team(name: string<1..8>, hp: i64 in 0..100) -> Response<{ size: i64 }> {
+    let p = game.team.items.add();
+    p.name = name;
+    p.hp = hp;
+    return ok({ size: game.team.size() });
+}
+@get("/teamhp")
+fn team_hp() -> Response<{ hp: i64, size: i64 }> {
+    var t = 0;
+    foreach p in game.team.items { t += p.hp; }
+    return ok({ hp: t, size: game.team.size() });
+}
+@post("/spare")
+fn spare() -> Response<{ slot: i64 }> {
+    let s = game.spares.add();
+    return created({ slot: slot(s) });
+}
+@post("/spare/{id}/{x}")
+fn spare_push(id: i64, x: i64 in 0..1000) -> Response<{ size: i64, room: i64 }> {
+    let s = game.spares[id];
+    s.push(x);
+    return ok({ size: s.size(), room: s.room() });
+}
+// a failed request restores a logged instance
+@post("/undone/{x}")
+fn undone(x: i64 in 0..1000) -> Response<{ size: i64 }> {
+    game.undone.push(x);
+    if x == 999 { fail 422 "no"; }
+    return ok({ size: game.undone.size() });
+}
+@post("/clear")
+fn clear() -> Response<{ size: i64 }> {
+    game.undo.clear_all();
+    return ok({ size: game.undo.size() });
+}
+@get("/state")
+fn state() -> Response<{ undo: i64, other: i64, names: i64, pairs: i64, team: i64, undone: i64 }> {
+    return ok({ undo: game.undo.size(), other: game.other.size(), names: game.names.size(), pairs: game.pairs.size(), team: game.team.size(), undone: game.undone.size() });
+}
+--- requests
+GET /state
+POST /play/10
+POST /play/20
+POST /other/7
+POST /play/30
+POST /play/40
+POST /play/50
+POST /undo
+POST /other/8
+POST /other/9
+POST /undo
+POST /undo
+POST /undo
+POST /undo
+POST /name/ann
+POST /name/bob
+POST /name/cy
+POST /name/dee
+POST /pair/1/2
+POST /pair/3/4
+POST /pair/5/6
+GET /pairsum
+POST /team/ann/10
+POST /team/bo/25
+POST /team/cy/5
+GET /teamhp
+POST /spare
+POST /spare
+POST /spare/0/5
+POST /spare/1/6
+POST /spare/0/7
+POST /spare/0/8
+POST /spare/1/9
+POST /spare/5/1
+POST /undone/1
+POST /undone/2
+POST /undone/999
+POST /undone/3
+POST /undone/4
+POST /undone/5
+POST /play/1
+POST /play/2
+POST /clear
+GET /state

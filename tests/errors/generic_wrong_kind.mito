@@ -1,0 +1,5 @@
+// expect: `Stack<Entry, 100>`: T is `number` in Stack<T, N>, but Entry is a struct
+struct Entry { a: i64; }
+struct Stack<T: number, N: count> { items: T[N]; len: i64 in 0..N; }
+struct G { names: Stack<Entry, 100>; }
+state g: G;

@@ -8,10 +8,13 @@
 //! ```
 //!
 //! Every distinct use (`Stack<i64, 64>`: the template and its evaluated arguments) becomes one struct named
-//! `__mito__Stack__i64__64` (generated names start with `__mito__`, which programs do not use) and one copy of each
-//! function of `Stack<T, N>` for it, a plain function of a type (`fn push(self: __mito__Stack__i64__64, x: i64)`), found
-//! by the receiver's type like any other. Copies are made by replacing the parameters' identifiers token by token (outside
-//! strings and comments, and not after a `.`), then expanded again, to a fixed point: a copy may use further generics.
+//! `__mito__Stack__i64__64` (generated names start with `__mito__`, which programs do not use). A function of `Stack<T, N>`
+//! is copied for an instance only where a call `x.f(...)` on it asks (`expand` and `note_missing`: the program is compiled
+//! once to see which calls lack a copy, until none does): a plain function of a type
+//! (`fn push(self: __mito__Stack__i64__64, x: i64)`), found by the receiver's type like any other, that keeps its template's
+//! line numbers (`//# line N`). Copies are made by replacing the parameters' identifiers token by token (outside
+//! strings and comments, and not after a `.`, except a parameter that names a field, `key: field of T`), then expanded
+//! again, to a fixed point: a copy may use further generics. A function without `pub` is private to its file (`check_call`).
 //! Limits: instances nest 64 deep and there are at most 1000, so a recursive generic type is an error, not a hang.
 //! `name_instances` turns the generated names back into `Stack<i64, 64>` in a message.
 use std::cell::RefCell;
@@ -22,13 +25,13 @@ const MAX_INSTANCES: usize = 1000;
 const MAX_NAME: usize = 100;
 const INT_TYPES: [&str; 8] = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"];
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Kind { Any, Struct, Number, Int, Text, Count }
+#[derive(Clone, PartialEq, Debug)]
+enum Kind { Any, Struct, Number, Int, Text, Count, Field(String) }
 
 struct Template { name: String, params: Vec<(String, Kind)>, body: String }
 /// A function of a generic type: the names its receiver gives the parameters (`Stack<U, M>`), and its text.
-struct Method { template: usize, name: String, names: Vec<String>, text: String }
-struct Inst { name: String, display: String, depth: usize, args: Vec<String> }
+struct Method { template: usize, name: String, names: Vec<String>, text: String, line: usize, public: bool }
+struct Inst { name: String, display: String, depth: usize, args: Vec<String>, body: String }
 
 thread_local! { static NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new()); }
 
@@ -107,13 +110,14 @@ fn blank(text: &str, ranges: &[(usize, usize)]) -> String {
     out
 }
 
-/// `text` with the identifiers in `map` replaced (outside strings and comments, and not a field after a `.`).
-fn subst(text: &str, map: &HashMap<String, String>) -> String {
+/// `text` with the identifiers in `map` replaced (outside strings and comments, and not a field after a `.`, except the
+/// parameters that name a field, `key: field of T`: `self.items[i].key` reads the field the argument names).
+fn subst(text: &str, map: &HashMap<String, String>, fields: &HashSet<String>) -> String {
     let s = Src::new(text);
     let mut out = String::new();
     for i in 0..s.t.len() {
         let w = s.txt(i);
-        match map.get(&w) { Some(r) if s.t[i].k == K::Id && !s.after_dot(i) => out += r, _ => out += &w }
+        match map.get(&w) { Some(r) if s.t[i].k == K::Id && (!s.after_dot(i) || fields.contains(&w)) => out += r, _ => out += &w }
     }
     out
 }
@@ -125,7 +129,7 @@ fn sanitize(a: &str) -> String {
     o.trim_matches('_').to_string()
 }
 
-struct Ctx { templates: Vec<Template>, methods: Vec<Method>, plain: HashSet<String>, insts: Vec<Inst>, by_key: HashMap<String, usize>, taken: HashSet<String>, out_state: String, out_api: String, demanded: HashSet<String>, pending: Vec<(usize, usize)> }
+struct Ctx { templates: Vec<Template>, methods: Vec<Method>, plain: HashMap<String, String>, insts: Vec<Inst>, by_key: HashMap<String, usize>, taken: HashSet<String>, out_state: String, out_api: String, asked: HashSet<(String, String)>, pending: Vec<(usize, usize)> }
 
 impl Ctx {
     fn template(&self, name: &str) -> Option<usize> { self.templates.iter().position(|t| t.name == name) }
@@ -149,25 +153,40 @@ impl Ctx {
                     continue;
                 }
             }
-            if s.t[i].k == K::Id { self.demanded.insert(s.txt(i)); }
             out += &s.txt(i);
             i += 1;
         }
         Ok(out)
     }
 
-    /// A copy of each function of a generic struct, for each instance of it, that the program names (a call `s.push(3)`
-    /// names `push`). A function nothing names is not copied, so an element type a function cannot work with is an error
-    /// only where that function is called. Copies name further functions, so this goes on until none is added.
-    fn copy_called_functions(&mut self) -> Result<(), String> {
+    /// A copy of each function of a generic struct that a call asked for on an instance (`asked`: the instance as written,
+    /// `Stack<i64, 16>`, and the function's name). Copies name further instances, whose functions are copied only when
+    /// a call asks for them in turn (see `expand`).
+    fn copy_asked_functions(&mut self) -> Result<(), String> {
         loop {
-            let Some(at) = self.pending.iter().position(|&(_, mi)| self.demanded.contains(&self.methods[mi].name)) else { return Ok(()) };
+            let Some(at) = self.pending.iter().position(|&(k, mi)| self.asked.contains(&(self.insts[k].display.clone(), self.methods[mi].name.clone()))) else { return Ok(()) };
             let (k, mi) = self.pending.remove(at);
             let map: HashMap<String, String> = self.methods[mi].names.iter().cloned().zip(self.insts[k].args.iter().cloned()).collect();
-            let f = subst(&self.methods[mi].text, &map);
+            let fields = self.field_params(self.methods[mi].template, &self.methods[mi].names);
+            let f = subst(&self.methods[mi].text, &map, &fields);
             let f = self.rewrite(&f)?;
-            self.out_api += &format!("// {}\n{}\n", self.insts[k].display, f);
+            // the copy's lines are the template's lines in the program's own source (see `//# line` in src/lang.rs)
+            self.out_api += &format!("//# line {} {}\n{}\n", self.methods[mi].line, self.insts[k].display, f);
+            if !self.methods[mi].public {
+                let file = crate::origin(self.methods[mi].line).map(|o| o.0);
+                PRIVATE.with(|p| { p.borrow_mut().insert(format!("{}.{}", self.insts[k].name, self.methods[mi].name), (format!("{}.{}", self.insts[k].display, self.methods[mi].name), file)); });
+            }
         }
+    }
+
+    /// Of the names a function's receiver gives a template's parameters (`self: Sorted<T, N, k>`), those of parameters that name a field.
+    fn field_params(&self, ti: usize, names: &[String]) -> HashSet<String> {
+        names.iter().zip(&self.templates[ti].params).filter(|(_, p)| matches!(p.1, Kind::Field(_))).map(|(n, _)| n.clone()).collect()
+    }
+
+    /// The text between the braces of a struct given by name: a plain one, or an instance of a generic one.
+    fn struct_body(&self, name: &str) -> Option<String> {
+        self.plain.get(name).cloned().or_else(|| self.by_key.get(&format!("name:{}", name)).map(|&k| self.insts[k].body.clone())).filter(|b| !b.is_empty())
     }
 
     /// The display form of an argument (its instances named as written).
@@ -177,12 +196,13 @@ impl Ctx {
     }
 
     /// Is `a` an acceptable argument for parameter `p` of `t`? The error says what was written and what the parameter is.
-    fn check_arg(&self, display: &str, t: &Template, p: &(String, Kind), a: &str) -> Result<(), String> {
+    fn check_arg(&self, display: &str, t: &Template, p: &(String, Kind), args: &[String], a: &str) -> Result<(), String> {
         let params = t.params.iter().map(|q| q.0.clone()).collect::<Vec<_>>().join(", ");
         let is_num = a.chars().next().map_or(false, |c| c.is_ascii_digit());
         let is_name = !a.is_empty() && a.chars().all(|c| c.is_alphanumeric() || c == '_');
-        let is_struct = self.plain.contains(a) || self.by_key.contains_key(&format!("name:{}", a));
-        let (what, ok, got) = match p.1 {
+        let is_struct = self.plain.contains_key(a) || self.by_key.contains_key(&format!("name:{}", a));
+        let (what, ok, got) = match &p.1 {
+            Kind::Field(of) => return self.check_field_arg(display, t, p, of, args, a),
             Kind::Count => {
                 if is_num && a.parse::<u64>().map_or(false, |n| n >= 1) { return Ok(()); }
                 let got = if is_name && !is_num { format!("{} is a name; counts are whole-number literals for now", a) } else { format!("{} is not a whole number of at least 1", a) };
@@ -203,7 +223,23 @@ impl Ctx {
         Err(format!("`{}`: {} is `{}` in {}<{}>, but {}", display, p.0, what, t.name, params, got))
     }
 
-    /// The name of the instance of template `ti` with these arguments (already expanded), making it, its struct and its functions if new.
+    /// `key: field of T` given `a`: a field of the struct `T` stands for, and an integer.
+    fn check_field_arg(&self, display: &str, t: &Template, p: &(String, Kind), of: &str, args: &[String], a: &str) -> Result<(), String> {
+        let params = t.params.iter().map(|q| q.0.clone()).collect::<Vec<_>>().join(", ");
+        let head = format!("`{}`: {} is a field of {} in {}<{}>", display, p.0, of, t.name, params);
+        if a.is_empty() || !a.chars().all(|c| c.is_alphanumeric() || c == '_') || a.starts_with(|c: char| c.is_ascii_digit()) { return Err(format!("{}, but {} is not a field name", head, a)); }
+        let sarg = match t.params.iter().position(|q| q.0 == of) { Some(i) => args[i].clone(), None => of.to_string() };
+        // not a struct: the parameter that stands for it says so
+        let Some(body) = self.struct_body(&sarg) else { return Ok(()) };
+        let sname = self.show(&sarg);
+        match field_type(&body, a) {
+            None => Err(format!("{}, but {} has no field `{}`", head, sname, a)),
+            Some(ty) if !is_int_type(&ty) => Err(format!("{}, but {}.{} is {}, not an integer", head, sname, a, ty)),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// The name of the instance of template `ti` with these arguments (already expanded), making it and its struct if new (its functions are copied where calls ask).
     fn instantiate(&mut self, ti: usize, args: Vec<String>) -> Result<String, String> {
         let key = format!("{}<{}>", self.templates[ti].name, args.iter().map(|a| a.split_whitespace().collect::<String>()).collect::<Vec<_>>().join(","));
         if let Some(&k) = self.by_key.get(&key) { return Ok(self.insts[k].name.clone()); }
@@ -212,7 +248,10 @@ impl Ctx {
         let display = format!("{}<{}>", tname, shown.join(", "));
         let np = self.templates[ti].params.len();
         if args.len() != np { return Err(format!("`{}`: {} takes {} argument{}, given {}", display, tname, np, if np == 1 { "" } else { "s" }, args.len())); }
-        for (p, a) in self.templates[ti].params.iter().zip(&args) { self.check_arg(&display, &self.templates[ti], p, a)?; }
+        // the parameters that name a field are checked last: they read the struct another parameter stands for
+        for fields in [false, true] {
+            for (p, a) in self.templates[ti].params.iter().zip(&args) { if matches!(p.1, Kind::Field(_)) == fields { self.check_arg(&display, &self.templates[ti], p, &args, a)?; } }
+        }
         // the nesting depth: one more than the deepest instance among the arguments
         let mut depth = 1;
         for a in &args { let s = Src::new(a); for i in 0..s.t.len() { if let Some(&k) = self.by_key.get(&format!("name:{}", s.txt(i))) { depth = depth.max(self.insts[k].depth + 1); } } }
@@ -223,14 +262,16 @@ impl Ctx {
         self.taken.insert(name.clone());
         NAMES.with(|n| { n.borrow_mut().insert(name.clone(), display.clone()); });
         let k = self.insts.len();
-        self.insts.push(Inst { name: name.clone(), display, depth, args: args.clone() });
+        self.insts.push(Inst { name: name.clone(), display, depth, args: args.clone(), body: String::new() });
         self.by_key.insert(key, k);
         self.by_key.insert(format!("name:{}", name), k);
         // the struct, then a copy of each function of the template
         let map = |names: &[String]| -> HashMap<String, String> { names.iter().cloned().zip(args.iter().cloned()).collect() };
         let pnames: Vec<String> = self.templates[ti].params.iter().map(|p| p.0.clone()).collect();
-        let body = subst(&self.templates[ti].body, &map(&pnames));
+        let fields: HashSet<String> = self.templates[ti].params.iter().filter(|p| matches!(p.1, Kind::Field(_))).map(|p| p.0.clone()).collect();
+        let body = subst(&self.templates[ti].body, &map(&pnames), &fields);
         let body = self.rewrite(&body)?;
+        self.insts[k].body = body.clone();
         self.out_state += &format!("struct {} {{{}}}\n", name, body);
         for (mi, m) in self.methods.iter().enumerate() { if m.template == ti { self.pending.push((k, mi)); } }
         Ok(name)
@@ -238,9 +279,9 @@ impl Ctx {
 }
 
 /// The `struct Name<params> { body }` declarations of a state text: the templates, and the character ranges to blank.
-fn collect_structs(state: &str) -> Result<(Vec<Template>, HashSet<String>, Vec<(usize, usize)>), String> {
+fn collect_structs(state: &str) -> Result<(Vec<Template>, HashMap<String, String>, Vec<(usize, usize)>), String> {
     let s = Src::new(state);
-    let (mut templates, mut plain, mut cut) = (Vec::new(), HashSet::new(), Vec::new());
+    let (mut templates, mut plain, mut cut) = (Vec::new(), HashMap::new(), Vec::new());
     let mut i = 0;
     while i < s.t.len() {
         if s.is_id(i, "struct") && !s.after_dot(i) {
@@ -257,7 +298,11 @@ fn collect_structs(state: &str) -> Result<(Vec<Template>, HashSet<String>, Vec<(
                         if params.iter().any(|q| q.0 == pn) { return Err(format!("struct {}: generic parameter `{}` is declared twice", name, pn)); }
                         let k = match kind.as_deref() {
                             None => Kind::Any, Some("struct") => Kind::Struct, Some("number") => Kind::Number, Some("int") => Kind::Int, Some("text") => Kind::Text, Some("count") => Kind::Count,
-                            Some(k) if k.starts_with("field of ") => return Err(format!("struct {}: `{}: {}`: parameters that name a field are not supported yet", name, pn, k)),
+                            Some(k) if k.starts_with("field of ") => {
+                                let of = k[9..].trim();
+                                if of.is_empty() || !of.chars().all(|c| c.is_alphanumeric() || c == '_') { return Err(format!("struct {}: `{}: {}`: expected `field of T`, a field of the struct T stands for", name, pn, k)); }
+                                Kind::Field(of.to_string())
+                            }
                             Some(k) => return Err(format!("struct {}: generic parameter kind `{}`: expected struct, number, int, text, count or nothing (any type)", name, k)),
                         };
                         params.push((pn, k));
@@ -272,14 +317,47 @@ fn collect_structs(state: &str) -> Result<(Vec<Template>, HashSet<String>, Vec<(
                     i = end;
                     continue;
                 }
-                plain.insert(name);
+                let open = s.sig(n + 1);
+                let body: String = if s.is(open, '{') { s.block_end(open).map(|end| s.c[s.t[open].e..s.t[end - 1].s].iter().collect()).unwrap_or_default() } else { String::new() };
+                plain.insert(name, body);
             }
         }
         i += 1;
     }
-    for t in &templates { if plain.contains(&t.name) { return Err(format!("struct {} is declared twice", t.name)); } }
-    for t in &templates { for p in &t.params { if plain.contains(&p.0) || templates.iter().any(|u| u.name == p.0) { return Err(format!("struct {}<{}>: the parameter `{}` has the name of a struct; a parameter shadows nothing, so rename it", t.name, p.0, p.0)); } } }
+    for t in &templates { if plain.contains_key(&t.name) { return Err(format!("struct {} is declared twice", t.name)); } }
+    for t in &templates { for p in &t.params { if plain.contains_key(&p.0) || templates.iter().any(|u| u.name == p.0) { return Err(format!("struct {}<{}>: the parameter `{}` has the name of a struct; a parameter shadows nothing, so rename it", t.name, p.0, p.0)); } } }
+    // a parameter that names a field says which struct it is a field of: a `struct` parameter of its own, or a struct
+    for t in &templates {
+        for p in &t.params {
+            let Kind::Field(of) = &p.1 else { continue };
+            match t.params.iter().find(|q| q.0 == *of) {
+                Some(q) if q.1 != Kind::Struct => return Err(format!("struct {}: `{}: field of {}`: {} must be a struct, `{}: struct`", t.name, p.0, of, of, of)),
+                Some(_) => {}
+                None if plain.contains_key(of) => {}
+                None => return Err(format!("struct {}: `{}: field of {}`: {} is neither a parameter of {}<...> nor a struct", t.name, p.0, of, of, t.name)),
+            }
+        }
+    }
     Ok((templates, plain, cut))
+}
+
+/// The type text of the field `name` in a struct body (`items: T[N]; len: i64 in 0..N;`), comments skipped.
+fn field_type(body: &str, name: &str) -> Option<String> {
+    let s = Src::new(body);
+    let text: String = (0..s.t.len()).filter(|&i| s.t[i].k != K::Comment).map(|i| s.txt(i)).collect();
+    let (mut depth, mut cur, mut parts) = (0i32, String::new(), Vec::new());
+    for ch in text.chars() {
+        match ch { '<' | '(' | '[' | '{' => depth += 1, '>' | ')' | ']' | '}' => depth -= 1, _ => {} }
+        if ch == ';' && depth == 0 { parts.push(std::mem::take(&mut cur)); } else { cur.push(ch); }
+    }
+    parts.push(cur);
+    parts.iter().find_map(|p| p.split_once(':').filter(|(n, _)| n.trim() == name).map(|(_, t)| t.split_whitespace().collect::<Vec<_>>().join(" ")))
+}
+
+/// Is a field's type text an integer type, with or without a range (`i64`, `u8 in 0..9`)?
+fn is_int_type(ty: &str) -> bool {
+    let word: String = ty.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    INT_TYPES.contains(&word.as_str()) && { let rest = ty[word.len()..].trim_start(); rest.is_empty() || rest.starts_with("in ") }
 }
 
 /// The functions of generic types in a code text (`fn push(self: Stack<T, N>, x: T) {...}`), and the ranges to blank.
@@ -289,6 +367,7 @@ fn collect_methods(api: &str, templates: &[Template]) -> Result<(Vec<Method>, Ve
     let mut i = 0;
     while i < s.t.len() {
         if !(s.is_id(i, "fn") && !s.after_dot(i)) { i += 1; continue; }
+        let public = s.prev(i).map_or(false, |p| s.is_id(p, "pub"));
         let start = match s.prev(i) { Some(p) if s.is_id(p, "pub") => s.t[p].s, _ => s.t[i].s };
         let n = s.sig(i + 1);
         let name = s.txt(n.min(s.t.len() - 1));
@@ -326,47 +405,116 @@ fn collect_methods(api: &str, templates: &[Template]) -> Result<(Vec<Method>, Ve
         let end = s.block_end(b).ok_or_else(|| format!("`fn {}`: expected a body", name))?;
         j = end;
         let text: String = s.c[start..s.t[end - 1].e].iter().collect();
-        methods.push(Method { template: ti, name, names, text });
+        let line = 1 + s.c[..start].iter().filter(|&&c| c == '\n').count();
+        methods.push(Method { template: ti, name, names, text, line, public });
         cut.push((start, s.t[end - 1].e));
         i = j;
     }
     Ok((methods, cut))
 }
 
-/// Expand every generic struct and function of a generic type in a program's state and code, returning plain text.
-pub fn expand(state: &str, api: &str) -> Result<(String, String), String> {
-    if !state.contains('<') { return Ok((state.to_string(), api.to_string())); }
+// The calls found to name a function that is not there yet: (instance as written, function name).
+thread_local! { static MISSING: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new()); }
+
+// The copies of functions without `pub`: the function's name, and what to call it in a message and the file it is private to.
+thread_local! { static PRIVATE: RefCell<HashMap<String, (String, Option<String>)>> = RefCell::new(HashMap::new()); }
+
+/// May the code at line `at` of the program call the function `name` (`__mito__Stack__i64__8.grow`)? A copy of a function
+/// of a generic struct without `pub` is private to the file it was written in; anything else is open.
+pub fn check_call(name: &str, at: u32) -> Result<(), String> {
+    let Some((shown, file)) = PRIVATE.with(|p| p.borrow().get(name).cloned()) else { return Ok(()) };
+    let here = crate::origin(at as usize).map(|o| o.0);
+    if here == file { return Ok(()); }
+    let place = |f: &Option<String>| f.clone().unwrap_or_else(|| "the program's own file".to_string());
+    Err(format!("`{}` is private to {} (it is not `pub`), and is called from {}", shown, place(&file), place(&here)))
+}
+
+thread_local! { static TEMPLATE_METHODS: RefCell<HashSet<String>> = RefCell::new(HashSet::new()); }
+
+/// Is `name` the name of a function of a generic struct in the program being compiled? Its copies are made where a call
+/// names them, so the binder cannot find the function itself and takes this as "declared".
+pub fn is_template_method(name: &str) -> bool { TEMPLATE_METHODS.with(|m| m.borrow().contains(name)) }
+
+/// The code generator found `x.f(...)` on a receiver of type `ty` and no function `f` for it. If `ty` is an instance of a
+/// generic struct, that is a request for the copy of the template's `f` for this instance (`expand` answers it). While
+/// `expand` is probing, the answer is true: the generator goes on past the call (with a placeholder number), so one probe
+/// finds every call of the endpoint that lacks a copy, not just the first.
+pub fn note_missing(ty: &str, method: &str) -> bool {
+    let Some(shown) = NAMES.with(|n| n.borrow().get(ty).cloned()) else { return false };
+    MISSING.with(|m| m.borrow_mut().push((shown, method.to_string())));
+    PROBING.with(|p| p.get())
+}
+thread_local! { static PROBING: std::cell::Cell<bool> = std::cell::Cell::new(false); }
+
+/// One expansion of the program with the copies `asked` for; the text, and whether any function of a generic type exists
+/// (then calls may ask for more).
+fn expand_once(state: &str, api: &str, asked: &HashSet<(String, String)>) -> Result<(String, String, bool), String> {
+    TEMPLATE_METHODS.with(|m| m.borrow_mut().clear());
+    PRIVATE.with(|p| p.borrow_mut().clear());
+    if !state.contains('<') { return Ok((state.to_string(), api.to_string(), false)); }
     let (templates, plain, cut) = collect_structs(state)?;
-    if templates.is_empty() { return Ok((state.to_string(), api.to_string())); }
+    if templates.is_empty() { return Ok((state.to_string(), api.to_string(), false)); }
     let (methods, api_cut) = collect_methods(api, &templates)?;
+    let calls = !methods.is_empty();
+    TEMPLATE_METHODS.with(|m| m.borrow_mut().extend(methods.iter().map(|x| x.name.clone())));
     let (state, api) = (blank(state, &cut), blank(api, &api_cut));
-    let mut cx = Ctx { templates, methods, plain, insts: Vec::new(), by_key: HashMap::new(), taken: HashSet::new(), out_state: String::new(), out_api: String::new(), demanded: HashSet::new(), pending: Vec::new() };
+    let mut cx = Ctx { templates, methods, plain, insts: Vec::new(), by_key: HashMap::new(), taken: HashSet::new(), out_state: String::new(), out_api: String::new(), asked: asked.clone(), pending: Vec::new() };
     let (mut state, mut api) = (cx.rewrite(&state)?, cx.rewrite(&api)?);
-    cx.copy_called_functions()?;
+    cx.copy_asked_functions()?;
     if !state.ends_with('\n') { state.push('\n'); }
     if !api.ends_with('\n') { api.push('\n'); }
     state += &cx.out_state;
     api += &cx.out_api;
-    Ok((state, api))
+    Ok((state, api, calls))
+}
+
+/// Expand every generic struct and function of a generic type in a program's state and code, returning plain text.
+/// `finish` turns the expanded text into what the compiler reads (the module expansion).
+///
+/// A function of a generic type is copied only for the instances a call names, and the receiver's type of a call is known
+/// only to the code generator. So the program is expanded with the copies asked for so far (none at first), compiled once
+/// to see which calls name a function no instance has (`note_missing`), and expanded again with those added, until a
+/// compile asks for nothing new. The last text is returned; its errors are the caller's to report, as for any program.
+pub fn expand(state: &str, api: &str, finish: &dyn Fn(&str, &str) -> Result<(String, String), String>) -> Result<(String, String), String> {
+    let mut asked: HashSet<(String, String)> = HashSet::new();
+    let mut probes = 1;
+    loop {
+        let (s, a, calls) = expand_once(state, api, &asked)?;
+        let (s, a) = finish(&s, &a)?;
+        if !calls { return Ok((s, a)); }
+        MISSING.with(|m| m.borrow_mut().clear());
+        PROBING.with(|p| p.set(true));
+        if let Ok(prog) = crate::layout::Program::parse(&s) { let _ = crate::cgen::check(&prog, &a); }
+        PROBING.with(|p| p.set(false));
+        let found: Vec<(String, String)> = MISSING.with(|m| m.borrow_mut().drain(..).collect());
+        let before = asked.len();
+        asked.extend(found);
+        if std::env::var_os("MITO_EXPLAIN_GENERICS").is_some() { eprintln!("generics: probe {} asked for {} more function copies", probes, asked.len() - before); }
+        if asked.len() == before { return Ok((s, a)); }
+        probes += 1;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn plain(state: &str, api: &str) -> Result<(String, String), String> { expand(state, api, &|s, a| Ok((s.to_string(), a.to_string()))) }
     const STACK: &str = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct Game { undo: Stack<i64, 16>; names: Stack<string<12>, 8>; again: Stack<i64, 16>; }\nstate game: Game;\n";
     const PUSH: &str = "fn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.len = self.len + 1; }\nfn full(self: Stack<T, N>) -> bool { return self.len == N; }\n";
 
     #[test]
     fn a_use_becomes_a_struct_and_functions_of_a_type() {
-        let (st, api) = expand(STACK, &format!("{}fn go() {{ game.undo.push(1); game.names.push(\"a\"); game.undo.full(); game.names.full(); }}
-", PUSH)).unwrap();
+        let asked: HashSet<(String, String)> = [("Stack<i64, 16>", "push"), ("Stack<string<12>, 8>", "push"), ("Stack<string<12>, 8>", "full")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let (st, api, _) = expand_once(STACK, &format!("{}fn go() {{ game.undo.push(1); game.names.push(\"a\"); game.undo.full(); game.names.full(); }}
+", PUSH), &asked).unwrap();
         assert!(st.contains("struct __mito__Stack__i64__16 { items: i64[16]; len: i64 in 0..16; }"), "{}", st);
         assert!(st.contains("struct __mito__Stack__string_12__8 { items: string<12>[8]; len: i64 in 0..8; }"), "{}", st);
         assert!(st.contains("undo: __mito__Stack__i64__16;") && st.contains("again: __mito__Stack__i64__16;") && !st.contains("struct Stack<"), "{}", st);
-        // one struct per distinct use, one copy of each function per instance
+        // one struct per distinct use; a copy of a function only where a call asked for it
+        assert!(!api.contains("fn full(self: __mito__Stack__i64__16"), "{}", api);
         assert_eq!(st.matches("struct __mito__Stack__i64__16 ").count(), 1);
         assert!(api.contains("fn push(self: __mito__Stack__i64__16, x: i64) {") && api.contains("fn push(self: __mito__Stack__string_12__8, x: string<12>) {"), "{}", api);
-        assert!(api.contains("return self.len == 8;") && api.contains("// Stack<string<12>, 8>"), "{}", api);
+        assert!(api.contains("return self.len == 8;") && api.contains("//# line 2 Stack<string<12>, 8>"), "{}", api);
         // line numbers are kept: the templates are blanked, not removed
         assert_eq!(st.lines().take(3).count(), 3);
         assert!(!st.lines().next().unwrap().contains("Stack<T"));
@@ -375,9 +523,10 @@ mod tests {
     #[test]
     fn instances_nest_and_the_expansion_parses_and_lays_out() {
         let state = "struct Pair<A, B> { a: A; b: B; }\nstruct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct G { s: Stack<Pair<i64, string<8>>, 4>; p: pool<Pair<i64, i64>, 2>; }\nstate g: G;\n";
-        let (st, api) = expand(state, "fn never(self: Stack<T, N>) -> T { return self.items[0] + 1; }
+        let asked: HashSet<(String, String)> = [("Stack<Pair<i64, string<8>>, 4>".to_string(), "first".to_string())].into_iter().collect();
+        let (st, api, _) = expand_once(state, "fn never(self: Stack<T, N>) -> T { return self.items[0] + 1; }
 fn go() { g.s.first(); }
-fn first(self: Stack<T, N>) -> T { return self.items[0]; }\nfn sum(p: Pair<i64, i64>) -> i64 { return p.a + p.b; }\n").unwrap();
+fn first(self: Stack<T, N>) -> T { return self.items[0]; }\nfn sum(p: Pair<i64, i64>) -> i64 { return p.a + p.b; }\n", &asked).unwrap();
         assert!(st.contains("s: __mito__Stack__"), "{}", st);
         assert!(api.contains("fn sum(p: __mito__Pair__i64__i64)"), "{}", api);
         assert!(crate::layout::Program::parse(&st).is_ok(), "{}", st);
@@ -390,12 +539,12 @@ fn first(self: Stack<T, N>) -> T { return self.items[0]; }\nfn sum(p: Pair<i64, 
     #[test]
     fn a_program_without_generics_is_unchanged() {
         let st = "struct S { a: i64[4]; }\nstate s: S;\n";
-        assert_eq!(expand(st, "fn f() {}").unwrap(), (st.to_string(), "fn f() {}".to_string()));
+        assert_eq!(plain(st, "fn f() {}").unwrap(), (st.to_string(), "fn f() {}".to_string()));
     }
 
     #[test]
     fn wrong_arguments_are_errors_that_name_the_instance() {
-        let go = |uses: &str| expand(&format!("struct Stack<T, N: count> {{ items: T[N]; len: i64; }}\nstruct E {{ a: i64; }}\nstruct Num<T: number> {{ v: T; }}\nstruct Int<T: int> {{ v: T; }}\nstruct Txt<T: text> {{ v: T; }}\nstruct Rec<T: struct> {{ v: T[2]; }}\nstruct G {{ {} }}\nstate g: G;\n", uses), "").unwrap_err();
+        let go = |uses: &str| plain(&format!("struct Stack<T, N: count> {{ items: T[N]; len: i64; }}\nstruct E {{ a: i64; }}\nstruct Num<T: number> {{ v: T; }}\nstruct Int<T: int> {{ v: T; }}\nstruct Txt<T: text> {{ v: T; }}\nstruct Rec<T: struct> {{ v: T[2]; }}\nstruct G {{ {} }}\nstate g: G;\n", uses), "").unwrap_err();
         assert_eq!(go("a: Stack<i64, 0>;"), "`Stack<i64, 0>`: N is a `count` in Stack<T, N>, but 0 is not a whole number of at least 1");
         assert!(go("a: Stack<i64>;").contains("`Stack<i64>`: Stack takes 2 arguments, given 1"), "{}", go("a: Stack<i64>;"));
         assert!(go("a: Stack<i64, 4, 5>;").contains("takes 2 arguments, given 3"));
@@ -407,26 +556,26 @@ fn first(self: Stack<T, N>) -> T { return self.items[0]; }\nfn sum(p: Pair<i64, 
         assert!(go("a: Rec<i64>;").contains("T is `struct` in Rec<T>, but i64 is not a struct") || go("a: Rec<i64>;").contains("T is `struct`"), "{}", go("a: Rec<i64>;"));
         assert!(go("a: Stack;").contains("`Stack` is a generic struct: write its arguments, `Stack<T, N>`"));
         // the right kinds are fine
-        assert!(expand("struct E { a: i64; }\nstruct Num<T: number> { v: T; }\nstruct Rec<T: struct> { v: T[2]; }\nstruct Txt<T: text> { v: T; }\nstruct G { a: Num<f32>; b: Rec<E>; c: Txt<string<4>>; }\nstate g: G;\n", "").is_ok());
+        assert!(plain("struct E { a: i64; }\nstruct Num<T: number> { v: T; }\nstruct Rec<T: struct> { v: T[2]; }\nstruct Txt<T: text> { v: T; }\nstruct G { a: Num<f32>; b: Rec<E>; c: Txt<string<4>>; }\nstate g: G;\n", "").is_ok());
     }
 
     #[test]
     fn declaration_errors() {
-        assert!(expand("struct P<T, T> { a: T; }\nstruct G { a: P<i64, i64>; }\nstate g: G;\n", "").unwrap_err().contains("`T` is declared twice"));
-        assert!(expand("struct E { a: i64; }\nstruct P<E> { a: E; }\nstate g: E;\n", "").unwrap_err().contains("has the name of a struct"));
-        assert!(expand("struct P<K: field of T, T> { a: T; }\nstate g: P<i64, i64>;\n", "").unwrap_err().contains("not supported yet"));
-        assert!(expand("struct P<T> { a: T; }\nstate g: P<i64>;\n", "fn f<T>(x: T) {}").unwrap_err().contains("generic functions of no type are not supported yet"));
-        assert!(expand("struct P<T, N: count> { a: T[N]; }\nstate g: P<i64, 2>;\n", "fn f(self: P<T>) {}").unwrap_err().contains("takes 2 parameters, the receiver names 1"));
-        assert!(expand("struct P<T, N: count> { a: T[N]; }\nstate g: P<i64, 2>;\n", "fn f(self: P<T, 4>) {}").unwrap_err().contains("is not a parameter name"));
-        assert!(expand("struct P<T, N: count> { a: T[N]; }\nstate g: P<i64, 2>;\n", "fn f(self: P) {}").unwrap_err().contains("names its parameters"));
+        assert!(plain("struct P<T, T> { a: T; }\nstruct G { a: P<i64, i64>; }\nstate g: G;\n", "").unwrap_err().contains("`T` is declared twice"));
+        assert!(plain("struct E { a: i64; }\nstruct P<E> { a: E; }\nstate g: E;\n", "").unwrap_err().contains("has the name of a struct"));
+        assert!(plain("struct P<K: field of T, T> { a: T; }\nstate g: P<i64, i64>;\n", "").unwrap_err().contains("T must be a struct"));
+        assert!(plain("struct P<T> { a: T; }\nstate g: P<i64>;\n", "fn f<T>(x: T) {}").unwrap_err().contains("generic functions of no type are not supported yet"));
+        assert!(plain("struct P<T, N: count> { a: T[N]; }\nstate g: P<i64, 2>;\n", "fn f(self: P<T>) {}").unwrap_err().contains("takes 2 parameters, the receiver names 1"));
+        assert!(plain("struct P<T, N: count> { a: T[N]; }\nstate g: P<i64, 2>;\n", "fn f(self: P<T, 4>) {}").unwrap_err().contains("is not a parameter name"));
+        assert!(plain("struct P<T, N: count> { a: T[N]; }\nstate g: P<i64, 2>;\n", "fn f(self: P) {}").unwrap_err().contains("names its parameters"));
     }
 
     #[test]
     fn a_recursive_generic_type_hits_the_depth_limit() {
-        let e = expand("struct R<T> { r: R<R<T>>; }\nstate g: R<i64>;\n", "").unwrap_err();
+        let e = plain("struct R<T> { r: R<R<T>>; }\nstate g: R<i64>;\n", "").unwrap_err();
         assert!(e.contains("nests 65 levels deep (more than 64)") && e.contains("recursive generic type"), "{}", e);
         // a type that holds itself by the same arguments is one instance, not a loop
-        let (st, _) = expand("struct L<T> { v: T; next: L<T>?; }\nstate g: L<i64>;\n", "").unwrap();
+        let (st, _) = plain("struct L<T> { v: T; next: L<T>?; }\nstate g: L<i64>;\n", "").unwrap();
         assert_eq!(st.matches("struct __mito__L__i64").count(), 1, "{}", st);
     }
 
@@ -435,16 +584,17 @@ fn first(self: Stack<T, N>) -> T { return self.items[0]; }\nfn sum(p: Pair<i64, 
         let mut state = "struct B<N: count> { a: i64[N]; }\nstruct G {".to_string();
         for n in 1..=1001 { state += &format!(" f{}: B<{}>;", n, n); }
         state += " }\nstate g: G;\n";
-        assert!(expand(&state, "").unwrap_err().contains("more than 1000 generic instances"));
+        assert!(plain(&state, "").unwrap_err().contains("more than 1000 generic instances"));
     }
 
     #[test]
     fn fields_named_like_parameters_and_strings_are_not_replaced() {
-        let (_, api) = expand("struct P<T> { v: T; }
+        let asked: HashSet<(String, String)> = [("P<i64>".to_string(), "show".to_string())].into_iter().collect();
+        let (_, api, _) = expand_once("struct P<T> { v: T; }
 state g: P<i64>;
 ", "fn show(self: P<U>) -> text { let a = self.U; return \"U \" + a; }
 fn go() { g.show(); }
-").unwrap();
+", &asked).unwrap();
         assert!(api.contains("self.U") && api.contains("\"U \""), "{}", api);
     }
 
@@ -461,17 +611,112 @@ fn go() { g.show(); }
         let e = load(&format!("{}@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.push(\"hi\"); return ok({{}}); }}\n", head)).unwrap_err();
         eprintln!("{}", e);
         assert!(e.contains("Stack<i64, 16>.push") && !e.contains("__mito__"), "{}", e);
-        // an error in a body is reported once per instance, each named; a copy is made for every instance of a function the program names
+        // an error in a body names the instance whose copy it is, and only the instances a call names have a copy
         let body = "fn loud(self: Stack<T, N>) -> i64 { return self.items[0].nothing(); }\n";
         let e = load(&format!("{}{}@post(\"/p\") fn p() -> Response<{{}}> {{ let s = g.b.loud(); return ok({{}}); }}\n", head, body)).unwrap_err();
-        assert!(e.contains("fn Stack<i64, 16>.loud:") && e.contains("fn Stack<string<12>, 8>.loud:") && !e.contains("__mito__"), "{}", e);
+        assert!(e.contains("fn Stack<string<12>, 8>.loud:") && !e.contains("Stack<i64, 16>.loud") && !e.contains("__mito__"), "{}", e);
+        // the error is at the template's own line (5), not a line after the end of the source
+        assert!(e.starts_with("5:"), "{}", e);
         // a function the program never names is not copied
         assert_eq!(load(&format!("{}{}@post(\"/p\") fn p() -> Response<{{}}> {{ g.b.push(\"x\"); return ok({{}}); }}\n", head, body)), Ok(()));
         // a struct whose parameters are wrong fails before any body is looked at
         let e = load("struct Stack<T: number, N: count> { items: T[N]; }\nstruct E { a: i64; }\nstruct G { a: Stack<E, 4>; }\nstate g: G;\n").unwrap_err();
         assert!(e.contains("`Stack<E, 4>`: T is `number` in Stack<T, N>, but E is a struct"), "{}", e);
         // an instance a program names twice, each time written differently, is one
-        let (st, _) = expand("struct S<T, N: count> { a: T[N]; }\nstruct G { x: S<i64,4>; y: S< i64 , 4 >; }\nstate g: G;\n", "").unwrap();
+        let (st, _) = plain("struct S<T, N: count> { a: T[N]; }\nstruct G { x: S<i64,4>; y: S< i64 , 4 >; }\nstate g: G;\n", "").unwrap();
         assert_eq!(st.matches("struct __mito__S__").count(), 1, "{}", st);
+    }
+
+    const POP_HEAD: &str = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct G { a: Stack<i64, 8>; b: Stack<string<12>, 8>; }\nstate g: G;\nfn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.len = self.len + 1; }\nfn pop(self: Stack<T, N>) -> T {\n    if self.len == 0 { fail 409 \"empty\"; }\n    self.len = self.len - 1;\n    return self.items[self.len];\n}\n";
+
+    #[test]
+    fn a_function_is_copied_only_for_the_instances_a_call_names() {
+        // `pop` returns T: fine for the number instance, impossible for the text one, which nothing pops
+        let ok = format!("{}@post(\"/p\") fn p() -> Response<{{ x: i64 }}> {{ g.b.push(\"hi\"); g.a.push(3); return ok({{ x: g.a.pop() }}); }}\n", POP_HEAD);
+        assert_eq!(load(&ok), Ok(()));
+        let (_, api) = crate::source::load(&ok).unwrap();
+        assert!(api.contains("fn pop(self: __mito__Stack__i64__8)") && !api.contains("fn pop(self: __mito__Stack__string_12__8"), "{}", api);
+        assert!(api.contains("fn push(self: __mito__Stack__i64__8, x: i64)") && api.contains("fn push(self: __mito__Stack__string_12__8, x: string<12>)"), "{}", api);
+        // calling it on the text instance is an error that names the instance, at the template's line in the program's own source
+        let bad = format!("{}@post(\"/p\") fn p() -> Response<{{}}> {{ let s = g.b.pop(); return ok({{}}); }}\n", POP_HEAD);
+        let e = load(&bad).unwrap_err();
+        assert!(e.contains("Stack<string<12>, 8>.pop") && !e.contains("Stack<i64, 8>") && !e.contains("__mito__"), "{}", e);
+        let place: u32 = e.split(':').next().unwrap().parse().unwrap();
+        assert!((5..=9).contains(&place), "line {} is not in the template of pop: {}", place, e);
+        // a call of a function no generic struct has is the ordinary error
+        let e = load(&format!("{}@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.nothing(); return ok({{}}); }}\n", POP_HEAD)).unwrap_err();
+        assert!(e.contains("unknown function `g.a.nothing`"), "{}", e);
+        // a function only another generic struct has: the ordinary message, without a list of types that has nothing in it
+        let other = format!("struct Other<T> {{ v: T; }}\nfn only_here(self: Other<T>) -> i64 {{ return 1; }}\n{}", POP_HEAD);
+        let e = load(&format!("{}@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.only_here(); return ok({{}}); }}\n", other.replace("state g: G;", "state g: G;\nstruct H { o: Other<i64>; }"))).unwrap_err();
+        assert!(e.contains("`Stack<i64, 8>` has no function `only_here` (declare `fn only_here(self: Stack<i64, 8>, ...)`)") || e.contains("`Stack<i64, 8>` has no function `only_here`"), "{}", e);
+        assert!(!e.contains("is declared for )") && !e.contains("__mito__"), "{}", e);
+        // a copy asks for another function: the copies follow the calls, however deep
+        let deep = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct G { a: Stack<i64, 8>; b: Stack<string<12>, 8>; }\nstate g: G;\nfn size(self: Stack<T, N>) -> i64 { return self.len; }\nfn twice(self: Stack<T, N>) -> i64 { return self.size() + self.size(); }\nfn bad(self: Stack<T, N>) -> T { return self.items[0]; }\n@post(\"/p\") fn p() -> Response<{ n: i64 }> { return ok({ n: g.a.twice() }); }\n";
+        assert_eq!(load(deep), Ok(()));
+        let (_, api) = crate::source::load(deep).unwrap();
+        assert!(api.contains("fn size(self: __mito__Stack__i64__8)") && !api.contains("fn size(self: __mito__Stack__string_12__8") && !api.contains("fn bad"), "{}", api);
+    }
+
+    #[test]
+    fn a_runtime_failure_in_a_copy_reports_the_templates_line() {
+        let src = format!("{}@post(\"/p\") fn p() -> Response<{{ x: i64 }}> {{ return ok({{ x: g.a.pop() }}); }}\n", POP_HEAD);
+        let (st, api) = crate::source::load(&src).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let a = crate::cgen::check(&prog, &api).unwrap();
+        let c = crate::cgen::program_c(&prog, &a, None).unwrap();
+        // the fail is on line 6 of the program (the line of `if self.len == 0`), as AT_ says
+        assert!(c.contains("#define AT_ 6"), "no AT_ 6 in the C");
+    }
+
+    const SORTED: &str = "struct Sorted<T: struct, N: count, key: field of T> { items: pool<T, N>; n: i64 in 0..N; }\nstruct Entry { name: string<8>; pts: i64; small: u8 in 0..9; id: i64; }\nstruct Game { board: Sorted<Entry, 4, pts>; byid: Sorted<Entry, 3, id>; }\nstate game: Game;\nfn put(self: Sorted<T, N, key>, v: T.key) { let it = self.items.add(); it.key = v; self.n = self.n + 1; }\nfn best(self: Sorted<T, N, key>) -> T.key { var top = 0; var i = 0; while i < self.n { if self.items[i].key > top { top = self.items[i].key; } i += 1; } return top; }\n@post(\"/p/{v}\") fn p(v: i64 in 0..1000) -> Response<{ a: i64, b: i64 }> { game.board.put(v); game.byid.put(v + 1); return ok({ a: game.board.best(), b: game.byid.best() }); }\n";
+
+    #[test]
+    fn a_parameter_naming_a_field_reads_that_field() {
+        assert_eq!(load(SORTED), Ok(()));
+        let (st, api) = crate::source::load(SORTED).unwrap();
+        // each instance reads its own field: `key` is replaced after a `.` too
+        assert!(api.contains("it.pts = v;") && api.contains("it.id = v;"), "{}", api);
+        assert!(api.contains("self.items[i].pts > top") && api.contains("self.items[i].id > top") && !api.contains(".key"), "{}", api);
+        assert!(st.contains("__mito__Sorted__Entry__4__pts"), "{}", st);
+    }
+
+    #[test]
+    fn field_of_constraint_errors_name_the_instance() {
+        let go = |arg: &str| load(&SORTED.replace("Sorted<Entry, 3, id>", arg)).unwrap_err();
+        assert_eq!(go("Sorted<Entry, 3, nope>"), "`Sorted<Entry, 3, nope>`: key is a field of T in Sorted<T, N, key>, but Entry has no field `nope`");
+        assert_eq!(go("Sorted<Entry, 3, name>"), "`Sorted<Entry, 3, name>`: key is a field of T in Sorted<T, N, key>, but Entry.name is string<8>, not an integer");
+        assert!(go("Sorted<Entry, 3, 5>").contains("key is a field of T in Sorted<T, N, key>, but 5 is not a field name"), "{}", go("Sorted<Entry, 3, 5>"));
+        assert!(go("Sorted<i64, 3, id>").contains("T is `struct` in Sorted<T, N, key>, but i64 is not a struct"), "{}", go("Sorted<i64, 3, id>"));
+        // a range on an integer field is still an integer
+        assert_eq!(load(&SORTED.replace("Sorted<Entry, 3, id>", "Sorted<Entry, 3, small>")), Ok(()));
+        // declarations: the struct the field belongs to is a `struct` parameter or a struct
+        assert!(plain("struct P<K: field of T, T> { a: T; }\nstate g: P<i64, i64>;\n", "").unwrap_err().contains("T must be a struct, `T: struct`"));
+        assert!(plain("struct P<K: field of Q, T: struct> { a: T; }\nstate g: P<i64, i64>;\n", "").unwrap_err().contains("Q is neither a parameter of P<...> nor a struct"));
+        // a field of a named struct (not a parameter)
+        let src = "struct E { a: i64; b: string<4>; }\nstruct P<K: field of E, N: count> { v: i64[N]; }\nstruct G { x: P<a, 2>; }\nstate g: G;\n";
+        assert!(plain(src, "").is_ok());
+        assert!(plain(&src.replace("P<a, 2>", "P<b, 2>"), "").unwrap_err().contains("E.b is string<4>, not an integer"));
+        // an instance of a generic struct can be the element: its fields are the instance's, as written in the template
+        let nested = "struct Pair<A, B> { a: A; b: B; }\nstruct S<T: struct, key: field of T> { v: T; }\nstruct G { x: S<Pair<i64, i64>, a>; }\nstate g: G;\n";
+        assert!(plain(nested, "").is_ok(), "{:?}", plain(nested, ""));
+        assert!(plain(&nested.replace("Pair<i64, i64>, a", "Pair<i64, i64>, c"), "").unwrap_err().contains("Pair<i64, i64> has no field `c`"));
+    }
+
+    #[test]
+    fn a_function_without_pub_is_private_to_its_file() {
+        let piece = |at: usize, n: usize, file: &str, from: usize| crate::Piece { at, n, file: file.to_string(), from, text: String::new() };
+        let lib = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nfn grow(self: Stack<T, N>) { self.len = self.len + 1; }\npub fn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.grow(); }\n";
+        let main = |call: &str| format!("{}struct G {{ a: Stack<i64, 8>; }}\nstate g: G;\n@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.push(1); {} return ok({{}}); }}\n", lib, call);
+        crate::PIECES.with(|p| *p.borrow_mut() = vec![piece(1, 3, "lib.mito", 1), piece(4, 3, "main.mito", 1)]);
+        // `push` is public, and calls the private `grow` from its own file
+        let ok = load(&main(""));
+        // `grow` called from the program's other file
+        let e = load(&main("g.a.grow();")).unwrap_err();
+        crate::PIECES.with(|p| p.borrow_mut().clear());
+        assert_eq!(ok, Ok(()));
+        assert!(e.contains("`Stack<i64, 8>.grow` is private to lib.mito (it is not `pub`), and is called from main.mito") && !e.contains("__mito__"), "{}", e);
+        // one file: everything is in it
+        assert_eq!(load(&main("g.a.grow();")), Ok(()));
     }
 }

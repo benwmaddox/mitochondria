@@ -1,6 +1,6 @@
-# Generics (design; steps 1 to 3 built)
+# Generics (design; steps 1 to 5 built, except field privacy)
 
-**Status.** Decided by the owner: generics replace modules. Steps 1 to 3 of the plan (section 9) are built in `src/generics.rs`: generic structs, functions of a generic type, instance names in messages. Section 12 lists where the build differs from this text.
+**Status.** Decided by the owner: generics replace modules. Steps 1 to 4 of the plan (section 9) and the function half of step 5 are built in `src/generics.rs`: generic structs, functions of a generic type copied per call, instance names in messages, `K: field of T`, file-level privacy for functions. Section 12 lists where the build differs from this text.
 
 **Why.** Today the only way to write a reusable container is a library module (`lib/*.mito`): `module sorted<T: struct, N: count, key: field of T>`.
 Modules work, but they are a second mechanism beside structs and functions of a type, they are expanded by *text substitution* before parsing
@@ -283,16 +283,22 @@ functions in `src/cgen.rs`. Not verified: how the binder resolves `self` and `T.
 module instances, how `ModInst` is consumed in cgen, the exact endpoint syntax, and the expected format in `tests/errors`. Step 1 of the
 plan reads these before anything is written.
 
-## 12. Deviations from the design (as built, steps 1 to 3)
+## 12. Deviations from the design (as built)
 
-1. **Expansion works on token streams of the program text, not on a parse tree.** The state and the code are still text when `modules::expand` is called (and it now calls `generics::expand` first), so the pass lexes them
-   (identifiers, numbers, strings, comments), replaces parameters token by token (never inside a string or comment, never a field after a `.`) and writes text the existing parsers read. Generated text is appended to the state and the code.
-2. **Functions are copied for the instances of a struct only if the program names them.** The design copies every function for every instance. The expansion does not know the type of a receiver (`a.push(3)`), so it cannot copy only
-   what is called on an instance; the choice made is: a function whose *name* appears anywhere in the program (or in a copy already made) is copied for *every* instance of its struct. Consequence: a function that cannot work for one element type
-   (it returns `T` and `T` is a text or struct, which no function can return by value; it assigns a struct into an array element, not compiled yet) fails to build as soon as its name is used for any instance. Exact per-call instantiation needs the
-   type of the receiver, so it belongs in the binder: step 3 in its stricter form, listed as the next step.
-3. **No `check --costs` instance count and no `generic_bounds_proof` emit-c assertion in this step**; the range proof is tested through the generated checks (`generic_instances_are_separate_state_to_the_range_analyses` in `src/cgen.rs`, both directions).
-4. **Errors found while expanding carry no line**; a runtime `fail` or an error inside a copied function reports a line in the generated copy (after the end of the source), not the template's. The message names the instance.
-5. **`K: field of T`** and `table<...>` fields are rejected with a message instead of being supported (steps 4 and the design's own v1 rule); counts are literals only.
-6. **Mangled names** start with `__mito__` (as module instances do) and sanitize the arguments (`__mito__Stack__string_12__8`); a name that would be too long or that collides is numbered.
-
+1. **Expansion works on token streams of the program text, not on a parse tree.** The state and the code are still text when `modules::expand` is called (it calls `generics::expand`, which wraps the module expansion), so the pass lexes them
+   (identifiers, numbers, strings, comments), replaces parameters token by token (never inside a string or comment, never a field after a `.`, except a parameter that names a field) and writes text the existing parsers read. Generated text is appended to the state and the code.
+2. **Functions are copied per call (fixed; was: for every instance once the name appeared).** The expansion cannot know a receiver's type, so the choice made, and the only mechanism: `generics::expand` expands the program with the copies asked for so far (none at first),
+   runs the normal compile once as a probe, and the code generator, where it resolves `x.f(...)` by the receiver's type (`callx`), records every call whose instance has no function `f` (`note_missing`: instance as written, function name). The next expansion copies exactly those
+   functions for exactly those instances; this repeats until a probe asks for nothing new. While probing, the generator goes on past a call that lacks a copy (with a placeholder value), so one probe finds every such call it reaches; a call made only from inside a copy is found by the next probe, so a program needs the depth of its chains of calls between copies, plus one, probes (the generics cases: 2 each; `MITO_EXPLAIN_GENERICS=1` prints each probe). The text of the last expansion is the program; its errors are reported as any program's are. The binder
+   cannot find a function that has no copy yet, so it takes a name that some generic struct declares as "declared for some type" (`is_template_method`) and leaves the call to the code generator. Costs: a program with a generic struct and functions of it is compiled once more per probe at load; programs without are unchanged.
+   Consequences: `fn pop(self: Stack<T, N>) -> T` works for `Stack<i64, 8>` while `Stack<string<12>, 8>` exists, because that instance never calls it; calling it on the text instance reports the error inside the copy, named `Stack<string<12>, 8>.pop`. Whole-program analyses see the copies that exist; a call `x.f()` is
+   treated as reaching every function named `f`, as before, so a missing copy never hides a callee.
+3. **No `check --costs` instance count and no `generic_bounds_proof` emit-c assertion**; the range proof is tested through the generated checks (`generic_instances_are_separate_state_to_the_range_analyses` in `src/cgen.rs`, both directions).
+4. **Lines (fixed for copies).** A copy of a function is preceded by `//# line N <instance>`; the lexer (`lex_lines` in `src/lang.rs`) continues from line N, so a runtime `fail` and every error inside a copy report the template function's line in the program's own source
+   (and `main.rs` maps it to the right file of a program of several files). Struct copies in the state text and errors found while expanding (wrong arguments) still carry no line.
+5. **`K: field of T` (step 4, built).** `T` must be a `struct` parameter of the same struct, or a struct name. The argument must be a field name of the struct the other argument stands for (a plain struct, or an instance such as `Pair<i64, i64>`, read from its expanded body), and an integer type, with or without `in lo..hi`;
+   the messages name the instance: `` `Sorted<Entry, 3, name>`: key is a field of T in Sorted<T, N, key>, but Entry.name is string<8>, not an integer ``. The parameter's name is replaced by the field's name everywhere in a copy, also after a `.` (a field of the template's own named like the parameter is therefore not usable in it),
+   and `T.key` in a signature is the field's type. Fields of type `table<...>` are still rejected; counts are literals only.
+6. **`pub` privacy (step 5): functions only.** A copy of a function of a generic struct without `pub` is private to the file it was written in; a call from code in another file of the same program is an error (`Stack<i64, 8>.grow is private to lib.mito (it is not pub), and is called from main.mito`),
+   checked where the code generator resolves the call, with the call's line mapped to its file. Not built: privacy for *fields* (read-only keys): a field is reached by many routes in the code generator (state paths, pool columns, array columns, table rows, struct values), each resolving the name by itself, and there is no single place yet where "this field of this instance read from this file" is decided.
+7. **Mangled names** start with `__mito__` (as module instance names do) and sanitize the arguments (`__mito__Stack__string_12__8`); a name that would be too long or that collides is numbered.

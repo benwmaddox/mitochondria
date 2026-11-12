@@ -8,10 +8,10 @@ struct World { pos: Vec3; g: Gauge; lg: Gauge logged; b: Body; r: Rec; xs: i64[8
 state world: World;
 
 fn len2(self: Vec3) -> f64 { return self.x * self.x + self.y * self.y + self.z * self.z; }
-fn scale(self: Vec3, d: f64) { self.x *= d; self.y *= d; self.z *= d; }
-fn bump(p: Vec3, d: f64) { p.x += d; p.y += d; p.z += d; }
-fn walk(p: Vec3, n: i64) { if n > 0 { p.x += 1.0; walk(p, n - 1); } }
-fn shift_hist(g: Gauge, d: i64) { g.hist[0] += d; g.n += d; }
+fn scale(self: write Vec3, d: f64) { self.x *= d; self.y *= d; self.z *= d; }
+fn bump(p: write Vec3, d: f64) { p.x += d; p.y += d; p.z += d; }
+fn walk(p: write Vec3, n: i64) { if n > 0 { p.x += 1.0; walk(p, n - 1); } }
+fn shift_hist(g: write Gauge, d: i64) { g.hist[0] += d; g.n += d; }
 
 @get("/state")
 fn state() -> Response<{ px: f64, py: f64, pz: f64, n: i64, ln: i64, h0: i64, h1: i64, name: string, lname: string, bx: f64, vx: f64, mass: f64, k: i64, lim: i64, tot: i64 }> {

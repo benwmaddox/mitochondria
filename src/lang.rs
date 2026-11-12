@@ -223,7 +223,7 @@ pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64, bool), Item(String, Opti
 /// `ret_opt`: declared `-> T?`: the result may be null, and a caller must check it (`if exists(x)`) or give a fallback (`or`).
 /// `test`: a test (`test "name" { ... }`): no parameters, a result of `bool` or text, run by `mito test` only.
 /// `html`: declared `-> html`, a function that writes markup into the answer (used inside markup, as `{item(t)}`).
-pub struct Func { pub test: Option<String>, pub recv: bool, pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool, pub html: bool }
+pub struct Func { pub test: Option<String>, pub recv: bool, pub modes: Vec<u8>, pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool, pub html: bool }
 /// A type in a function's signature, as written: `i64`, `f64`, `bool`, `string`, a struct whose items the function takes
 /// (`Player`, or `Player in game.players` when several collections hold it), the type of a struct's field (`T.key`, for
 /// modules), each with `?` for "or null".
@@ -477,8 +477,20 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             let mut name = p.id()?;
             while p.sym(".") { name = format!("{}.{}", name, p.id()?); } // instance.function, from module expansion
             p.eat("(")?;
-            let (mut params, mut ptys) = (Vec::new(), Vec::new());
-            while !p.sym(")") { params.push(p.id()?); ptys.push(if p.sym(":") { Some(p.pty()?) } else { None }); p.sym(","); }
+            let (mut params, mut ptys, mut modes) = (Vec::new(), Vec::new(), Vec::new());
+            // `p: Player` is read-only; `p: write Player` may change the caller's struct (a type named `write` is still a type); a copy is made at the call, `f(x.copy())`
+            while !p.sym(")") {
+                params.push(p.id()?);
+                let mut mode = 0u8;
+                ptys.push(if p.sym(":") {
+                    if matches!(p.t.get(p.i + 1), Some(Tok::Id(_))) {
+                        if p.is_kw("write") { mode = 1; p.i += 1; }
+                        else if p.is_kw("copy") { return Err("a parameter is never a copy: pass `x.copy()` at the call to give a function its own copy".into()); }
+                    }
+                    Some(p.pty()?)
+                } else { None });
+                modes.push(mode); p.sym(",");
+            }
             // a function whose first parameter is `self: Type` belongs to that type (as in Stasis): `fn hurt(self: Player, n: i64) { self.hp -= n; }` is called `p.hurt(3)`, and is named `Player.hurt`.
             // The same name may be declared for any number of types, and beside a function of no type.
             let is_recv = params.first().map_or(false, |n| n == "self");
@@ -510,7 +522,7 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             p.typed.truncate(mark);
             let mut body = body?;
             if !entry.is_empty() { entry.append(&mut body); body = entry; }
-            api.fns.push(Func { test: None, recv: is_recv, name, params, ptys, ret, body, slots: 0, public, ret_opt, html });
+            api.fns.push(Func { test: None, recv: is_recv, modes, name, params, ptys, ret, body, slots: 0, public, ret_opt, html });
             continue;
         }
         // `test "name" { ... }`: a function the test runner calls; inside, `get`, `post`, `put`, `patch`, `delete` make requests
@@ -522,7 +534,7 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             let body = p.block();
             p.in_test = false;
             let n = api.fns.iter().filter(|f| f.test.is_some()).count();
-            api.fns.push(Func { test: Some(title), recv: false, name: format!("__mito__test{}", n), params: Vec::new(), ptys: Vec::new(), ret: None, body: body?, slots: 0, public: false, ret_opt: false, html: false });
+            api.fns.push(Func { test: Some(title), recv: false, modes: Vec::new(), name: format!("__mito__test{}", n), params: Vec::new(), ptys: Vec::new(), ret: None, body: body?, slots: 0, public: false, ret_opt: false, html: false });
             continue;
         }
         if p.is_kw("endpoint") { return Err("endpoints are functions with an attribute: `@post(\"/path\") fn name() -> Response<T> { ... }`".into()); }
@@ -1394,7 +1406,7 @@ pub fn path_of(e: &Expr) -> Option<String> {
 }
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums, test: bool, coll_loops: u32, consts: &'g Consts }
+struct Binder<'g> { typed_first: Vec<String>, names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums, test: bool, coll_loops: u32, consts: &'g Consts }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
 pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> { bind_with(api, globals, &[], &[]) }
@@ -1408,10 +1420,12 @@ pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: 
 fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: &Enums, consts: &Consts) -> R<()> {
     let fns: Vec<(String, usize, bool, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public, f.recv)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
+    // a function whose first parameter has a type can also be called as a method on it: `f(x, y)` is `x.f(y)`
+    let typed_first: Vec<String> = api.fns.iter().filter(|f| !f.recv && f.test.is_none() && f.ptys.first().map_or(false, |t| t.is_some())).map(|f| f.name.clone()).collect();
     let mut errs = Vec::new();
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: if f.recv { None } else { f.name.rfind('.').map(|i| f.name[..i].to_string()) }, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
-        for p in &f.params { b.declare(p, false); }
+        let mut b = Binder { typed_first: typed_first.clone(), names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: if f.recv { None } else { f.name.rfind('.').map(|i| f.name[..i].to_string()) }, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
+        for (k, p) in f.params.iter().enumerate() { b.declare(p, f.modes.get(k).map_or(false, |m| *m != 0)); } // a `write` or `copy` parameter may be assigned
         // a full signature: every parameter's type, and the result's when the function returns a value
         if let Some(Stmt::At(l, c)) = f.body.first() { b.at = (*l, *c); }
         if f.test.is_some() { b.test = true; b.place = format!("test \"{}\"", f.test.as_deref().unwrap_or("")); }
@@ -1423,7 +1437,7 @@ fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums
         f.slots = b.max;
     }
     for e in &mut api.eps {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
+        let mut b = Binder { typed_first: typed_first.clone(), names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
         for i in &mut e.inputs { if let Err(m) = resolve_bounds(i, consts) { errs.push(format!("endpoint {} ({}): {}", e.name, e.text, m)); } }
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         if let Err(e) = b.block(&mut e.body) { errs.push(e); continue; }
@@ -1522,7 +1536,7 @@ impl Binder<'_> {
     }
     /// Is a function named `name` declared for some type, or for a generic struct (its copies are made where a call names them)?
     fn declared_method(&self, name: &str) -> bool {
-        self.fns.iter().any(|f| f.3 && f.0.rsplit_once('.').map_or(false, |(_, m)| m == name)) || crate::generics::is_template_method(name)
+        self.fns.iter().any(|f| f.3 && f.0.rsplit_once('.').map_or(false, |(_, m)| m == name)) || self.typed_first.iter().any(|n| n == name) || crate::generics::is_template_method(name)
     }
     /// `x.f(args)` naming no function of a module instance: a collection operation, `.f(x, args)`.
     fn operation(&self, e: &mut Expr) {
@@ -1530,7 +1544,7 @@ impl Binder<'_> {
         if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
         let Some((recv, op)) = n.rsplit_once('.') else { return };
         let declared = self.declared_method(op);
-        if !declared && !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
+        if !declared && !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity" | "copy") { return; }
         let mut parts = recv.split('.');
         let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
         for f in parts { r = Expr::Field(Box::new(r), f.to_string()); }
@@ -1669,6 +1683,7 @@ impl Binder<'_> {
                 for a in args.iter_mut() { self.expr(a)?; }
                 *res = match (n.as_str(), args.len()) {
                     _ if AMBIGUOUS_OPS.contains(&&n[1..]) && self.declared_method(&n[1..]) => CallRes::Unbound,
+                    (".copy", 1) => CallRes::Unbound, // `x.copy()`: the code generator decides (a function of the receiver's type named `copy`, or the built-in copy)
                     (".count", 1) => CallRes::Builtin(B::Count),
                     (".capacity", 1) => CallRes::Builtin(B::Capacity),
                     (".add" | ".try_add", 1) => return self.err(format!("`{}()` makes an item: write `let x = coll{}();` or `coll{}();` as a statement", &n[1..], n, n)),
@@ -1709,6 +1724,8 @@ impl Binder<'_> {
                 } else if let Some(b) = B::from(n) { CallRes::Builtin(b) }
                 // `split(...)`: what a loop walks (`foreach p in split(t, ", ")`); compiled there
                 else if n == "split" || n == "__mito__text_cap" || n == "__mito__struct" { CallRes::Unbound }
+                // `f(x, y)` for a function declared for the types of its first parameter is `x.f(y)`: the receiver's type picks the function
+                else if !args.is_empty() && self.declared_method(n) { *n = format!(".{}", n); CallRes::Unbound }
                 else { let hint = suggest(n, self.fns.iter().map(|f| f.0.as_str()).chain(BUILTIN_NAMES.iter().copied())); return self.err(format!("unknown function `{}`{}", n, hint)); };
             }
             _ => {}

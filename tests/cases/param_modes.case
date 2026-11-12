@@ -1,0 +1,47 @@
+// a struct is always passed as a view of the caller's: `p: T` is read-only (it cannot be changed or handed to a `write` parameter), `p: write T` changes the caller's struct;
+// a copy is explicit, `x.copy()`: a read-only parameter sees later writes to the place it views (`snapshot(g.p)` gives 50) unless it was given a copy (`snapshot(g.p.copy())` gives 7)
+--- program
+struct P { x: i64; y: i64; }
+struct Pet { name: string<16>; }
+struct G { p: P; q: P; label: string<16>; pets: pool<Pet, 4>; }
+state g: G;
+
+fn bump(p: write P) { p.x += 1; }
+fn twice(p: write P) { bump(p); bump(p); }
+fn with_hundred(p: P) -> i64 { var q = p.copy(); q.x += 100; return q.x; }
+fn sum(p: P) -> i64 { return p.x + p.y; }
+fn snapshot(p: P) -> i64 { g.p.x = 50; return p.x; }
+
+fn shout(s: write string<16>) { s += "!"; }
+fn set_name(s: write string<16>, t: string<16>) { s = t; }
+
+@post("/text")
+fn post_text() -> Response<{ label: string, pet: string }> {
+    g.label = "hi";
+    shout(g.label);
+    shout(g.label);
+    let pet = g.pets.add();
+    pet.name = "rex";
+    shout(pet.name);
+    set_name(pet.name, g.label);
+    return ok({ "label": g.label, "pet": pet.name });
+}
+@post("/go")
+fn post_go() -> Response<{ twice: i64, copied: i64, kept: i64, view: i64, now: i64, snap: i64, sum: i64, field: i64, local: i64 }> {
+    g.p.x = 1;
+    g.p.y = 2;
+    twice(g.p);
+    let a = g.p.x;
+    let c = with_hundred(g.p);
+    let k = g.p.x;
+    let v = snapshot(g.p);
+    g.p.x = 7;
+    let s = snapshot(g.p.copy());
+    g.q = g.p;
+    var l = g.p.copy();
+    g.p.x = 0;
+    return ok({ "twice": a, "copied": c, "kept": k, "view": v, "now": g.p.x, "snap": s, "sum": sum(g.q), "field": g.q.x, "local": l.x });
+}
+--- requests
+POST /go
+POST /text

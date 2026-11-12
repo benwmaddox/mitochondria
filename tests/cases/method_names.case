@@ -6,10 +6,10 @@ struct Dot { x: i64; }
 struct Game { c: Counter; dots: pool<Dot, 8>; name: string<16>; }
 state game: Game;
 
-fn clear(self: Counter) { self.n = 0; self.hits = self.hits + 1; }
+fn clear(self: write Counter) { self.n = 0; self.hits = self.hits + 1; }
 fn count(self: Counter) -> i64 { return self.n * 10; }
-fn add(self: Counter, k: i64) { self.n = self.n + k; }
-fn remove(self: Counter, k: i64) -> i64 { self.n = self.n - k; return self.n; }
+fn add(self: write Counter, k: i64) { self.n = self.n + k; }
+fn remove(self: write Counter, k: i64) -> i64 { self.n = self.n - k; return self.n; }
 fn len(self: Counter) -> i64 { return self.n + 1000; }
 
 @post("/go")

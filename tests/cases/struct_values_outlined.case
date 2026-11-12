@@ -4,7 +4,7 @@ struct Vec3 { x: f64; y: f64; z: f64; }
 struct World { pos: Vec3; b: Vec3; calls: i64; }
 state world: World;
 
-fn big(p: Vec3, n: f64) -> f64 {
+fn big(p: write Vec3, n: f64) -> f64 {
     var t = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
     p.x += 1.0;
     t.y += 0.5;
@@ -809,7 +809,7 @@ fn big(p: Vec3, n: f64) -> f64 {
     t.x += p.x;
     return t.x + t.y + n;
 }
-fn big2(p: Vec3) -> f64 {
+fn big2(p: write Vec3) -> f64 {
     var t = p;
     t.z += 100.0;
     p.y += 1.0;

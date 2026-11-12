@@ -1,0 +1,5 @@
+// expect: `write` needs a place to write to
+struct G { label: string<16>; }
+state g: G;
+fn f(s: write string<16>) { s = "x"; }
+@get("/a") fn a() -> Response<{ n: i64 }> { f("lit"); return ok({ "n": 1 }); }

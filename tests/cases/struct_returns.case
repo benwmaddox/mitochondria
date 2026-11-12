@@ -1,0 +1,38 @@
+// a function can return a struct: the result is written straight into the place it goes to (`target = f(x);`, or a new local, `let t = f(x);`);
+// a struct result is never a hidden temporary, so a chain needs a name for its middle
+--- program
+struct V { x: i64; y: i64; }
+struct G { p: V; q: V; }
+state g: G;
+
+fn plus(a: V, b: V) -> V { var r = V { x: a.x + b.x, y: a.y + b.y }; return r; }
+fn scaled(a: V, k: i64) -> V { var r = V { x: a.x * k, y: a.y * k }; return r; }
+fn pick(a: V, b: V, first: bool) -> V { if first { return a; } return b; }
+
+@post("/go")
+fn post_go() -> Response<{ px: i64, py: i64, tx: i64, ty: i64, qx: i64, qy: i64, rx: i64, bx: i64 }> {
+    g.p = V { x: 1, y: 2 };
+    g.q = V { x: 10, y: 20 };
+    g.p = plus(g.p, g.q);
+    let t = plus(g.p, g.q);
+    g.q = scaled(t, 2);
+    var r = pick(g.p, g.q, true);
+    r.x = 99;
+    let b = pick(g.p, g.q, false);
+    return ok({ "px": g.p.x, "py": g.p.y, "tx": t.x, "ty": t.y, "qx": g.q.x, "qy": g.q.y, "rx": r.x, "bx": b.x });
+}
+fn norm1(self: V) -> i64 { return self.x + self.y; }
+fn dist1(a: V, b: V) -> i64 { return norm1(a) - b.norm1(); }
+
+// any function can be called on its first parameter (`g.p.plus(g.q)` is `plus(g.p, g.q)`), and a function of a type either way (`norm1(g.p)` is `g.p.norm1()`)
+@post("/forms")
+fn post_forms() -> Response<{ a: i64, b: i64, c: i64, d: i64 }> {
+    g.p = V { x: 3, y: 4 };
+    g.q = V { x: 1, y: 1 };
+    let t = g.p.plus(g.q);
+    g.q = g.p.scaled(3);
+    return ok({ "a": t.x, "b": norm1(g.p), "c": g.p.norm1(), "d": dist1(g.p, g.q) });
+}
+--- requests
+POST /go
+POST /forms

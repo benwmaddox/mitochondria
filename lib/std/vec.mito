@@ -9,13 +9,13 @@ struct Vec2 { x: f64; y: f64; }
 struct Vec3 { x: f64; y: f64; z: f64; }
 
 // ---- Vec2 ----
-fn set(self: Vec2, x: f64, y: f64) { self.x = x; self.y = y; }
-fn assign(self: Vec2, other: Vec2) { self.x = other.x; self.y = other.y; }
-fn plus(self: Vec2, other: Vec2) { self.x += other.x; self.y += other.y; }
-fn minus(self: Vec2, other: Vec2) { self.x -= other.x; self.y -= other.y; }
-fn scale(self: Vec2, k: f64) { self.x *= k; self.y *= k; }
-fn add_scaled(self: Vec2, other: Vec2, k: f64) { self.x += other.x * k; self.y += other.y * k; }
-fn negate(self: Vec2) { self.x = -self.x; self.y = -self.y; }
+fn set(self: write Vec2, x: f64, y: f64) { self.x = x; self.y = y; }
+fn assign(self: write Vec2, other: Vec2) { self.x = other.x; self.y = other.y; }
+fn plus(self: write Vec2, other: Vec2) { self.x += other.x; self.y += other.y; }
+fn minus(self: write Vec2, other: Vec2) { self.x -= other.x; self.y -= other.y; }
+fn scale(self: write Vec2, k: f64) { self.x *= k; self.y *= k; }
+fn add_scaled(self: write Vec2, other: Vec2, k: f64) { self.x += other.x * k; self.y += other.y * k; }
+fn negate(self: write Vec2) { self.x = -self.x; self.y = -self.y; }
 fn dot(self: Vec2, other: Vec2) -> f64 { return self.x * other.x + self.y * other.y; }
 fn length_squared(self: Vec2) -> f64 { return self.x * self.x + self.y * self.y; }
 fn length(self: Vec2) -> f64 { return sqrt(self.x * self.x + self.y * self.y); }
@@ -24,17 +24,17 @@ fn distance(self: Vec2, other: Vec2) -> f64 {
     let dy = self.y - other.y;
     return sqrt(dx * dx + dy * dy);
 }
-fn normalize(self: Vec2) {
+fn normalize(self: write Vec2) {
     let len = self.length();
     if len > 0.0 { self.x /= len; self.y /= len; }
 }
 // self = a + (b - a) * t
-fn lerp_to(self: Vec2, a: Vec2, b: Vec2, t: f64) {
+fn lerp_to(self: write Vec2, a: Vec2, b: Vec2, t: f64) {
     self.x = a.x + (b.x - a.x) * t;
     self.y = a.y + (b.y - a.y) * t;
 }
 // self turned counterclockwise by radians
-fn rotate(self: Vec2, radians: f64) {
+fn rotate(self: write Vec2, radians: f64) {
     let c = cos(radians);
     let s = sin(radians);
     let x = self.x * c - self.y * s;
@@ -43,19 +43,19 @@ fn rotate(self: Vec2, radians: f64) {
     self.y = y;
 }
 // self turned a quarter counterclockwise: (x, y) becomes (-y, x)
-fn perp(self: Vec2) {
+fn perp(self: write Vec2) {
     let x = -self.y;
     self.y = self.x;
     self.x = x;
 }
 // self = v mirrored about the unit vector n: v - 2 (v . n) n
-fn reflect_to(self: Vec2, v: Vec2, n: Vec2) {
+fn reflect_to(self: write Vec2, v: Vec2, n: Vec2) {
     let d = 2.0 * (v.x * n.x + v.y * n.y);
     self.x = v.x - d * n.x;
     self.y = v.y - d * n.y;
 }
 // self replaced by its projection on onto (zero when onto is zero)
-fn project_on(self: Vec2, onto: Vec2) {
+fn project_on(self: write Vec2, onto: Vec2) {
     let den = onto.x * onto.x + onto.y * onto.y;
     var k = 0.0;
     if den > 0.0 { k = (self.x * onto.x + self.y * onto.y) / den; }
@@ -64,13 +64,13 @@ fn project_on(self: Vec2, onto: Vec2) {
 }
 
 // ---- Vec3 ----
-fn set(self: Vec3, x: f64, y: f64, z: f64) { self.x = x; self.y = y; self.z = z; }
-fn assign(self: Vec3, other: Vec3) { self.x = other.x; self.y = other.y; self.z = other.z; }
-fn plus(self: Vec3, other: Vec3) { self.x += other.x; self.y += other.y; self.z += other.z; }
-fn minus(self: Vec3, other: Vec3) { self.x -= other.x; self.y -= other.y; self.z -= other.z; }
-fn scale(self: Vec3, k: f64) { self.x *= k; self.y *= k; self.z *= k; }
-fn add_scaled(self: Vec3, other: Vec3, k: f64) { self.x += other.x * k; self.y += other.y * k; self.z += other.z * k; }
-fn negate(self: Vec3) { self.x = -self.x; self.y = -self.y; self.z = -self.z; }
+fn set(self: write Vec3, x: f64, y: f64, z: f64) { self.x = x; self.y = y; self.z = z; }
+fn assign(self: write Vec3, other: Vec3) { self.x = other.x; self.y = other.y; self.z = other.z; }
+fn plus(self: write Vec3, other: Vec3) { self.x += other.x; self.y += other.y; self.z += other.z; }
+fn minus(self: write Vec3, other: Vec3) { self.x -= other.x; self.y -= other.y; self.z -= other.z; }
+fn scale(self: write Vec3, k: f64) { self.x *= k; self.y *= k; self.z *= k; }
+fn add_scaled(self: write Vec3, other: Vec3, k: f64) { self.x += other.x * k; self.y += other.y * k; self.z += other.z * k; }
+fn negate(self: write Vec3) { self.x = -self.x; self.y = -self.y; self.z = -self.z; }
 fn dot(self: Vec3, other: Vec3) -> f64 { return self.x * other.x + self.y * other.y + self.z * other.z; }
 fn length_squared(self: Vec3) -> f64 { return self.x * self.x + self.y * self.y + self.z * self.z; }
 fn length(self: Vec3) -> f64 { return sqrt(self.x * self.x + self.y * self.y + self.z * self.z); }
@@ -80,17 +80,17 @@ fn distance(self: Vec3, other: Vec3) -> f64 {
     let dz = self.z - other.z;
     return sqrt(dx * dx + dy * dy + dz * dz);
 }
-fn normalize(self: Vec3) {
+fn normalize(self: write Vec3) {
     let len = self.length();
     if len > 0.0 { self.x /= len; self.y /= len; self.z /= len; }
 }
-fn lerp_to(self: Vec3, a: Vec3, b: Vec3, t: f64) {
+fn lerp_to(self: write Vec3, a: Vec3, b: Vec3, t: f64) {
     self.x = a.x + (b.x - a.x) * t;
     self.y = a.y + (b.y - a.y) * t;
     self.z = a.z + (b.z - a.z) * t;
 }
 // self = a x b; a or b may be self
-fn cross_to(self: Vec3, a: Vec3, b: Vec3) {
+fn cross_to(self: write Vec3, a: Vec3, b: Vec3) {
     let x = a.y * b.z - a.z * b.y;
     let y = a.z * b.x - a.x * b.z;
     let z = a.x * b.y - a.y * b.x;
@@ -98,13 +98,13 @@ fn cross_to(self: Vec3, a: Vec3, b: Vec3) {
     self.y = y;
     self.z = z;
 }
-fn reflect_to(self: Vec3, v: Vec3, n: Vec3) {
+fn reflect_to(self: write Vec3, v: Vec3, n: Vec3) {
     let d = 2.0 * (v.x * n.x + v.y * n.y + v.z * n.z);
     self.x = v.x - d * n.x;
     self.y = v.y - d * n.y;
     self.z = v.z - d * n.z;
 }
-fn project_on(self: Vec3, onto: Vec3) {
+fn project_on(self: write Vec3, onto: Vec3) {
     let den = onto.x * onto.x + onto.y * onto.y + onto.z * onto.z;
     var k = 0.0;
     if den > 0.0 { k = (self.x * onto.x + self.y * onto.y + self.z * onto.z) / den; }

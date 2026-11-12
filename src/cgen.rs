@@ -532,7 +532,7 @@ enum CV {
 /// `bound`: the most bytes of text a return so far gave (None: none yet, or one not known: `unbounded`)
 /// `mark`: the text area's length when the function began, which a `return` of a value that is not text cuts back to (placeholders
 /// `/*RCUT mark*/` until the body is compiled: kept as cuts when the body built region text, dropped otherwise)
-struct Ret { var: String, label: String, kind: Option<K>, func: bool, sel: Option<String>, bound: Option<usize>, unbounded: bool, mark: String, ivs: Vec<Option<(i64, i64)>> }
+struct Ret { dest: Option<(usize, usize)>, var: String, label: String, kind: Option<K>, func: bool, sel: Option<String>, bound: Option<usize>, unbounded: bool, mark: String, ivs: Vec<Option<(i64, i64)>> }
 
 /// How an argument is passed to a generated C function: a value of a kind, or an instance of a collection.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -724,7 +724,7 @@ struct G<'p> {
     region_unbounded: Vec<String>,
     /// the C names of capped `var`s of text (`var acc: text<N>`) and their caps
     txt_caps: std::collections::HashMap<String, usize>,
-    prog: &'p Program, api: &'p Api, ep: &'p Endpoint, body: String, n: usize, depth: usize, inlining: Vec<u32>, ret: Vec<Ret>,
+    prog: &'p Program, api: &'p Api, ep: &'p Endpoint, body: String, n: usize, depth: usize, inlining: Vec<u32>, ret: Vec<Ret>, ret_ctx: Option<Option<usize>>, pending_ctx: Option<Option<usize>>,
     frame: Option<u32>,                                  // the function whose slots `env` holds (None: the endpoint)
     slot_kinds: &'p [((Option<u32>, u32), K)],           // widened kinds of `var` and `let` slots
     ret_kinds: &'p [(u32, K)],                           // widened result kinds of functions
@@ -1615,6 +1615,31 @@ enum SpecErr { Conflict(K), Other(String) }
 fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool { writes_in(api, stmts, seen, false) }
 /// `locals`: an assignment to a field or element of a local (`v.x = 1;`, a struct value of the code's own: the code generator checks that it is one) is not a write of state here.
 /// What a called function does is judged strictly: through a parameter it may write state.
+/// Does this code change local `slot` (a parameter) or something inside it: an assignment to it or a part of it, an operation on a collection or array that is part of it, or
+/// handing it to a function that takes that argument as a `view` (which may change it)?
+fn param_written(api: &Api, stmts: &[Stmt], slot: u32) -> bool {
+    let rooted = |e: &Expr| matches!(G::root_local(e), Some((_, s)) if s == slot);
+    fn passes(api: &Api, e: &Expr, rooted: &dyn Fn(&Expr) -> bool) -> bool {
+        match e {
+            Expr::Call(nm, a, r) => {
+                let viewed = |k: u32, j: usize| api.fns[k as usize].modes.get(j).copied() == Some(1);
+                a.iter().enumerate().any(|(j, x)| (rooted(x) && callees(nm, r).into_iter().any(|k| viewed(k, j))) || passes(api, x, rooted))
+            }
+            Expr::Field(b, ..) | Expr::Un(_, b) => passes(api, b, rooted),
+            Expr::Index(a, b) | Expr::Bin(_, a, b) => passes(api, a, rooted) || passes(api, b, rooted),
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| match s {
+        Stmt::Assign(l, r) => rooted(l) || passes(api, r, &rooted),
+        Stmt::Remove(c, _) | Stmt::Clear(c) | Stmt::Move(c, ..) | Stmt::Copy(c, ..) | Stmt::Sort(c, ..) | Stmt::Fill(c, ..) => rooted(c),
+        Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => passes(api, e, &rooted),
+        Stmt::If(c, t, e) => passes(api, c, &rooted) || param_written(api, t, slot) || param_written(api, e, slot),
+        Stmt::Each(it, b) => passes(api, &it.coll, &rooted) || param_written(api, b, slot),
+        _ => false,
+    })
+}
+
 fn writes_in(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>, locals: bool) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
@@ -1689,7 +1714,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { var_iv: std::collections::HashMap::new(), loop_frames: Vec::new(), var_depth: std::collections::HashMap::new(), loop_stmts: None, loop_entry: None, loop_heads: None, rq_touched: Vec::new(), uses_spec: false, wrote_state: std::cell::Cell::new(false), narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), own_region: false, region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, u32_vars: std::collections::HashSet::new(), rest: &[], var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new(), scr_top: 0, spec_key: None, scr_n: 0, spec_rec: false, immut: std::collections::HashSet::new() }
+        G { ret_ctx: None, pending_ctx: None, var_iv: std::collections::HashMap::new(), loop_frames: Vec::new(), var_depth: std::collections::HashMap::new(), loop_stmts: None, loop_entry: None, loop_heads: None, rq_touched: Vec::new(), uses_spec: false, wrote_state: std::cell::Cell::new(false), narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), own_region: false, region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, u32_vars: std::collections::HashSet::new(), rest: &[], var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new(), scr_top: 0, spec_key: None, scr_n: 0, spec_rec: false, immut: std::collections::HashSet::new() }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -2095,7 +2120,7 @@ impl<'p> G<'p> {
             g.inlining.push(k);
             let sel = if has_collecting_loop(self.api, &f.body) { Some("hm".to_string()) } else { None };
             if sel.is_some() { g.line("u32 hm;"); g.call("c->h->sel_mark(c, &hm)"); }
-            g.ret.push(Ret { var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone(), bound: None, unbounded: rec, mark: "rmark".into(), ivs: Vec::new() });
+            g.ret.push(Ret { dest: None, var: String::new(), label: String::new(), kind: Some(cand), func: true, sel: sel.clone(), bound: None, unbounded: rec, mark: "rmark".into(), ivs: Vec::new() });
             let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
             for (i, pk) in pks.iter().enumerate() {
                 fenv[i] = Some(match pk {
@@ -2152,7 +2177,7 @@ impl<'p> G<'p> {
     /// The kind a function's declared result stands for: a struct that is part of the state cannot be returned (it has no place of its own to point at).
     fn ret_kind(&self, t: &crate::lang::PTy, f: &str) -> R<K> {
         match self.decl_kind(t, f)? {
-            K::Plain(sd, _) => no(format!("`{}` returns `{}`, a struct that is part of the state: a function can take it as a parameter but not return it yet (struct returns are step 3 of \"Struct values\" in DESIGN.md: return its fields, or an item)", f, self.prog.structs[sd].name)),
+            K::Plain(sd, _) if false => no(format!("`{}` returns `{}`, a struct that is part of the state: a function can take it as a parameter but not return it yet (struct returns are step 3 of \"Struct values\" in DESIGN.md: return its fields, or an item)", f, self.prog.structs[sd].name)),
             k => Ok(k),
         }
     }
@@ -2704,11 +2729,21 @@ impl<'p> G<'p> {
         if !list.contains(&(off, size)) { list.push((off, size)); }
         true
     }
-    /// Is this receiver one a function of a type was declared for (`fn clear(self: Grid)`)? A name that is also a collection operation means the function
+    /// `x.copy()` as the whole right side of an assignment is an error: the assignment copies the struct into its target already, once, so the copy would only be a second one.
+    fn refuse_copy(&self, e: &'p Expr) -> R<&'p Expr> {
+        match e {
+            Expr::Call(n, args, _) if n == ".copy" && args.len() == 1 && !self.api.fns.iter().any(|f| f.recv && f.name.ends_with(".copy")) => no("an assignment copies already: write `target = source;` without `.copy()`"),
+            e => Ok(e),
+        }
+    }
+    /// Is this receiver one a function of a type was declared for (`fn clear(self: write Grid)`)? A name that is also a collection operation means the function
     /// when the receiver's type has one declared, and the collection operation otherwise.
     fn user_method_for(&mut self, op: &str, recv: &'p Expr, env: &mut Vec<Option<CV>>) -> R<bool> {
         let v = self.expr(recv, env, None)?;
-        Ok(match self.receiver_type(&v) { Some(ty) => { let want = format!("{}.{}", ty, op); self.api.fns.iter().any(|f| f.recv && f.name == want) } None => false })
+        Ok(match self.receiver_type(&v) {
+            Some(ty) => { let want = format!("{}.{}", ty, op); self.api.fns.iter().any(|f| (f.recv && f.name == want) || (!f.recv && f.test.is_none() && f.name == op && f.ptys.first().map_or(false, |t| t.is_some()))) }
+            None => false,
+        })
     }
     /// A statement the binder left as a call because its name is also declared for some type: where the receiver is a collection it becomes the collection statement.
     fn deferred_op(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<Option<&'p Stmt>> {
@@ -2779,12 +2814,15 @@ impl<'p> G<'p> {
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
                 self.immut.remove(&(self.frame, *slot));
-                // a struct value: a local struct is a copy in its own place (a hidden temporary of a struct literal is that place itself)
+                // a struct bound to a name is a view of the place it names (`x.copy()` makes a place of its own); a struct literal builds one in the scratch area
                 if let Expr::Call(f, args, _) = e { if f == "__mito__struct" { let v = self.struct_new(args)?; env[*slot as usize] = Some(v); return Ok(()); } }
-                let v = self.expr(e, env, None)?;
+                if matches!(e, Expr::Call(..)) { self.ret_ctx = Some(None); }
+                let v = self.expr(e, env, None);
+                self.ret_ctx = None;
+                let v = v?;
                 if let CV::Plain(sid, src) = v {
-                    let hidden = matches!(e, Expr::Var(n, _) if n.starts_with("__mito__lit"));
-                    let v = self.struct_local(sid, src, hidden)?;
+                    // a struct bound to a name is a view of it, never a copy (`let c = world.pos.copy();` is one): a literal's hidden temporary is its own place
+                    let v = CV::Plain(sid, src);
                     if !mutable && !matches!(s, Stmt::Let(n, ..) if n.starts_with("__mito__lit")) { self.immut.insert((self.frame, *slot)); }
                     env[*slot as usize] = Some(v);
                     return Ok(());
@@ -2828,12 +2866,32 @@ impl<'p> G<'p> {
                 let cur = env[*slot as usize].clone().ok_or_else(|| format!("`{}` has no compiled value", n))?;
                 // a struct local: the whole struct is copied in (its place stays where it is)
                 if let CV::Plain(sid, off) = cur {
-                    if self.in_scratch(off) {
-                        let v = self.expr(rhs, env, None)?;
-                        let CV::Plain(s2, src) = v else { return no(format!("`{}` is a `{}`: assign it a struct of that type", n, self.prog.structs[sid].name)) };
-                        if s2 != sid { return no(format!("`{}` is a `{}`, not a `{}`", n, self.prog.structs[sid].name, self.prog.structs[s2].name)); }
-                        return self.copy_struct(sid, off, src);
-                    }
+                    let rhs = self.refuse_copy(rhs)?;
+                    if matches!(rhs, Expr::Call(..)) { self.ret_ctx = Some(Some(off)); }
+                    let v = self.expr(rhs, env, None);
+                    self.ret_ctx = None;
+                    let v = v?;
+                    let CV::Plain(s2, src) = v else { return no(format!("`{}` is a `{}`: assign it a struct of that type", n, self.prog.structs[sid].name)) };
+                    if s2 != sid { return no(format!("`{}` is a `{}`, not a `{}`", n, self.prog.structs[sid].name, self.prog.structs[s2].name)); }
+                    return self.copy_struct(sid, off, src);
+                }
+                // a `write` text parameter is the caller's text field itself: assigning it stores into that field (`s = "x"`, `s += "x"`), as a field assignment does
+                if matches!(cur, CV::PlainStr(_) | CV::StateStr(..)) {
+                    let ascii = self.is_ascii(&cur);
+                    let (clear, pieces) = match str_pieces(target, rhs) { Some(p) => p, None => (true, vec![rhs]) };
+                    return match &cur {
+                        CV::PlainStr(off) => {
+                            let Some(cap) = self.plain_str_cap(*off) else { return no(format!("`{}` is a text of a size the compiler could not find", n)) };
+                            self.may_write_plain(*off)?;
+                            self.str_append(if ascii { 4 } else { 0 }, format!("{}ULL", off), format!("{}ULL", cap), 0, clear, &pieces, env)
+                        }
+                        CV::StateStr(c, idx, ci) => {
+                            let path = self.prog.colls[*c].cols[*ci].path.clone();
+                            self.may_write_col(*c, &path)?;
+                            self.str_append(if ascii { 5 } else { 1 }, format!("{}ULL", c), format!("(u64)({})", idx), *ci as u32, clear, &pieces, env)
+                        }
+                        _ => unreachable!(),
+                    };
                 }
                 // a capped var of text: written in place (`acc += a + b`: the pieces after what it holds; `acc = ...`: from the start)
                 if let CV::Txt(t) = &cur {
@@ -2895,7 +2953,11 @@ impl<'p> G<'p> {
                         // a struct-valued field: the whole struct is copied in (`world.pos = v;`)
                         if let Ty::Struct(s2) = sd.fields[k].1 {
                             let at = off + sd.offs[k];
-                            let v = self.expr(rhs, env, None)?;
+                            let rhs = self.refuse_copy(rhs)?;
+                            if matches!(rhs, Expr::Call(..)) { self.ret_ctx = Some(Some(at)); }
+                            let v = self.expr(rhs, env, None);
+                            self.ret_ctx = None;
+                            let v = v?;
                             let CV::Plain(s3, src) = v else { return no(format!("`.{}` is a `{}`: assign it a struct of that type", f, self.prog.structs[s2].name)) };
                             if s3 != s2 { return no(format!("`.{}` is a `{}`, not a `{}`", f, self.prog.structs[s2].name, self.prog.structs[s3].name)); }
                             self.prog.value_check(s2)?;
@@ -3456,6 +3518,17 @@ impl<'p> G<'p> {
     }
 
     fn ret_with(&mut self, v: CV) -> R<()> {
+        // a struct goes straight into the destination the call was given
+        if let Some((sid, off)) = self.ret.last().and_then(|r| r.dest) {
+            let f = *self.inlining.last().unwrap();
+            let CV::Plain(s2, src) = v else { return no(format!("`{}` returns a `{}`: return a struct of that type", self.api.fns[f as usize].name, self.prog.structs[sid].name)) };
+            if s2 != sid { return no(format!("`{}` returns a `{}`, not a `{}`", self.api.fns[f as usize].name, self.prog.structs[sid].name, self.prog.structs[s2].name)); }
+            self.copy_struct(sid, off, src)?;
+            let (m, label) = { let r = self.ret.last().unwrap(); (r.mark.clone(), r.label.clone()) };
+            self.line(&format!("/*RCUT {}*/", m));
+            self.line(&format!("goto {};", label));
+            return Ok(());
+        }
         let b = self.txt_bound(&v);
         if let Some(r) = self.ret.last_mut() { match b { Some(b) => r.bound = Some(r.bound.unwrap_or(0).max(b)), None => r.unbounded = true } }
         let v = self.hold(v, false)?;
@@ -4618,13 +4691,28 @@ impl<'p> G<'p> {
             // `x.f(args)` on a receiver whose function depends on its type: the receiver is evaluated, its type names the function (`Type.f`), and it is called with the receiver first
             CallRes::Unbound if n.starts_with('.') && !args.is_empty() => {
                 // a name that is also a collection operation (`count`, `capacity`, `truncate`): the collection's own unless the receiver's type declares the function
+                if n == ".copy" && args.len() == 1 && !self.user_method_for("copy", &args[0], env)? {
+                    // `x.copy()`: a struct in a place of its own (the scratch area), a number or bool as it is
+                    let v = self.expr(&args[0], env, dead)?;
+                    // a struct that is already a temporary of its own (a literal being built, a call's result) and a number or bool are fresh values: a copy would change nothing
+                    let temp = matches!(&args[0], Expr::Call(..)) || matches!(&args[0], Expr::Var(n, _) if n.starts_with("__mito__lit"));
+                    return match v {
+                        CV::Plain(..) if temp => no("`.copy()` of a struct that was just built is not needed: it is already a value of its own"),
+                        CV::Plain(sid, src) => self.struct_local(sid, src, false),
+                        CV::Int(_) | CV::Flt(_) | CV::Bool(_) => no("`.copy()` of a number or bool is not needed: it is already a value"),
+                        CV::Item(..) | CV::Ref(..) => no("`.copy()` of an item is not supported yet: assign its fields to a struct of your own"),
+                        _ => no("`.copy()` of text is not supported yet: build a `text` instead"),
+                    };
+                }
                 let own = match (&n[1..], args.len()) { ("count", 1) => Some(B::Count), ("capacity", 1) => Some(B::Capacity), ("truncate", 2) => Some(B::Truncate), _ => None };
                 if let Some(b) = own { if !self.user_method_for(&n[1..], &args[0], env)? { return self.callx(n, args, CallRes::Builtin(b), env, dead); } }
                 let mut vals = Vec::new();
+                let ctx = self.ret_ctx.take();
                 for a in args { let v = self.expr(a, env, dead)?; vals.push(self.hold(v, false)?); }
+                self.ret_ctx = ctx;
                 let Some(ty) = self.receiver_type(&vals[0]) else { return no(format!("`{}` is called on something that is not a struct, a number, a string or a bool, and only those have functions of their own", &n[1..])) };
                 let want = format!("{}.{}", ty, &n[1..]);
-                let Some(k) = self.api.fns.iter().position(|f| f.recv && f.name == want) else {
+                let Some(k) = self.api.fns.iter().position(|f| f.recv && f.name == want).or_else(|| self.api.fns.iter().position(|f| !f.recv && f.test.is_none() && f.name == n[1..] && f.ptys.first().map_or(false, |t| t.is_some()))) else {
                     if crate::generics::note_missing(&ty, &n[1..]) { return Ok(CV::Int("0LL".into())); } // a probe of `generics::expand`: go on to find the next missing copy
                     let has: Vec<String> = self.api.fns.iter().filter(|f| f.recv).filter_map(|f| f.name.rsplit_once('.').filter(|(_, m)| *m == &n[1..]).map(|(t, _)| t.to_string())).collect();
                     if has.is_empty() { return no(format!("`{}` has no function `{}` (declare `fn {}(self: {}, ...)`)", ty, &n[1..], &n[1..], ty)); }
@@ -5079,12 +5167,16 @@ impl<'p> G<'p> {
     /// Inline a user function: its parameters become values in a fresh frame; `return` jumps to the end of the inlined block.
     fn inline(&mut self, k: u32, args: &'p [Expr], env: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<CV> {
         let mut vals = Vec::new();
+        // where a struct this call returns goes is meant for the call, not for a call among its arguments
+        let ctx = self.ret_ctx.take();
         for a in args { let v = self.expr(a, env, dead)?; vals.push(self.hold(v, false)?); }
+        self.ret_ctx = ctx;
         self.call_values(k, vals, dead)
     }
 
     /// Call user function `k` with argument values already computed: inlined, or a generated C function if recursive.
     fn call_values(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>) -> R<CV> {
+        self.pending_ctx = self.ret_ctx.take();
         let f = &self.api.fns[k as usize];
         if vals.len() != f.params.len() {
             // a function of a type is called `p.hit(1)`: the receiver is not counted among its arguments
@@ -5095,11 +5187,38 @@ impl<'p> G<'p> {
         if let Some(t) = &f.ret { self.ret_kind(t, &f.name)?; } // (a one-line function never reaches its result kind otherwise)
         let mut checked = Vec::with_capacity(vals.len());
         for (i, v) in vals.into_iter().enumerate() {
-            checked.push(match &f.ptys[i] { Some(t) => self.to_declared(v, t, &f.name, &format!("parameter `{}` of `{}`", f.params[i], f.name))?, None => v });
+            let v = match &f.ptys[i] { Some(t) => self.to_declared(v, t, &f.name, &format!("parameter `{}` of `{}`", f.params[i], f.name))?, None => v };
+            // a struct parameter is read-only unless declared `write` (it may change the caller's struct, and may be handed to other `write` parameters) or `copy` (the function gets a copy
+            // of its own, which it may change). A read-only one is passed as it is, which no one can tell from a copy, unless the function writes something else (it might write the very
+            // place the argument is): then the copy is made.
+            let mode = f.modes.get(i).copied().unwrap_or(0);
+            if mode != 0 {
+                let (word, pn) = ("write", f.params[i].as_str());
+                let why = match &v {
+                    CV::Plain(..) => None,
+                    CV::Int(_) | CV::Flt(_) | CV::Bool(_) => Some("`write` of a number or bool is not supported yet: return the new value instead".to_string()),
+                    CV::StateStr(..) | CV::PlainStr(..) if mode == 1 => None,
+                    CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) if mode == 1 => Some("`write` needs a place to write to (a text field of the state or of an item), not a literal or computed text (a `var` text local is not supported yet)".to_string()),
+                    CV::Item(..) | CV::Ref(..) => None, // an item is already a handle to its row: `write` is allowed (so one signature serves a state struct and an item) and changes nothing
+                    _ => Some("only a plain struct (with its text and array fields) can be a `write` parameter".to_string()),
+                };
+                if let Some(why) = why { return no(format!("`{}: {}` in `{}`: {}", pn, word, f.name, why)); }
+            }
+            if let CV::Plain(sid, _) = v {
+                if mode == 0 && f.test.is_none() {
+                    if param_written(self.api, &f.body, i as u32) {
+                        let ty = self.prog.structs[sid].name.clone();
+                        return no(format!("`{}` is read-only here, and this changes it (or hands it to a `write` parameter): declare `{}: write {}` to change the caller's struct, or work on `{}.copy()`", f.params[i], f.params[i], ty, f.params[i]));
+                    }
+                }
+            }
+            checked.push(v);
         }
         let vals = checked;
         let args: Vec<String> = vals.iter().map(|v| type_text(self.prog, v)).collect();
-        let r = self.call_values_inner(k, vals, dead)?;
+        let r = self.call_values_inner(k, vals, dead);
+        self.pending_ctx = None;
+        let r = r?;
         let rt = if returns_value(&self.api.fns[k as usize].body) { type_text(self.prog, &r) } else { "-".into() };
         SIGS.with(|s| s.borrow_mut().push((k, args, rt)));
         let (opt, name) = (self.api.fns[k as usize].ret_opt, self.api.fns[k as usize].name.clone());
@@ -5115,11 +5234,15 @@ impl<'p> G<'p> {
     fn call_values_inner(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>) -> R<CV> {
         let f = &self.api.fns[k as usize];
         self.depth_check();
+        // a function that returns a struct is always inlined (its result is written into the caller's destination)
+        let returns_plain = matches!(f.ret.as_ref().map(|t| self.decl_kind(t, &f.name)), Some(Ok(K::Plain(..))));
         if self.recursive[k as usize] {
+            if returns_plain { return no(format!("`{}` is recursive and returns a struct: not supported yet (a recursive function cannot hold struct values)", f.name)); }
+            self.pending_ctx = None;
             return self.call_spec(k, vals);
         }
         // an outlined function: called, when its arguments are of kinds a C function takes and its body compiles as one; inlined otherwise
-        if OUTLINED.with(|o| o.borrow().get(k as usize).copied().unwrap_or(false)) && vals.iter().all(spec_arg) {
+        if !returns_plain && OUTLINED.with(|o| o.borrow().get(k as usize).copied().unwrap_or(false)) && vals.iter().all(spec_arg) {
             let (n0, body0, specs0) = (self.n, self.body.len(), self.specs.borrow().len());
             match self.call_spec(k, vals.clone()) {
                 Ok(v) => return Ok(v),
@@ -5143,20 +5266,39 @@ impl<'p> G<'p> {
         r
     }
     fn inline_body_at(&mut self, k: u32, f: &'p Func, fenv: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<CV> {
+        // a function that returns a struct writes it into the place the call was given (`target = f(x);`: the target itself; `let v = f(x);`: a new place that `v` names)
+        let ctx = self.pending_ctx.take();
+        let struct_dest = match f.ret.as_ref().map(|t| self.decl_kind(t, &f.name)) {
+            Some(Ok(K::Plain(sid, _))) => match ctx {
+                None => {
+                    let short = f.name.rsplit('.').next().unwrap_or(&f.name).to_string();
+                    return no(format!("`{}` returns a struct, which has to go somewhere: write `target = {}(...);`, `let x = {}(...);` or `var x = {}(...);` (name the middle of a chain: `let t = a.plus(b); world.pos = t.scaled(2.0);`)", f.name, short, short, short));
+                }
+                Some(Some(off)) => Some((sid, off)),
+                Some(None) => { self.prog.value_check(sid)?; let off = self.scratch_alloc(self.prog.structs[sid].size)?; Some((sid, off)) }
+            },
+            _ => None,
+        };
         // a function that is just `return e;` needs no block
         if let Some(Stmt::Return(Some(body))) = only_stmt(&f.body) {
             self.inlining.push(k);
             let r = self.expr(body, fenv, dead);
             self.inlining.pop();
+            if let Some((sid, off)) = struct_dest {
+                let CV::Plain(s2, src) = r? else { return no(format!("`{}` returns a `{}`: return a struct of that type", f.name, self.prog.structs[sid].name)) };
+                if s2 != sid { return no(format!("`{}` returns a `{}`, not a `{}`", f.name, self.prog.structs[sid].name, self.prog.structs[s2].name)); }
+                self.copy_struct(sid, off, src)?;
+                return Ok(CV::Plain(sid, off));
+            }
             return r;
         }
         let (var, label) = (self.tmp("ret"), self.tmp("end"));
         let saved = std::mem::take(&mut self.body);
         self.inlining.push(k);
-        let forced = match &f.ret { Some(t) => Some(self.ret_kind(t, &f.name)?), None => self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1) };
+        let forced = match &f.ret { Some(_) if struct_dest.is_some() => struct_dest.map(|(s, o)| K::Plain(s, o)), Some(t) => Some(self.ret_kind(t, &f.name)?), None => self.ret_kinds.iter().find(|x| x.0 == k).map(|x| x.1) };
         let sel = if has_collecting_loop(self.api, &f.body) { Some(self.tmp("hm")) } else { None };
         let rmark = self.tmp("rm");
-        self.ret.push(Ret { var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone(), bound: None, unbounded: false, mark: rmark.clone(), ivs: Vec::new() });
+        self.ret.push(Ret { dest: struct_dest, var: var.clone(), label: label.clone(), kind: forced, func: false, sel: sel.clone(), bound: None, unbounded: false, mark: rmark.clone(), ivs: Vec::new() });
         self.depth += 1;
         let frame = std::mem::replace(&mut self.frame, Some(k));
         let r = self.block(&f.body, fenv);
@@ -5793,8 +5935,8 @@ state app: A;
 struct Leaf { w: i64; }
 struct A { xs: pool<Node, 4>; ls: pool<Leaf, 4>; }
 state app: A;
-            fn bump(self: Node) { self.v += 1; }
-            fn bump(self: Leaf) -> i64 { return self.w; }
+            fn bump(self: write Node) { self.v += 1; }
+            fn bump(self: write Leaf) -> i64 { return self.w; }
             fn peek(self: Node) -> i64 { return self.v; }
             @get(\"/peek\") fn peek() -> Response<{ n: i64 }> { var t = 0; foreach n in app.xs { t += n.peek(); } return ok({ n: t }); }
             @get(\"/leaf\") fn leaf() -> Response<{ n: i64 }> { var t = 0; foreach l in app.ls { t += l.bump(); } return ok({ n: t }); }
@@ -5818,8 +5960,8 @@ state app: A;
         let src = "struct V { x: i64; y: i64; }
 struct A { p: V; q: V logged; n: i64; }
 state app: A;
-            fn bump(p: V) { p.x += 1; }
-            fn shift(self: V, d: i64) { self.x += d; self.y += d; }
+            fn bump(p: write V) { p.x += 1; }
+            fn shift(self: write V, d: i64) { self.x += d; self.y += d; }
             @get(\"/locals\") fn locals() -> Response<{ n: i64 }> { var a = app.p; var b = app.q; b = a; a.x += 2; let c = V { ..b, y: 4 }; return ok({ n: a.x + c.y }); }
             @get(\"/through\") fn through() -> Response<{ n: i64 }> { var a = app.p; bump(a); a.shift(3); return ok({ n: a.x }); }
             @get(\"/into\") fn into() -> Response<{ n: i64 }> { var a = app.p; app.q = a; return ok({ n: 1 }); }
@@ -5892,8 +6034,8 @@ state app: A;
     #[test]
     fn struct_locals_of_functions_compiled_apart_have_places_of_their_own() {
         let body: String = (0..400).map(|_| "    p.x += 1.0;\n    t.y += 0.5;\n").collect();
-        let src = format!("struct V {{ x: f64; y: f64; z: f64; }}\nstruct A {{ pos: V; b: V; }}\nstate app: A;\nfn big(p: V, n: f64) -> f64 {{ var t = V {{ x: 1.0, y: 2.0, z: 3.0 }};\n{}    return t.x + t.y + n; }}\n\
-            fn big2(p: V) -> f64 {{ var t = p;\n{}    let r = big(t, 1.0); return t.z + r; }}\n\
+        let src = format!("struct V {{ x: f64; y: f64; z: f64; }}\nstruct A {{ pos: V; b: V; }}\nstate app: A;\nfn big(p: write V, n: f64) -> f64 {{ var t = V {{ x: 1.0, y: 2.0, z: 3.0 }};\n{}    return t.x + t.y + n; }}\n\
+            fn big2(p: write V) -> f64 {{ var t = p;\n{}    let r = big(t, 1.0); return t.z + r; }}\n\
             @post(\"/a\") fn a() -> Response<{{ n: f64 }}> {{ var l = app.pos; let k = V {{ x: 5.0, y: 6.0, z: 7.0 }}; let a = big(l, 1.0); let c = big2(l); return ok({{ n: a + c + k.z }}); }}\n", body, body);
         let g = gen_of(&src);
         let mut places: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
@@ -5925,7 +6067,7 @@ state app: A;
     /// A function given a plain struct counts as what its body does: one that writes through the parameter makes a GET not a reader, one that only reads leaves it one.
     #[test]
     fn plain_struct_parameters_count_as_what_they_do_for_readers() {
-        let head = "struct P { v: i64; }\nstruct A { p: P; q: P; }\nstate app: A;\nfn peek(p: P) -> i64 { return p.v; }\nfn bump(p: P) { p.v += 1; }\nfn look(self: P) -> i64 { return self.v; }\nfn poke(self: P) { self.v = 2; }\n";
+        let head = "struct P { v: i64; }\nstruct A { p: P; q: P; }\nstate app: A;\nfn peek(p: P) -> i64 { return p.v; }\nfn bump(p: write P) { p.v += 1; }\nfn look(self: P) -> i64 { return self.v; }\nfn poke(self: write P) { self.v = 2; }\n";
         let g = gen_of(&format!("{}@get(\"/a\") fn a() -> Response<{{ n: i64 }}> {{ return ok({{ n: peek(app.p) + app.q.look() }}); }}\n@get(\"/b\") fn b() -> Response<{{ n: i64 }}> {{ bump(app.p); return ok({{ n: 1 }}); }}\n@get(\"/c\") fn c() -> Response<{{ n: i64 }}> {{ app.q.poke(); return ok({{ n: 1 }}); }}\n", head));
         let want = [("a", true), ("b", false), ("c", false)];
         for (k, (name, reads)) in want.iter().enumerate() { assert_eq!(g.reads[k], *reads, "endpoint {}", name); }
@@ -5935,7 +6077,7 @@ state app: A;
     /// given small values lets an index into a larger array go unchecked, until a function writes it through a parameter with a value nothing is known of.
     #[test]
     fn plain_struct_parameters_are_seen_by_the_range_analyses() {
-        let head = "struct P { n: i64 in 0..100; v: i64; }\nstruct A { p: P; buf: i64[8]; }\nstate app: A;\nfn set_n(p: P, x: i64) { p.n = x; }\nfn set_v(p: P, x: i64) { p.v = x; }\n";
+        let head = "struct P { n: i64 in 0..100; v: i64; }\nstruct A { p: P; buf: i64[8]; }\nstate app: A;\nfn set_n(p: write P, x: i64) { p.n = x; }\nfn set_v(p: write P, x: i64) { p.v = x; }\n";
         let msg = "`n` must be in 0..100";
         // a value the endpoint's own range proves inside: no check; an unbounded one: checked
         let g = gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in 0..50) -> Response<{{}}> {{ set_n(app.p, x); return ok({{}}); }}\n", head));
@@ -5959,7 +6101,7 @@ state app: A;
     #[test]
     fn generic_instances_are_separate_state_to_the_range_analyses() {
         // `n: i64 in 0..N`: the same function copied for Box<100> and Box<20>; a value in 0..50 is proven inside 0..100 and not inside 0..20
-        let head = "struct Box<N: count> { n: i64 in 0..N; }\nstruct A { big: Box<100>; small: Box<20>; }\nstate app: A;\nfn set_n(self: Box<N>, x: i64) { self.n = x; }\n";
+        let head = "struct Box<N: count> { n: i64 in 0..N; }\nstruct A { big: Box<100>; small: Box<20>; }\nstate app: A;\nfn set_n(self: write Box<N>, x: i64) { self.n = x; }\n";
         let both = gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in 0..50) -> Response<{{}}> {{ app.big.set_n(x); app.small.set_n(x); return ok({{}}); }}\n", head));
         assert!(both.src.contains("`n` must be in 0..20") && !both.src.contains("`n` must be in 0..100"), "Box<100> proves 0..50 inside, Box<20> keeps its test");
         let big = gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in 0..50) -> Response<{{}}> {{ app.big.set_n(x); return ok({{}}); }}\n", head));
@@ -5967,7 +6109,7 @@ state app: A;
         let wide = gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in 0..500) -> Response<{{}}> {{ app.big.set_n(x); return ok({{}}); }}\n", head));
         assert!(wide.src.contains("`n` must be in 0..100"), "a value outside the instance's range is checked");
         // whole-program field ranges: `big.v` only ever holds 3, `small.v` takes any value; each read is judged by its own instance's stores
-        let head = "struct Cell<N: count> { v: i64; buf: i64[N]; }\nstruct A { big: Cell<8>; small: Cell<4>; }\nstate app: A;\nfn put(self: Cell<N>, x: i64) { self.v = x; }\n";
+        let head = "struct Cell<N: count> { v: i64; buf: i64[N]; }\nstruct A { big: Cell<8>; small: Cell<4>; }\nstate app: A;\nfn put(self: write Cell<N>, x: i64) { self.v = x; }\n";
         let w = "@post(\"/w\") fn w() -> Response<{}> { app.big.put(3); return ok({}); }\n";
         let ws = "@post(\"/s/{x}\") fn s(x: i64) -> Response<{}> { app.small.put(x); return ok({}); }\n";
         let rb = "@get(\"/rb\") fn rb() -> Response<{ n: i64 }> { return ok({ n: app.big.buf[app.big.v] }); }\n";

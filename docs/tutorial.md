@@ -284,11 +284,11 @@ struct Hero { name: string<16>; pos: Pos; }
 struct World { origin: Pos; hero: Hero; }
 state world: World;
 
-fn move_by(p: Pos, dx: i64, dy: i64) { p.x += dx; p.y += dy; }
+fn move_by(p: write Pos, dx: i64, dy: i64) { p.x += dx; p.y += dy; }
 fn len2(self: Pos) -> i64 { return self.x * self.x + self.y * self.y; }
 ```
 
-`move_by(world.origin, 1, 2)` and `move_by(world.hero.pos, 3, 4)` are two calls of one function. What is passed is a view of where that struct lives, as an item is a view of its slot: nothing is copied, a read sees the state and a write through `p` changes it, exactly as `world.origin.x += dx` would. A function of a type works on a nested struct the same way: `world.hero.pos.len2()`.
+`move_by(world.origin, 1, 2)` and `move_by(world.hero.pos, 3, 4)` are two calls of one function. What is passed is a view of where that struct lives, as an item is a view of its slot: nothing is copied. A parameter is read-only unless it is declared `p: write Pos`, which is what lets `move_by` change it; a read sees the state and a write through `p` changes it, exactly as `world.origin.x += dx` would. A function of a type works on a nested struct the same way: `world.hero.pos.len2()`.
 
 ```
 POST /origin {"dx": 1, "dy": 2}   200 {"x":1,"y":2}
@@ -297,7 +297,7 @@ POST /hero {"dx": 3, "dy": 4}     200 {"x":3,"y":4,"len2":25}
 POST /hero {"dx": 3, "dy": 4}     200 {"x":6,"y":8,"len2":100}
 ```
 
-Not allowed yet: a function that returns such a struct (`fn copy_of(p: Pos) -> Pos` is refused, with ``returns `Pos`, a struct that is part of the state: a function can take it as a parameter but not return it (return its fields, or an item)``), and a parameter that may be null (`p: Pos?`: ``a plain struct is part of the state, it cannot be null``). A struct that is also an item of a pool can be passed either way: the same function takes the plain one or an item.
+A function may return a struct (`fn copy_of(p: Pos) -> Pos { return p; }`, used as `world.backup = copy_of(world.hero.pos);`: the result goes straight into the place on the left), but only there, or in a `let` or `var`; as an argument it is an error that says to name it first. Not allowed yet: a parameter that may be null (`p: Pos?`: ``a plain struct is part of the state, it cannot be null``). A struct that is also an item of a pool can be passed either way: the same function takes the plain one or an item.
 
 ## 14. Constants
 
@@ -338,7 +338,7 @@ struct Stack<T, N: count> {
 struct Game { scores: Stack<i64, 3>; names: Stack<string<12>, 2>; }
 state game: Game;
 
-fn push(self: Stack<T, N>, x: T) {
+fn push(self: write Stack<T, N>, x: T) {
     if self.len == N { fail 409 "stack is full"; }
     self.items[self.len] = x;
     self.len += 1;

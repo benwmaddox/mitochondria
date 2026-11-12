@@ -18,19 +18,19 @@ struct Game {
 }
 state game: Game;
 
-fn push(self: Stack<T, N>, x: T) {
+fn push(self: write Stack<T, N>, x: T) {
     if self.len == N { fail 409 "stack is full"; }
     self.items[self.len] = x;
     self.len = self.len + 1;
 }
 // returns T: only the number instance can, and only it is popped
-fn pop(self: Stack<T, N>) -> T {
+fn pop(self: write Stack<T, N>) -> T {
     if self.len == 0 { fail 409 "stack is empty"; }
     self.len = self.len - 1;
     return self.items[self.len];
 }
 fn size(self: Stack<T, N>) -> i64 { return self.len; }
-fn add_entry(self: Ranked<T, N, key>, name: string<8>, v: T.key) {
+fn add_entry(self: write Ranked<T, N, key>, name: string<8>, v: T.key) {
     let e = self.items.add();
     e.name = name;
     e.key = v;

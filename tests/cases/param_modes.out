@@ -1,0 +1,5 @@
+POST /go -> 200 {"twice":3,"copied":103,"kept":3,"view":50,"now":0,"snap":7,"sum":52,"field":50,"local":50}
+POST /text -> 200 {"label":"hi!!","pet":"hi!!"}
+state <plain values> 56
+state g.pets 32
+memory reserved=24576 committed=24576 live=16472

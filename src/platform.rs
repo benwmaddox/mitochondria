@@ -221,7 +221,8 @@ struct Solo { a: i64; }\nstruct Item { v: i64; }\nstruct W { solo: Solo; origin:
 {}", ep("let a = maybe(w.origin);"))).contains("parameter `p` of `maybe` is `Pos?`, given a struct `Pos`"));
         assert!(err(&format!("fn maybe(p: Solo?) -> i64 {{ return 1; }}
 {}", ep("let a = maybe(w.solo);"))).contains("`Solo?`: a plain struct is part of the state, it cannot be null"));
-        assert!(err("fn same(p: Solo) -> Solo { return p; } @post(\"/a\") fn a() -> Response<{}> { let q = same(w.solo); return ok({}); }").contains("a struct that is part of the state"));
+        assert_eq!(err("fn same(p: Solo) -> Solo { return p; } @post(\"/a\") fn a() -> Response<{}> { let q = same(w.solo); return ok({}); }"), ""); // a struct may be returned into a `let`
+        assert!(err("fn same(p: Solo) -> Solo { return p; } fn val(p: Solo) -> i64 { return p.z; } @post(\"/a\") fn a() -> Response<{}> { let q = val(same(w.solo)); return ok({}); }").contains("which has to go somewhere"));
         assert!(err(&format!("fn lone(p: Lone) -> i64 {{ return p.z; }}\n{}", ep("let a = lone(3);"))).contains("no collection holds `Lone` items"));
     }
 
@@ -242,7 +243,7 @@ fn hit(self: P) { self.hp -= 1; }
         assert!(err("@post(\"/a\") fn a() -> Response<{}> { let m = w.ms.add(); m.hit(); return ok({}); }").contains("`M` has no function `hit`"));
         assert!(err("@post(\"/a\") fn a() -> Response<{}> { let m = w.ms.add(); m.hit(); return ok({}); }").contains("`hit` is declared for P"));
         assert!(err("fn hit(self: P) { self.hp -= 2; }").contains("`hit` is declared twice for `P`"));
-        assert!(err("fn count(self: P) -> i64 { return 1; }").contains("`count` is a collection operation"));
+        assert_eq!(err("fn count(self: P) -> i64 { return 1; }"), "");   // a collection operation's name may be a function of a type
         assert!(err("@post(\"/a\") fn a() -> Response<{}> { let p = w.ps.add(); p.hit(1); return ok({}); }").contains("`P.hit` takes 0 arguments, given 1"));
         assert!(err("@post(\"/a\") fn a() -> Response<{}> { let p = w.ps.add(); p.fly(); return ok({}); }").contains("unknown function `p.fly`"));
         assert!(err("fn hit2(self: P?) { }").contains("`self` is a struct"));

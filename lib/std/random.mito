@@ -9,10 +9,10 @@
 fn shr_logical(self: i64, n: i64) -> i64 { return (self >> n) & wrapping_sub(1 << (64 - n), 1); }
 
 // start the stream from s (any value); an unseeded generator (state 0) behaves as if seeded with 0
-fn seed(self: Rng, s: i64) { self.state = s; if s == 0 { self.state = 88172645463325252; } }
+fn seed(self: write Rng, s: i64) { self.state = s; if s == 0 { self.state = 88172645463325252; } }
 
 // the next 64-bit value (any i64, negative too)
-fn next(self: Rng) -> i64 {
+fn next(self: write Rng) -> i64 {
     var x = self.state;
     if x == 0 { x = 88172645463325252; }
     x = x ^ x.shr_logical(12);
@@ -25,7 +25,7 @@ fn next(self: Rng) -> i64 {
 // a whole number from lo to hi, both included. Unbiased: it keeps the top 63 bits of a value and draws again when
 // the value falls in the short last block that would favor small results (fewer than 2 draws on average).
 // hi < lo fails the request (400); a range of all 2^64 values overflows and fails too.
-fn range(self: Rng, lo: i64, hi: i64) -> i64 {
+fn range(self: write Rng, lo: i64, hi: i64) -> i64 {
     if hi < lo { fail 400 "range: hi is below lo"; }
     let n = hi - lo + 1;
     // draws above `top` would favor small results: 2^63 mod n values are left over
@@ -36,10 +36,10 @@ fn range(self: Rng, lo: i64, hi: i64) -> i64 {
 }
 
 // a float from 0 up to but not including 1: 53 random bits over 2^53
-fn unit(self: Rng) -> f64 { return self.next().shr_logical(11) * (1.0 / 9007199254740992.0); }
+fn unit(self: write Rng) -> f64 { return self.next().shr_logical(11) * (1.0 / 9007199254740992.0); }
 
 // true with probability p (p <= 0 never, p >= 1 always)
-fn chance(self: Rng, p: f64) -> bool { return self.unit() < p; }
+fn chance(self: write Rng, p: f64) -> bool { return self.unit() < p; }
 
 // a 64-bit mixing function (the finalizer of splitmix64): nearby inputs give unrelated outputs
 fn mix64(self: i64) -> i64 {

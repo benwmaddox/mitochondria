@@ -14,6 +14,8 @@ u64 strlen(const char *s);
 #define CLI_READ_CHUNK (16u << 20)
 void mito_set_areas(u64 text_max, u64 out_max);
 void mito_set_loop_budget(void *m, i64 n);
+u8 *mito_text_room(void *m, u64 n);
+void mito_text_input(void *m, u64 n);
 #define CLI_TARGET_MAX 8192
 
 /* a flag's name or value, percent-encoded into the target; 0 when it does not fit */
@@ -63,34 +65,6 @@ int main(int argc, char **argv) {
             np++;
         }
     }
-#ifdef MITO_CLI_STDIN
-    /* everything piped in, as the value of ":stdin" (a program that takes no input from stdin never waits for it). The buffer is address space,
-       committed as the input arrives: a small input costs a small buffer, and the most it can hold is CLI_STDIN_MAX (4 GiB - 1: a length is 32 bits). */
-    u8 *in = (u8 *)os_reserve((u64)CLI_STDIN_MAX + 65536);
-    u64 inn = 0, committed = 0;
-    if (!in) { os_err("error: no memory for the input\n", 31); return 2; }
-    for (;;) {
-        u64 room = (u64)CLI_STDIN_MAX - inn;
-        if (room > CLI_READ_CHUNK) room = CLI_READ_CHUNK;
-        if (!room) { /* the buffer is full: more input is too much */
-            u8 probe[1];
-            if (os_in(probe, 1)) { os_err("error: the input is larger than 4294967295 bytes (4 GiB - 1)\n", 63); return 2; }
-            break;
-        }
-        if (inn + room > committed) {
-            u64 step = committed / 16; if (step < (1u << 20)) step = 1u << 20;
-            u64 nc = committed + step; if (nc < inn + room) nc = inn + room; if (nc > (u64)CLI_STDIN_MAX + 65536) nc = (u64)CLI_STDIN_MAX + 65536;
-            nc = (nc + 65535) / 65536 * 65536;
-            if (!os_commit(in + committed, nc - committed)) { os_err("error: no memory for the input\n", 31); return 2; }
-            committed = nc;
-        }
-        u32 k = os_in(in + inn, (u32)room);
-        if (!k) break;
-        inn += k;
-    }
-    pairs[np].k = ":stdin"; pairs[np].kn = 6; pairs[np].v = (const char *)in; pairs[np].vn = (u32)inn;
-    np++;
-#endif
     if (mito_has_tables()) { os_err("error: a command-line program has no tables yet\n", 48); return 2; }
     mito_set_areas(0xFFFFFFFFULL, 0xFFFFFFFFULL); /* the request text and the answer: 4 GiB - 1 of address space each, committed as used */
     void *app = mito_start(1ULL << 40, 0);
@@ -98,6 +72,27 @@ int main(int argc, char **argv) {
     { int sc = mito_begin(app);
       if (sc) { u32 en; const char *e = mito_response(app, &en); os_err("error: ", 7); os_err(e, en); os_err("\n", 1); return 2; } }
 #ifdef MITO_CLI_STDIN
+    /* everything piped in, as the value of ":stdin" (a program that takes no input from stdin never waits for it). It is read straight into the request's
+       text area (address space, committed as the input arrives: a small input costs a small amount), where the program's text input then points at it:
+       the input is held once. The most it can hold is 4 GiB - 1 including the program's literals (a text offset is 32 bits). */
+    u64 inn = 0;
+    u8 *in = mito_text_room(app, 0);
+    if (!in) { os_err("error: no memory for the input\n", 31); return 2; }
+    for (;;) {
+        u64 room = CLI_READ_CHUNK;
+        while (room > 1 && !mito_text_room(app, inn + room)) room >>= 1;
+        if (!mito_text_room(app, inn + room)) { /* the text area is full: more input is too much */
+            u8 probe[1];
+            if (os_in(probe, 1)) { os_err("error: the input is larger than 4294967295 bytes (4 GiB - 1)\n", 63); return 2; }
+            break;
+        }
+        u32 k = os_in(in + inn, (u32)room);
+        if (!k) break;
+        inn += k;
+    }
+    mito_text_input(app, inn);
+    pairs[np].k = ":stdin"; pairs[np].kn = 6; pairs[np].v = (const char *)in; pairs[np].vn = (u32)inn;
+    np++;
     mito_set_loop_budget(app, 100000000 + 64 * (i64)inn); /* the step budget grows with the input: a pass over every byte of it takes several steps */
 #endif
     int code = mito_handle(app, "MAIN", 4, target, tn, pairs, np, 0, 0, "", 0);

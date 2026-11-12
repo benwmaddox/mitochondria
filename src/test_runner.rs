@@ -67,10 +67,10 @@ test \"each test starts empty\" { return app.n == 0 && get(\"/nope\").status == 
 fn tests_can_use_struct_values() {
     let text = "struct V { x: i64; y: i64 in 0..10; } struct A { p: V; n: i64; } state app: A;
 @post(\"/p/{x}\") fn setp(x: i64) -> Response<{ x: i64 }> { app.p.x = x; return ok({ x: app.p.x }); }
-test \"copy is independent\" { post(\"/p/3\"); var c = app.p; c.x = 9; c.x += 1; return app.p.x == 3 && c.x == 10; }
+test \"copy is independent\" { post(\"/p/3\"); var c = V { ..app.p }; c.x = 9; c.x += 1; return app.p.x == 3 && c.x == 10; }
 test \"literals\" { let v = V { x: 1, y: 2 }; var w = V { ..v, y: 5 }; w.x = w.y + v.x; var z = V {}; z = w; return w.x == 6 && v.y == 2 && z.x == 6 && z.y == 5; }
 test \"state starts empty\" { return app.p.x == 0; }
-test \"a range holds in a local\" { var c = app.p; c.y = 11; return true; }
+test \"a range holds in a local\" { var c = V { ..app.p }; c.y = 11; return true; }
 test \"a literal range\" { let c = V { x: 1, y: 11 }; return true; }
 ";
     let (code, out) = run_tests("values.mito", text);

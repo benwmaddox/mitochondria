@@ -5932,11 +5932,11 @@ struct A { p: V; q: V logged; n: i64; }
 state app: A;
             fn bump(p: write V) { p.x += 1; }
             fn shift(self: write V, d: i64) { self.x += d; self.y += d; }
-            @get(\"/locals\") fn locals() -> Response<{ n: i64 }> { var a = app.p; var b = app.q; b = a; a.x += 2; let c = V { ..b, y: 4 }; return ok({ n: a.x + c.y }); }
-            @get(\"/through\") fn through() -> Response<{ n: i64 }> { var a = app.p; bump(a); a.shift(3); return ok({ n: a.x }); }
-            @get(\"/into\") fn into() -> Response<{ n: i64 }> { var a = app.p; app.q = a; return ok({ n: 1 }); }
+            @get(\"/locals\") fn locals() -> Response<{ n: i64 }> { var a = V { ..app.p }; var b = V { ..app.q }; b = a; a.x += 2; let c = V { ..b, y: 4 }; return ok({ n: a.x + c.y }); }
+            @get(\"/through\") fn through() -> Response<{ n: i64 }> { var a = V { ..app.p }; bump(a); a.shift(3); return ok({ n: a.x }); }
+            @get(\"/into\") fn into() -> Response<{ n: i64 }> { var a = V { ..app.p }; app.q = a; return ok({ n: 1 }); }
             @get(\"/literal\") fn literal() -> Response<{ n: i64 }> { app.p = V { x: 1, y: 2 }; return ok({ n: 1 }); }
-            @get(\"/state_through\") fn state_through() -> Response<{ n: i64 }> { var a = app.p; bump(app.p); return ok({ n: a.x }); }
+            @get(\"/state_through\") fn state_through() -> Response<{ n: i64 }> { var a = V { ..app.p }; bump(app.p); return ok({ n: a.x }); }
             @get(\"/plain\") fn plain() -> Response<{ n: i64 }> { return ok({ n: app.p.x }); }
 ";
         let g = gen_of(src);
@@ -5958,13 +5958,13 @@ state app: A;
         let tested = |more: &str| gen_of(&format!("{}{}{}{}", head, small, more, read)).src.contains("c->h->elem(");
         assert!(!tested(""), "every store to p.v is 3: the index is inside buf");
         // a copy of a local, of a state struct, or of a literal into app.p could hold anything: the test stays
-        assert!(tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { var l = app.q; l.v = x; app.p = l; return ok({}); }\n"), "a local copied into p");
+        assert!(tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { var l = P { ..app.q }; l.v = x; app.p = l; return ok({}); }\n"), "a local copied into p");
         assert!(tested("@post(\"/c\") fn c() -> Response<{}> { app.p = app.q; return ok({}); }\n"), "a state struct copied into p (q is never proven small)");
         assert!(tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { app.p = P { v: x }; return ok({}); }\n"), "a literal copied into p");
         // writes to locals, and copies into another place, leave p.v at its proven range
-        assert!(!tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { var l = app.p; l.v = x; l.v = 1000; return ok({}); }\n"), "stores into a local are not stores into the state");
-        assert!(!tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { var l = app.p; l.v = x; app.q = l; return ok({}); }\n"), "a copy into q does not change what p.v holds");
-        assert!(!tested("@post(\"/c\") fn c() -> Response<{}> { let l = app.p; var m = l; m = l; return ok({}); }\n"), "copies between locals store nothing in the state");
+        assert!(!tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { var l = P { ..app.p }; l.v = x; l.v = 1000; return ok({}); }\n"), "stores into a local are not stores into the state");
+        assert!(!tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { var l = P { ..app.p }; l.v = x; app.q = l; return ok({}); }\n"), "a copy into q does not change what p.v holds");
+        assert!(!tested("@post(\"/c\") fn c() -> Response<{}> { let l = P { ..app.p }; var m = P { ..l }; m = l; return ok({}); }\n"), "copies between locals store nothing in the state");
     }
 
     /// A range-declared field keeps its check when a literal or a field store of a local writes it, unless the value is proven inside; a copy needs none (the source holds the range).
@@ -6005,8 +6005,8 @@ state app: A;
     fn struct_locals_of_functions_compiled_apart_have_places_of_their_own() {
         let body: String = (0..400).map(|_| "    p.x += 1.0;\n    t.y += 0.5;\n").collect();
         let src = format!("struct V {{ x: f64; y: f64; z: f64; }}\nstruct A {{ pos: V; b: V; }}\nstate app: A;\nfn big(p: write V, n: f64) -> f64 {{ var t = V {{ x: 1.0, y: 2.0, z: 3.0 }};\n{}    return t.x + t.y + n; }}\n\
-            fn big2(p: write V) -> f64 {{ var t = p;\n{}    let r = big(t, 1.0); return t.z + r; }}\n\
-            @post(\"/a\") fn a() -> Response<{{ n: f64 }}> {{ var l = app.pos; let k = V {{ x: 5.0, y: 6.0, z: 7.0 }}; let a = big(l, 1.0); let c = big2(l); return ok({{ n: a + c + k.z }}); }}\n", body, body);
+            fn big2(p: write V) -> f64 {{ var t = V {{ ..p }};\n{}    let r = big(t, 1.0); return t.z + r; }}\n\
+            @post(\"/a\") fn a() -> Response<{{ n: f64 }}> {{ var l = V {{ ..app.pos }}; let k = V {{ x: 5.0, y: 6.0, z: 7.0 }}; let a = big(l, 1.0); let c = big2(l); return ok({{ n: a + c + k.z }}); }}\n", body, body);
         let g = gen_of(&src);
         let mut places: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
         let mut cur = String::new();

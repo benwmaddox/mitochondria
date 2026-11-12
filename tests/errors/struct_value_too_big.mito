@@ -1,3 +1,3 @@
 // expect: `Big` is 264 bytes: a struct used as a value can be at most 256 bytes (use it in place in the state, or split it)
 struct Big { a: i64[33]; } struct W { b: Big; } state w: W;
-@get("/a") fn a() -> Response<{ n: i64 }> { let c = w.b; return ok({ n: c.a[0] }); }
+@get("/a") fn a() -> Response<{ n: i64 }> { let c = Big { ..w.b }; return ok({ n: c.a[0] }); }

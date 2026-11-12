@@ -1,4 +1,0 @@
-// expect: a struct that is part of the state: a function can take it as a parameter but not return it yet (struct returns are step 3
-struct V { x: i64; } struct W { v: V; } state w: W;
-fn get_v() -> V { let c = w.v; return c; }
-@get("/a") fn a() -> Response<{ n: i64 }> { let c = get_v(); return ok({ n: 0 }); }

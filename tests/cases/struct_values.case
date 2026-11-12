@@ -1,4 +1,4 @@
-// struct values, step 1: a struct local (`let v = world.pos;`, `var v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };`) is a copy in the request's scratch area; `=` copies whole structs; ranges, text, arrays and nested structs come along; a local can be passed as a view
+// struct values, step 1: a struct local (`var v = Vec3 { ..world.pos };`, `var v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };`) is a new place in the request's scratch area; `=` copies whole structs; ranges, text, arrays and nested structs come along; a local can be passed as a view
 --- program
 struct Vec3 { x: f64; y: f64; z: f64; }
 struct Gauge { n: i64 in 0..100; hist: i64[4]; name: string<8>; }
@@ -31,7 +31,7 @@ fn lit() -> Response<{ ax: f64, ay: f64, az: f64, bz: f64, cx: f64, cy: f64, cz:
 // a copy is independent of its source in both directions
 @post("/copy")
 fn copy() -> Response<{ lx: f64, sx: f64, lx2: f64, sy: f64, ly: f64 }> {
-    var l = world.pos;
+    var l = Vec3 { ..world.pos };
     l.x = 99.0;
     let lx = l.x;
     let sx = world.pos.x;
@@ -65,7 +65,7 @@ fn body() -> Response<{ px: f64, vx: f64, mass: f64, lpx: f64 }> {
 // a range-declared field keeps its check in a copy, a literal and a field store; text and arrays inside a value are copied whole
 @post("/gauge/{n}")
 fn gauge(n: i64) -> Response<{ n: i64, h0: i64, name: string }> {
-    var g = world.g;
+    var g = Gauge { ..world.g };
     g.n = n;
     g.hist[0] = n + 1;
     g.name = "abc";
@@ -79,7 +79,7 @@ fn litrange(n: i64) -> Response<{ n: i64 }> {
 }
 @post("/text")
 fn text() -> Response<{ copy: string, now: string, ok: bool }> {
-    let g = world.g;
+    let g = Gauge { ..world.g };
     world.g.name = "zz";
     let c = Gauge { ..g, name: "new" };
     return ok({ copy: g.name, now: world.g.name, ok: c.name == "new" });
@@ -87,14 +87,14 @@ fn text() -> Response<{ copy: string, now: string, ok: bool }> {
 // a local passes as a view (an ordinary struct argument and `self`): writes through it change the local, not the state
 @post("/view")
 fn view() -> Response<{ lx: f64, sx: f64, l2: f64, sx2: f64, h0: i64, wn: i64 }> {
-    var l = world.pos;
+    var l = Vec3 { ..world.pos };
     bump(l, 1.0);
     l.scale(2.0);
     walk(l, 3);
     let lx = l.x;
     let sx = world.pos.x;
     bump(world.pos, 100.0);
-    var g = world.g;
+    var g = Gauge { ..world.g };
     shift_hist(g, 5);
     return ok({ lx: lx, sx: sx, l2: l.len2(), sx2: world.pos.x, h0: g.hist[0], wn: world.g.n });
 }
@@ -112,7 +112,7 @@ fn looped(n: i64 in 0..20) -> Response<{ sum: f64, last: f64, big: i64 }> {
             acc.z += t.z;
             big += 1;
         } else {
-            var u = step;
+            var u = Vec3 { ..step };
             u.z = 1.0;
             acc.z += u.z;
         }
@@ -133,11 +133,11 @@ fn at() -> Response<{ v: i64 }> {
 // failure undoes a copy into logged state and leaves a copy into unlogged state
 @post("/fail/{n}")
 fn fail_after(n: i64) -> Response<{ n: i64 }> {
-    var g = world.g;
+    var g = Gauge { ..world.g };
     g.n = n;
     g.name = "u";
     world.g = g;
-    var l = world.lg;
+    var l = Gauge { ..world.lg };
     l.n = n;
     l.name = "l";
     world.lg = l;
@@ -147,11 +147,11 @@ fn fail_after(n: i64) -> Response<{ n: i64 }> {
 }
 @post("/failok/{n}")
 fn fail_ok(n: i64) -> Response<{ n: i64 }> {
-    var g = world.g;
+    var g = Gauge { ..world.g };
     g.n = n;
     g.name = "u";
     world.g = g;
-    var l = world.lg;
+    var l = Gauge { ..world.lg };
     l.n = n;
     l.name = "l";
     world.lg = l;
@@ -161,7 +161,7 @@ fn fail_ok(n: i64) -> Response<{ n: i64 }> {
 // a GET that only builds locals from state
 @get("/peek")
 fn peek() -> Response<{ x: f64, l2: f64 }> {
-    var v = world.pos;
+    var v = Vec3 { ..world.pos };
     v.scale(2.0);
     let w = Vec3 { ..v, y: 1.0 };
     return ok({ x: w.x, l2: w.len2() });

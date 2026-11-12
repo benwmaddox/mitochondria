@@ -810,7 +810,7 @@ fn big(p: write Vec3, n: f64) -> f64 {
     return t.x + t.y + n;
 }
 fn big2(p: write Vec3) -> f64 {
-    var t = p;
+    var t = Vec3 { ..p };
     t.z += 100.0;
     p.y += 1.0;
     p.y += 1.0;
@@ -1224,7 +1224,7 @@ fn set(x: i64 in 0..100, y: i64 in 0..100) -> Response<{ x: f64 }> {
 }
 @post("/big")
 fn bigf() -> Response<{ a: f64, b: f64, c: f64, lx: f64, ly: f64, px: f64, py: f64, bx: f64 }> {
-    var l = world.pos;
+    var l = Vec3 { ..world.pos };
     let local = Vec3 { x: 5.0, y: 6.0, z: 7.0 };
     let a = big(l, 1.0);
     let b = big(world.b, 2.0);

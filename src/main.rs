@@ -1,4 +1,5 @@
 mod build;
+mod fmt;
 #[cfg(test)]
 mod cases;
 #[cfg(test)]
@@ -34,6 +35,8 @@ A program is one `.mito` file: a program, or a system of workers (a file holding
   test   <program> [--clang]        run the program's tests (`test \"name\" { ... }`), each on a fresh state
   emit-c <program> [-o file.c]       (a system: -o dir, one file per worker kind and system.c)
                                     the generated C, to read or build yourself
+  fmt    <program>... [--check|--write]   print the program file formatted (--write: rewrite the files; --check: list the files that
+                                    would change, exit 1 if any does)
 
 Executable options: --port N (8080); --budget MB, --soft MB, --hard MB (one program's memory; soft and hard turn on
 memory pressure); --conns N (a system's connection threads, 16); --seed N and --clock MS (fixed, for tests).";
@@ -122,6 +125,7 @@ fn main() {
         Some("test") => test(rest),
         Some("emit-c") => emit_c(rest),
         Some("sigs") => sigs(rest),
+        Some("fmt") => fmt::run(rest),
         _ => { eprintln!("{}", USAGE); std::process::exit(2) }
     }
 }

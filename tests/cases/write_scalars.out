@@ -1,0 +1,26 @@
+POST /count -> 200 {"count":8,"peek":8}
+POST /local -> 200 {"x":15,"y":7,"z":7}
+POST /pair -> 200 {"lo":3,"hi":7,"glo":2,"ghi":9}
+POST /flag -> 200 {"flag":true,"local":true}
+POST /acc -> 200 {"ratio":1.75,"local":0.75}
+POST /arr -> 200 {"a1":6,"a2":2,"a3":0,"i":3}
+POST /item -> 200 {"n":6,"h1":2,"sum":8}
+POST /ranged/2 -> 200 {"ranged":9}
+GET /peek -> 200 {"ranged":9,"count":10}
+POST /ranged/3 -> 400 {"error":"`ranged` must be in 0..9","line":5}
+GET /peek -> 200 {"ranged":9,"count":12}
+POST /small/200 -> 200 {"small":200,"local":200}
+POST /small/300 -> 400 {"error":"`v` must be in 0..255","line":11}
+GET /stale1 -> 200 {"v":2}
+GET /stale2 -> 400 {"error":"index 5 out of range (fixed size 4)","line":111}
+GET /stale3/2 -> 200 {"v":2}
+GET /stale3/9 -> 400 {"error":"index 9 out of range (fixed size 4)","line":117}
+GET /stale4/2 -> 200 {"v":0}
+GET /stale4/5 -> 400 {"error":"index 6 out of range (fixed size 4)","line":123}
+POST /fieldk/2 -> 200 {"v":2}
+GET /readk -> 200 {"v":2}
+POST /fieldk/9 -> 400 {"error":"index 9 out of range (fixed size 4)","line":129}
+GET /readk -> 400 {"error":"index 9 out of range (fixed size 4)","line":132}
+state <plain values> 96
+state g.items 56
+memory reserved=8192 committed=8192 live=152

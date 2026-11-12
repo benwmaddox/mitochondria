@@ -539,6 +539,14 @@ enum CV {
 /// `/*RCUT mark*/` until the body is compiled: kept as cuts when the body built region text, dropped otherwise)
 struct Ret { dest: Option<(usize, usize)>, var: String, label: String, kind: Option<K>, func: bool, sel: Option<String>, bound: Option<usize>, unbounded: bool, mark: String, ivs: Vec<Option<(i64, i64)>> }
 
+/// The place a `write` parameter of a number or bool stands for. `Var`: a `var` local of the caller (its C name, and its slot in the caller), which the parameter shares. The others: a field (`Field`) or
+/// an element (`Index`) of the base the first hidden value is (and the index the second): the callee's hidden slots `hb`, `hb + 1` hold them, `hb + 2` the value being assigned, and `loc` is
+/// the expression that names the place (read it for the parameter's value; assign it to store). The code that reads or assigns the place is the code for any field or element.
+#[derive(Clone)]
+enum WShape { Var(String, Option<u32>), Field(String), Index }
+#[derive(Clone)]
+struct WPlace<'p> { shape: WShape, hidden: Vec<CV>, hb: u32, loc: Option<&'p Expr> }
+
 /// How an argument is passed to a generated C function: a value of a kind, or an instance of a collection.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PK { V(K), Coll(usize), Plain(usize, usize), TxtB(usize) }
@@ -711,6 +719,9 @@ struct G<'p> {
     // what is known of each mutable integer local's value at this point of the code (C name -> interval): from its initial value, its assignments, `if` joins, the
     // widening a counted loop gives a counter, and the condition a `while` or `if` holds; absent: nothing known. Consulted by `interval` after `ranges`.
     var_iv: std::collections::HashMap<String, (i64, i64)>,
+    // `write` parameters of a number or bool in the functions being inlined (keyed by the function and the parameter): the caller's place each stands for (see `WPlace`);
+    // `wargs`: the places of the arguments of the call about to be made; `wskip`: the next assignment to a parameter goes through its own C variable
+    wslots: std::collections::HashMap<(Option<u32>, u32), WPlace<'p>>, wargs: Vec<Option<WPlace<'p>>>, wskip: bool,
     loop_frames: Vec<usize>, // the loops being compiled, outermost first (their ids: the address of their `Iter`)
     var_depth: std::collections::HashMap<String, usize>, // how many loops were open where each variable was declared
     loop_stmts: Option<&'p [Stmt]>, loop_entry: Option<std::collections::HashMap<String, (i64, i64)>>, loop_heads: Option<std::collections::HashMap<String, (i64, i64)>>,
@@ -1724,7 +1735,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { ret_ctx: None, pending_ctx: None, var_iv: std::collections::HashMap::new(), loop_frames: Vec::new(), var_depth: std::collections::HashMap::new(), loop_stmts: None, loop_entry: None, loop_heads: None, rq_touched: Vec::new(), uses_spec: false, wrote_state: std::cell::Cell::new(false), narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), own_region: false, region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, u32_vars: std::collections::HashSet::new(), rest: &[], var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new(), scr_top: 0, spec_key: None, scr_n: 0, spec_rec: false, immut: std::collections::HashSet::new() }
+        G { ret_ctx: None, pending_ctx: None, var_iv: std::collections::HashMap::new(), wslots: Default::default(), wargs: Vec::new(), wskip: false, loop_frames: Vec::new(), var_depth: std::collections::HashMap::new(), loop_stmts: None, loop_entry: None, loop_heads: None, rq_touched: Vec::new(), uses_spec: false, wrote_state: std::cell::Cell::new(false), narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), own_region: false, region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, u32_vars: std::collections::HashSet::new(), rest: &[], var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new(), scr_top: 0, spec_key: None, scr_n: 0, spec_rec: false, immut: std::collections::HashSet::new() }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1797,6 +1808,12 @@ impl<'p> G<'p> {
         Some((m, *name == items || name.starts_with(&format!("{}.", items)), *name == items))
     }
     fn module_err(&self, m: &crate::layout::ModInst, what: &str) -> String { format!("{} belongs to {} (module {}); change it through {}'s functions", what, m.name, m.module, m.name) }
+    /// The locals assigned in these statements, and the `write` parameters of the function being inlined (each stands for a place something else may write: not invariant in a loop).
+    fn assigned_here(&self, body: &[Stmt]) -> std::collections::HashSet<u32> {
+        let mut a = assigned_slots(body);
+        for ((fr, s), _) in &self.wslots { if *fr == self.frame { a.insert(*s); } }
+        a
+    }
     /// Writing column `path` of collection `c` from here: refused outside a module for its own state, and for its key.
     /// `loop_stmt` for a loop whose body is `body`, with what is known of the variables set up as the handler of `Stmt::Each` says: `base` (the ones the loop assigns dropped),
     /// plus the counters `range_loop` can bound from the `entry` state.
@@ -2369,7 +2386,7 @@ impl<'p> G<'p> {
     fn version_guard(&mut self, it: &'p Iter, body: &'p [Stmt], env: &mut Vec<Option<CV>>) -> R<Option<(String, std::collections::HashSet<*const Expr>, Vec<(String, (i64, i64))>, Option<(i64, i64)>)>> {
         let (Some(hi), None) = (&it.hi, &it.via) else { return Ok(None) };
         if self.versioned >= 3 { return Ok(None); }
-        let assigned = assigned_slots(body);
+        let assigned = self.assigned_here(body);
         // the counter's values: lo..hi (evaluated again by the loop itself, so they must be free of effects)
         let mut plans: Vec<(u32, Vec<Site<'p>>, Bound<'p>)> = Vec::new();
         if pure(&it.coll) && pure(hi) {
@@ -2874,6 +2891,10 @@ impl<'p> G<'p> {
                 env[*slot as usize] = Some(v);
             }
             Stmt::Assign(target @ Expr::Var(n, VarRes::Local(slot)), rhs) => {
+                // a `write` parameter of a number or bool: the caller's place (`wskip`: this is the store itself, into the shared `var`)
+                if !std::mem::take(&mut self.wskip) {
+                    if let Some(w) = self.wslots.get(&(self.frame, *slot)).cloned() { return self.write_param_assign(w, target, *slot, rhs, env, rest); }
+                }
                 let cur = env[*slot as usize].clone().ok_or_else(|| format!("`{}` has no compiled value", n))?;
                 // a struct local: the whole struct is copied in (its place stays where it is)
                 if let CV::Plain(sid, off) = cur {
@@ -3869,6 +3890,8 @@ impl<'p> G<'p> {
             Expr::Str(s) => Ok(CV::Lit(s.clone())),
             Expr::Null => Ok(CV::Null),
             Expr::Float(f) => Ok(CV::Flt(c_double(*f))),
+            // a `write` parameter standing for a field or element of the caller's: read where it is, each time
+            Expr::Var(_, VarRes::Local(s)) if self.wslots.get(&(self.frame, *s)).map_or(false, |w| w.loc.is_some()) => { let loc = self.wslots[&(self.frame, *s)].loc.unwrap(); self.expr(loc, env, dead) }
             Expr::Var(n, VarRes::Local(s)) => match env.get(*s as usize).cloned().flatten() { Some(CV::Int(name)) if self.u32_vars.contains(&name) => Ok(CV::Int(format!("(i64){}", name))), v => v.ok_or_else(|| format!("`{}` has no compiled value", n)) },
             Expr::Var(n, VarRes::Global(g)) => {
                 let gl = &self.prog.globals[*g as usize];
@@ -4419,7 +4442,7 @@ impl<'p> G<'p> {
                 let Expr::Field(_, f) = &inner.coll else { unreachable!() };
                 if let Some(&(_, ct)) = tb.children.iter().find(|x| x.0 == *f) {
                     let ctb = self.prog.tables[ct].clone();
-                    let assigned = match lb { LoopBody::Stmts(ss) => assigned_slots(ss), LoopBody::Json(_) => Default::default() };
+                    let assigned = match lb { LoopBody::Stmts(ss) => self.assigned_here(ss), LoopBody::Json(_) => Default::default() };
                     let (mut iconds, mut ivals, mut icols) = (Vec::new(), Vec::new(), Vec::new());
                     let inner_ok = match &inner.wher { None => true, Some(w) => self.sql_where(w, inner.slot, ct, names.len(), &mut iconds, &mut ivals, &mut icols) && ivals.iter().all(|e| bound_before(e, env, &assigned)) };
                     if inner_ok {
@@ -5165,14 +5188,129 @@ impl<'p> G<'p> {
         let mut vals = Vec::new();
         // where a struct this call returns goes is meant for the call, not for a call among its arguments
         let ctx = self.ret_ctx.take();
-        for a in args { let v = self.expr(a, env, dead)?; vals.push(self.hold(v, false)?); }
+        let mut places: Vec<Option<WPlace<'p>>> = Vec::new();
+        for (j, a) in args.iter().enumerate() {
+            // a `write` parameter of a number or bool takes a place, which is not evaluated to a value here
+            if scalar_write_at(k, j) { let (v, pl) = self.write_place(a, k, j, env, dead)?; vals.push(v); places.push(Some(pl)); }
+            else { let v = self.expr(a, env, dead)?; vals.push(self.hold(v, false)?); places.push(None); }
+        }
         self.ret_ctx = ctx;
+        self.wargs = places;
         self.call_values(k, vals, dead)
+    }
+
+    /// The place an argument names for `write` parameter `j` of callee `k`: a `var` local, or a field or element of the state or of an item. Returns the place's value now, and the
+    /// place. Everything in the place that could change before the callee stores (an item's number, an index) is copied into a variable of its own here.
+    fn write_place(&mut self, a: &'p Expr, k: u32, j: usize, env: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<(CV, WPlace<'p>)> {
+        let f = &self.api.fns[k as usize];
+        let (fname, pname) = (f.name.clone(), f.params[j].clone());
+        let pty = f.ptys[j].as_ref().ok_or("a `write` parameter has a type")?;
+        let want = self.decl_kind(pty, &fname)?;
+        let bad = |what: &str| format!("`{}: write` in `{}`: `write` needs a place to write to (a `var`, a field of the state or of an item, or an element of an array), not {}", pname, fname, what);
+        let same_kind = |g: &Self, v: &CV| -> R<()> {
+            if kind(v) == Some(want) { Ok(()) } else { no(format!("`{}: write {}` in `{}` takes a place of its own type, given {}", pname, pty, fname, type_text(g.prog, v))) }
+        };
+        match a {
+            Expr::Var(n, VarRes::Local(slot)) => {
+                // a `write` parameter of this function handed on: the same place
+                if let Some(w) = self.wslots.get(&(self.frame, *slot)).cloned() {
+                    let v = self.expr(a, env, dead)?;
+                    same_kind(self, &v)?;
+                    return Ok((v, w));
+                }
+                let v = env.get(*slot as usize).cloned().flatten();
+                let name = match &v { Some(CV::Int(x)) | Some(CV::Flt(x)) | Some(CV::Bool(x)) => x.clone(), _ => return no(bad(&format!("`{}`", n))) };
+                if !self.var_names.contains(&name) { return no(bad(&format!("`{}`, which is a `let` or a parameter (declare it with `var` to change it)", n))); }
+                if self.u32_vars.contains(&name) { return no(format!("`{}: write` in `{}`: this `var` is kept in 32 bits: not supported yet", pname, fname)); }
+                let v = v.unwrap();
+                same_kind(self, &v)?;
+                Ok((v, WPlace { shape: WShape::Var(name, Some(*slot)), hidden: Vec::new(), hb: 0, loc: None }))
+            }
+            Expr::Field(base, fld) => {
+                self.check_assign_target(a, env)?;
+                let bv = self.expr(base, env, dead)?;
+                let bv = self.freeze_place(bv, &bad)?;
+                let pl = WPlace { shape: WShape::Field(fld.clone()), hidden: vec![bv], hb: 0, loc: None };
+                let v = self.read_place(&pl, dead)?;
+                same_kind(self, &v)?;
+                Ok((v, pl))
+            }
+            Expr::Index(base, k_expr) => {
+                self.check_assign_target(a, env)?;
+                let bv = self.expr(base, env, dead)?;
+                if !matches!(bv, CV::ArrCol(..) | CV::PlainArr(_, Ty::Scalar(_), _)) { return no(bad("an element of something that is not an array of numbers or bool")); }
+                let kv = self.expr(k_expr, env, dead)?;
+                let kk = self.int_or(kv, 400, "an index must be an integer");
+                let bv = self.freeze_place(bv, &bad)?;
+                let kt = self.tmp("k");
+                self.line(&format!("i64 {} = {};", kt, kk));
+                let pl = WPlace { shape: WShape::Index, hidden: vec![bv, CV::Int(kt)], hb: 0, loc: None };
+                let v = self.read_place(&pl, dead)?;
+                same_kind(self, &v)?;
+                Ok((v, pl))
+            }
+            Expr::Var(..) => no(bad("a state variable of its own (give it a field of a struct)")),
+            _ => no(bad("a literal or a computed value")),
+        }
+    }
+    /// The names a place holds, copied into variables of their own (an item's number, an element's index), so nothing assigned later moves it.
+    fn freeze_place(&mut self, bv: CV, bad: &dyn Fn(&str) -> String) -> R<CV> {
+        let copy = |g: &mut Self, ty: &str, e: &str| { let t = g.tmp("w"); g.line(&format!("{} {} = {};", ty, t, e)); t };
+        Ok(match bv {
+            CV::Item(c, idx) => CV::Item(c, copy(self, "u32", &idx)),
+            CV::Part(c, idx, p) => CV::Part(c, copy(self, "u32", &idx), p),
+            CV::Elem(c, idx, p, k) => { let i2 = copy(self, "u32", &idx); CV::Elem(c, i2, p, copy(self, "i64", &k)) }
+            CV::ArrCol(c, idx, ci) => CV::ArrCol(c, copy(self, "u32", &idx), ci),
+            b @ (CV::Plain(..) | CV::PlainArr(..)) => b,
+            CV::Ref(..) => return no(bad("a field of a value that may be null: check it first with `if exists(x)`")),
+            _ => return no(bad("a field or element of something else")),
+        })
+    }
+    /// The expression that names `pl`, written over the slots `hb` (the base) and `hb + 1` (the index).
+    fn place_loc(pl: &WPlace<'p>, hb: u32) -> &'p Expr {
+        let base = Expr::Var("__w".into(), VarRes::Local(hb));
+        let e = match &pl.shape {
+            WShape::Field(f) => Expr::Field(Box::new(base), f.clone()),
+            WShape::Index => Expr::Index(Box::new(base), Box::new(Expr::Var("__wk".into(), VarRes::Local(hb + 1)))),
+            WShape::Var(..) => base,
+        };
+        Box::leak(Box::new(e))
+    }
+    /// The value now in a field or element place (not yet bound to a callee).
+    fn read_place(&mut self, pl: &WPlace<'p>, dead: Option<&str>) -> R<CV> {
+        let loc = Self::place_loc(pl, 0);
+        let mut tmp: Vec<Option<CV>> = pl.hidden.iter().cloned().map(Some).collect();
+        self.expr(loc, &mut tmp, dead)
+    }
+    /// Assigning `write` parameter `slot` (a place of the caller's): the value is checked as the parameter's declared type, then stored the way an assignment to that place is (a `var`: its
+    /// own C variable; a field or element: the same code as `field = value`, with its range and type checks, undo log and whole-program facts).
+    fn write_param_assign(&mut self, w: WPlace<'p>, target: &'p Expr, slot: u32, rhs: &'p Expr, env: &mut Vec<Option<CV>>, rest: &'p [Stmt]) -> R<()> {
+        let k = self.frame.ok_or("a `write` parameter outside a function")?;
+        let f = &self.api.fns[k as usize];
+        let (fname, pname) = (f.name.clone(), f.params[slot as usize].clone());
+        let pty = f.ptys[slot as usize].as_ref().ok_or("a `write` parameter has a type")?;
+        let v = self.expr(rhs, env, None)?;
+        let mut v = self.to_declared(v, pty, &fname, &format!("`{}`", pname))?;
+        let range = match pty.name.as_str() { "i8" => Some((-128, 127)), "i16" => Some((-32768, 32767)), "i32" => Some((i32::MIN as i64, i32::MAX as i64)), "u8" => Some((0, 255)), "u16" => Some((0, 65535)), "u32" => Some((0, u32::MAX as i64)), "u64" => Some((0, i64::MAX)), _ => None };
+        if let (CV::Int(_), Some(r)) = (&v, range) { v = self.in_field_range(v, r, &pname)?; }
+        let v = self.hold(v, false)?;
+        let need = (w.hb + 3) as usize;
+        if env.len() < need { env.resize(need, None); }
+        env[(w.hb + 2) as usize] = Some(v);
+        let val = Expr::Var("__wv".into(), VarRes::Local(w.hb + 2));
+        let stmt: &'p Stmt = match (&w.shape, w.loc) {
+            (WShape::Var(..), _) => { self.wskip = true; Box::leak(Box::new(Stmt::Assign(target.clone(), val))) }
+            (_, Some(loc)) => Box::leak(Box::new(Stmt::Assign(loc.clone(), val))),
+            _ => return no("a `write` parameter with no place"),
+        };
+        self.rest = rest;
+        self.stmt_inner(stmt, env)
     }
 
     /// Call user function `k` with argument values already computed: inlined, or a generated C function if recursive.
     fn call_values(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>) -> R<CV> {
         self.pending_ctx = self.ret_ctx.take();
+        let places = std::mem::take(&mut self.wargs);
         let f = &self.api.fns[k as usize];
         if vals.len() != f.params.len() {
             // a function of a type is called `p.hit(1)`: the receiver is not counted among its arguments
@@ -5192,7 +5330,8 @@ impl<'p> G<'p> {
                 let (word, pn) = ("write", f.params[i].as_str());
                 let why = match &v {
                     CV::Plain(..) => None,
-                    CV::Int(_) | CV::Flt(_) | CV::Bool(_) => Some("`write` of a number or bool is not supported yet: return the new value instead".to_string()),
+                    CV::Int(_) | CV::Flt(_) | CV::Bool(_) if places.get(i).map_or(false, |p| p.is_some()) => None, // a place the caller named (see `write_place`)
+                    CV::Int(_) | CV::Flt(_) | CV::Bool(_) => Some("`write` needs a place to write to (a `var`, a field of the state or of an item, or an element of an array), not a computed value (and a function called as `x.f(...)` cannot take one yet)".to_string()),
                     CV::StateStr(..) | CV::PlainStr(..) if mode == 1 => None,
                     CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) if mode == 1 => Some("`write` needs a place to write to (a text field of the state or of an item), not a literal or computed text (a `var` text local is not supported yet)".to_string()),
                     CV::Item(..) | CV::Ref(..) => None, // an item is already a handle to its row: `write` is allowed (so one signature serves a state struct and an item) and changes nothing
@@ -5212,7 +5351,7 @@ impl<'p> G<'p> {
         }
         let vals = checked;
         let args: Vec<String> = vals.iter().map(|v| type_text(self.prog, v)).collect();
-        let r = self.call_values_inner(k, vals, dead);
+        let r = self.call_values_inner(k, vals, dead, places);
         self.pending_ctx = None;
         let r = r?;
         let rt = if returns_value(&self.api.fns[k as usize].body) { type_text(self.prog, &r) } else { "-".into() };
@@ -5227,18 +5366,20 @@ impl<'p> G<'p> {
             r => r,
         })
     }
-    fn call_values_inner(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>) -> R<CV> {
+    fn call_values_inner(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>, places: Vec<Option<WPlace<'p>>>) -> R<CV> {
         let f = &self.api.fns[k as usize];
         self.depth_check();
+        let has_places = places.iter().any(|p| p.is_some());
         // a function that returns a struct is always inlined (its result is written into the caller's destination)
         let returns_plain = matches!(f.ret.as_ref().map(|t| self.decl_kind(t, &f.name)), Some(Ok(K::Plain(..))));
         if self.recursive[k as usize] {
+            if has_places { return no(format!("`{}` is recursive and has a `write` parameter of a number or bool: not supported yet (each call would need its own place)", f.name)); }
             if returns_plain { return no(format!("`{}` is recursive and returns a struct: not supported yet (a recursive function cannot hold struct values)", f.name)); }
             self.pending_ctx = None;
             return self.call_spec(k, vals);
         }
         // an outlined function: called, when its arguments are of kinds a C function takes and its body compiles as one; inlined otherwise
-        if !returns_plain && OUTLINED.with(|o| o.borrow().get(k as usize).copied().unwrap_or(false)) && vals.iter().all(spec_arg) {
+        if !returns_plain && !has_places && OUTLINED.with(|o| o.borrow().get(k as usize).copied().unwrap_or(false)) && vals.iter().all(spec_arg) {
             let (n0, body0, specs0) = (self.n, self.body.len(), self.specs.borrow().len());
             match self.call_spec(k, vals.clone()) {
                 Ok(v) => return Ok(v),
@@ -5247,9 +5388,42 @@ impl<'p> G<'p> {
         }
         let mut fenv: Vec<Option<CV>> = vec![None; f.slots as usize];
         for (i, v) in vals.into_iter().enumerate() { fenv[i] = Some(v); }
+        // a `write` parameter of a number or bool: a `var` of the caller is shared as it is; a field or element is read and assigned through its place, kept in the function's hidden slots
+        let mut bound: Vec<u32> = Vec::new();
+        let mut shared_vars: Vec<(String, Option<u32>)> = Vec::new();
+        if has_places {
+            let mut hb = f.slots;
+            fenv.resize((f.slots as usize) + 3 * places.iter().filter(|p| p.is_some()).count(), None);
+            for (i, pl) in places.into_iter().enumerate() {
+                let Some(mut pl) = pl else { continue };
+                pl.hb = hb;
+                match &pl.shape {
+                    WShape::Var(name, cslot) => shared_vars.push((name.clone(), *cslot)),
+                    _ => {
+                        fenv[i] = None; // read through the place on every use
+                        for (h, v) in pl.hidden.iter().enumerate() { fenv[hb as usize + h] = Some(v.clone()); }
+                        pl.loc = Some(Self::place_loc(&pl, hb));
+                    }
+                }
+                self.wslots.insert((Some(k), i as u32), pl);
+                bound.push(i as u32);
+                hb += 3;
+            }
+        }
         self.inl += 1;
         let r = self.inline_body(k, f, &mut fenv, dead);
         self.inl -= 1;
+        for i in bound { self.wslots.remove(&(Some(k), i)); }
+        // the callee may have assigned a `var` of the caller: what was known of it is gone, in the straight code after the call and for the loops around it
+        for (name, cslot) in shared_vars {
+            self.var_iv.remove(&name);
+            if let (Some(cs), Some(&d)) = (cslot, self.var_depth.get(&name)) {
+                for fi in d..self.loop_frames.len() {
+                    let key = (self.loop_frames[fi], cs);
+                    LOOP_INV.with(|l| { l.borrow_mut().assigns.insert(key, None); });
+                }
+            }
+        }
         r
     }
 

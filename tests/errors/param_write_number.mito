@@ -1,7 +1,7 @@
-// expect: `write` of a number or bool is not supported yet
+// expect: `write` needs a place to write to
 struct P { x: i64; y: i64; }
 struct G { p: P; }
 state g: G;
 fn f(p: P) { }
-fn h(n: write i64) { }
+fn h(n: write i64) { n += 1; }
 @get("/a") fn a() -> Response<{ n: i64 }> { f(g.p); h(3); return ok({ "n": g.p.x }); }

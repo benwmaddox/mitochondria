@@ -1,0 +1,8 @@
+POST /seed -> 200 {}
+POST /go/2 -> 200 {"r":9}
+GET /peek -> 200 {"c":2,"r":9,"a":2,"ratio":1,"flag":false,"n":3}
+POST /go/3 -> 400 {"error":"`r` must be in 0..9","line":5}
+GET /peek -> 200 {"c":2,"r":9,"a":2,"ratio":1,"flag":false,"n":3}
+state <plain values> 48
+state h.items 32
+memory reserved=8192 committed=8192 live=80

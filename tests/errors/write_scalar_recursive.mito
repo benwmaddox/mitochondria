@@ -1,0 +1,5 @@
+// expect: is recursive and has a `write` parameter of a number or bool: not supported yet
+struct G { n: i64; }
+state g: G;
+fn count_down(k: i64, n: write i64) { if k > 0 { n += 1; count_down(k - 1, n); } }
+@get("/a") fn a() -> Response<{ n: i64 }> { count_down(3, g.n); return ok({ "n": g.n }); }

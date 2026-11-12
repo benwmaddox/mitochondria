@@ -1,0 +1,5 @@
+// expect: `write` needs a place to write to
+struct G { n: i64; }
+state g: G;
+fn bump(n: write i64) { n += 1; }
+@get("/a") fn a() -> Response<{ n: i64 }> { bump(g.n + 1); return ok({ "n": g.n }); }

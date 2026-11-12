@@ -1,0 +1,154 @@
+// lib/queue.mito: FIFO of struct items, full is 507, empty is 404, wraparound, clear
+--- program
+struct Job { id: i64; name: string<8>; }
+struct App { q: queue<Job, 4>; }
+state app: App;
+
+@post("/push/{id}")
+fn post_push_id(id: i64) -> Response<{ count: i64 }> { let job = app.q.push(); job.id = id; job.name = "n" + id; return ok({ "count": app.q.count() }); }
+@post("/pop")
+fn post_pop() -> Response<{ id: i64, name: string }> { let job = app.q.pop(); return ok({ "id": job.id, "name": job.name }); }
+@get("/peek")
+fn get_peek() -> Response<{ id: i64, name: string }> { let job = app.q.peek(); return ok({ "id": job.id, "name": job.name }); }
+@get("/count")
+fn get_count() -> Response<{ count: i64, room: i64, empty: bool }> { return ok({ "count": app.q.count(), "room": app.q.room(), "empty": app.q.is_empty() }); }
+@post("/clear")
+fn post_clear() -> Response<{ count: i64 }> { app.q.clear(); return ok({ "count": app.q.count() }); }
+--- requests
+GET /count
+POST /pop
+GET /peek
+POST /push/1
+POST /push/2
+POST /pop
+POST /push/3
+POST /pop
+POST /push/4
+POST /push/5
+POST /pop
+POST /push/6
+POST /pop
+POST /push/7
+POST /push/8
+POST /pop
+GET /peek
+POST /push/9
+POST /push/10
+POST /pop
+GET /count
+POST /pop
+POST /push/11
+POST /clear
+POST /push/12
+GET /count
+POST /push/13
+POST /push/14
+POST /push/15
+POST /push/16
+GET /peek
+POST /push/17
+POST /pop
+POST /pop
+POST /push/18
+POST /pop
+POST /push/19
+POST /push/20
+POST /push/21
+POST /pop
+POST /pop
+POST /push/22
+POST /pop
+POST /pop
+POST /push/23
+GET /peek
+POST /pop
+POST /push/24
+POST /pop
+POST /pop
+GET /count
+GET /peek
+POST /push/25
+POST /clear
+POST /push/26
+POST /pop
+GET /peek
+POST /push/27
+POST /pop
+POST /push/28
+POST /pop
+GET /peek
+POST /pop
+GET /count
+POST /push/29
+POST /pop
+POST /pop
+POST /pop
+POST /pop
+GET /peek
+GET /count
+POST /pop
+POST /pop
+POST /push/30
+GET /peek
+POST /pop
+POST /clear
+GET /peek
+POST /push/31
+POST /push/32
+POST /pop
+POST /push/33
+POST /pop
+POST /push/34
+POST /push/35
+POST /push/36
+GET /peek
+POST /push/37
+POST /push/38
+POST /push/39
+GET /count
+POST /push/40
+POST /pop
+POST /pop
+GET /count
+GET /peek
+GET /count
+POST /push/41
+POST /pop
+POST /push/42
+GET /count
+GET /count
+POST /push/43
+POST /push/44
+POST /push/45
+POST /push/46
+POST /pop
+POST /pop
+POST /push/47
+POST /push/48
+POST /pop
+POST /push/49
+POST /pop
+GET /count
+POST /pop
+POST /pop
+POST /pop
+POST /pop
+POST /push/50
+GET /count
+GET /peek
+GET /count
+GET /peek
+POST /clear
+POST /push/900
+POST /push/901
+POST /push/902
+POST /push/903
+POST /push/999
+POST /pop
+POST /push/950
+POST /pop
+POST /pop
+POST /pop
+POST /pop
+POST /pop
+GET /count

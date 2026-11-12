@@ -1,0 +1,263 @@
+GET /count -> 200 {"count":0,"room":8}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+GET /peek -> 404 {"error":"heap: empty","line":50}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+GET /peek -> 404 {"error":"heap: empty","line":50}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /push/0/905 -> 200 {"count":1}
+GET /count -> 200 {"count":1,"room":7}
+GET /peek -> 200 {"priority":0,"payload":905}
+GET /peek -> 200 {"priority":0,"payload":905}
+GET /count -> 200 {"count":1,"room":7}
+POST /push/-37/-542 -> 200 {"count":2}
+POST /push/16/990 -> 200 {"count":3}
+POST /pop -> 200 {"priority":-37,"payload":-542}
+GET /count -> 200 {"count":2,"room":6}
+POST /pop -> 200 {"priority":0,"payload":905}
+POST /pop -> 200 {"priority":16,"payload":990}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /push/50/-743 -> 200 {"count":1}
+POST /push/-46/321 -> 200 {"count":2}
+POST /pop -> 200 {"priority":-46,"payload":321}
+GET /count -> 200 {"count":1,"room":7}
+POST /pop -> 200 {"priority":50,"payload":-743}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /push/47/-771 -> 200 {"count":1}
+POST /push/-12/74 -> 200 {"count":2}
+GET /count -> 200 {"count":2,"room":6}
+POST /push/-17/-543 -> 200 {"count":3}
+POST /pop -> 200 {"priority":-17,"payload":-543}
+POST /push/18/-383 -> 200 {"count":3}
+POST /clear -> 200 {"count":0}
+POST /push/-10/320 -> 200 {"count":1}
+GET /peek -> 200 {"priority":-10,"payload":320}
+POST /push/17/-520 -> 200 {"count":2}
+POST /pop -> 200 {"priority":-10,"payload":320}
+POST /push/2/443 -> 200 {"count":2}
+POST /pop -> 200 {"priority":2,"payload":443}
+POST /push/-26/20 -> 200 {"count":2}
+GET /peek -> 200 {"priority":-26,"payload":20}
+POST /pop -> 200 {"priority":-26,"payload":20}
+POST /push/-21/366 -> 200 {"count":2}
+POST /push/-3/-536 -> 200 {"count":3}
+POST /pop -> 200 {"priority":-21,"payload":366}
+POST /pop -> 200 {"priority":-3,"payload":-536}
+POST /pop -> 200 {"priority":17,"payload":-520}
+POST /push/0/-595 -> 200 {"count":1}
+POST /push/-13/513 -> 200 {"count":2}
+GET /peek -> 200 {"priority":-13,"payload":513}
+POST /push/13/986 -> 200 {"count":3}
+POST /push/48/679 -> 200 {"count":4}
+POST /push/9/-547 -> 200 {"count":5}
+POST /push/-37/949 -> 200 {"count":6}
+POST /pop -> 200 {"priority":-37,"payload":949}
+POST /pop -> 200 {"priority":-13,"payload":513}
+GET /peek -> 200 {"priority":0,"payload":-595}
+POST /pop -> 200 {"priority":0,"payload":-595}
+GET /peek -> 200 {"priority":9,"payload":-547}
+POST /push/26/-701 -> 200 {"count":4}
+GET /count -> 200 {"count":4,"room":4}
+POST /push/-47/994 -> 200 {"count":5}
+POST /pop -> 200 {"priority":-47,"payload":994}
+POST /push/40/-877 -> 200 {"count":5}
+POST /push/7/839 -> 200 {"count":6}
+POST /pop -> 200 {"priority":7,"payload":839}
+POST /push/-36/-838 -> 200 {"count":6}
+GET /count -> 200 {"count":6,"room":2}
+POST /push/-27/336 -> 200 {"count":7}
+GET /count -> 200 {"count":7,"room":1}
+POST /pop -> 200 {"priority":-36,"payload":-838}
+POST /push/35/485 -> 200 {"count":7}
+POST /push/-3/-321 -> 200 {"count":8}
+POST /push/-37/-995 -> 507 {"error":"heap: full","line":33}
+POST /push/-40/-281 -> 507 {"error":"heap: full","line":33}
+POST /push/-35/149 -> 507 {"error":"heap: full","line":33}
+GET /count -> 200 {"count":8,"room":0}
+POST /push/-5/574 -> 507 {"error":"heap: full","line":33}
+GET /peek -> 200 {"priority":-27,"payload":336}
+GET /peek -> 200 {"priority":-27,"payload":336}
+POST /push/-44/444 -> 507 {"error":"heap: full","line":33}
+POST /pop -> 200 {"priority":-27,"payload":336}
+POST /push/7/-605 -> 200 {"count":8}
+POST /push/44/837 -> 507 {"error":"heap: full","line":33}
+POST /pop -> 200 {"priority":-3,"payload":-321}
+POST /pop -> 200 {"priority":7,"payload":-605}
+POST /push/30/570 -> 200 {"count":7}
+POST /push/-2/-929 -> 200 {"count":8}
+POST /pop -> 200 {"priority":-2,"payload":-929}
+GET /peek -> 200 {"priority":9,"payload":-547}
+POST /push/-26/530 -> 200 {"count":8}
+POST /push/27/-306 -> 507 {"error":"heap: full","line":33}
+POST /push/-8/961 -> 507 {"error":"heap: full","line":33}
+GET /count -> 200 {"count":8,"room":0}
+POST /push/45/467 -> 507 {"error":"heap: full","line":33}
+POST /pop -> 200 {"priority":-26,"payload":530}
+GET /count -> 200 {"count":7,"room":1}
+POST /push/42/547 -> 200 {"count":8}
+POST /pop -> 200 {"priority":9,"payload":-547}
+GET /peek -> 200 {"priority":13,"payload":986}
+GET /count -> 200 {"count":7,"room":1}
+POST /push/-21/-781 -> 200 {"count":8}
+POST /pop -> 200 {"priority":-21,"payload":-781}
+GET /count -> 200 {"count":7,"room":1}
+GET /count -> 200 {"count":7,"room":1}
+POST /push/-18/870 -> 200 {"count":8}
+POST /push/-34/900 -> 507 {"error":"heap: full","line":33}
+POST /pop -> 200 {"priority":-18,"payload":870}
+POST /push/44/-379 -> 200 {"count":8}
+GET /peek -> 200 {"priority":13,"payload":986}
+POST /pop -> 200 {"priority":13,"payload":986}
+POST /pop -> 200 {"priority":26,"payload":-701}
+POST /push/-10/-57 -> 200 {"count":7}
+POST /push/50/220 -> 200 {"count":8}
+POST /push/-25/-198 -> 507 {"error":"heap: full","line":33}
+POST /pop -> 200 {"priority":-10,"payload":-57}
+POST /push/-42/330 -> 200 {"count":8}
+POST /push/20/115 -> 507 {"error":"heap: full","line":33}
+POST /push/4/809 -> 507 {"error":"heap: full","line":33}
+POST /push/-41/-458 -> 507 {"error":"heap: full","line":33}
+POST /pop -> 200 {"priority":-42,"payload":330}
+POST /push/3/20 -> 200 {"count":8}
+POST /clear -> 200 {"count":0}
+GET /count -> 200 {"count":0,"room":8}
+POST /push/-33/-147 -> 200 {"count":1}
+POST /pop -> 200 {"priority":-33,"payload":-147}
+GET /peek -> 404 {"error":"heap: empty","line":50}
+POST /push/18/734 -> 200 {"count":1}
+POST /pop -> 200 {"priority":18,"payload":734}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /push/-15/160 -> 200 {"count":1}
+POST /push/-18/511 -> 200 {"count":2}
+POST /push/6/-494 -> 200 {"count":3}
+POST /push/-20/-686 -> 200 {"count":4}
+POST /push/24/-615 -> 200 {"count":5}
+POST /push/0/-485 -> 200 {"count":6}
+POST /clear -> 200 {"count":0}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /push/-38/338 -> 200 {"count":1}
+POST /pop -> 200 {"priority":-38,"payload":338}
+POST /push/-50/-28 -> 200 {"count":1}
+GET /peek -> 200 {"priority":-50,"payload":-28}
+POST /push/7/872 -> 200 {"count":2}
+POST /push/-13/-524 -> 200 {"count":3}
+POST /push/-26/229 -> 200 {"count":4}
+GET /count -> 200 {"count":4,"room":4}
+POST /pop -> 200 {"priority":-50,"payload":-28}
+GET /count -> 200 {"count":3,"room":5}
+POST /push/-28/-81 -> 200 {"count":4}
+POST /pop -> 200 {"priority":-28,"payload":-81}
+POST /pop -> 200 {"priority":-26,"payload":229}
+POST /clear -> 200 {"count":0}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /push/5/16 -> 200 {"count":1}
+POST /pop -> 200 {"priority":5,"payload":16}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+POST /push/2/7 -> 200 {"count":1}
+POST /push/0/1 -> 200 {"count":2}
+POST /push/2/7 -> 200 {"count":3}
+POST /push/5/16 -> 200 {"count":4}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /push/0/1 -> 200 {"count":4}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /push/2/7 -> 200 {"count":4}
+POST /push/2/7 -> 200 {"count":5}
+POST /push/0/1 -> 200 {"count":6}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /pop -> 200 {"priority":2,"payload":7}
+POST /push/0/1 -> 200 {"count":5}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /pop -> 200 {"priority":2,"payload":7}
+POST /push/4/13 -> 200 {"count":4}
+POST /push/1/4 -> 200 {"count":5}
+POST /push/2/7 -> 200 {"count":6}
+POST /push/2/7 -> 200 {"count":7}
+POST /pop -> 200 {"priority":1,"payload":4}
+POST /push/0/1 -> 200 {"count":7}
+POST /push/4/13 -> 200 {"count":8}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /push/0/1 -> 200 {"count":8}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /pop -> 200 {"priority":2,"payload":7}
+POST /push/1/4 -> 200 {"count":7}
+POST /push/3/10 -> 200 {"count":8}
+POST /push/0/1 -> 507 {"error":"heap: full","line":33}
+POST /push/1/4 -> 507 {"error":"heap: full","line":33}
+POST /push/0/1 -> 507 {"error":"heap: full","line":33}
+POST /push/2/7 -> 507 {"error":"heap: full","line":33}
+POST /push/1/4 -> 507 {"error":"heap: full","line":33}
+POST /push/0/1 -> 507 {"error":"heap: full","line":33}
+POST /pop -> 200 {"priority":1,"payload":4}
+POST /pop -> 200 {"priority":2,"payload":7}
+POST /pop -> 200 {"priority":2,"payload":7}
+POST /push/4/13 -> 200 {"count":6}
+POST /pop -> 200 {"priority":2,"payload":7}
+POST /pop -> 200 {"priority":3,"payload":10}
+POST /push/2/7 -> 200 {"count":5}
+POST /push/4/13 -> 200 {"count":6}
+POST /push/0/1 -> 200 {"count":7}
+POST /push/3/10 -> 200 {"count":8}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /pop -> 200 {"priority":2,"payload":7}
+POST /pop -> 200 {"priority":3,"payload":10}
+POST /push/0/1 -> 200 {"count":6}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /push/0/1 -> 200 {"count":6}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /pop -> 200 {"priority":4,"payload":13}
+POST /push/5/16 -> 200 {"count":5}
+POST /pop -> 200 {"priority":4,"payload":13}
+POST /pop -> 200 {"priority":4,"payload":13}
+POST /push/1/4 -> 200 {"count":4}
+POST /pop -> 200 {"priority":1,"payload":4}
+POST /pop -> 200 {"priority":4,"payload":13}
+POST /push/3/10 -> 200 {"count":3}
+POST /push/1/4 -> 200 {"count":4}
+POST /push/4/13 -> 200 {"count":5}
+POST /push/2/7 -> 200 {"count":6}
+POST /push/1/4 -> 200 {"count":7}
+POST /pop -> 200 {"priority":1,"payload":4}
+POST /pop -> 200 {"priority":1,"payload":4}
+POST /push/4/13 -> 200 {"count":6}
+POST /pop -> 200 {"priority":2,"payload":7}
+POST /pop -> 200 {"priority":3,"payload":10}
+POST /pop -> 200 {"priority":4,"payload":13}
+POST /push/3/10 -> 200 {"count":4}
+POST /pop -> 200 {"priority":3,"payload":10}
+POST /pop -> 200 {"priority":4,"payload":13}
+POST /pop -> 200 {"priority":5,"payload":16}
+POST /push/3/10 -> 200 {"count":2}
+POST /push/1/4 -> 200 {"count":3}
+POST /push/5/16 -> 200 {"count":4}
+POST /push/4/13 -> 200 {"count":5}
+POST /push/0/1 -> 200 {"count":6}
+POST /push/3/10 -> 200 {"count":7}
+POST /push/3/10 -> 200 {"count":8}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /pop -> 200 {"priority":1,"payload":4}
+POST /push/1/4 -> 200 {"count":7}
+POST /pop -> 200 {"priority":1,"payload":4}
+POST /push/0/1 -> 200 {"count":7}
+POST /push/3/10 -> 200 {"count":8}
+POST /push/3/10 -> 507 {"error":"heap: full","line":33}
+POST /pop -> 200 {"priority":0,"payload":1}
+POST /pop -> 200 {"priority":3,"payload":10}
+POST /push/1/4 -> 200 {"count":7}
+POST /push/5/16 -> 200 {"count":8}
+POST /push/5/16 -> 507 {"error":"heap: full","line":33}
+POST /pop -> 200 {"priority":1,"payload":4}
+POST /push/4/13 -> 200 {"count":8}
+POST /pop -> 200 {"priority":3,"payload":10}
+POST /pop -> 200 {"priority":3,"payload":10}
+POST /pop -> 200 {"priority":3,"payload":10}
+POST /pop -> 200 {"priority":4,"payload":13}
+POST /pop -> 200 {"priority":4,"payload":13}
+POST /pop -> 200 {"priority":5,"payload":16}
+POST /pop -> 200 {"priority":5,"payload":16}
+POST /pop -> 200 {"priority":5,"payload":16}
+POST /pop -> 404 {"error":"heap: empty","line":50}
+state <plain values> 136
+memory reserved=4096 committed=4096 live=136

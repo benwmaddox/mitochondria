@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 /// The standard library: module name, source.
-pub const STDLIB: &[(&str, &str)] = &[("bag", include_str!("../lib/bag.mito")), ("sorted", include_str!("../lib/sorted.mito")), ("btree", include_str!("../lib/btree.mito")), ("ordmap", include_str!("../lib/ordmap.mito")), ("rowmap", include_str!("../lib/rowmap.mito")), ("strmap", include_str!("../lib/strmap.mito")), ("intmap", include_str!("../lib/intmap.mito"))];
+pub const STDLIB: &[(&str, &str)] = &[("bag", include_str!("../lib/bag.mito")), ("sorted", include_str!("../lib/sorted.mito")), ("btree", include_str!("../lib/btree.mito")), ("ordmap", include_str!("../lib/ordmap.mito")), ("rowmap", include_str!("../lib/rowmap.mito")), ("strmap", include_str!("../lib/strmap.mito")), ("intmap", include_str!("../lib/intmap.mito")), ("queue", include_str!("../lib/queue.mito")), ("ring", include_str!("../lib/ring.mito")), ("set", include_str!("../lib/set.mito")), ("heap", include_str!("../lib/heap.mito")), ("bitset", include_str!("../lib/bitset.mito")), ("grid", include_str!("../lib/grid.mito"))];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PKind { Struct, Count, Field }

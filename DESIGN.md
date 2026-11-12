@@ -415,7 +415,7 @@ cannot be written, its items not added or removed directly, and its key not assi
 `iter_next` and `iter_item` can be walked by `each`.
 
 Standard library: `sorted<T, N, key>` (a skip list, items in order of a field: `add(k)`, `remove`, `set_key`,
-`first`, `last`, walks from a key), `intmap<N>` and `strmap<N>` (hash maps from `i64` or string keys to `i64` values, up to N entries; a removed entry frees its slot at once) and `bag<T, N>` (the smallest module, for tests). `rowmap<N, W>` is `ordmap` with a row of W numbers per key (`put(key, col, value)`, `get_or`, `add_to`, `range_sum` by column): a record's numbers kept in the leaves beside its key.
+`first`, `last`, walks from a key), `intmap<N>` and `strmap<N>` (hash maps from `i64` or string keys to `i64` values, up to N entries; a removed entry frees its slot at once) and `bag<T, N>` (the smallest module, for tests). The fixed-capacity collections: `queue<T, N>` (FIFO of struct items) and `ring<T, N>` (keeps the last N, overwriting the oldest) over a pool and an order array; `set<N>` (hash set of `i64`); `heap<N>` (binary min-heap of `i64` priority and payload); `bitset<N>`; `grid<W, H>` (2D `i64` cells). Each is fixed state, every operation bounded, and a full structure an ordinary error (507). `rowmap<N, W>` is `ordmap` with a row of W numbers per key (`put(key, col, value)`, `get_or`, `add_to`, `range_sum` by column): a record's numbers kept in the leaves beside its key.
 
 ## Workers
 A system runs several programs as workers, each on its own thread with its own memory; they share nothing.

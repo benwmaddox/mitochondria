@@ -103,6 +103,12 @@ A module is a `.mito` file in `lib/`, used with an `instance` declaration (DESIG
 | `intmap<N>` | a hash map from `i64` keys to `i64` values, up to `N` entries; removing an entry frees its slot at once; putting a new key into a full map is an error (507) |
 | `strmap<N>` | a hash map from string keys (up to 64 bytes) to `i64` values, up to `N` entries, the same rules |
 | `bag<T, N>` | the smallest module, for tests |
+| `queue<T, N>` | a first-in first-out queue of up to `N` struct items: `push()` returns the new item to fill in, `pop()`, `peek()`, `count()`, `clear()`; pushing when full is an error (507), popping or peeking when empty a 404 |
+| `ring<T, N>` | a ring buffer of the last `N` struct items: `push()` returns the new newest item (reusing the oldest slot when full), `get(age)` reads from the newest (0), `count()`, `clear()`; reading past the items held is a 404 |
+| `set<N>` | a hash set of up to `N` `i64` keys: `add`, `has`, `remove`, `count`, `clear`; adding a new key when full is an error (507) |
+| `heap<N>` | a binary min-heap priority queue of up to `N` entries of `i64` priority and `i64` payload: `push(priority, payload)`, `pop_min()`, `peek()`, `peek_priority()`, `count()`; full is 507, empty is 404 |
+| `bitset<N>` | `N` bits: `set`, `unset`, `flip`, `test`, `count`, `clear_all`; an index outside 0 to N - 1 is a 400 |
+| `grid<W, H>` | a `W` by `H` grid of `i64` cells: `get(x, y)`, `set(x, y, value)`, `fill(value)`, `in_bounds(x, y)`; a position outside the grid is a 400 |
 
 ## Examples
 

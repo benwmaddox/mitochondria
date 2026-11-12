@@ -1,0 +1,226 @@
+GET /count -> 200 {"count":0,"room":6}
+POST /add/4294967297 -> 200 {"added":true,"count":1}
+GET /has/0 -> 200 {"has":false}
+GET /has/-4294967296 -> 200 {"has":false}
+GET /has/-4294967296 -> 200 {"has":false}
+GET /count -> 200 {"count":1,"room":5}
+POST /clear -> 200 {"count":0}
+POST /add/1 -> 200 {"added":true,"count":1}
+POST /add/6 -> 200 {"added":true,"count":2}
+POST /add/99 -> 200 {"added":true,"count":3}
+POST /add/99 -> 200 {"added":false,"count":3}
+POST /add/4294967296 -> 200 {"added":true,"count":4}
+DELETE /remove/-1099511627773 -> 200 {"removed":false,"count":4}
+DELETE /remove/6 -> 200 {"removed":true,"count":3}
+GET /has/-4294967296 -> 200 {"has":false}
+DELETE /remove/1099511627776 -> 200 {"removed":false,"count":3}
+GET /has/7 -> 200 {"has":false}
+POST /add/0 -> 200 {"added":true,"count":4}
+DELETE /remove/-1 -> 200 {"removed":false,"count":4}
+GET /has/1 -> 200 {"has":true}
+POST /add/0 -> 200 {"added":false,"count":4}
+GET /has/99 -> 200 {"has":true}
+POST /add/1099511627776 -> 200 {"added":true,"count":5}
+DELETE /remove/1 -> 200 {"removed":true,"count":4}
+POST /add/1 -> 200 {"added":true,"count":5}
+GET /has/7 -> 200 {"has":false}
+POST /clear -> 200 {"count":0}
+GET /count -> 200 {"count":0,"room":6}
+GET /has/0 -> 200 {"has":false}
+GET /has/5 -> 200 {"has":false}
+GET /count -> 200 {"count":0,"room":6}
+POST /add/-1 -> 200 {"added":true,"count":1}
+POST /add/6 -> 200 {"added":true,"count":2}
+GET /has/-4294967296 -> 200 {"has":false}
+DELETE /remove/6 -> 200 {"removed":true,"count":1}
+GET /has/-1099511627773 -> 200 {"has":false}
+POST /add/7 -> 200 {"added":true,"count":2}
+DELETE /remove/6 -> 200 {"removed":false,"count":2}
+POST /add/0 -> 200 {"added":true,"count":3}
+DELETE /remove/-4294967296 -> 200 {"removed":false,"count":3}
+GET /count -> 200 {"count":3,"room":3}
+GET /has/4294967297 -> 200 {"has":false}
+POST /add/-1099511627773 -> 200 {"added":true,"count":4}
+GET /has/4294967297 -> 200 {"has":false}
+GET /has/4294967296 -> 200 {"has":false}
+GET /count -> 200 {"count":4,"room":2}
+DELETE /remove/5 -> 200 {"removed":false,"count":4}
+POST /add/12 -> 200 {"added":true,"count":5}
+DELETE /remove/-1 -> 200 {"removed":true,"count":4}
+GET /has/7 -> 200 {"has":true}
+POST /clear -> 200 {"count":0}
+POST /add/-1099511627773 -> 200 {"added":true,"count":1}
+DELETE /remove/6 -> 200 {"removed":false,"count":1}
+GET /has/0 -> 200 {"has":false}
+POST /add/4294967296 -> 200 {"added":true,"count":2}
+DELETE /remove/-1099511627773 -> 200 {"removed":true,"count":1}
+GET /count -> 200 {"count":1,"room":5}
+POST /add/6 -> 200 {"added":true,"count":2}
+POST /add/-1 -> 200 {"added":true,"count":3}
+POST /add/4294967297 -> 200 {"added":true,"count":4}
+POST /add/7 -> 200 {"added":true,"count":5}
+GET /count -> 200 {"count":5,"room":1}
+POST /add/0 -> 200 {"added":true,"count":6}
+GET /count -> 200 {"count":6,"room":0}
+POST /add/-1 -> 200 {"added":false,"count":6}
+POST /add/4294967296 -> 200 {"added":false,"count":6}
+POST /add/6 -> 200 {"added":false,"count":6}
+GET /has/5 -> 200 {"has":false}
+POST /add/99 -> 507 {"error":"set: full","line":45}
+POST /add/6 -> 200 {"added":false,"count":6}
+DELETE /remove/-1 -> 200 {"removed":true,"count":5}
+GET /has/0 -> 200 {"has":true}
+GET /has/6 -> 200 {"has":true}
+POST /add/5 -> 200 {"added":true,"count":6}
+POST /add/-4294967296 -> 507 {"error":"set: full","line":45}
+DELETE /remove/-1 -> 200 {"removed":false,"count":6}
+DELETE /remove/12 -> 200 {"removed":false,"count":6}
+DELETE /remove/1099511627776 -> 200 {"removed":false,"count":6}
+GET /has/7 -> 200 {"has":true}
+DELETE /remove/4294967297 -> 200 {"removed":true,"count":5}
+POST /add/12 -> 200 {"added":true,"count":6}
+GET /has/-1 -> 200 {"has":false}
+POST /add/12 -> 200 {"added":false,"count":6}
+DELETE /remove/-1099511627773 -> 200 {"removed":false,"count":6}
+GET /has/12 -> 200 {"has":true}
+DELETE /remove/-1 -> 200 {"removed":false,"count":6}
+DELETE /remove/99 -> 200 {"removed":false,"count":6}
+GET /has/99 -> 200 {"has":false}
+POST /add/-1099511627773 -> 507 {"error":"set: full","line":45}
+GET /has/12 -> 200 {"has":true}
+DELETE /remove/12 -> 200 {"removed":true,"count":5}
+GET /has/1 -> 200 {"has":false}
+POST /add/-1 -> 200 {"added":true,"count":6}
+GET /has/1 -> 200 {"has":false}
+GET /has/4294967297 -> 200 {"has":false}
+GET /has/-1099511627773 -> 200 {"has":false}
+POST /add/-4294967296 -> 507 {"error":"set: full","line":45}
+DELETE /remove/4294967297 -> 200 {"removed":false,"count":6}
+POST /add/4294967297 -> 507 {"error":"set: full","line":45}
+DELETE /remove/12 -> 200 {"removed":false,"count":6}
+GET /count -> 200 {"count":6,"room":0}
+POST /add/-4294967296 -> 507 {"error":"set: full","line":45}
+POST /add/12 -> 507 {"error":"set: full","line":45}
+GET /has/99 -> 200 {"has":false}
+POST /add/6 -> 200 {"added":false,"count":6}
+POST /add/99 -> 507 {"error":"set: full","line":45}
+POST /add/12 -> 507 {"error":"set: full","line":45}
+GET /has/4294967297 -> 200 {"has":false}
+GET /has/4294967296 -> 200 {"has":true}
+POST /add/-1099511627773 -> 507 {"error":"set: full","line":45}
+POST /add/0 -> 200 {"added":false,"count":6}
+GET /has/-1099511627773 -> 200 {"has":false}
+POST /add/1099511627776 -> 507 {"error":"set: full","line":45}
+POST /add/6 -> 200 {"added":false,"count":6}
+DELETE /remove/12 -> 200 {"removed":false,"count":6}
+POST /add/1099511627776 -> 507 {"error":"set: full","line":45}
+POST /add/4294967297 -> 507 {"error":"set: full","line":45}
+POST /add/6 -> 200 {"added":false,"count":6}
+GET /count -> 200 {"count":6,"room":0}
+DELETE /remove/-1099511627773 -> 200 {"removed":false,"count":6}
+GET /has/12 -> 200 {"has":false}
+GET /has/4294967297 -> 200 {"has":false}
+GET /has/99 -> 200 {"has":false}
+POST /add/-4294967296 -> 507 {"error":"set: full","line":45}
+POST /add/1 -> 507 {"error":"set: full","line":45}
+GET /count -> 200 {"count":6,"room":0}
+POST /add/1 -> 507 {"error":"set: full","line":45}
+DELETE /remove/4294967297 -> 200 {"removed":false,"count":6}
+POST /clear -> 200 {"count":0}
+POST /add/5 -> 200 {"added":true,"count":1}
+POST /add/1 -> 200 {"added":true,"count":2}
+POST /add/-4294967296 -> 200 {"added":true,"count":3}
+POST /add/7 -> 200 {"added":true,"count":4}
+POST /add/-1099511627773 -> 200 {"added":true,"count":5}
+GET /has/1 -> 200 {"has":true}
+DELETE /remove/5 -> 200 {"removed":true,"count":4}
+GET /has/4294967297 -> 200 {"has":false}
+GET /has/-1 -> 200 {"has":false}
+POST /add/4294967297 -> 200 {"added":true,"count":5}
+DELETE /remove/4294967296 -> 200 {"removed":false,"count":5}
+POST /add/-1 -> 200 {"added":true,"count":6}
+GET /has/4294967296 -> 200 {"has":false}
+POST /add/7 -> 200 {"added":false,"count":6}
+POST /add/99 -> 507 {"error":"set: full","line":45}
+POST /add/4294967296 -> 507 {"error":"set: full","line":45}
+POST /add/5 -> 507 {"error":"set: full","line":45}
+DELETE /remove/12 -> 200 {"removed":false,"count":6}
+POST /add/7 -> 200 {"added":false,"count":6}
+POST /add/4294967296 -> 507 {"error":"set: full","line":45}
+POST /clear -> 200 {"count":0}
+POST /add/4294967296 -> 200 {"added":true,"count":1}
+DELETE /remove/0 -> 200 {"removed":false,"count":1}
+POST /add/0 -> 200 {"added":true,"count":2}
+DELETE /remove/6 -> 200 {"removed":false,"count":2}
+GET /has/-1 -> 200 {"has":false}
+POST /add/6 -> 200 {"added":true,"count":3}
+GET /has/7 -> 200 {"has":false}
+POST /add/7 -> 200 {"added":true,"count":4}
+DELETE /remove/4294967296 -> 200 {"removed":true,"count":3}
+DELETE /remove/99 -> 200 {"removed":false,"count":3}
+DELETE /remove/4294967296 -> 200 {"removed":false,"count":3}
+DELETE /remove/-4294967296 -> 200 {"removed":false,"count":3}
+GET /has/12 -> 200 {"has":false}
+POST /add/12 -> 200 {"added":true,"count":4}
+GET /has/1099511627776 -> 200 {"has":false}
+DELETE /remove/-1099511627773 -> 200 {"removed":false,"count":4}
+DELETE /remove/4294967297 -> 200 {"removed":false,"count":4}
+POST /add/-4294967296 -> 200 {"added":true,"count":5}
+POST /add/4294967297 -> 200 {"added":true,"count":6}
+GET /has/6 -> 200 {"has":true}
+POST /add/12 -> 200 {"added":false,"count":6}
+DELETE /remove/-1099511627773 -> 200 {"removed":false,"count":6}
+POST /add/-1099511627773 -> 507 {"error":"set: full","line":45}
+POST /add/4294967297 -> 200 {"added":false,"count":6}
+GET /has/4294967296 -> 200 {"has":false}
+POST /add/-1099511627773 -> 507 {"error":"set: full","line":45}
+POST /add/5 -> 507 {"error":"set: full","line":45}
+GET /has/99 -> 200 {"has":false}
+GET /has/5 -> 200 {"has":false}
+GET /has/7 -> 200 {"has":true}
+POST /clear -> 200 {"count":0}
+GET /has/-4294967296 -> 200 {"has":false}
+POST /add/1 -> 200 {"added":true,"count":1}
+POST /add/-4294967296 -> 200 {"added":true,"count":2}
+POST /add/5 -> 200 {"added":true,"count":3}
+GET /has/99 -> 200 {"has":false}
+GET /has/0 -> 200 {"has":false}
+DELETE /remove/4294967296 -> 200 {"removed":false,"count":3}
+GET /has/12 -> 200 {"has":false}
+GET /has/4294967296 -> 200 {"has":false}
+POST /add/99 -> 200 {"added":true,"count":4}
+POST /add/6 -> 200 {"added":true,"count":5}
+GET /has/7 -> 200 {"has":false}
+POST /add/-4294967296 -> 200 {"added":false,"count":5}
+GET /has/99 -> 200 {"has":true}
+DELETE /remove/5 -> 200 {"removed":true,"count":4}
+POST /add/5 -> 200 {"added":true,"count":5}
+GET /has/-1099511627773 -> 200 {"has":false}
+GET /has/6 -> 200 {"has":true}
+DELETE /remove/0 -> 200 {"removed":false,"count":5}
+POST /add/4294967296 -> 200 {"added":true,"count":6}
+POST /clear -> 200 {"count":0}
+POST /add/0 -> 200 {"added":true,"count":1}
+POST /add/1 -> 200 {"added":true,"count":2}
+POST /add/-1 -> 200 {"added":true,"count":3}
+POST /add/5 -> 200 {"added":true,"count":4}
+POST /add/6 -> 200 {"added":true,"count":5}
+POST /add/7 -> 200 {"added":true,"count":6}
+POST /add/12 -> 507 {"error":"set: full","line":45}
+DELETE /remove/0 -> 200 {"removed":true,"count":5}
+POST /add/12 -> 200 {"added":true,"count":6}
+GET /has/0 -> 200 {"has":false}
+GET /has/1 -> 200 {"has":true}
+GET /has/-1 -> 200 {"has":true}
+GET /has/5 -> 200 {"has":true}
+GET /has/6 -> 200 {"has":true}
+GET /has/7 -> 200 {"has":true}
+GET /has/4294967296 -> 200 {"has":false}
+GET /has/4294967297 -> 200 {"has":false}
+GET /has/-4294967296 -> 200 {"has":false}
+GET /has/1099511627776 -> 200 {"has":false}
+GET /has/-1099511627773 -> 200 {"has":false}
+GET /has/12 -> 200 {"has":true}
+GET /has/99 -> 200 {"has":false}
+state <plain values> 120
+memory reserved=4096 committed=4096 live=120

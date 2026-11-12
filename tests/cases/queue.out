@@ -1,0 +1,140 @@
+GET /count -> 200 {"count":0,"room":4,"empty":true}
+POST /pop -> 404 {"error":"queue: empty","line":39}
+GET /peek -> 404 {"error":"queue: empty","line":34}
+POST /push/1 -> 200 {"count":1}
+POST /push/2 -> 200 {"count":2}
+POST /pop -> 200 {"id":1,"name":"n1"}
+POST /push/3 -> 200 {"count":2}
+POST /pop -> 200 {"id":2,"name":"n2"}
+POST /push/4 -> 200 {"count":2}
+POST /push/5 -> 200 {"count":3}
+POST /pop -> 200 {"id":3,"name":"n3"}
+POST /push/6 -> 200 {"count":3}
+POST /pop -> 200 {"id":4,"name":"n4"}
+POST /push/7 -> 200 {"count":3}
+POST /push/8 -> 200 {"count":4}
+POST /pop -> 200 {"id":5,"name":"n5"}
+GET /peek -> 200 {"id":6,"name":"n6"}
+POST /push/9 -> 200 {"count":4}
+POST /push/10 -> 507 {"error":"queue: full","line":26}
+POST /pop -> 200 {"id":6,"name":"n6"}
+GET /count -> 200 {"count":3,"room":1,"empty":false}
+POST /pop -> 200 {"id":7,"name":"n7"}
+POST /push/11 -> 200 {"count":3}
+POST /clear -> 200 {"count":0}
+POST /push/12 -> 200 {"count":1}
+GET /count -> 200 {"count":1,"room":3,"empty":false}
+POST /push/13 -> 200 {"count":2}
+POST /push/14 -> 200 {"count":3}
+POST /push/15 -> 200 {"count":4}
+POST /push/16 -> 507 {"error":"queue: full","line":26}
+GET /peek -> 200 {"id":12,"name":"n12"}
+POST /push/17 -> 507 {"error":"queue: full","line":26}
+POST /pop -> 200 {"id":12,"name":"n12"}
+POST /pop -> 200 {"id":13,"name":"n13"}
+POST /push/18 -> 200 {"count":3}
+POST /pop -> 200 {"id":14,"name":"n14"}
+POST /push/19 -> 200 {"count":3}
+POST /push/20 -> 200 {"count":4}
+POST /push/21 -> 507 {"error":"queue: full","line":26}
+POST /pop -> 200 {"id":15,"name":"n15"}
+POST /pop -> 200 {"id":18,"name":"n18"}
+POST /push/22 -> 200 {"count":3}
+POST /pop -> 200 {"id":19,"name":"n19"}
+POST /pop -> 200 {"id":20,"name":"n20"}
+POST /push/23 -> 200 {"count":2}
+GET /peek -> 200 {"id":22,"name":"n22"}
+POST /pop -> 200 {"id":22,"name":"n22"}
+POST /push/24 -> 200 {"count":2}
+POST /pop -> 200 {"id":23,"name":"n23"}
+POST /pop -> 200 {"id":24,"name":"n24"}
+GET /count -> 200 {"count":0,"room":4,"empty":true}
+GET /peek -> 404 {"error":"queue: empty","line":34}
+POST /push/25 -> 200 {"count":1}
+POST /clear -> 200 {"count":0}
+POST /push/26 -> 200 {"count":1}
+POST /pop -> 200 {"id":26,"name":"n26"}
+GET /peek -> 404 {"error":"queue: empty","line":34}
+POST /push/27 -> 200 {"count":1}
+POST /pop -> 200 {"id":27,"name":"n27"}
+POST /push/28 -> 200 {"count":1}
+POST /pop -> 200 {"id":28,"name":"n28"}
+GET /peek -> 404 {"error":"queue: empty","line":34}
+POST /pop -> 404 {"error":"queue: empty","line":39}
+GET /count -> 200 {"count":0,"room":4,"empty":true}
+POST /push/29 -> 200 {"count":1}
+POST /pop -> 200 {"id":29,"name":"n29"}
+POST /pop -> 404 {"error":"queue: empty","line":39}
+POST /pop -> 404 {"error":"queue: empty","line":39}
+POST /pop -> 404 {"error":"queue: empty","line":39}
+GET /peek -> 404 {"error":"queue: empty","line":34}
+GET /count -> 200 {"count":0,"room":4,"empty":true}
+POST /pop -> 404 {"error":"queue: empty","line":39}
+POST /pop -> 404 {"error":"queue: empty","line":39}
+POST /push/30 -> 200 {"count":1}
+GET /peek -> 200 {"id":30,"name":"n30"}
+POST /pop -> 200 {"id":30,"name":"n30"}
+POST /clear -> 200 {"count":0}
+GET /peek -> 404 {"error":"queue: empty","line":34}
+POST /push/31 -> 200 {"count":1}
+POST /push/32 -> 200 {"count":2}
+POST /pop -> 200 {"id":31,"name":"n31"}
+POST /push/33 -> 200 {"count":2}
+POST /pop -> 200 {"id":32,"name":"n32"}
+POST /push/34 -> 200 {"count":2}
+POST /push/35 -> 200 {"count":3}
+POST /push/36 -> 200 {"count":4}
+GET /peek -> 200 {"id":33,"name":"n33"}
+POST /push/37 -> 507 {"error":"queue: full","line":26}
+POST /push/38 -> 507 {"error":"queue: full","line":26}
+POST /push/39 -> 507 {"error":"queue: full","line":26}
+GET /count -> 200 {"count":4,"room":0,"empty":false}
+POST /push/40 -> 507 {"error":"queue: full","line":26}
+POST /pop -> 200 {"id":33,"name":"n33"}
+POST /pop -> 200 {"id":34,"name":"n34"}
+GET /count -> 200 {"count":2,"room":2,"empty":false}
+GET /peek -> 200 {"id":35,"name":"n35"}
+GET /count -> 200 {"count":2,"room":2,"empty":false}
+POST /push/41 -> 200 {"count":3}
+POST /pop -> 200 {"id":35,"name":"n35"}
+POST /push/42 -> 200 {"count":3}
+GET /count -> 200 {"count":3,"room":1,"empty":false}
+GET /count -> 200 {"count":3,"room":1,"empty":false}
+POST /push/43 -> 200 {"count":4}
+POST /push/44 -> 507 {"error":"queue: full","line":26}
+POST /push/45 -> 507 {"error":"queue: full","line":26}
+POST /push/46 -> 507 {"error":"queue: full","line":26}
+POST /pop -> 200 {"id":36,"name":"n36"}
+POST /pop -> 200 {"id":41,"name":"n41"}
+POST /push/47 -> 200 {"count":3}
+POST /push/48 -> 200 {"count":4}
+POST /pop -> 200 {"id":42,"name":"n42"}
+POST /push/49 -> 200 {"count":4}
+POST /pop -> 200 {"id":43,"name":"n43"}
+GET /count -> 200 {"count":3,"room":1,"empty":false}
+POST /pop -> 200 {"id":47,"name":"n47"}
+POST /pop -> 200 {"id":48,"name":"n48"}
+POST /pop -> 200 {"id":49,"name":"n49"}
+POST /pop -> 404 {"error":"queue: empty","line":39}
+POST /push/50 -> 200 {"count":1}
+GET /count -> 200 {"count":1,"room":3,"empty":false}
+GET /peek -> 200 {"id":50,"name":"n50"}
+GET /count -> 200 {"count":1,"room":3,"empty":false}
+GET /peek -> 200 {"id":50,"name":"n50"}
+POST /clear -> 200 {"count":0}
+POST /push/900 -> 200 {"count":1}
+POST /push/901 -> 200 {"count":2}
+POST /push/902 -> 200 {"count":3}
+POST /push/903 -> 200 {"count":4}
+POST /push/999 -> 507 {"error":"queue: full","line":26}
+POST /pop -> 200 {"id":900,"name":"n900"}
+POST /push/950 -> 200 {"count":4}
+POST /pop -> 200 {"id":901,"name":"n901"}
+POST /pop -> 200 {"id":902,"name":"n902"}
+POST /pop -> 200 {"id":903,"name":"n903"}
+POST /pop -> 200 {"id":950,"name":"n950"}
+POST /pop -> 404 {"error":"queue: empty","line":39}
+GET /count -> 200 {"count":0,"room":4,"empty":true}
+state <plain values> 32
+state app.q.items 32
+memory reserved=8192 committed=8192 live=64

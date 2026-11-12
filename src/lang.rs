@@ -352,7 +352,13 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
         }
         if ch == '\n' { line += 1; line_start = i + 1; }
         if ch.is_whitespace() { i += 1; }
-        else if ch == '/' && c.get(i + 1) == Some(&'/') { while i < c.len() && c[i] != '\n' { i += 1; } }
+        else if ch == '/' && c.get(i + 1) == Some(&'/') {
+            let s = i;
+            while i < c.len() && c[i] != '\n' { i += 1; }
+            // `//# line N`: the next line is line N (generated copies of a generic function keep the template's lines, src/generics.rs)
+            let text: String = c[s..i].iter().collect();
+            if let Some(n) = text.strip_prefix("//# line ").and_then(|r| r.split_whitespace().next()).and_then(|n| n.parse::<u32>().ok()) { line = n.saturating_sub(1); }
+        }
         else if ch.is_alphabetic() || ch == '_' {
             let s = i; while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') { i += 1; }
             let id: String = c[s..i].iter().collect();
@@ -1433,12 +1439,16 @@ impl Binder<'_> {
         }
         Ok(())
     }
+    /// Is a function named `name` declared for some type, or for a generic struct (its copies are made where a call names them)?
+    fn declared_method(&self, name: &str) -> bool {
+        self.fns.iter().any(|f| f.3 && f.0.rsplit_once('.').map_or(false, |(_, m)| m == name)) || crate::generics::is_template_method(name)
+    }
     /// `x.f(args)` naming no function of a module instance: a collection operation, `.f(x, args)`.
     fn operation(&self, e: &mut Expr) {
         let Expr::Call(n, args, _) = e else { return };
         if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
         let Some((recv, op)) = n.rsplit_once('.') else { return };
-        let declared = self.fns.iter().any(|f| f.3 && f.0.rsplit_once('.').map_or(false, |(_, m)| m == op));
+        let declared = self.declared_method(op);
         if !declared && !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
         let mut parts = recv.split('.');
         let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
@@ -1604,7 +1614,7 @@ impl Binder<'_> {
                     (".move", _) => return self.err("`array.move(from, to, count)` is a statement".into()),
                     (".fill", _) => return self.err("`array.fill(from, count, value)` is a statement".into()),
                     // a function declared for a type: which one is known when the receiver's type is
-                    _ if self.fns.iter().any(|f| f.3 && f.0.rsplit_once('.').map_or(false, |(_, m)| m == &n[1..])) => CallRes::Unbound,
+                    _ if self.declared_method(&n[1..]) => CallRes::Unbound,
                     _ => return self.err(format!("unknown function `{}`", &n[1..])),
                 };
             }

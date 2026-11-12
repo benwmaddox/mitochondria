@@ -4415,6 +4415,7 @@ impl<'p> G<'p> {
                 let Some(ty) = self.receiver_type(&vals[0]) else { return no(format!("`{}` is called on something that is not a struct, a number, a string or a bool, and only those have functions of their own", &n[1..])) };
                 let want = format!("{}.{}", ty, &n[1..]);
                 let Some(k) = self.api.fns.iter().position(|f| f.recv && f.name == want) else {
+                    crate::generics::note_missing(&ty, &n[1..]);
                     let has: Vec<String> = self.api.fns.iter().filter(|f| f.recv).filter_map(|f| f.name.rsplit_once('.').filter(|(_, m)| *m == &n[1..]).map(|(t, _)| t.to_string())).collect();
                     return no(format!("`{}` has no function `{}` (declare `fn {}(self: {}, ...)`; `{}` is declared for {})", ty, &n[1..], &n[1..], ty, &n[1..], has.join(", ")));
                 };

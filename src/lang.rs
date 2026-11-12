@@ -1319,18 +1319,20 @@ pub fn path_of(e: &Expr) -> Option<String> {
 }
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums, test: bool, coll_loops: u32 }
+struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums, test: bool, coll_loops: u32, consts: &'g Consts }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
-pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> { bind_with(api, globals, &[]) }
+pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> { bind_with(api, globals, &[], &[]) }
 /// The enums' names and values, for `Name.Value` in code.
 pub type Enums = [(String, Vec<(String, i64)>)];
-pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: &Enums) -> R<()> {
+/// The const groups' names and values, for `Group.NAME` in code (each folds to a literal, so the analyses see its value).
+pub type Consts = [(String, Vec<(String, crate::layout::CVal)>)];
+pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: &Enums, consts: &Consts) -> R<()> {
     let fns: Vec<(String, usize, bool, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public, f.recv)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
     let mut errs = Vec::new();
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: if f.recv { None } else { f.name.rfind('.').map(|i| f.name[..i].to_string()) }, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0 };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: if f.recv { None } else { f.name.rfind('.').map(|i| f.name[..i].to_string()) }, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
         for p in &f.params { b.declare(p, false); }
         // a full signature: every parameter's type, and the result's when the function returns a value
         if let Some(Stmt::At(l, c)) = f.body.first() { b.at = (*l, *c); }
@@ -1343,7 +1345,7 @@ pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: 
         f.slots = b.max;
     }
     for e in &mut api.eps {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0 };
+        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         if let Err(e) = b.block(&mut e.body) { errs.push(e); continue; }
         e.slots = b.max;
@@ -1543,6 +1545,18 @@ impl Binder<'_> {
                 }
             }
         }
+        // `Limits.MAX_HP`: a constant is its value (unless `Limits` is a local)
+        if let Expr::Field(b, v) = e {
+            if let Expr::Var(n, _) = &**b {
+                if !self.names.iter().any(|x| x.0 == *n) {
+                    if let Some((gn, items)) = self.consts.iter().find(|x| x.0 == *n) {
+                        let Some(x) = items.iter().find(|x| x.0 == *v) else { return self.err(format!("const group `{}` has no `{}`: it has {}", gn, v, items.iter().map(|x| format!("`{}`", x.0)).collect::<Vec<_>>().join(", "))) };
+                        *e = match x.1 { crate::layout::CVal::Int(i) => Expr::Int(i), crate::layout::CVal::Flt(f) => Expr::Float(f) };
+                        return Ok(());
+                    }
+                }
+            }
+        }
         self.operation(e);
         match e {
             Expr::Var(n, res) => {
@@ -1557,7 +1571,14 @@ impl Binder<'_> {
             Expr::Field(b, _) => self.expr(b)?,
             Expr::Index(b, i) => { self.expr(b)?; self.expr(i)?; }
             Expr::Un(_, x) => self.expr(x)?,
-            Expr::Bin(_, a, b) => { self.expr(a)?; self.expr(b)?; }
+            Expr::Bin(op, a, b) => {
+                self.expr(a)?; self.expr(b)?;
+                // two numbers (a constant is one) are one number: `Limits.N + 1` is the literal, to the loop bounds and every analysis
+                if let (Expr::Int(x), Expr::Int(y)) = (&**a, &**b) {
+                    let v = match op.as_str() { "+" => x.checked_add(*y), "-" => x.checked_sub(*y), "*" => x.checked_mul(*y), _ => None };
+                    if let Some(v) = v { *e = Expr::Int(v); }
+                }
+            }
             Expr::Call(n, ..) if n.starts_with('.') => {
                 let Expr::Call(n, args, res) = e else { unreachable!() };
                 for a in args.iter_mut() { self.expr(a)?; }

@@ -1,0 +1,16 @@
+POST /unit/ann -> 201 {"slot":0,"hp":100}
+POST /unit/bo -> 201 {"slot":1,"hp":100}
+POST /hit/0/30 -> 200 {"hp":70,"dead":false}
+POST /hit/0/90 -> 200 {"hp":0,"dead":true}
+POST /hit/1/5 -> 200 {"hp":95,"dead":false}
+POST /tag/0/10 -> 200 {"sum":46}
+POST /tag/1/0 -> 200 {"sum":6}
+GET /key/119 -> 200 {"dir":1}
+GET /key/97 -> 200 {"dir":2}
+GET /key/115 -> 200 {"dir":3}
+GET /key/100 -> 200 {"dir":3}
+GET /key/7 -> 200 {"dir":0}
+GET /math -> 200 {"dbl":200,"mask":31,"big":397,"g":9.8,"half":4.9,"over":true}
+state <plain values> 0
+state world.units 61
+memory reserved=4096 committed=4096 live=61

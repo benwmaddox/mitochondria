@@ -323,6 +323,12 @@ declared with an enum type is written as the value's name. `Op.Plus` is its inte
 Op.Out => { } 0..9 => { } else => { } }` tests constants, lists and ranges in order, without fall-through; on an enum every value
 must be handled or an `else` given, and no value may be covered twice. It runs as an `if` chain (clang turns it into a jump table).
 
+**Const groups.** `const Limits { MAX_HP: i64 = 100; MAX_NAME = 16; }` names constants, read as `Limits.MAX_HP`; a value may use earlier constants and
+integer arithmetic (folded when read, an overflow or a name that is not a constant is an error naming the constant), floats need a type (`G: f64 = 9.8`). They are
+not enums: an enum is a type (a field of it is checked, `match` must cover it, its values differ), a group is only numbers, floats allowed, duplicates allowed. Groups share
+the enum machinery in the binder: `Limits.MAX_HP` is replaced by its literal before any analysis, so a loop over `0..Limits.MAX_NAME - 1`, an index and a range are bounded exactly as
+with the number written (and a sum of two numbers is folded the same way). Layout reads the groups first, so `in 0..Limits.MAX_HP` and sizes take them; endpoint input ranges do not yet.
+
 **Debugging.** `log(a, b, ...)` writes its values (formatted as `+` would, separated by spaces) on one line of the server's
 standard error, with the line it was called from (`log: line 12: n is 5`); it is not part of the answer.
 

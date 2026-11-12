@@ -1239,7 +1239,7 @@ static int h_lit(Ctx *c, const char *p, u32 n, Txt *out) { Mito *m = M_(c); T t;
 static int h_fail(Ctx *c, int code, const char *p, u32 n) { Mito *m = M_(c); err(m, E_FAIL, code); a_put(&m->emsg, p, n); return -1; }
 static int h_dead(Ctx *c) { return err(M_(c), E_DEAD, 404); }
 static int h_col_txt(Ctx *c, u32 cid, u32 idx, u32 ci, Txt *out) { Mito *m = M_(c); T t; if (col_txt(m, cid, idx, ci, &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
-static int h_plain_txt(Ctx *c, u32 off, Txt *out) { Mito *m = M_(c); T t; if (t_push(m, m->mem.base + off + 4, rd(&m->mem, off, 4), &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
+static int h_plain_txt(Ctx *c, u64 off, Txt *out) { Mito *m = M_(c); T t; if (t_push(m, m->mem.base + off + 4, rd(&m->mem, off, 4), &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
 
 static int num(const Val *v, double *f) { if (v->tag == 1) { *f = (double)v->i; return 1; } if (v->tag == 2) { *f = v->f; return 1; } return 0; }
 static int bytes_cmp(const u8 *a, u64 an, const u8 *b, u64 bn) { u64 n = an < bn ? an : bn; for (u64 i = 0; i < n; i++) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1; return an < bn ? -1 : an > bn ? 1 : 0; }
@@ -1412,7 +1412,7 @@ static int h_move_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 to, i64 count
 static int h_store(Ctx *c, u32 cid, u32 idx, u32 ci, const Val *v) { RD_ANY(M_(c)); return store_col(M_(c), cid, idx, ci, -1, v); }
 static int h_store_elem(Ctx *c, u32 cid, u32 idx, u32 ci, i64 k, const Val *v) { RD_ANY(M_(c)); return store_col(M_(c), cid, idx, ci, k, v); }
 /* A plain value at `off`: code 1..11 a scalar, 20 a string<cap>, 30 a reference to top-level pool `cap`. */
-static int h_store_plain(Ctx *c, u32 off, u32 code, u32 cap, const Val *v) { RD_AT(M_(c), off, 4);
+static int h_store_plain(Ctx *c, u64 off, u32 code, u32 cap, const Val *v) { RD_AT(M_(c), off, 4);
     Mito *m = M_(c);
     if (v->tag == 4) { if (code != 20 && code != 21) return bad_type(m); if (code == 21 && not_ascii(m, t_ptr(m, (T){ v->a, v->b }), v->b)) return -1; return store_bytes_at(m, off, off + 4, cap, t_ptr(m, (T){ v->a, v->b }), v->b); }
     if (v->tag != 1 && v->tag != 2 && v->tag != 3) return fail(m, 500, "cannot store this value in state");

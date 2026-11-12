@@ -504,6 +504,40 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Build a command-line program (a test helper); returns its directory and executable.
+    fn cli_build(src: &str, tag: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        if super::clang().is_none() { return None; }
+        let (st, code) = crate::source::load(src).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap_or_else(|e| panic!("{}", e));
+        let dir = std::env::temp_dir().join(format!("mito-cli-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(format!("cli{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O0"]).unwrap();
+        Some((dir, exe))
+    }
+
+    /// Run a built command-line program: (exit code, stdout, stderr).
+    fn cli_run(exe: &std::path::Path, args: &[&str], stdin: &str) -> (i32, String, String) {
+        use std::io::Write;
+        let mut c = std::process::Command::new(exe).args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        c.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let o = c.wait_with_output().unwrap();
+        (o.status.code().unwrap(), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+    }
+
+    /// A text field declared with the largest size (4 GiB - 1) puts the fields after it beyond 4 GiB into the state: they must work (the plain-state
+    /// handlers take 64-bit offsets).
+    #[test]
+    fn fields_after_a_four_gib_field_work() {
+        let src = "struct J { a: utf8<4294967295>; n: i64; err: utf8<200>; }\nstate j: J;\n@main\nfn main(x: utf8<1..20> from arg(0)) -> Response<text> {\n    j.n = 7;\n    j.err = \"boom\";\n    if x == \"s\" { return status(400, j.err); }\n    j.a += j.err;\n    j.a += str(j.n);\n    return ok(j.a);\n}\n";
+        let Some((dir, exe)) = cli_build(src, "big") else { return };
+        assert_eq!(cli_run(&exe, &["s"], ""), (1, "".into(), "boom\n".into()));
+        assert_eq!(cli_run(&exe, &["t"], ""), (0, "boom7".into(), "".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A command-line program (`@main`): arguments, flags and stdin are its inputs, its answer goes to stdout, an answer of 400 or more to stderr with exit code 1.
     #[test]
     fn a_main_program_is_a_command_line_tool() {

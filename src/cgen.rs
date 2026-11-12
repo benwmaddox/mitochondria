@@ -36,11 +36,11 @@ struct H {
     int (*fail)(Ctx *, int, const char *, u32);                /* fail the request with a status and message */
     int (*dead)(Ctx *);                                        /* fail: a reference that is no longer live was used */
     int (*col_txt)(Ctx *, u32, u32, u32, Txt *);               /* copy a string column of an item into the text area */
-    int (*plain_txt)(Ctx *, u32, Txt *);                       /* copy a plain (record-style) string at an offset into the text area */
+    int (*plain_txt)(Ctx *, u64, Txt *);                       /* copy a plain (record-style) string at an offset into the text area */
     int (*binop)(Ctx *, int, const Val *, const Val *, Val *); /* an operator (OPS order) on values of run-time kind */
     int (*truthy)(Ctx *, const Val *, int *);                  /* is a value true (bool), or an error for other kinds */
     int (*store)(Ctx *, u32, u32, u32, const Val *);           /* journaled write of column (coll, idx, col) */
-    int (*store_plain)(Ctx *, u32, u32, u32, const Val *);     /* journaled write of a plain value: offset, kind, capacity */
+    int (*store_plain)(Ctx *, u64, u32, u32, const Val *);     /* journaled write of a plain value: offset, kind, capacity */
     int (*alloc)(Ctx *, u32, u32, int, u32 *);                 /* add an item to instance `inst` of `coll`; try: u32 max when full */
     int (*free_)(Ctx *, u32, u32);                             /* free a pool item when the request succeeds */
     int (*fwd_begin)(Ctx *, const char *, u32);                /* start a forward to worker kind `name` */
@@ -3109,9 +3109,9 @@ impl<'p> G<'p> {
                         self.field_store_seen(off, stored);
                         let esz = self.prog.plain_size(&e).0;
                         self.skip_save = covered || self.unlogged_at(off) || self.presaved(off, n as usize * esz as usize);
-                        if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap), true, off % esz as usize == 0)? { self.skip_save = false; return Ok(()); }
+                        if self.scalar_store(code, format!("{}ULL + (u64)({}) * {}ULL", off, k, esz), &v, &format!("c->h->store_plain(c, (u64)({} + {} * {}), {}, {}, &@VAL)", off, k, esz, code, cap), true, off % esz as usize == 0)? { self.skip_save = false; return Ok(()); }
                         let vv = self.val(v)?;
-                        self.call(&format!("c->h->store_plain(c, (u32)({} + {} * {}), {}, {}, &{})", off, k, esz, code, cap, vv));
+                        self.call(&format!("c->h->store_plain(c, (u64)({} + {} * {}), {}, {}, &{})", off, k, esz, code, cap, vv));
                         self.skip_save = false;
                     }
                     CV::Coll(c, inst) => {

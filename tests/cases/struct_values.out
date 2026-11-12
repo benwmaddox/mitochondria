@@ -1,0 +1,28 @@
+GET /state -> 200 {"px":0,"py":0,"pz":0,"n":0,"ln":0,"h0":0,"h1":0,"name":"","lname":"","bx":0,"vx":0,"mass":0,"k":0,"lim":0,"tot":0}
+POST /lit -> 200 {"ax":1,"ay":2,"az":3,"bz":0,"cx":1,"cy":5,"cz":6,"len2":62,"sx":1}
+POST /copy -> 200 {"lx":99,"sx":1,"lx2":99,"sy":7,"ly":2}
+POST /assign -> 200 {"ax":20,"ay":10,"bx":11,"by":20,"px":10,"py":20}
+POST /body -> 200 {"px":11,"vx":11,"mass":2.5,"lpx":1000}
+POST /gauge/40 -> 200 {"n":40,"h0":41,"name":"abc"}
+POST /gauge/101 -> 400 {"error":"`n` must be in 0..100","line":67}
+POST /gauge/-1 -> 400 {"error":"`n` must be in 0..100","line":67}
+POST /litrange/50 -> 200 {"n":50}
+POST /litrange/100 -> 200 {"n":100}
+POST /litrange/101 -> 400 {"error":"`n` must be in 0..100","line":75}
+POST /text -> 200 {"copy":"abc","now":"zz","ok":true}
+POST /view -> 200 {"lx":25,"sx":10,"l2":2393,"sx2":110,"h0":46,"wn":40}
+POST /loop/0 -> 200 {"sum":0,"last":0,"big":0}
+POST /loop/5 -> 200 {"sum":25,"last":29,"big":3}
+POST /rec/3/10 -> 200 {"k":3,"lim":10}
+GET /at -> 200 {"v":0}
+POST /rec/100/10 -> 200 {"k":100,"lim":10}
+GET /at -> 400 {"error":"index 100 out of range (fixed size 8)","line":129}
+POST /rec/1/51 -> 400 {"error":"`lim` must be in 0..50","line":123}
+POST /failok/10 -> 200 {"n":10}
+POST /failok/70 -> 409 {"error":"too big","line":156}
+GET /state -> 200 {"px":110,"py":120,"pz":100,"n":70,"ln":10,"h0":41,"h1":0,"name":"u","lname":"l","bx":11,"vx":11,"mass":2.5,"k":100,"lim":10,"tot":0}
+POST /fail/20 -> 400 {"error":"`n` must be in 0..100","line":142}
+GET /state -> 200 {"px":110,"py":120,"pz":100,"n":20,"ln":10,"h0":41,"h1":0,"name":"u","lname":"l","bx":11,"vx":11,"mass":2.5,"k":100,"lim":10,"tot":0}
+GET /peek -> 200 {"x":220,"l2":88401}
+state <plain values> 384
+memory reserved=20480 committed=20480 live=16768

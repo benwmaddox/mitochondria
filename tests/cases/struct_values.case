@@ -1,0 +1,195 @@
+// struct values, step 1: a struct local (`let v = world.pos;`, `var v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };`) is a copy in the request's scratch area; `=` copies whole structs; ranges, text, arrays and nested structs come along; a local can be passed as a view
+--- program
+struct Vec3 { x: f64; y: f64; z: f64; }
+struct Gauge { n: i64 in 0..100; hist: i64[4]; name: string<8>; }
+struct Body { pos: Vec3; vel: Vec3; mass: f64; }
+struct Rec { k: i64; lim: i64 in 0..50; }
+struct World { pos: Vec3; g: Gauge; lg: Gauge logged; b: Body; r: Rec; xs: i64[8]; tot: i64; }
+state world: World;
+
+fn len2(self: Vec3) -> f64 { return self.x * self.x + self.y * self.y + self.z * self.z; }
+fn scale(self: Vec3, d: f64) { self.x *= d; self.y *= d; self.z *= d; }
+fn bump(p: Vec3, d: f64) { p.x += d; p.y += d; p.z += d; }
+fn walk(p: Vec3, n: i64) { if n > 0 { p.x += 1.0; walk(p, n - 1); } }
+fn shift_hist(g: Gauge, d: i64) { g.hist[0] += d; g.n += d; }
+
+@get("/state")
+fn state() -> Response<{ px: f64, py: f64, pz: f64, n: i64, ln: i64, h0: i64, h1: i64, name: string, lname: string, bx: f64, vx: f64, mass: f64, k: i64, lim: i64, tot: i64 }> {
+    return ok({ px: world.pos.x, py: world.pos.y, pz: world.pos.z, n: world.g.n, ln: world.lg.n, h0: world.g.hist[0], h1: world.g.hist[1], name: world.g.name, lname: world.lg.name,
+        bx: world.b.pos.x, vx: world.b.vel.x, mass: world.b.mass, k: world.r.k, lim: world.r.lim, tot: world.tot });
+}
+// literals: every field named, `{}` is all zero, `..base` copies and changes some; the local is a copy, so writing it leaves the state alone
+@post("/lit")
+fn lit() -> Response<{ ax: f64, ay: f64, az: f64, bz: f64, cx: f64, cy: f64, cz: f64, len2: f64, sx: f64 }> {
+    let a = Vec3 { z: 3.0, x: 1.0, y: 2.0 };
+    let b = Vec3 {};
+    var c = Vec3 { ..a, y: 5.0 };
+    c.z = c.z * 2.0;
+    world.pos = a;
+    return ok({ ax: a.x, ay: a.y, az: a.z, bz: b.z, cx: c.x, cy: c.y, cz: c.z, len2: c.len2(), sx: world.pos.x });
+}
+// a copy is independent of its source in both directions
+@post("/copy")
+fn copy() -> Response<{ lx: f64, sx: f64, lx2: f64, sy: f64, ly: f64 }> {
+    var l = world.pos;
+    l.x = 99.0;
+    let lx = l.x;
+    let sx = world.pos.x;
+    world.pos.y = 7.0;
+    return ok({ lx: lx, sx: sx, lx2: l.x, sy: world.pos.y, ly: l.y });
+}
+// `=` between locals, into state, and from state; the same place on both sides; a swap through a literal reads the old values
+@post("/assign")
+fn assign() -> Response<{ ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64 }> {
+    var a = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    var b = Vec3 { x: 10.0, y: 20.0, z: 30.0 };
+    a = b;
+    b.x = 11.0;
+    a = Vec3 { x: a.y, y: a.x, z: a.z };
+    a = a;
+    world.pos = a;
+    world.pos = world.pos;
+    world.pos = Vec3 { x: world.pos.y, y: world.pos.x, z: 0.0 };
+    return ok({ ax: a.x, ay: a.y, bx: b.x, by: b.y, px: world.pos.x, py: world.pos.y });
+}
+// nested structs: a literal inside a literal, a copy of the whole, writes to the local's nested fields
+@post("/body")
+fn body() -> Response<{ px: f64, vx: f64, mass: f64, lpx: f64 }> {
+    var bd = Body { pos: Vec3 { x: 1.0, y: 2.0, z: 3.0 }, vel: world.pos, mass: 2.5 };
+    bd.pos.x += bd.vel.x;
+    bd.vel = bd.pos;
+    world.b = bd;
+    bd.pos.x = 1000.0;
+    return ok({ px: world.b.pos.x, vx: world.b.vel.x, mass: world.b.mass, lpx: bd.pos.x });
+}
+// a range-declared field keeps its check in a copy, a literal and a field store; text and arrays inside a value are copied whole
+@post("/gauge/{n}")
+fn gauge(n: i64) -> Response<{ n: i64, h0: i64, name: string }> {
+    var g = world.g;
+    g.n = n;
+    g.hist[0] = n + 1;
+    g.name = "abc";
+    world.g = g;
+    return ok({ n: world.g.n, h0: world.g.hist[0], name: world.g.name });
+}
+@post("/litrange/{n}")
+fn litrange(n: i64) -> Response<{ n: i64 }> {
+    let g = Gauge { ..world.g, n: n };
+    return ok({ n: g.n });
+}
+@post("/text")
+fn text() -> Response<{ copy: string, now: string, ok: bool }> {
+    let g = world.g;
+    world.g.name = "zz";
+    let c = Gauge { ..g, name: "new" };
+    return ok({ copy: g.name, now: world.g.name, ok: c.name == "new" });
+}
+// a local passes as a view (an ordinary struct argument and `self`): writes through it change the local, not the state
+@post("/view")
+fn view() -> Response<{ lx: f64, sx: f64, l2: f64, sx2: f64, h0: i64, wn: i64 }> {
+    var l = world.pos;
+    bump(l, 1.0);
+    l.scale(2.0);
+    walk(l, 3);
+    let lx = l.x;
+    let sx = world.pos.x;
+    bump(world.pos, 100.0);
+    var g = world.g;
+    shift_hist(g, 5);
+    return ok({ lx: lx, sx: sx, l2: l.len2(), sx2: world.pos.x, h0: g.hist[0], wn: world.g.n });
+}
+// locals in loops and branches; the same slot is reused by blocks that do not overlap
+@post("/loop/{n}")
+fn looped(n: i64 in 0..20) -> Response<{ sum: f64, last: f64, big: i64 }> {
+    var acc = Vec3 {};
+    var big = 0;
+    for var i = 0; i < n; i += 1 {
+        let step = Vec3 { x: 1.0 + i, y: 2.0, z: 0.5 };
+        acc.x += step.x;
+        acc.y += step.y;
+        if i % 2 == 0 {
+            let t = Vec3 { ..step, z: 9.0 };
+            acc.z += t.z;
+            big += 1;
+        } else {
+            var u = step;
+            u.z = 1.0;
+            acc.z += u.z;
+        }
+    }
+    return ok({ sum: acc.x + acc.y, last: acc.z, big: big });
+}
+// whole-program ranges: `world.r.k` is stored only through a literal's copy below, so an index by it must stay tested
+@post("/rec/{k}/{lim}")
+fn rec(k: i64, lim: i64) -> Response<{ k: i64, lim: i64 }> {
+    let r = Rec { k: k, lim: lim };
+    world.r = r;
+    return ok({ k: world.r.k, lim: world.r.lim });
+}
+@get("/at")
+fn at() -> Response<{ v: i64 }> {
+    return ok({ v: world.xs[world.r.k] });
+}
+// failure undoes a copy into logged state and leaves a copy into unlogged state
+@post("/fail/{n}")
+fn fail_after(n: i64) -> Response<{ n: i64 }> {
+    var g = world.g;
+    g.n = n;
+    g.name = "u";
+    world.g = g;
+    var l = world.lg;
+    l.n = n;
+    l.name = "l";
+    world.lg = l;
+    l.n = 1000;
+    world.lg = l;
+    return ok({ n: world.lg.n });
+}
+@post("/failok/{n}")
+fn fail_ok(n: i64) -> Response<{ n: i64 }> {
+    var g = world.g;
+    g.n = n;
+    g.name = "u";
+    world.g = g;
+    var l = world.lg;
+    l.n = n;
+    l.name = "l";
+    world.lg = l;
+    if n > 60 { fail 409 "too big"; }
+    return ok({ n: world.lg.n });
+}
+// a GET that only builds locals from state
+@get("/peek")
+fn peek() -> Response<{ x: f64, l2: f64 }> {
+    var v = world.pos;
+    v.scale(2.0);
+    let w = Vec3 { ..v, y: 1.0 };
+    return ok({ x: w.x, l2: w.len2() });
+}
+--- requests
+GET /state
+POST /lit
+POST /copy
+POST /assign
+POST /body
+POST /gauge/40
+POST /gauge/101
+POST /gauge/-1
+POST /litrange/50
+POST /litrange/100
+POST /litrange/101
+POST /text
+POST /view
+POST /loop/0
+POST /loop/5
+POST /rec/3/10
+GET /at
+POST /rec/100/10
+GET /at
+POST /rec/1/51
+POST /failok/10
+POST /failok/70
+GET /state
+POST /fail/20
+GET /state
+GET /peek

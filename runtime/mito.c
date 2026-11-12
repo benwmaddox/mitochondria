@@ -510,7 +510,7 @@ static void coll_ranges_deep(Mem *m, u32 c, RangeFn f, void *x) { coll_ranges(m,
 static void sum_range(Mem *m, u64 a, u64 b, void *x) { (void)m; *(u64 *)x += b - a; }
 static void mark_range(Mem *m, u64 a, u64 b, void *x) { (void)x; if (b > a) for (u64 p = a / PAGE; p <= (b - 1) / PAGE; p++) m->livepg[p] = 1; }
 static u64 coll_live(Mem *m, u32 c) { u64 t = 0; coll_ranges(m, c, sum_range, &t); return t; }
-static u64 live_total(Mem *m) { u64 t = m->prog->plain_end; for (u32 c = 0; c < m->prog->ncolls; c++) t += coll_live(m, c); return t; }
+static u64 live_total(Mem *m) { u64 t = m->prog->plain_end + m->prog->scr_size; for (u32 c = 0; c < m->prog->ncolls; c++) t += coll_live(m, c); return t; }
 static u64 coll_committed(Mem *m, u32 c) { const MitoColl *k = coll(m, c); u64 n = 0; for (u64 p = k->start / PAGE; p < up(k->end, PAGE) / PAGE; p++) n += m->committed[p]; return n * PAGE; }
 static u64 release_dead(Mem *m, u64 lo, u64 hi) {
     u64 freed = 0, p = lo;
@@ -528,6 +528,7 @@ static u64 release_dead(Mem *m, u64 lo, u64 hi) {
 static u64 trim_all(Mem *m) {
     memset(m->livepg, 0, m->npages);
     mark_range(m, 0, m->prog->plain_end, 0);
+    mark_range(m, m->prog->scr_off, m->prog->scr_off + m->prog->scr_size, 0); /* struct values' scratch area: always live */
     for (u32 c = 0; c < m->prog->ncolls; c++) coll_ranges(m, c, mark_range, 0);
     return release_dead(m, 0, m->npages);
 }
@@ -685,7 +686,7 @@ static Val v_item(u32 c, u32 i) { Val v = { 5, c, i, 0, 0 }; return v; }
 static Mito *M_(Ctx *c) { return (Mito *)c->run; }
 /* A reader changes only its own request struct: anything else stops the request (it runs again alone, on the primary instance). */
 static int rd_writes(Mito *m) { m->wants_write = 1; err(m, E_WRITES, 503); a_str(&m->emsg, "a reader cannot change the state"); return -1; }
-static int in_request(u64 a, u64 n) { return mito_prog.req_size && a >= mito_prog.req_off && a + n <= mito_prog.req_off + mito_prog.req_size; }
+static int in_request(u64 a, u64 n) { return (mito_prog.req_size && a >= mito_prog.req_off && a + n <= mito_prog.req_off + mito_prog.req_size) || (mito_prog.scr_size && a >= mito_prog.scr_off && a + n <= mito_prog.scr_off + mito_prog.scr_size); }
 #define RD_ANY(m) do { if (UNLIKELY((m)->reader)) return rd_writes(m); } while (0)
 #define RD_AT(m, a, n) do { if (UNLIKELY((m)->reader) && !in_request((a), (n))) return rd_writes(m); } while (0)
 
@@ -2839,6 +2840,7 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
         mem->all = 1;
     }
     ensure(mem, 0, pg->plain_end);
+    if (pg->scr_size) ensure(mem, pg->scr_off, pg->scr_off + pg->scr_size);
     for (u32 c = 0; c < pg->ncolls; c++) { const MitoColl *k = &pg->colls[c]; if (k->parent < 0) ensure(mem, k->hdr, k->hdr + hdr_fields(k) * 4); }
     /* Unlogged bytes: their lines are marked saved once, here, and never journaled, so no store, add or helper saves them and a rollback
        leaves them as written. The undo log clears the mark only of lines it saved, so these stay marked. */
@@ -2874,6 +2876,7 @@ MITO_API void *MITO(reader)(void *mp_, u32 k, char *why, u32 cap) {
     mem->base = (u8 *)os_map_shared_ro(p->shared_fd, mem->reserved);
     if (!mem->base) return 0;
     if (mito_prog.req_size && !os_map_private_at(mem->base + mito_prog.req_off, mito_prog.req_size)) return 0;
+    if (mito_prog.scr_size && !os_map_private_at(mem->base + mito_prog.scr_off, mito_prog.scr_size)) return 0; /* struct values' scratch: its own too */
     /* its own line map, all clear (every write outside its request struct reaches save_line, which stops the request) and no undo log */
     mem->dirty = (u8 *)os_alloc(up(mem->npages * (PAGE / 64 / 8), PAGE));
     if (!mem->dirty) return 0;

@@ -4963,6 +4963,47 @@ impl<'p> G<'p> {
                 _ => {}
             }
         }
+        // `byte_at(t, i)`: the byte at i, or -1 past either end, read in line (as the runtime's builtin 58 does; no call, no copy of a field)
+        if bi == B::ByteAt {
+            if let [t @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)), CV::Int(k)] = a.as_slice() {
+                let (t, k) = (t.clone(), k.clone());
+                let iv = self.interval(&k);
+                let k = self.hold_int(k);
+                let r = match t {
+                    CV::Lit(s) => {
+                        let off = intern_lit(s.as_bytes());
+                        match iv.or_else(|| self.interval(&k)) {
+                            // the range analysis proves the index inside the literal: no test
+                            Some((lo, hi)) if lo >= 0 && hi < s.len() as i64 => format!("(i64)TX_({}ULL + (u64)({}))", off, k),
+                            _ => format!("((u64)({k}) < {}ULL ? (i64)TX_({}ULL + (u64)({k})) : -1LL)", s.len(), off),
+                        }
+                    }
+                    CV::Txt(x) => {
+                        // a missing text is an error, as the builtin's (the test is the same for every byte, so it leaves the loop)
+                        self.line(&format!("if (UNLIKELY(!{x}.present)) FAIL(500, \"expected a string argument\", 26);"));
+                        format!("((u64)({k}) < (u64){x}.len ? (i64)TX_({x}.off + (u64)({k})) : -1LL)")
+                    }
+                    CV::StateStr(c, idx, ci) => {
+                        let lenoff = self.prog.colls[c].cols[ci].off;
+                        let bytes = &self.prog.colls[c].cols[ci + 1];
+                        let CKind::StrBytes(m) = bytes.kind else { return no("string column layout") };
+                        let boff = bytes.off;
+                        format!("((u64)({k}) < (u64)LD_U32({lenoff}, {idx}) ? (i64)LD_U8({boff}, (i64)({idx}) * {m} + {k}) : -1LL)")
+                    }
+                    CV::PlainStr(off) => {
+                        let len = self.str_lens.get(&off).cloned().unwrap_or_else(|| format!("(i64)LD_U32({}, 0)", off));
+                        format!("((u64)({k}) < (u64)({len}) ? (i64)LD_U8({}, {k}) : -1LL)", off + 4)
+                    }
+                    CV::Sub(base, from, count) => {
+                        let at = self.sub_bytes_at(&base, &format!("{} + {}", from, k));
+                        format!("((u64)({k}) < (u64)({count}) ? (i64)LD_U8({at}, 0) : -1LL)")
+                    }
+                    _ => unreachable!(),
+                };
+                let r = self.hold_int(r);
+                return Ok(CV::Int(r));
+            }
+        }
         // `int` of a number: an integer as it is; a float truncated in line, as the runtime's builtin does (NaN is 0, beyond i64 the nearest end)
         if bi == B::Int {
             match a.first() {
@@ -6306,6 +6347,32 @@ state app: A;
         assert!(!gen_of(&format!("{}{}{}", head, w, rb)).src.contains("c->h->elem("), "every store to big.v is 3: inside buf[8]");
         assert!(!gen_of(&format!("{}{}{}{}", head, w, ws, rb)).src.contains("c->h->elem("), "an unbounded store to small.v does not widen big.v");
         assert!(gen_of(&format!("{}{}{}{}", head, w, ws, rs)).src.contains("c->h->elem("), "small.v is unbounded: its index is tested");
+    }
+
+    /// `byte_at` is read in line (the byte, or -1 past either end): no runtime call for any kind of text it takes, and no test where the
+    /// range analysis proves the index inside a literal.
+    #[test]
+    fn byte_at_is_read_in_line() {
+        let gen = |body: &str| {
+            let src = format!("struct A {{ s: string<16>; n: i64 in 0..2; }}\nstate app: A;\n@post(\"/t\") fn t(x: utf8<16>) -> Response<{{ v: i64 }}> {{ {} }}\n", body);
+            let (state, api) = crate::source::load(&src).unwrap();
+            let prog = Program::parse(&state).unwrap();
+            let mut api = crate::lang::parse(&api).unwrap();
+            crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+            let g = generate(&prog, &api);
+            assert!(g.notes.is_empty(), "{:?}", g.notes);
+            g.src[g.src.find("int ep0(Ctx").unwrap()..].to_string()
+        };
+        let looped = gen("var t = 0; var i = 0; while i < len(x) { t += byte_at(x, i); i += 1; } return ok({ v: t });");
+        assert!(!looped.contains("builtin(c, 58"), "an input text's byte is a load: {}", looped);
+        assert!(looped.contains("TX_("), "{}", looped);
+        let kinds = gen("return ok({ v: byte_at(app.s, 3) + byte_at(substr(app.s, 1, 2), 1) + byte_at(substr(x, 1, 2), 0) });");
+        assert!(!kinds.contains("builtin(c, 58"), "a field's and a window's bytes are loads: {}", kinds);
+        // inside the literal (the field `n` is 0..2 and "abc" has 3 bytes): no length test; one that may be outside keeps it
+        let proven = gen("return ok({ v: byte_at(\"abc\", app.n) });");
+        assert!(proven.contains("TX_(") && !proven.contains("< 3ULL"), "{}", proven);
+        let open = gen("return ok({ v: byte_at(\"abc\", app.n + 5) });");
+        assert!(open.contains("< 3ULL"), "{}", open);
     }
 
     /// How many overflow-checked operations (`ADD`, `SUB`, `MUL`) an endpoint's generated code keeps, for a body written in a program with one range-typed field and one free field.

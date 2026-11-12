@@ -1,0 +1,67 @@
+// byte_at(t, i) is read in line, not through a runtime call: the byte, or -1 past either end (an index below 0 or at the length
+// or beyond), for every kind of text it takes: a literal, an input text, a plain text field, a piece (`substr`) of an input and of a
+// field, and a text column of a pool's item
+--- program
+struct Note { text: string<8>; }
+struct App { name: string<16>; notes: pool<Note, 4>; n: i64; }
+state app: App;
+
+@post("/set/{s}")
+fn set(s: utf8<16>) -> Response<{ len: i64 }> {
+    app.name = s;
+    let it = app.notes.add();
+    it.text = s;
+    return ok({ len: len(app.name) });
+}
+@post("/lit/{i}")
+fn lit(i: i64) -> Response<{ a: i64, b: i64, c: i64 }> {
+    return ok({ a: byte_at("abc", i), b: byte_at("abc", 2), c: byte_at("", i) });
+}
+@post("/input/{i}")
+fn input(i: i64, s: utf8<16>) -> Response<{ b: i64, sub: i64, sub0: i64 }> {
+    return ok({ b: byte_at(s, i), sub: byte_at(substr(s, 1, 2), i), sub0: byte_at(substr(s, 0, 0), i) });
+}
+@post("/field/{i}")
+fn field(i: i64) -> Response<{ b: i64, sub: i64 }> {
+    return ok({ b: byte_at(app.name, i), sub: byte_at(substr(app.name, 1, 2), i) });
+}
+@post("/col/{i}")
+fn col(i: i64) -> Response<{ b: i64, sub: i64 }> {
+    let it = app.notes[0];
+    let b = byte_at(it.text, i);
+    let sub = byte_at(substr(it.text, 1, 2), i);
+    return ok({ b: b, sub: sub });
+}
+@post("/sum")
+fn sum(s: utf8<16>) -> Response<{ sum: i64, count: i64 }> {
+    var total = 0;
+    var n = 0;
+    var i = 0;
+    while i < len(s) { total += byte_at(s, i); n += 1; i += 1; }
+    var j = 0 - 1;
+    while byte_at(s, j + 1) >= 0 { j += 1; }
+    return ok({ sum: total, count: j + 1 + n * 0 });
+}
+--- requests
+POST /set/hello
+POST /lit/0
+POST /lit/2
+POST /lit/3
+POST /lit/-1
+POST /lit/9223372036854775807
+POST /lit/-9223372036854775808
+POST /input/0 {"s": "xyz"}
+POST /input/2 {"s": "xyz"}
+POST /input/3 {"s": "xyz"}
+POST /input/-1 {"s": "xyz"}
+POST /input/1 {"s": ""}
+POST /field/0
+POST /field/4
+POST /field/5
+POST /field/-1
+POST /col/0
+POST /col/1
+POST /col/4
+POST /col/-3
+POST /sum {"s": "AB"}
+POST /sum {"s": ""}

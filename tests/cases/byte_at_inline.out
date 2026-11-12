@@ -1,0 +1,25 @@
+POST /set/hello -> 200 {"len":5}
+POST /lit/0 -> 200 {"a":97,"b":99,"c":-1}
+POST /lit/2 -> 200 {"a":99,"b":99,"c":-1}
+POST /lit/3 -> 200 {"a":-1,"b":99,"c":-1}
+POST /lit/-1 -> 200 {"a":-1,"b":99,"c":-1}
+POST /lit/9223372036854775807 -> 200 {"a":-1,"b":99,"c":-1}
+POST /lit/-9223372036854775808 -> 200 {"a":-1,"b":99,"c":-1}
+POST /input/0 -> 200 {"b":120,"sub":121,"sub0":-1}
+POST /input/2 -> 200 {"b":122,"sub":-1,"sub0":-1}
+POST /input/3 -> 200 {"b":-1,"sub":-1,"sub0":-1}
+POST /input/-1 -> 200 {"b":-1,"sub":-1,"sub0":-1}
+POST /input/1 -> 400 {"error":"substring out of range","line":18}
+POST /field/0 -> 200 {"b":104,"sub":101}
+POST /field/4 -> 200 {"b":111,"sub":-1}
+POST /field/5 -> 200 {"b":-1,"sub":-1}
+POST /field/-1 -> 200 {"b":-1,"sub":-1}
+POST /col/0 -> 200 {"b":104,"sub":101}
+POST /col/1 -> 200 {"b":101,"sub":108}
+POST /col/4 -> 200 {"b":111,"sub":-1}
+POST /col/-3 -> 200 {"b":-1,"sub":-1}
+POST /sum -> 200 {"sum":131,"count":2}
+POST /sum -> 200 {"sum":0,"count":0}
+state <plain values> 32
+state app.notes 33
+memory reserved=8192 committed=8192 live=65

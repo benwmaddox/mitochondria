@@ -1,0 +1,51 @@
+// A set of the integers 0 to N - 1, one bit each, eight to a byte. set, unset, flip and test are O(1) and the number of set bits is kept as they go, so count is O(1) too.
+// An index outside 0..N - 1 is a 400.
+module bitset<N: count>
+struct Head { ones: i64; }
+// what an instance holds
+state {
+    bytes: u8[(N + 7) / 8];
+    head: Head;
+}
+
+pub fn size() -> i64 { return N; }
+pub fn count() -> i64 { return self.head.ones; }
+fn check(bit: i64) {
+    if bit < 0 || bit >= N { fail 400 "bitset: index out of range"; }
+}
+pub fn test(bit: i64) -> bool {
+    self.check(bit);
+    return (self.bytes[bit / 8] >> (bit % 8)) & 1 == 1;
+}
+// Set a bit to 1; true if it was 0.
+pub fn set(bit: i64) -> bool {
+    self.check(bit);
+    let was = (self.bytes[bit / 8] >> (bit % 8)) & 1;
+    if was == 0 {
+        self.bytes[bit / 8] = self.bytes[bit / 8] | (1 << (bit % 8));
+        self.head.ones = self.head.ones + 1;
+    }
+    return was == 0;
+}
+// Set a bit to 0; true if it was 1.
+pub fn unset(bit: i64) -> bool {
+    self.check(bit);
+    let was = (self.bytes[bit / 8] >> (bit % 8)) & 1;
+    if was == 1 {
+        self.bytes[bit / 8] = self.bytes[bit / 8] & (255 ^ (1 << (bit % 8)));
+        self.head.ones = self.head.ones - 1;
+    }
+    return was == 1;
+}
+// Turn a bit over; its new value.
+pub fn flip(bit: i64) -> bool {
+    self.check(bit);
+    let was = self.test(bit);
+    if was { self.unset(bit); } else { self.set(bit); }
+    return !was;
+}
+// Set every bit to 0.
+pub fn clear_all() {
+    self.bytes.fill(0, (N + 7) / 8, 0);
+    self.head.ones = 0;
+}

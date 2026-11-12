@@ -1,0 +1,21 @@
+// A W by H grid of i64 cells, row by row, x across (0 to W - 1) and y down (0 to H - 1). Cells start at 0. in_bounds tests a position without failing;
+// get and set at a position outside the grid are a 400.
+module grid<W: count, H: count>
+// what an instance holds
+state {
+    cells: i64[W * H];
+}
+
+pub fn width() -> i64 { return W; }
+pub fn height() -> i64 { return H; }
+pub fn in_bounds(x: i64, y: i64) -> bool { return x >= 0 && x < W && y >= 0 && y < H; }
+pub fn get(x: i64, y: i64) -> i64 {
+    if x < 0 || x >= W || y < 0 || y >= H { fail 400 "grid: out of bounds"; }
+    return self.cells[y * W + x];
+}
+pub fn set(x: i64, y: i64, value: i64) {
+    if x < 0 || x >= W || y < 0 || y >= H { fail 400 "grid: out of bounds"; }
+    self.cells[y * W + x] = value;
+}
+// Set every cell.
+pub fn fill(value: i64) { self.cells.fill(0, W * H, value); }

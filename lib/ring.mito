@@ -1,0 +1,38 @@
+// A ring buffer of the last N items of struct T: push always succeeds and returns the new newest item for the caller to fill in; once N items are held a push reuses the
+// oldest item's slot, so the oldest is overwritten. Reuse keeps the old field values: set every field. Items are read by age: get(0) is the newest, get(1) the one before it, up to
+// get(count() - 1), the oldest; reading past the items held is a 404. The items live in a pool, in slot order of first use; an array of slot numbers keeps their order. Nothing moves.
+module ring<T: struct, N: count>
+struct Head { next: i64; size: i64; }
+// what an instance holds
+state {
+    items: pool<T, N> checked;
+    order: u32[N];
+    head: Head;
+}
+
+pub fn count() -> i64 { return self.head.size; }
+pub fn is_full() -> bool { return self.head.size >= N; }
+// Add an item as the newest (the oldest one's slot when full); fill in its fields.
+pub fn push() -> T {
+    if self.head.size < N {
+        let fresh = self.items.add();
+        self.order[self.head.next] = slot(fresh);
+        self.head.size = self.head.size + 1;
+    }
+    let item = self.items[self.order[self.head.next]];
+    self.head.next = (self.head.next + 1) % N;
+    return item;
+}
+// The item pushed age pushes ago (0 is the newest).
+pub fn get(age: i64) -> T {
+    if age < 0 || age >= self.head.size { fail 404 "ring: no such item"; }
+    return self.items[self.order[(self.head.next - 1 - age + 2 * N) % N]];
+}
+// Remove every item.
+pub fn clear() {
+    foreach pos in 0..N - 1 where pos < self.head.size {
+        self.items.remove(self.items[self.order[pos]]);
+    }
+    self.head.next = 0;
+    self.head.size = 0;
+}

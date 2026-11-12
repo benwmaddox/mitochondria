@@ -1,0 +1,47 @@
+// A first-in first-out queue of up to N items of struct T: push adds an item at the back and returns it for the caller to fill in (like bag's add), pop removes the item
+// at the front and returns it, peek returns it without removing. The items live in a pool; a circular array of slot numbers, with a front position and a count, keeps their
+// order, so nothing moves. Pushing onto a full queue is an ordinary error (507), popping or peeking an empty one is a 404. As with any pool, a popped item stays readable until
+// the end of the request, and its slot is reused only after that: a request that pops from a full queue cannot push back in the same request.
+module queue<T: struct, N: count>
+struct Head { front: i64; size: i64; }
+// what an instance holds
+state {
+    items: pool<T, N> checked;
+    order: u32[N];
+    head: Head;
+}
+
+pub fn count() -> i64 { return self.head.size; }
+pub fn room() -> i64 { return N - self.head.size; }
+pub fn is_empty() -> bool { return self.head.size == 0; }
+// Add an item at the back; fill in its fields.
+pub fn push() -> T {
+    if self.head.size >= N { fail 507 "queue: full"; }
+    let item = self.items.add();
+    self.order[(self.head.front + self.head.size) % N] = slot(item);
+    self.head.size = self.head.size + 1;
+    return item;
+}
+// The item at the front, left in place.
+pub fn peek() -> T {
+    if self.head.size == 0 { fail 404 "queue: empty"; }
+    return self.items[self.order[self.head.front]];
+}
+// Remove and return the item at the front.
+pub fn pop() -> T {
+    if self.head.size == 0 { fail 404 "queue: empty"; }
+    let item = self.items[self.order[self.head.front]];
+    self.items.remove(item);
+    self.head.front = (self.head.front + 1) % N;
+    self.head.size = self.head.size - 1;
+    return item;
+}
+// Remove every item.
+pub fn clear() {
+    foreach step in 0..N - 1 where self.head.size > 0 {
+        self.items.remove(self.items[self.order[self.head.front]]);
+        self.head.front = (self.head.front + 1) % N;
+        self.head.size = self.head.size - 1;
+    }
+    self.head.front = 0;
+}

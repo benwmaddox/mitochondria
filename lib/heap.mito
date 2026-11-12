@@ -1,0 +1,78 @@
+// A priority queue of up to N entries, each an i64 priority and an i64 payload; the smallest priority comes out first. A binary min-heap in two plain arrays:
+// the entry at position p has its children at 2p + 1 and 2p + 2, and a parent is never larger than its children, so the smallest is at position 0. push and pop_min take
+// O(log N) steps. Entries with equal priorities come out in no particular order. Pushing onto a full heap is an ordinary error (507); peeking or popping an empty one is a 404.
+// pop_min returns the payload: read peek_priority first when the priority is needed too.
+module heap<N: count>
+struct Head { size: i64; }
+// what an instance holds
+state {
+    priorities: i64[N];
+    payloads: i64[N];
+    head: Head;
+}
+
+pub fn count() -> i64 { return self.head.size; }
+pub fn room() -> i64 { return N - self.head.size; }
+// swap the entries at two positions
+fn swap(left: i64, right: i64) {
+    let priority = self.priorities[left];
+    let payload = self.payloads[left];
+    self.priorities[left] = self.priorities[right];
+    self.payloads[left] = self.payloads[right];
+    self.priorities[right] = priority;
+    self.payloads[right] = payload;
+}
+// Add an entry.
+pub fn push(priority: i64, payload: i64) {
+    if self.head.size >= N { fail 507 "heap: full"; }
+    var pos = self.head.size;
+    self.priorities[pos] = priority;
+    self.payloads[pos] = payload;
+    self.head.size = self.head.size + 1;
+    foreach step in 0..N while pos > 0 {
+        let parent = (pos - 1) / 2;
+        if self.priorities[parent] > self.priorities[pos] {
+            self.swap(parent, pos);
+            pos = parent;
+        } else {
+            pos = 0;
+        }
+    }
+}
+// The smallest priority, left in place.
+pub fn peek_priority() -> i64 {
+    if self.head.size == 0 { fail 404 "heap: empty"; }
+    return self.priorities[0];
+}
+// The payload of the entry with the smallest priority, left in place.
+pub fn peek() -> i64 {
+    if self.head.size == 0 { fail 404 "heap: empty"; }
+    return self.payloads[0];
+}
+// Remove the entry with the smallest priority; its payload.
+pub fn pop_min() -> i64 {
+    if self.head.size == 0 { fail 404 "heap: empty"; }
+    let payload = self.payloads[0];
+    let last = self.head.size - 1;
+    self.priorities[0] = self.priorities[last];
+    self.payloads[0] = self.payloads[last];
+    self.head.size = last;
+    var pos = 0;
+    var sifting = last > 1;
+    foreach step in 0..N while sifting {
+        let left = 2 * pos + 1;
+        let right = left + 1;
+        var smallest = pos;
+        if left < last && self.priorities[left] < self.priorities[smallest] { smallest = left; }
+        if right < last && self.priorities[right] < self.priorities[smallest] { smallest = right; }
+        if smallest == pos {
+            sifting = false;
+        } else {
+            self.swap(pos, smallest);
+            pos = smallest;
+        }
+    }
+    return payload;
+}
+// Remove every entry.
+pub fn clear() { self.head.size = 0; }

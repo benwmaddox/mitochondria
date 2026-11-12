@@ -1,0 +1,155 @@
+GET /count -> 200 {"count":0,"full":false}
+GET /get/0 -> 404 {"error":"ring: no such item","line":34}
+POST /push/1 -> 200 {"count":1}
+POST /push/2 -> 200 {"count":2}
+POST /push/3 -> 200 {"count":3}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+POST /push/4 -> 200 {"count":4}
+POST /clear -> 200 {"count":0}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+POST /push/5 -> 200 {"count":1}
+POST /push/6 -> 200 {"count":2}
+POST /push/7 -> 200 {"count":3}
+POST /push/8 -> 200 {"count":4}
+POST /push/9 -> 200 {"count":4}
+POST /push/10 -> 200 {"count":4}
+POST /push/11 -> 200 {"count":4}
+GET /count -> 200 {"count":4,"full":true}
+GET /get/0 -> 200 {"value":11,"label":"s11"}
+GET /get/1 -> 200 {"value":10,"label":"s10"}
+GET /get/2 -> 200 {"value":9,"label":"s9"}
+POST /push/12 -> 200 {"count":4}
+GET /get/2 -> 200 {"value":10,"label":"s10"}
+GET /get/1 -> 200 {"value":11,"label":"s11"}
+POST /push/13 -> 200 {"count":4}
+POST /push/14 -> 200 {"count":4}
+POST /push/15 -> 200 {"count":4}
+POST /push/16 -> 200 {"count":4}
+GET /get/0 -> 200 {"value":16,"label":"s16"}
+GET /get/0 -> 200 {"value":16,"label":"s16"}
+GET /count -> 200 {"count":4,"full":true}
+GET /get/0 -> 200 {"value":16,"label":"s16"}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+GET /get/1 -> 200 {"value":15,"label":"s15"}
+POST /clear -> 200 {"count":0}
+GET /count -> 200 {"count":0,"full":false}
+GET /get/1 -> 404 {"error":"ring: no such item","line":34}
+GET /get/0 -> 404 {"error":"ring: no such item","line":34}
+POST /push/17 -> 200 {"count":1}
+POST /push/18 -> 200 {"count":2}
+GET /get/3 -> 404 {"error":"ring: no such item","line":34}
+POST /push/19 -> 200 {"count":3}
+POST /push/20 -> 200 {"count":4}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+GET /count -> 200 {"count":4,"full":true}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+POST /push/21 -> 200 {"count":4}
+GET /get/1 -> 200 {"value":20,"label":"s20"}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+GET /get/2 -> 200 {"value":19,"label":"s19"}
+POST /push/22 -> 200 {"count":4}
+GET /get/1 -> 200 {"value":21,"label":"s21"}
+GET /get/4 -> 404 {"error":"ring: no such item","line":34}
+POST /clear -> 200 {"count":0}
+GET /count -> 200 {"count":0,"full":false}
+POST /push/23 -> 200 {"count":1}
+POST /push/24 -> 200 {"count":2}
+POST /push/25 -> 200 {"count":3}
+POST /push/26 -> 200 {"count":4}
+POST /push/27 -> 200 {"count":4}
+GET /get/3 -> 200 {"value":24,"label":"s24"}
+GET /get/2 -> 200 {"value":25,"label":"s25"}
+GET /count -> 200 {"count":4,"full":true}
+POST /push/28 -> 200 {"count":4}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+GET /get/2 -> 200 {"value":26,"label":"s26"}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+POST /push/29 -> 200 {"count":4}
+GET /count -> 200 {"count":4,"full":true}
+GET /get/4 -> 404 {"error":"ring: no such item","line":34}
+POST /push/30 -> 200 {"count":4}
+GET /get/4 -> 404 {"error":"ring: no such item","line":34}
+POST /push/31 -> 200 {"count":4}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+GET /get/0 -> 200 {"value":31,"label":"s31"}
+POST /clear -> 200 {"count":0}
+POST /push/32 -> 200 {"count":1}
+GET /get/2 -> 404 {"error":"ring: no such item","line":34}
+GET /get/0 -> 200 {"value":32,"label":"s32"}
+GET /get/3 -> 404 {"error":"ring: no such item","line":34}
+POST /clear -> 200 {"count":0}
+GET /get/1 -> 404 {"error":"ring: no such item","line":34}
+POST /push/33 -> 200 {"count":1}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+POST /push/34 -> 200 {"count":2}
+POST /clear -> 200 {"count":0}
+GET /get/3 -> 404 {"error":"ring: no such item","line":34}
+GET /get/0 -> 404 {"error":"ring: no such item","line":34}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+POST /push/35 -> 200 {"count":1}
+GET /count -> 200 {"count":1,"full":false}
+POST /push/36 -> 200 {"count":2}
+POST /push/37 -> 200 {"count":3}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+GET /get/1 -> 200 {"value":36,"label":"s36"}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+POST /push/38 -> 200 {"count":4}
+GET /count -> 200 {"count":4,"full":true}
+POST /push/39 -> 200 {"count":4}
+GET /get/3 -> 200 {"value":36,"label":"s36"}
+GET /get/3 -> 200 {"value":36,"label":"s36"}
+GET /get/3 -> 200 {"value":36,"label":"s36"}
+POST /push/40 -> 200 {"count":4}
+POST /push/41 -> 200 {"count":4}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+GET /get/0 -> 200 {"value":41,"label":"s41"}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+GET /get/0 -> 200 {"value":41,"label":"s41"}
+POST /push/42 -> 200 {"count":4}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+GET /get/1 -> 200 {"value":41,"label":"s41"}
+GET /get/3 -> 200 {"value":39,"label":"s39"}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+GET /get/3 -> 200 {"value":39,"label":"s39"}
+POST /push/43 -> 200 {"count":4}
+POST /push/44 -> 200 {"count":4}
+POST /push/45 -> 200 {"count":4}
+POST /push/46 -> 200 {"count":4}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+GET /get/3 -> 200 {"value":43,"label":"s43"}
+POST /clear -> 200 {"count":0}
+GET /get/0 -> 404 {"error":"ring: no such item","line":34}
+GET /get/2 -> 404 {"error":"ring: no such item","line":34}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+GET /get/0 -> 404 {"error":"ring: no such item","line":34}
+GET /get/1 -> 404 {"error":"ring: no such item","line":34}
+GET /count -> 200 {"count":0,"full":false}
+GET /count -> 200 {"count":0,"full":false}
+POST /push/47 -> 200 {"count":1}
+GET /get/2 -> 404 {"error":"ring: no such item","line":34}
+POST /push/48 -> 200 {"count":2}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+GET /get/2 -> 404 {"error":"ring: no such item","line":34}
+POST /push/49 -> 200 {"count":3}
+GET /get/5 -> 404 {"error":"ring: no such item","line":34}
+POST /push/50 -> 200 {"count":4}
+GET /get/4 -> 404 {"error":"ring: no such item","line":34}
+GET /get/1 -> 200 {"value":49,"label":"s49"}
+POST /push/51 -> 200 {"count":4}
+GET /count -> 200 {"count":4,"full":true}
+GET /count -> 200 {"count":4,"full":true}
+POST /push/52 -> 200 {"count":4}
+GET /count -> 200 {"count":4,"full":true}
+POST /push/53 -> 200 {"count":4}
+GET /get/4 -> 404 {"error":"ring: no such item","line":34}
+GET /get/0 -> 200 {"value":53,"label":"s53"}
+GET /get/3 -> 200 {"value":50,"label":"s50"}
+GET /get/2 -> 200 {"value":51,"label":"s51"}
+POST /push/54 -> 200 {"count":4}
+POST /push/55 -> 200 {"count":4}
+GET /get/-1 -> 404 {"error":"ring: no such item","line":34}
+state <plain values> 32
+state app.r.items 100
+memory reserved=8192 committed=8192 live=132

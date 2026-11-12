@@ -1,0 +1,76 @@
+// A hash set of up to N i64 keys. The same layout as lib/intmap.mito without values: separate chaining over plain arrays, a table of N bucket heads and, per key, its
+// chain link. Removing a key is an unlink onto a free list that the next add reuses at once. Entries are numbered by slot + 1; 0 is none. Adding a new key to a full
+// set is an ordinary error (507); adding a key already there does nothing.
+module set<N: count>
+struct Head { size: i64; used: i64; free: u32; }
+// what an instance holds
+state {
+    keys: i64[N];
+    links: u32[N];
+    heads: u32[N];
+    head: Head;
+}
+
+pub fn count() -> i64 { return self.head.size; }
+pub fn room() -> i64 { return N - self.head.size; }
+
+// the bucket of a key: its bits mixed a little so that keys differing in high bytes only still spread
+fn bucket_of(key: i64) -> i64 {
+    let mixed = (key % 4294967296 + 4294967296) % 4294967296;
+    return ((mixed ^ (mixed >> 15)) * 40503 + (mixed >> 7)) % N;
+}
+// the entry for key, 0 if there is none
+fn find(key: i64) -> i64 {
+    var cur = self.heads[self.bucket_of(key)];
+    var found = 0;
+    foreach step in 0..N while cur != 0 && found == 0 {
+        if self.keys[cur - 1] == key { found = cur; } else { cur = self.links[cur - 1]; }
+    }
+    return found;
+}
+pub fn has(key: i64) -> bool { return self.find(key) != 0; }
+// Add key; true if it was new.
+pub fn add(key: i64) -> bool {
+    if self.find(key) != 0 { return false; }
+    var entry = self.head.free;
+    if entry != 0 {
+        self.head.free = self.links[entry - 1];
+    } else {
+        if self.head.used >= N { fail 507 "set: full"; }
+        self.head.used = self.head.used + 1;
+        entry = self.head.used;
+    }
+    let bucket = self.bucket_of(key);
+    self.keys[entry - 1] = key;
+    self.links[entry - 1] = self.heads[bucket];
+    self.heads[bucket] = entry;
+    self.head.size = self.head.size + 1;
+    return true;
+}
+// Remove key; true if it was there.
+pub fn remove(key: i64) -> bool {
+    let bucket = self.bucket_of(key);
+    var cur = self.heads[bucket];
+    var prev = 0;
+    var done = false;
+    foreach step in 0..N while cur != 0 && !done {
+        if self.keys[cur - 1] == key {
+            if prev == 0 { self.heads[bucket] = self.links[cur - 1]; } else { self.links[prev - 1] = self.links[cur - 1]; }
+            self.links[cur - 1] = self.head.free;
+            self.head.free = cur;
+            self.head.size = self.head.size - 1;
+            done = true;
+        } else {
+            prev = cur;
+            cur = self.links[cur - 1];
+        }
+    }
+    return done;
+}
+// Remove every key.
+pub fn clear() {
+    self.heads.fill(0, N, 0);
+    self.head.size = 0;
+    self.head.used = 0;
+    self.head.free = 0;
+}

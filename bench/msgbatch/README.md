@@ -30,6 +30,19 @@ All three give the same checksum and the same counts (24 rejected, 64 skipped, 1
 
 Run: `cargo build --release` in `rust/`, `go build -o msgbatch.exe .` in `go/`, then `python -I run.py --rounds 5` (all three pinned to the same core, alternating rounds).
 
-## Goose
+## Goose (measured 2026-11-12, Linux/WSL2)
 
-[Goose](https://github.com/aardappel/goose) (a new memory-safe, heap-free systems language that compiles to C) is added as a fourth implementation in `goose/main.goose`. It was written from Goose's docs and has **not been compiled yet** (the compiler could not be run in the session that wrote it): expect syntax fixes. To measure it: install or build a Goose compiler, `goose build goose/main.goose -o goose/msgbatch`, then `run.py` picks it up and checks its checksum like the others.
+[Goose](https://github.com/aardappel/goose) (memory-safe, no heap, compiles to C) is the fourth implementation, `goose/main.goose`. Built from source in WSL (`cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build`, commit d5ae5bb, no extra libraries); the port compiled with only "redundant cast" warnings and gave the Rust checksum on the first try (the only changes: it now also prints the rejected/skipped/copied counts). Run with `GOOSE_EXE=~/goose-src/build/goose GOOSE_CC=clang python3 -I run.py` (`run.py` builds it with `goose build ... --cc $GOOSE_CC`; the generated C is always compiled `-O2` and Goose's own `-O2` inlining is the default; no `--debug`, so Goose's overflow and range checks are off and its bounds checks are on). `RUST_EXE` / `GO_EXE` point `run.py` at the Rust and Go binaries; on Linux it also reports peak resident memory.
+
+Linux results (WSL2 on this machine, one pinned core (BENCH_CPU=10) under `/home/ben/linuxbench/bench.lock`, 500,000 timed batches after 100,000 warmup, best of 5, all checksums equal, counts 24/64/168 equal). Rust and Mitochondria built as in the Windows section, Go with `go build`:
+
+| | time (Goose built by clang 18) | time (Goose built by gcc 13) | peak RSS |
+|---|---|---|---|
+| Rust | 1.063 s (1.00x) | 0.996 s (1.00x) | 1.7 MB |
+| Goose | 1.054 s (0.99x) | 1.717 s (1.72x) | 1.7 MB |
+| Mitochondria | 1.160 s (1.09x) | 1.112 s (1.12x) | 2.4 MB (a server: includes its HTTP layer) |
+| Go | 2.009 s (1.89x) | 1.946 s (1.95x) | 1.9 MB |
+
+(The two columns are two separate runs of all four; only Goose's C compiler differs.) Goose's default C compiler here is gcc, which does not vectorize the checksum loop at `-O2` as clang does; with `--cc clang` it matches Rust. Mitochondria on Linux is slower relative to Rust than in the Windows table above (1.09-1.12x, was 0.94x); not investigated.
+
+How idiomatic the port is: it follows the other ports (same generator, loop, one output `u8[>..]` builder reused, `append` of the frame slice, `clear()`) and uses Goose's slices, builders and `for b, i in out`; casts that Goose reports as redundant were left in. Differences that matter: Goose integer overflow is unchecked in release (Mitochondria always checks; Rust release wraps like Goose); Goose has no heap, its builders live on a data stack of 2 GB reserved address space, committed as used; the C compiler is outside Goose (gcc vs clang changes the result by 1.6x); bounds checks on the header reads are kept (`--bce-lines`), as in Rust. Memory is peak resident set sampled from `/proc` and all four are within noise of each other; the Mitochondria figure is a server process.

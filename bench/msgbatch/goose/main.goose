@@ -1,5 +1,5 @@
-// Message batch filter, Goose version (NOT YET COMPILED: written from the Goose docs on 2026-11-10, no goose binary could be run then). Same format, data and
-// checksum as ../main.mito, ../rust/src/main.rs and ../go/main.go; see ../README.md. Output is "<seconds> <checksum>", like the Rust and Go programs.
+// Message batch filter, Goose version (compiled and measured 2026-11-12 with Goose d5ae5bb, see ../README.md). Same format, data and
+// checksum as ../main.mito, ../rust/src/main.rs and ../go/main.go; see ../README.md. Output is "<seconds> <checksum> <rejected> <skipped> <copied>", like the Rust and Go programs.
 
 import std;
 import os;
@@ -42,7 +42,10 @@ fn build(buf: u8[>..]&) {
 }
 
 // one batch: filter and copy into out, then read the copy back; out is emptied for the next batch
-fn process(input: const u8[:], out: u8[>..]&) -> u32 {
+fn process(input: const u8[:], out: u8[>..]&) -> u32, u32, u32, u32 {
+    var rejected: u32 = 0;
+    var skipped: u32 = 0;
+    var copied: u32 = 0;
     var off: i64 = 0;
     while off < input.len {
         let magic = (input[off] as i64) | ((input[off + 1] as i64) << 8);
@@ -51,11 +54,12 @@ fn process(input: const u8[:], out: u8[>..]&) -> u32 {
         let frame = (input[off + 4] as i64) | ((input[off + 5] as i64) << 8);
         let len = (input[off + 6] as i64) | ((input[off + 7] as i64) << 8);
         if magic != 0x4D53 || ver != 1 || len + 8 != frame || len > 120 {
-            // rejected
+            rejected += 1;
         } else if cat == 3 || cat == 5 {
-            // skipped
+            skipped += 1;
         } else {
             out.append(input[off..off + frame]);
+            copied += 1;
         }
         off += frame;
     }
@@ -63,7 +67,7 @@ fn process(input: const u8[:], out: u8[>..]&) -> u32 {
     for b, i in out { h = h + (b ^ (i & 255) as u8) as u32; }
     h = h + (out.len as u32 << 16);
     out.clear();
-    return h;
+    return h, rejected, skipped, copied;
 }
 
 fn main() {
@@ -78,11 +82,14 @@ fn main() {
     build(input);
     var out: u8[>..] = [];
     var result: u32 = 0;
-    for i in warm { result = result * 31 + process(input, out); }
+    var rej: u32 = 0;
+    var skp: u32 = 0;
+    var cpd: u32 = 0;
+    for i in warm { let h, r, s, c = process(input, out); result = result * 31 + h; rej = r; skp = s; cpd = c; }
     let t0 = clock();
-    for i in iters { result = result * 31 + process(input, out); }
+    for i in iters { let h, r, s, c = process(input, out); result = result * 31 + h; rej = r; skp = s; cpd = c; }
     let t1 = clock();
     var line: u8[>..] = [];
     format_flt(line, t1 - t0, 6);
-    print(line, " ", result);
+    print(line, " ", result, " ", rej, " ", skp, " ", cpd);
 }

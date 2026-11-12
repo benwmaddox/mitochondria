@@ -200,6 +200,33 @@ mod tests {
 ".to_string()]).unwrap_err().contains("tables"));
     }
 
+    /// Receiver functions say what is wrong in the terms the program was written in: a type that lacks a function, a function declared twice, a name that is a collection operation, a call with the wrong number of arguments.
+    #[test]
+    fn receiver_function_errors_name_the_type_and_the_function() {
+        let head = "struct P { hp: i64; }
+struct M { hp: i64; }
+struct W { ps: pool<P, 4>; ms: pool<M, 4>; }
+state w: W;
+fn hit(self: P) { self.hp -= 1; }
+";
+        let err = |tail: &str| -> String {
+            let (st, code) = crate::source::load(&format!("{}{}", head, tail)).unwrap();
+            let prog = crate::layout::Program::parse(&st).unwrap();
+            match crate::cgen::check(&prog, &code) { Ok(_) => String::new(), Err(e) => e }
+        };
+        assert!(err("@post(\"/a\") fn a() -> Response<{}> { let m = w.ms.add(); m.hit(); return ok({}); }").contains("`M` has no function `hit`"));
+        assert!(err("@post(\"/a\") fn a() -> Response<{}> { let m = w.ms.add(); m.hit(); return ok({}); }").contains("`hit` is declared for P"));
+        assert!(err("fn hit(self: P) { self.hp -= 2; }").contains("`hit` is declared twice for `P`"));
+        assert!(err("fn count(self: P) -> i64 { return 1; }").contains("`count` is a collection operation"));
+        assert!(err("@post(\"/a\") fn a() -> Response<{}> { let p = w.ps.add(); p.hit(1); return ok({}); }").contains("`P.hit` takes 0 arguments, given 1"));
+        assert!(err("@post(\"/a\") fn a() -> Response<{}> { let p = w.ps.add(); p.fly(); return ok({}); }").contains("unknown function `p.fly`"));
+        assert!(err("fn hit2(self: P?) { }").contains("`self` is a struct"));
+        // the same name for two types is fine, and none of the messages shows an internal spelling
+        assert_eq!(err("fn hit(self: M) { self.hp -= 1; }
+@post(\"/a\") fn a() -> Response<{}> { let m = w.ms.add(); m.hit(); let p = w.ps.add(); p.hit(); return ok({}); }"), "");
+        assert!(!err("@post(\"/a\") fn a() -> Response<{}> { let p = w.ps.add(); p.hit(1); return ok({}); }").contains("::"));
+    }
+
     #[test]
     fn a_key_must_be_one_the_window_reads() {
         let bad = crate::source::load(&format!("{}@frame fn frame(k: bool from key(\"enter\")) -> Response<text> {{ return ok(\"x\"); }}", HEAD)).and_then(|(st, code)| {

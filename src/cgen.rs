@@ -760,6 +760,7 @@ pub fn test_names(api: &Api) -> Vec<String> { api.fns.iter().filter_map(|f| f.te
 pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
     let mut api = parse(api_src)?;
     crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table())?;
+    set_methods(&api);
     let notes = generate_tests(prog, &api).notes;
     let mut seen: Vec<&str> = Vec::new();
     let mut out: Vec<&str> = Vec::new();
@@ -1052,6 +1053,26 @@ fn source_comment(ep: &Endpoint, (name, text): (&str, &str)) -> String {
     o
 }
 
+// Receiver functions: `fn heal(self: Player, n: i64)` is the function `Player.heal`, and `self.heal(3)` is the call `.heal` with the receiver first. Which function it is
+// depends on the receiver's type, known only while generating, so the analyses that follow calls treat it as reaching every function declared for `heal`.
+thread_local! { static METHODS: std::cell::RefCell<std::collections::HashMap<String, Vec<u32>>> = std::cell::RefCell::new(Default::default()); }
+/// Make the table of methods from the program's functions (every `Type.name`, by `name`).
+pub(crate) fn set_methods(api: &Api) {
+    METHODS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        for (k, f) in api.fns.iter().enumerate() { if f.recv { if let Some((_, name)) = f.name.rsplit_once('.') { m.entry(name.to_string()).or_default().push(k as u32); } } }
+    });
+}
+/// The functions a call can reach: its function, or every function declared for the method an `x.f(...)` names.
+fn callees(n: &str, r: &CallRes) -> Vec<u32> {
+    match r {
+        CallRes::User(k) => vec![*k],
+        CallRes::Unbound if n.starts_with('.') => METHODS.with(|m| m.borrow().get(&n[1..]).cloned().unwrap_or_default()),
+        _ => Vec::new(),
+    }
+}
+
 /// Does this expression read local `slot`?
 fn expr_uses_slot(e: &Expr, slot: u32) -> bool {
     match e {
@@ -1067,7 +1088,7 @@ fn expr_uses_slot(e: &Expr, slot: u32) -> bool {
 fn changes_instance(api: &Api, inst: &str, stmts: &[Stmt]) -> bool {
     fn ex(e: &Expr, out: &mut Vec<u32>) {
         match e {
-            Expr::Call(_, a, r) => { if let CallRes::User(k) = r { out.push(*k); } for x in a { ex(x, out); } }
+            Expr::Call(n, a, r) => { out.extend(callees(n, r)); for x in a { ex(x, out); } }
             Expr::Field(b, ..) | Expr::Un(_, b) => ex(b, out),
             Expr::Index(a, b) | Expr::Bin(_, a, b) => { ex(a, out); ex(b, out); }
             _ => {}
@@ -1214,7 +1235,7 @@ fn recursive_fns(api: &Api) -> Vec<bool> {
     fn calls(stmts: &[Stmt], out: &mut Vec<u32>) {
         fn ex(e: &Expr, out: &mut Vec<u32>) {
             match e {
-                Expr::Call(_, a, r) => { if let CallRes::User(k) = r { out.push(*k); } for x in a { ex(x, out); } }
+                Expr::Call(n, a, r) => { out.extend(callees(n, r)); for x in a { ex(x, out); } }
                 Expr::Field(b, ..) | Expr::Un(_, b) => ex(b, out),
                 Expr::Index(a, b) | Expr::Bin(_, a, b) => { ex(a, out); ex(b, out); }
                 _ => {}
@@ -1265,9 +1286,9 @@ const OUTLINE_SIZE: usize = 4000;
 fn outlined_fns(api: &Api, recursive: &[bool]) -> Vec<bool> {
     fn ex(api: &Api, e: &Expr, memo: &mut Vec<Option<usize>>, out: &mut Vec<bool>, rec: &[bool]) -> usize {
         match e {
-            Expr::Call(_, a, r) => {
+            Expr::Call(nm, a, r) => {
                 let mut n = 1 + a.iter().map(|x| ex(api, x, memo, out, rec)).sum::<usize>();
-                if let CallRes::User(k) = r { if !rec[*k as usize] { let s = size(api, *k as usize, memo, out, rec); if !out[*k as usize] { n += s; } } }
+                for k in callees(nm, r) { if !rec[k as usize] { let s = size(api, k as usize, memo, out, rec); if !out[k as usize] { n += s; } } }
                 n
             }
             Expr::Field(b, ..) | Expr::Un(_, b) => 1 + ex(api, b, memo, out, rec),
@@ -1341,6 +1362,7 @@ fn outlined_fns(api: &Api, recursive: &[bool]) -> Vec<bool> {
 /// second build is kept only if every store it compiled still lies within the ranges it assumed. Nothing else writes plain state:
 /// a failed request puts back values those same stores wrote.
 fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str, tests: bool) -> Generated {
+    set_methods(api);
     type Ranges = std::collections::HashMap<usize, (i64, i64)>;
     type Pools = std::collections::HashSet<usize>;
     type Loops = std::collections::HashMap<(usize, u32), (i64, i64)>;
@@ -1533,7 +1555,7 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
             Expr::Call(_, _, CallRes::Builtin(B::Truncate)) => true,
-            Expr::Call(_, a, r) => a.iter().any(|x| ex(api, x, seen)) || match r { CallRes::User(k) if !seen.contains(k) => { seen.push(*k); writes(api, &api.fns[*k as usize].body, seen) } _ => false },
+            Expr::Call(nm, a, r) => a.iter().any(|x| ex(api, x, seen)) || callees(nm, r).into_iter().any(|k| if seen.contains(&k) { false } else { seen.push(k); writes(api, &api.fns[k as usize].body, seen) }),
             Expr::Field(b, ..) | Expr::Un(_, b) => ex(api, b, seen),
             Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),
             _ => false,
@@ -1561,7 +1583,7 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
 fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
-            Expr::Call(_, a, r) => a.iter().any(|x| ex(api, x, seen)) || match r { CallRes::User(k) if !seen.contains(k) => { seen.push(*k); allocates(api, &api.fns[*k as usize].body, seen) } _ => false },
+            Expr::Call(nm, a, r) => a.iter().any(|x| ex(api, x, seen)) || callees(nm, r).into_iter().any(|k| if seen.contains(&k) { false } else { seen.push(k); allocates(api, &api.fns[k as usize].body, seen) }),
             Expr::Field(b, ..) | Expr::Un(_, b) => ex(api, b, seen),
             Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),
             _ => false,
@@ -4307,9 +4329,32 @@ impl<'p> G<'p> {
         Ok(CV::Any(t))
     }
 
+    /// The type a function declared for a receiver is looked up by: a struct's name (an item of a pool, list or table, or a plain struct), or `i64`, `f64`, `bool`, `string`.
+    fn receiver_type(&self, v: &CV) -> Option<String> {
+        let item = |c: usize| if let Some(t) = tab(c) { Some(self.prog.structs[self.prog.tables[t].item].name.clone()) } else { self.prog.colls[c].item.map(|s| self.prog.structs[s].name.clone()) };
+        match v {
+            CV::Int(_) => Some("i64".into()), CV::Flt(_) => Some("f64".into()), CV::Bool(_) => Some("bool".into()),
+            CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => Some("string".into()),
+            CV::Item(c, _) => item(*c),
+            CV::Plain(sd, _) => Some(self.prog.structs[*sd].name.clone()),
+            _ => None,
+        }
+    }
     fn callx(&mut self, n: &str, args: &'p [Expr], res: CallRes, env: &mut Vec<Option<CV>>, dead: Option<&str>) -> R<CV> {
         match res {
             CallRes::User(k) => self.inline(k, args, env, dead),
+            // `x.f(args)` on a receiver whose function depends on its type: the receiver is evaluated, its type names the function (`Type.f`), and it is called with the receiver first
+            CallRes::Unbound if n.starts_with('.') && !args.is_empty() => {
+                let mut vals = Vec::new();
+                for a in args { let v = self.expr(a, env, dead)?; vals.push(self.hold(v, false)?); }
+                let Some(ty) = self.receiver_type(&vals[0]) else { return no(format!("`{}` is called on something that is not a struct, a number, a string or a bool, and only those have functions of their own", &n[1..])) };
+                let want = format!("{}.{}", ty, &n[1..]);
+                let Some(k) = self.api.fns.iter().position(|f| f.recv && f.name == want) else {
+                    let has: Vec<String> = self.api.fns.iter().filter(|f| f.recv).filter_map(|f| f.name.rsplit_once('.').filter(|(_, m)| *m == &n[1..]).map(|(t, _)| t.to_string())).collect();
+                    return no(format!("`{}` has no function `{}` (declare `fn {}(self: {}, ...)`; `{}` is declared for {})", ty, &n[1..], &n[1..], ty, &n[1..], has.join(", ")));
+                };
+                self.call_values(k as u32, vals, dead)
+            }
             CallRes::Unbound if n == "split" => no("`split` is what a loop walks: `foreach part in split(text, \", \") { ... }` (or `split(text)` for words)"),
             CallRes::Unbound => no("unbound call"),
             CallRes::Builtin(bi) => {
@@ -4762,7 +4807,12 @@ impl<'p> G<'p> {
     /// Call user function `k` with argument values already computed: inlined, or a generated C function if recursive.
     fn call_values(&mut self, k: u32, vals: Vec<CV>, dead: Option<&str>) -> R<CV> {
         let f = &self.api.fns[k as usize];
-        if vals.len() != f.params.len() { return no(format!("`{}` takes {} argument{}, given {}", f.name, f.params.len(), if f.params.len() == 1 { "" } else { "s" }, vals.len())); }
+        if vals.len() != f.params.len() {
+            // a function of a type is called `p.hit(1)`: the receiver is not counted among its arguments
+            let (shown, skip) = (f.name.clone(), if f.recv { 1 } else { 0 });
+            let (want, given) = (f.params.len() - skip, vals.len().saturating_sub(skip));
+            return no(format!("`{}` takes {} argument{}, given {}", shown, want, if want == 1 { "" } else { "s" }, given));
+        }
         let mut checked = Vec::with_capacity(vals.len());
         for (i, v) in vals.into_iter().enumerate() {
             checked.push(match &f.ptys[i] { Some(t) => self.to_declared(v, t, &f.name, &format!("parameter `{}` of `{}`", f.params[i], f.name))?, None => v });
@@ -5436,6 +5486,31 @@ state app: A;
         for (k, (name, reads)) in want.iter().enumerate() { assert_eq!(g.reads[k], *reads, "endpoint {}", name); }
     }
 
+    /// A call of a function declared for a type counts as what the function it reaches does: a GET that calls one that writes is not a reader, one that calls only readers is, whichever types share the name.
+    #[test]
+    fn receiver_functions_count_as_what_they_do_for_readers() {
+        let src = "struct Node { v: i64; }
+struct Leaf { w: i64; }
+struct A { xs: pool<Node, 4>; ls: pool<Leaf, 4>; }
+state app: A;
+            fn bump(self: Node) { self.v += 1; }
+            fn bump(self: Leaf) -> i64 { return self.w; }
+            fn peek(self: Node) -> i64 { return self.v; }
+            @get(\"/peek\") fn peek() -> Response<{ n: i64 }> { var t = 0; foreach n in app.xs { t += n.peek(); } return ok({ n: t }); }
+            @get(\"/leaf\") fn leaf() -> Response<{ n: i64 }> { var t = 0; foreach l in app.ls { t += l.bump(); } return ok({ n: t }); }
+            @get(\"/bump\") fn bump() -> Response<{ n: i64 }> { foreach n in app.xs { n.bump(); } return ok({ n: 1 }); }
+";
+        let (state, api) = crate::source::load(src).unwrap();
+        let prog = Program::parse(&state).unwrap();
+        let mut api = crate::lang::parse(&api).unwrap();
+        crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+        let g = generate(&prog, &api);
+        assert!(g.notes.is_empty(), "{:?}", g.notes);
+        // `bump` writes for a Node and only reads for a Leaf: what a GET does is what its generated code does, so the call follows the function its receiver's type names
+        let want = [("peek", true), ("leaf", true), ("bump", false)];
+        for (k, (name, reads)) in want.iter().enumerate() { assert_eq!(g.reads[k], *reads, "endpoint {}", name); }
+    }
+
     /// How many overflow-checked operations (`ADD`, `SUB`, `MUL`) an endpoint's generated code keeps, for a body written in a program with one range-typed field and one free field.
     fn checked_ops(body: &str) -> usize {
         let src = format!("struct A {{ n: i64 in 0..1000; big: i64; }}\nstate app: A;\n@get(\"/t\") fn t() -> Response<{{ x: i64 }}> {{ {} }}\n", body);
@@ -5947,7 +6022,7 @@ fn assigns_field(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
             Expr::Call(_, _, CallRes::Builtin(B::Truncate)) => true,
-            Expr::Call(_, a, r) => a.iter().any(|x| ex(api, x, seen)) || match r { CallRes::User(k) if !seen.contains(k) => { seen.push(*k); assigns_field(api, &api.fns[*k as usize].body, seen) } _ => false },
+            Expr::Call(nm, a, r) => a.iter().any(|x| ex(api, x, seen)) || callees(nm, r).into_iter().any(|k| if seen.contains(&k) { false } else { seen.push(k); assigns_field(api, &api.fns[k as usize].body, seen) }),
             Expr::Field(b, _) | Expr::Un(_, b) => ex(api, b, seen),
             Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),
             _ => false,

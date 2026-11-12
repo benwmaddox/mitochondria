@@ -1,0 +1,75 @@
+// functions of a type: a function whose first parameter is `self: Type`, `fn hurt(self: Player, n: i64)`, belongs to that type and is called `p.hurt(3)`; the same name can be declared for any number of types and beside a function of no type; a number, a float and a string can be receivers; a receiver function may call itself
+--- program
+struct Player { name: string<16>; hp: i64; }
+struct Monster { hp: i64; rage: i64; }
+struct World { players: pool<Player, 8>; monsters: pool<Monster, 8>; }
+state world: World;
+
+fn hurt(self: Player, n: i64) { self.hp -= n; }
+fn hurt(self: Monster, n: i64) { self.hp -= n * 2; self.rage += 1; }
+fn alive(self: Player) -> bool { return self.hp > 0; }
+fn alive(self: Monster) -> bool { return self.hp > 0; }
+fn status(self: Player) -> text { if self.alive() { return self.name + " is up"; } return self.name + " is down"; }
+fn double(self: i64) -> i64 { return self * 2; }
+fn half(self: f64) -> f64 { return self * 0.5; }
+fn shout(self: string) -> text { return self + "!"; }
+fn fact(self: i64) -> i64 { if self <= 1 { return 1; } return self * (self - 1).fact(); }
+fn fib(self: i64) -> i64 { if self < 2 { return self; } return (self - 1).fib() + (self - 2).fib(); }
+// a function of no type may share the name
+fn hurt(n: i64) -> i64 { return n + 1000; }
+
+@post("/player/{name}")
+fn add_player(name: string<1..16>) -> Response<{ slot: i64 }> {
+    let p = world.players.add();
+    p.name = name;
+    p.hp = 10;
+    return created({ slot: slot(p) });
+}
+@post("/monster")
+fn add_monster() -> Response<{ slot: i64 }> {
+    let m = world.monsters.add();
+    m.hp = 10;
+    return created({ slot: slot(m) });
+}
+@post("/player/{id}/hurt/{n}")
+fn hurt_player(id: i64, n: i64 in 0..100) -> Response<{ hp: i64, up: bool, status: string }> {
+    let p = world.players[id];
+    p.hurt(n);
+    return ok({ hp: p.hp, up: p.alive(), status: p.status() });
+}
+@post("/monster/{id}/hurt/{n}")
+fn hurt_monster(id: i64, n: i64 in 0..100) -> Response<{ hp: i64, rage: i64, up: bool }> {
+    let m = world.monsters[id];
+    m.hurt(n);
+    return ok({ hp: m.hp, rage: m.rage, up: m.alive() });
+}
+// every player and monster is hurt by the same name, each by its own rule
+@post("/storm/{n}")
+fn storm(n: i64 in 0..100) -> Response<{ players: i64, monsters: i64 }> {
+    foreach p in world.players { p.hurt(n); }
+    foreach m in world.monsters { m.hurt(n); }
+    var ph = 0;
+    var mh = 0;
+    foreach p in world.players { ph += p.hp; }
+    foreach m in world.monsters { mh += m.hp; }
+    return ok({ players: ph, monsters: mh });
+}
+@get("/math/{x}")
+fn math(x: i64 in 0..15) -> Response<{ double: i64, half: f64, fact: i64, fib: i64, free: i64, shout: string }> {
+    return ok({ double: x.double(), half: (x * 0.5).half(), fact: x.fact(), fib: x.fib(), free: hurt(x), shout: "hey".shout() });
+}
+--- requests
+POST /player/ann
+POST /player/bo
+POST /monster
+POST /player/0/hurt/3
+POST /player/0/hurt/7
+POST /player/1/hurt/20
+POST /monster/0/hurt/3
+POST /monster/0/hurt/2
+POST /storm/1
+POST /storm/1
+GET /math/0
+GET /math/5
+GET /math/10
+GET /math/12

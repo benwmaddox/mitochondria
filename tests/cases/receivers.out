@@ -1,0 +1,18 @@
+POST /player/ann -> 201 {"slot":0}
+POST /player/bo -> 201 {"slot":1}
+POST /monster -> 201 {"slot":0}
+POST /player/0/hurt/3 -> 200 {"hp":7,"up":true,"status":"ann is up"}
+POST /player/0/hurt/7 -> 200 {"hp":0,"up":false,"status":"ann is down"}
+POST /player/1/hurt/20 -> 200 {"hp":-10,"up":false,"status":"bo is down"}
+POST /monster/0/hurt/3 -> 200 {"hp":4,"rage":1,"up":true}
+POST /monster/0/hurt/2 -> 200 {"hp":0,"rage":2,"up":false}
+POST /storm/1 -> 200 {"players":-12,"monsters":-2}
+POST /storm/1 -> 200 {"players":-14,"monsters":-4}
+GET /math/0 -> 200 {"double":0,"half":0,"fact":1,"fib":0,"free":1000,"shout":"hey!"}
+GET /math/5 -> 200 {"double":10,"half":1.25,"fact":120,"fib":5,"free":1005,"shout":"hey!"}
+GET /math/10 -> 200 {"double":20,"half":2.5,"fact":3628800,"fib":55,"free":1010,"shout":"hey!"}
+GET /math/12 -> 200 {"double":24,"half":3,"fact":479001600,"fib":144,"free":1012,"shout":"hey!"}
+state <plain values> 0
+state world.players 53
+state world.monsters 40
+memory reserved=8192 committed=8192 live=93

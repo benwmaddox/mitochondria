@@ -1,0 +1,29 @@
+// Physics-loop microbenchmark, before struct views (commit cd62aba): a particle updated by std/vec.mito functions and by a user function
+// that writes in place (no `write` keyword yet). The same program as new.mito's in-place and field-arithmetic loops; same answers.
+use "std/math.mito";
+use "std/vec.mito";
+struct W { pos: Vec3; vel: Vec3; acc: Vec3; sum: f64; }
+state w: W;
+
+fn damp(self: Vec3, k: f64) { self.x = self.x * k; self.y = self.y * k; self.z = self.z * k; }
+
+fn reset() { w.pos.set(1.0, 0.5, -0.25); w.vel.set(0.0, 0.1, 0.2); w.acc.set(0.0, 0.0, 0.0); w.sum = 0.0; }
+// the library path: set / add_scaled / plus / damp (user) / length
+fn step_lib() {
+    w.acc.set(-w.pos.x, -w.pos.y, -w.pos.z);
+    w.vel.add_scaled(w.acc, 0.001);
+    w.pos.plus(w.vel);
+    w.pos.damp(0.99999999);
+    w.sum = w.sum + w.pos.length();
+}
+// the same arithmetic written on the fields
+fn step_field() {
+    w.acc.x = -w.pos.x; w.acc.y = -w.pos.y; w.acc.z = -w.pos.z;
+    w.vel.x = w.vel.x + w.acc.x * 0.001; w.vel.y = w.vel.y + w.acc.y * 0.001; w.vel.z = w.vel.z + w.acc.z * 0.001;
+    w.pos.x = (w.pos.x + w.vel.x) * 0.99999999; w.pos.y = (w.pos.y + w.vel.y) * 0.99999999; w.pos.z = (w.pos.z + w.vel.z) * 0.99999999;
+    w.sum = w.sum + sqrt(w.pos.x * w.pos.x + w.pos.y * w.pos.y + w.pos.z * w.pos.z);
+}
+@post("/lib/{n}")
+fn run_lib(n: i64 in 1..100000000) -> Response<{ sum: f64, x: f64, vy: f64 }> { reset(); foreach i in 0..n - 1 { step_lib(); } return ok({ "sum": w.sum, "x": w.pos.x, "vy": w.vel.y }); }
+@post("/field/{n}")
+fn run_field(n: i64 in 1..100000000) -> Response<{ sum: f64, x: f64, vy: f64 }> { reset(); foreach i in 0..n - 1 { step_field(); } return ok({ "sum": w.sum, "x": w.pos.x, "vy": w.vel.y }); }

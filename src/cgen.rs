@@ -184,7 +184,7 @@ struct H {
 #define LOG2_(x) __builtin_log2(x)
 #define LOG10_(x) __builtin_log10(x)
 #define CEIL_(x) __builtin_ceil(x)
-#define ROUND_(x) __builtin_round(x)
+#define ROUNDF_(x) __builtin_round(x)
 #define TRUNC_(x) __builtin_trunc(x)
 #define CBRT_(x) __builtin_cbrt(x)
 #define HYPOT_(x, y) __builtin_hypot(x, y)
@@ -211,7 +211,7 @@ double tan(double); double asin(double); double acos(double); double atan(double
 #define LOG2_(x) log2(x)
 #define LOG10_(x) log10(x)
 #define CEIL_(x) ceil(x)
-#define ROUND_(x) round(x)
+#define ROUNDF_(x) round(x)
 #define TRUNC_(x) trunc(x)
 #define CBRT_(x) cbrt(x)
 #define HYPOT_(x, y) hypot(x, y)
@@ -4764,7 +4764,8 @@ impl<'p> G<'p> {
                 // IEEE results, as the platform's math library gives them (a negative square root is NaN)
                 let name = match bi { B::Sqrt => "sqrt", B::Exp => "exp", B::Sin => "sin", B::Cos => "cos", B::Tan => "tan", B::Asin => "asin", B::Acos => "acos", B::Atan => "atan", B::Sinh => "sinh", B::Cosh => "cosh", B::Tanh => "tanh", B::Ln => "ln", B::Log2 => "log2", B::Log10 => "log10", B::Ceil => "ceil", B::Round => "round", B::Trunc => "trunc", B::Cbrt => "cbrt", _ => "floor" };
                 let x = match a.as_slice() { [CV::Flt(e)] => e.clone(), [CV::Int(e)] => format!("(double)({})", e), _ => return no(format!("`{}` takes one number", name)) };
-                CV::Flt(format!("{}_({})", name.to_uppercase(), x))
+                let mac = if name == "round" { "ROUNDF_".to_string() } else { format!("{}_", name.to_uppercase()) };
+                CV::Flt(format!("{}({})", mac, x))
             }
             B::Substr => {
                 // a piece of a string, `substr(text, from, count)`: it shares the text's bytes (no copy), the range is checked
@@ -5383,7 +5384,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "TAN_", "ASIN_", "ACOS_", "ATAN_", "SINH_", "COSH_", "TANH_", "LN_", "LOG2_", "LOG10_", "CEIL_", "ROUND_", "TRUNC_", "CBRT_", "HYPOT_", "FMOD_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "TAN_", "ASIN_", "ACOS_", "ATAN_", "SINH_", "COSH_", "TANH_", "LN_", "LOG2_", "LOG10_", "CEIL_", "ROUNDF_", "TRUNC_", "CBRT_", "HYPOT_", "FMOD_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
@@ -5499,6 +5500,26 @@ fn ctoks(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod profile_tests {
     use super::*;
+
+    /// A macro name defined twice in the prelude where both definitions can be in force (the same `#if` branch, or one
+    /// of them outside every branch) silently replaces the first: a built-in's `ROUND_` once replaced the loop budget's.
+    #[test]
+    fn the_prelude_defines_each_macro_once_per_branch() {
+        let (mut stack, mut next, mut defs): (Vec<String>, usize, Vec<(String, Vec<String>)>) = (vec![], 0, vec![]);
+        for l in PRELUDE.lines() {
+            let t = l.trim_start();
+            if t.starts_with("#if") { next += 1; stack.push(format!("if{}", next)); }
+            else if t.starts_with("#else") || t.starts_with("#elif") { if let Some(top) = stack.last_mut() { *top = top.replace("if", "else"); } }
+            else if t.starts_with("#endif") { stack.pop(); }
+            else if let Some(rest) = t.strip_prefix("#define ") {
+                let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                for (n, st) in &defs {
+                    assert!(*n != name || !(st.starts_with(&stack) || stack.starts_with(st)), "the prelude defines `{}` twice where both can be in force", name);
+                }
+                defs.push((name, stack.clone()));
+            }
+        }
+    }
 
     #[test]
     fn each_endpoint_zeroes_only_the_request_fields_it_names() {

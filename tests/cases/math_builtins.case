@@ -3,19 +3,22 @@
 struct S { n: i64; }
 state s: S;
 
+// the last digits of transcendental results differ between math libraries (Windows, glibc), so they are recorded rounded to 12 decimals
+fn r12(v: f64) -> f64 { return round(v * 1000000000000.0) / 1000000000000.0; }
+
 @get("/m/{n}")
 fn m(n: i64) -> Response<{ x: f64, tan: f64, asin: f64, acos: f64, atan: f64, sinh: f64, cosh: f64, tanh: f64 }> {
     let x = n * 0.25;
-    return ok({ x: x, tan: tan(x), asin: asin(x), acos: acos(x), atan: atan(x), sinh: sinh(x), cosh: cosh(x), tanh: tanh(x) });
+    return ok({ x: x, tan: r12(tan(x)), asin: r12(asin(x)), acos: r12(acos(x)), atan: r12(atan(x)), sinh: r12(sinh(x)), cosh: r12(cosh(x)), tanh: r12(tanh(x)) });
 }
 @get("/l/{n}")
 fn l(n: i64) -> Response<{ x: f64, ln: f64, log2: f64, log10: f64, ceil: f64, round: f64, trunc: f64, cbrt: f64, hypot: f64, fmod: f64, fmod_neg: f64 }> {
     let x = n * 0.25;
-    return ok({ x: x, ln: ln(x), log2: log2(x), log10: log10(x), ceil: ceil(x), round: round(x), trunc: trunc(x), cbrt: cbrt(x), hypot: hypot(x, 1.5), fmod: fmod(x, 0.75), fmod_neg: fmod(x, -0.75) });
+    return ok({ x: x, ln: r12(ln(x)), log2: r12(log2(x)), log10: r12(log10(x)), ceil: ceil(x), round: round(x), trunc: trunc(x), cbrt: r12(cbrt(x)), hypot: r12(hypot(x, 1.5)), fmod: fmod(x, 0.75), fmod_neg: fmod(x, -0.75) });
 }
 @get("/int/{n}")
 fn int_args(n: i64) -> Response<{ ln: f64, log2: f64, log10: f64, cbrt: f64, hypot: f64, fmod: f64, ceil: f64, round: f64 }> {
-    return ok({ ln: ln(n), log2: log2(n), log10: log10(n), cbrt: cbrt(n), hypot: hypot(n, 4), fmod: fmod(n, 3), ceil: ceil(n), round: round(n) });
+    return ok({ ln: r12(ln(n)), log2: r12(log2(n)), log10: r12(log10(n)), cbrt: r12(cbrt(n)), hypot: r12(hypot(n, 4)), fmod: fmod(n, 3), ceil: ceil(n), round: round(n) });
 }
 --- requests
 GET /m/-8

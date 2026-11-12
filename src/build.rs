@@ -253,6 +253,26 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A game builds with clang as well as TinyCC (link only: SDL3 is loaded when the game starts, so no GPU or SDL3 is needed here). The driver once declared `sprintf`
+    /// itself, which Windows' C headers define inline, so a clang build of the world example failed to link while the TinyCC builds the other tests use worked.
+    #[test]
+    fn a_game_links_with_clang() {
+        if super::clang().is_none() { return; }
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/world/world.mito");
+        let text = std::fs::read_to_string(&example).unwrap();
+        crate::lang::set_file_dir(example.parent().unwrap());
+        let (st, code) = crate::source::load(&text).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap_or_else(|e| panic!("{}", e));
+        let dir = std::env::temp_dir().join(format!("mito-game-clang-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(format!("world{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O0"]).unwrap_or_else(|e| panic!("{}", e));
+        assert!(exe.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The open-world example through a real window (runtime/game.c): built, run for a few frames of a hidden window, and the frame it saved read back. Needs SDL3 and a GPU, so it
     /// runs only when asked: `MITO_SDL3_DIR=<directory holding SDL3.dll> cargo test game_renders_the_world -- --ignored`.
     #[test]
@@ -296,6 +316,171 @@ int main(int argc, char **argv) {
         assert!(differ(&rest, &render(&["--frames", "1"], "rest2.ppm")) == 0.0, "a frame at rest is repeatable");
         assert!(differ(&rest, &render(&["--frames", "120", "--hold", "w,shift"], "walk.ppm")) > 3.0, "running forward moves the view");
         assert!(differ(&rest, &render(&["--frames", "1", "--mouse", "160,0"], "turn.ppm")) > 2.0, "the pointer turns the view");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build a game's executable into `dir` (with the C compiler the tests use).
+    fn build_game(source: &std::path::Path, dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let text = std::fs::read_to_string(source).unwrap();
+        crate::lang::set_file_dir(source.parent().unwrap());
+        let (st, code) = crate::source::load(&text).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap_or_else(|e| panic!("{}", e));
+        std::fs::create_dir_all(dir).unwrap();
+        let exe = dir.join(format!("{}{}", name, std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, true, &[]).unwrap();
+        exe
+    }
+
+    /// Run a game executable with SDL3 on the path: (exit code, standard output).
+    fn run_game(exe: &std::path::Path, args: &[&str]) -> (i32, String) {
+        let sdl = std::env::var_os("MITO_SDL3_DIR").unwrap_or_default();
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let path = format!("{}{}{}", sdl.to_string_lossy(), sep, std::env::var("PATH").unwrap_or_default());
+        let out = std::process::Command::new(exe).args(args).env("PATH", path).output().unwrap();
+        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// What the header of a recording says (the format is in DESIGN.md, "Record and replay"); `body` is where the frames start.
+    #[derive(Debug)]
+    struct RecordingHeader { version: u32, checkpoint: u32, seed: u64, width: u32, height: u32, frames: u64, final_hash: u64, program_hash: u64, keys: Vec<String>, shaders: Vec<String>, body: usize }
+
+    fn read_recording_header(b: &[u8]) -> Result<RecordingHeader, String> {
+        if b.len() < 56 || &b[..8] != b"MITOREP1" { return Err("not a recording".into()); }
+        let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+        let u64_at = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        let names = |at: &mut usize| -> Result<Vec<String>, String> {
+            if b.len() < *at + 4 { return Err("cut short".into()); }
+            let n = u32_at(*at); *at += 4;
+            let mut v = Vec::new();
+            for _ in 0..n {
+                if b.len() < *at + 2 { return Err("cut short".into()); }
+                let l = u16::from_le_bytes(b[*at..*at + 2].try_into().unwrap()) as usize; *at += 2;
+                if b.len() < *at + l { return Err("cut short".into()); }
+                v.push(String::from_utf8_lossy(&b[*at..*at + l]).into_owned()); *at += l;
+            }
+            Ok(v)
+        };
+        let mut at = 56;
+        let keys = names(&mut at)?;
+        let shaders = names(&mut at)?;
+        Ok(RecordingHeader { version: u32_at(8), checkpoint: u32_at(12), seed: u64_at(16), width: u32_at(24), height: u32_at(28), frames: u64_at(32), final_hash: u64_at(40), program_hash: u64_at(48), keys, shaders, body: at })
+    }
+
+    /// The reader of the format reads a file written by hand in the documented layout (pure Rust: no window needed).
+    #[test]
+    fn a_recording_header_is_read_back() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"MITOREP1");
+        b.extend_from_slice(&1u32.to_le_bytes()); b.extend_from_slice(&60u32.to_le_bytes()); b.extend_from_slice(&42u64.to_le_bytes());
+        b.extend_from_slice(&320u32.to_le_bytes()); b.extend_from_slice(&180u32.to_le_bytes());
+        b.extend_from_slice(&2u64.to_le_bytes()); b.extend_from_slice(&9u64.to_le_bytes()); b.extend_from_slice(&7u64.to_le_bytes());
+        for list in [&["w", "shift"][..], &["scene"][..]] {
+            b.extend_from_slice(&(list.len() as u32).to_le_bytes());
+            for n in list { b.extend_from_slice(&(n.len() as u16).to_le_bytes()); b.extend_from_slice(n.as_bytes()); }
+        }
+        let h = read_recording_header(&b).unwrap();
+        assert_eq!((h.version, h.checkpoint, h.seed, h.width, h.height, h.frames, h.final_hash, h.program_hash), (1, 60, 42, 320, 180, 2, 9, 7));
+        assert_eq!(h.keys, ["w", "shift"]);
+        assert_eq!(h.shaders, ["scene"]);
+        assert_eq!(h.body, b.len());
+        assert!(read_recording_header(&b[..b.len() - 1]).is_err(), "a cut header is refused");
+        b[7] = b'2';
+        assert!(read_recording_header(&b).is_err(), "another magic is refused");
+    }
+
+    /// Record a run of examples/world, replay it twice: the state checkpoints match and the pictures are the same bytes; bad and tampered files are refused or caught.
+    /// Needs SDL3 and a GPU: `MITO_SDL3_DIR=<directory holding SDL3.dll> cargo test --release game_record_and_replay -- --ignored`.
+    #[test]
+    #[ignore]
+    fn game_record_and_replay() {
+        if std::env::var_os("MITO_SDL3_DIR").is_none() { eprintln!("MITO_SDL3_DIR is not set: skipped"); return; }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = std::env::temp_dir().join(format!("mito-replay-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let exe = build_game(&root.join("examples/world/world.mito"), &dir, "world");
+        let p = |n: &str| dir.join(n).to_string_lossy().into_owned();
+        let (rec, shot_a) = (p("a.rep"), p("a.ppm"));
+        let (code, out) = run_game(&exe, &["--frames", "120", "--hold", "w,shift", "--mouse", "3,0", "--size", "320x180", "--seed", "7", "--checkpoint", "30", "--record", &rec, "--screenshot", &shot_a, "--capture", &p("rec_caps"), "--capture-every", "60"]);
+        assert_eq!(code, 0, "{}", out);
+        let bytes = std::fs::read(&rec).unwrap();
+        let h = read_recording_header(&bytes).unwrap();
+        assert_eq!((h.version, h.checkpoint, h.seed, h.width, h.height, h.frames), (1, 30, 7, 320, 180, 120));
+        let mut keys = h.keys.clone(); keys.sort();
+        assert_eq!(keys, ["a", "d", "s", "shift", "w"], "the keys the program reads");
+        assert!(h.shaders.iter().any(|s| s == "scene") && h.shaders.iter().any(|s| s == "paint"));
+        let frame_bytes = 8 + (h.keys.len() + 7) / 8 + 8;
+        assert_eq!(bytes.len(), h.body + 120 * frame_bytes + (120 / 30) * 8, "frames and checkpoints, and nothing else");
+        assert!(h.final_hash != 0 && h.program_hash != 0);
+        // the recorded dt is 1/60 s as a 64-bit double, the held keys are in the key bits
+        assert_eq!(f64::from_le_bytes(bytes[h.body..h.body + 8].try_into().unwrap()), 1.0 / 60.0);
+        let wbit = h.keys.iter().position(|k| k == "w").unwrap();
+        assert_eq!((bytes[h.body + 8 + wbit / 8] >> (wbit % 8)) & 1, 1, "w is held in the first frame");
+        // two replays are the recording: no divergence, the final picture is the recorded one
+        let (shot_b, shot_c) = (p("b.ppm"), p("c.ppm"));
+        let (code, out) = run_game(&exe, &["--replay", &rec, "--screenshot", &shot_b, "--capture", &p("caps"), "--capture-every", "40"]);
+        assert_eq!(code, 0, "{}", out);
+        let (code, out) = run_game(&exe, &["--replay", &rec, "--screenshot", &shot_c]);
+        assert_eq!(code, 0, "{}", out);
+        let (a, b, c) = (std::fs::read(&shot_a).unwrap(), std::fs::read(&shot_b).unwrap(), std::fs::read(&shot_c).unwrap());
+        assert!(a == b && b == c, "the replays draw the recorded final frame, byte for byte");
+        let mut caps: Vec<String> = std::fs::read_dir(p("caps")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        caps.sort();
+        assert_eq!(caps, ["frame_000000.png", "frame_000040.png", "frame_000080.png"], "every 40th frame");
+        assert_eq!(std::fs::read_dir(p("rec_caps")).unwrap().count(), 2, "capture works while recording too");
+        let png = std::fs::read(p("caps/frame_000040.png")).unwrap();
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 13, 10, 26, 10]);
+        assert_eq!(&png[12..16], b"IHDR");
+        assert_eq!((u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap())), (320, 180));
+        // a replay of the first frames only
+        let (code, out) = run_game(&exe, &["--replay", &rec, "--frames", "10"]);
+        assert_eq!(code, 0, "{}", out);
+
+        // damaged files are refused with a clear message (exit code 2)
+        let refuse = |name: &str, data: &[u8], what: &str| {
+            let f = p(name); std::fs::write(&f, data).unwrap();
+            let (code, out) = run_game(&exe, &["--replay", &f]);
+            assert_eq!(code, 2, "{}: {}", name, out);
+            assert!(out.contains(what), "{}: expected `{}` in `{}`", name, what, out);
+        };
+        refuse("cut.rep", &bytes[..bytes.len() - 5], "is damaged");
+        refuse("short.rep", &bytes[..20], "is not a Mitochondria recording");
+        let mut bad = bytes.clone(); bad[0] = b'X';
+        refuse("magic.rep", &bad, "is not a Mitochondria recording");
+        let mut bad = bytes.clone(); bad[8] = 2;
+        refuse("version.rep", &bad, "format version 2");
+        let mut bad = bytes.clone(); bad[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+        refuse("open.rep", &bad, "is not finished");
+        let mut bad = bytes.clone(); bad[48] ^= 1;
+        refuse("hash.rep", &bad, "recorded by another program");
+        // a recording of another program is refused (and refuses this one)
+        let other = dir.join("other.mito");
+        std::fs::write(&other, "platform game;\nstruct S { t: f64; }\nstate s: S;\n@shader\nfn flat() -> Response<text> { return ok(\"#version 330 core\\nout vec4 c;\\nvoid main() { c = vec4(1.0); }\\n\"); }\n@frame\nfn frame(dt: f64 from time, jump: bool from key(\"space\")) -> Response<text> { s.t += dt; return ok(\"flat\"); }\n").unwrap();
+        let other_exe = build_game(&other, &dir, "other");
+        let (code, out) = run_game(&other_exe, &["--replay", &rec]);
+        assert_eq!(code, 2, "{}", out);
+        assert!(out.contains("recorded by another program") && out.contains("shaders [scene paint]"), "{}", out);
+        let orec = p("other.rep");
+        let (code, out) = run_game(&other_exe, &["--frames", "5", "--record", &orec, "--seed", "3"]);
+        assert_eq!(code, 0, "{}", out);
+        let (code, out) = run_game(&exe, &["--replay", &orec]);
+        assert_eq!(code, 2, "{}", out);
+        assert!(out.contains("recorded by another program"), "{}", out);
+
+        // a changed input, a changed dt or a changed checkpoint is caught at the first checkpoint it reaches (frame 29, or 59 for frame 40)
+        let diverges = |name: &str, bad: &[u8], frame: u32| {
+            let f = p(name); std::fs::write(&f, bad).unwrap();
+            let (code, out) = run_game(&exe, &["--replay", &f]);
+            assert_eq!(code, 1, "{}: {}", name, out);
+            assert!(out.contains(&format!("replay diverged at frame {}: expected ", frame)), "{}: {}", name, out);
+        };
+        let record_at = |frame: usize| h.body + frame * frame_bytes + (frame / 30) * 8;
+        let mut bad = bytes.clone(); bad[record_at(10) + 8 + wbit / 8] ^= 1 << (wbit % 8);
+        diverges("tamper_key.rep", &bad, 29);
+        let mut bad = bytes.clone(); bad[record_at(40)..record_at(40) + 8].copy_from_slice(&0.05f64.to_le_bytes());
+        diverges("tamper_dt.rep", &bad, 59);
+        let mut bad = bytes.clone(); bad[record_at(30) - 8] ^= 0x10;
+        diverges("tamper_hash.rep", &bad, 29);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -56,6 +56,11 @@ nothing is linked, so a build needs neither the library nor its headers. A game 
 | `--hold KEYS` | keys (`w,shift`) held down in every frame, to try a game's controls without a person |
 | `--mouse DX,DY` | pointer movement added to every frame |
 | `--seed N` | fix the random generator |
+| `--record FILE` | write each frame's inputs (the `dt` used, the keys the program reads, the pointer's movement) and every `--checkpoint N` frames a hash of the state; runs on a fixed clock and a seed (a fresh one is chosen and stored when `--seed` is not given) |
+| `--replay FILE` | run the recorded frames through the program again, in a window that is not shown, with the recorded size, seed, `dt` and inputs; stops with `replay diverged at frame K: expected H1, got H2` and exit code 1 at the first checkpoint whose state hash differs; a file recorded by another program, or a damaged one, is refused with exit code 2 (`--frames N` replays only the first N frames; `--size` overrides the size; `--hold`, `--mouse` and `--seed` are refused) |
+| `--checkpoint N` | frames between two state checkpoints in a recording (60; 0: only the last frame's) |
+| `--capture DIR` | write the frame as `DIR/frame_000000.png` (numbered by frame) every `--capture-every` frames, live, with `--frames` or with `--replay` (the directory is made) |
+| `--capture-every N` | frames between two captures (1) |
 
 ## Built-ins described here
 

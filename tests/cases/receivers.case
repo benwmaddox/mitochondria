@@ -32,7 +32,7 @@ fn add_monster() -> Response<{ slot: i64 }> {
     return created({ slot: slot(m) });
 }
 @post("/player/{id}/hurt/{n}")
-fn hurt_player(id: i64, n: i64 in 0..100) -> Response<{ hp: i64, up: bool, status: text }> {
+fn hurt_player(id: i64, n: i64 in 0..100) -> Response<{ hp: i64, up: bool, status: string }> {
     let p = world.players[id];
     p.hurt(n);
     return ok({ hp: p.hp, up: p.alive(), status: p.status() });
@@ -55,7 +55,7 @@ fn storm(n: i64 in 0..100) -> Response<{ players: i64, monsters: i64 }> {
     return ok({ players: ph, monsters: mh });
 }
 @get("/math/{x}")
-fn math(x: i64 in 0..15) -> Response<{ double: i64, half: f64, fact: i64, fib: i64, free: i64, shout: text }> {
+fn math(x: i64 in 0..15) -> Response<{ double: i64, half: f64, fact: i64, fib: i64, free: i64, shout: string }> {
     return ok({ double: x.double(), half: (x * 0.5).half(), fact: x.fact(), fib: x.fib(), free: hurt(x), shout: "hey".shout() });
 }
 --- requests

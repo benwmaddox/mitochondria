@@ -441,12 +441,12 @@ fn typed_expr(e: Expr, code: u8, name: &str) -> Expr {
     if code == 6 { return Expr::Call("__mito__f32".into(), vec![e], CallRes::Unbound); }
     Expr::Call("__mito__in".into(), vec![e, Expr::Int(code as i64), Expr::Str(name.to_string())], CallRes::Unbound)
 }
-struct P { t: Vec<Tok>, i: usize, lines: Vec<(u32, u32)>, pre: Vec<Stmt>, init_ok: bool, tmp: u32, in_endpoint: bool, in_test: bool, markup: Option<bool>, typed: Vec<(String, u8)>, ret_code: Option<u8> }
+struct P { t: Vec<Tok>, i: usize, lines: Vec<(u32, u32)>, pre: Vec<Stmt>, init_ok: bool, tmp: u32, in_endpoint: bool, in_main: bool, in_test: bool, markup: Option<bool>, typed: Vec<(String, u8)>, ret_code: Option<u8> }
 type R<T> = Result<T, String>;
 
 pub fn parse(src: &str) -> R<Api> {
     let (t, lines) = lex_lines(src)?;
-    let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0, in_endpoint: false, in_test: false, markup: None, typed: Vec::new(), ret_code: None };
+    let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0, in_endpoint: false, in_main: false, in_test: false, markup: None, typed: Vec::new(), ret_code: None };
     let mut api = Api::default();
     parse_items(&mut p, &mut api).map_err(|e| crate::generics::name_instances(&e)).map_err(|e| {
         if starts_with_place(&e) { return e; }
@@ -620,9 +620,9 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
         for s in &segs { if let Seg::Param(_, n) = s { if !inputs.iter().any(|i| i.name == *n && i.src == Src::Path) { return Err(format!("endpoint `{}`: the path's `{{{}}}` is not one of its inputs: `fn {}({}: ...)`", name, n, name, n)); } } }
         if !(p.sym("->") && p.is_kw("Response")) { return Err(format!("endpoint `{}` returns a `Response<T>`: `fn {}() -> Response<T>`", name, name)); }
         p.i += 1; p.eat("<")?; let resp = p.rtype()?; p.eat(">")?;
-        p.in_endpoint = true;
+        p.in_endpoint = true; p.in_main = method == "MAIN";
         let body = p.block();
-        p.in_endpoint = false;
+        p.in_endpoint = false; p.in_main = false;
         let body = body?;
         let text = format!("{} {}", method, segs.iter().map(|s| match s { Seg::Lit(l) => format!("/{}", l), Seg::Param(pre, n) => format!("/{}{{{}}}", pre, n) }).collect::<String>());
         let last = p.lines.get(p.i.saturating_sub(1)).map_or(first, |x| x.0);
@@ -706,6 +706,8 @@ impl P {
             else if self.is_kw("body") { self.i += 1; Src::Body }
             // a command-line program's input: the Nth argument, or what was piped in (named as headers, as `:socket` is)
             else if self.is_kw("stdin") { self.i += 1; Src::Header(":stdin".into()) }
+            // every argument as written (each followed by a 0 byte); a program that has this input parses its own flags (runtime/cli.c)
+            else if self.is_kw("args") { self.i += 1; Src::Header(":args".into()) }
             // a game's inputs: the seconds since the last frame, whether a key is down, how far the pointer moved
             else if self.is_kw("time") { self.i += 1; Src::Header(":dt".into()) }
             else if self.is_kw("key") {
@@ -1043,13 +1045,19 @@ impl P {
             // in an endpoint, the answer: ok(...) 200, created(...) 201, no_content() 204, status(code, ...), see_other(path) 303, found(path) 302
             if self.in_endpoint {
                 let how = self.here_word();
-                let code: u16 = match how.as_str() { "ok" => 200, "created" => 201, "no_content" => 204, "status" => 0, "see_other" => 303, "found" => 302, _ => return Err("an endpoint returns its answer: `return ok(...)`, `created(...)`, `no_content()`, `status(code, ...)`, `see_other(path)` or `found(path)`".into()) };
+                let code: u16 = match how.as_str() { "ok" => 200, "created" => 201, "no_content" => 204, "status" => 0, "see_other" => 303, "found" => 302, "exit" if self.in_main => 1000, "exit_error" if self.in_main => 1256,  _ => return Err("an endpoint returns its answer: `return ok(...)`, `created(...)`, `no_content()`, `status(code, ...)`, `see_other(path)` or `found(path)` (in `@main` also `exit(n, ...)` and `exit_error(n, ...)`)".into()) };
                 self.i += 1; self.eat("(")?;
                 let code = if code == 0 {
                     let c = self.int()?;
                     // a page may be answered with an error status (a form shown again 422, a sign-in refused 401); redirects are `see_other`/`found`
                     if !((200..300).contains(&c) || (400..600).contains(&c)) { return Err(format!("`status({}, ...)`: an answer is 2xx, 4xx or 5xx (a redirect is `see_other(path)` or `found(path)`)", c)); }
                     self.eat(",")?; c as u16
+                } else if code >= 1000 {
+                    // `exit(n, body)` / `exit_error(n, body)` in `@main`: the program's exit code n (0 to 255); the answer's status is 1000 + n (the body goes to
+                    // standard output) or 1256 + n (to standard error), a range no HTTP status uses (runtime/cli.c)
+                    let n = self.int()?;
+                    if !(0..=255).contains(&n) { return Err(format!("`{}({}, ...)`: an exit code is 0 to 255", how, n)); }
+                    self.eat(",")?; code + n as u16
                 } else { code };
                 let j = if code == 204 { Json::Empty } else if code == 303 || code == 302 { Json::E(self.expr()?) }
                     else if matches!(self.peek(), Some(Tok::HOpen(_) | Tok::HText(_))) { let body = self.html()?; self.pre.extend(body); Json::Html }

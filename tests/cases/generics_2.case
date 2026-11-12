@@ -1,0 +1,92 @@
+// generic structs, next steps: a function of a generic struct is copied only for the instances a call names (`pop` returns T, which a text instance could not, and nothing pops one), a failure inside a copy reports the template's line in this file, and `key: field of T` reads the field each instance names
+--- program
+struct Stack<T, N: count> {
+    items: T[N];
+    len: i64 in 0..N;
+}
+struct Entry { name: string<8>; score: i64 in 0..1000; age: i64 in 0..120; }
+// the elements live in a pool; `key` is a field of T, each instance reads its own
+struct Ranked<T: struct, N: count, key: field of T> {
+    items: pool<T, N>;
+    best: i64 in 0..1000;
+}
+struct Game {
+    nums: Stack<i64, 3>;
+    words: Stack<string<8>, 2>;
+    byscore: Ranked<Entry, 3, score>;
+    byage: Ranked<Entry, 3, age>;
+}
+state game: Game;
+
+fn push(self: Stack<T, N>, x: T) {
+    if self.len == N { fail 409 "stack is full"; }
+    self.items[self.len] = x;
+    self.len = self.len + 1;
+}
+// returns T: only the number instance can, and only it is popped
+fn pop(self: Stack<T, N>) -> T {
+    if self.len == 0 { fail 409 "stack is empty"; }
+    self.len = self.len - 1;
+    return self.items[self.len];
+}
+fn size(self: Stack<T, N>) -> i64 { return self.len; }
+fn add_entry(self: Ranked<T, N, key>, name: string<8>, v: T.key) {
+    let e = self.items.add();
+    e.name = name;
+    e.key = v;
+    if v > self.best { self.best = v; }
+}
+fn top(self: Ranked<T, N, key>) -> i64 { return self.best; }
+fn total(self: Ranked<T, N, key>) -> i64 {
+    var t = 0;
+    foreach e in self.items { t += e.key; }
+    return t;
+}
+fn entries(self: Ranked<T, N, key>) -> i64 { return self.items.count(); }
+
+@post("/num/{x}")
+fn num(x: i64 in 0..1000) -> Response<{ size: i64 }> {
+    game.nums.push(x);
+    return ok({ size: game.nums.size() });
+}
+@post("/pop")
+fn pop_num() -> Response<{ x: i64, size: i64 }> {
+    let x = game.nums.pop();
+    return ok({ x: x, size: game.nums.size() });
+}
+@post("/word/{w}")
+fn word(w: string<1..8>) -> Response<{ size: i64 }> {
+    game.words.push(w);
+    return ok({ size: game.words.size() });
+}
+@post("/entry/{name}/{score}/{age}")
+fn entry(name: string<1..8>, score: i64 in 0..1000, age: i64 in 0..120) -> Response<{ top_score: i64, top_age: i64, sum_score: i64, sum_age: i64 }> {
+    game.byscore.add_entry(name, score);
+    game.byage.add_entry(name, age);
+    return ok({ top_score: game.byscore.top(), top_age: game.byage.top(), sum_score: game.byscore.total(), sum_age: game.byage.total() });
+}
+@get("/state")
+fn state() -> Response<{ nums: i64, words: i64, scored: i64, aged: i64 }> {
+    return ok({ nums: game.nums.size(), words: game.words.size(), scored: game.byscore.entries(), aged: game.byage.entries() });
+}
+--- requests
+GET /state
+POST /num/5
+POST /num/6
+POST /pop
+POST /num/7
+POST /num/8
+POST /num/9
+POST /num/10
+POST /pop
+POST /pop
+POST /pop
+POST /pop
+POST /word/ann
+POST /word/bob
+POST /word/cy
+POST /entry/ann/50/30
+POST /entry/bob/70/20
+POST /entry/cy/60/45
+POST /entry/dee/10/5
+GET /state

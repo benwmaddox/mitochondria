@@ -4419,6 +4419,7 @@ impl<'p> G<'p> {
                     let has: Vec<String> = self.api.fns.iter().filter(|f| f.recv).filter_map(|f| f.name.rsplit_once('.').filter(|(_, m)| *m == &n[1..]).map(|(t, _)| t.to_string())).collect();
                     return no(format!("`{}` has no function `{}` (declare `fn {}(self: {}, ...)`; `{}` is declared for {})", ty, &n[1..], &n[1..], ty, &n[1..], has.join(", ")));
                 };
+                crate::generics::check_call(&want, self.at.0)?;
                 self.call_values(k as u32, vals, dead)
             }
             CallRes::Unbound if n == "split" => no("`split` is what a loop walks: `foreach part in split(text, \", \") { ... }` (or `split(text)` for words)"),

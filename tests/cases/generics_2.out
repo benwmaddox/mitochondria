@@ -1,0 +1,24 @@
+GET /state -> 200 {"nums":0,"words":0,"scored":0,"aged":0}
+POST /num/5 -> 200 {"size":1}
+POST /num/6 -> 200 {"size":2}
+POST /pop -> 200 {"x":6,"size":1}
+POST /num/7 -> 200 {"size":2}
+POST /num/8 -> 200 {"size":3}
+POST /num/9 -> 409 {"error":"stack is full","line":20}
+POST /num/10 -> 409 {"error":"stack is full","line":20}
+POST /pop -> 200 {"x":8,"size":2}
+POST /pop -> 200 {"x":7,"size":1}
+POST /pop -> 200 {"x":5,"size":0}
+POST /pop -> 409 {"error":"stack is empty","line":26}
+POST /word/ann -> 200 {"size":1}
+POST /word/bob -> 200 {"size":2}
+POST /word/cy -> 409 {"error":"stack is full","line":20}
+POST /entry/ann/50/30 -> 200 {"top_score":50,"top_age":30,"sum_score":50,"sum_age":30}
+POST /entry/bob/70/20 -> 200 {"top_score":70,"top_age":30,"sum_score":120,"sum_age":50}
+POST /entry/cy/60/45 -> 200 {"top_score":70,"top_age":45,"sum_score":180,"sum_age":95}
+POST /entry/dee/10/5 -> 503 {"error":"capacity: game.byscore.items is full (3 of 3)","line":32}
+GET /state -> 200 {"nums":0,"words":2,"scored":3,"aged":3}
+state <plain values> 80
+state game.byscore.items 92
+state game.byage.items 92
+memory reserved=12288 committed=12288 live=264

@@ -90,10 +90,11 @@ A function can take a plain struct (a struct that is a field of the state, also 
 
 ## Generic structs
 
-`struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }` declares a struct with parameters: `T` is a type, `N: count` a whole-number literal of at least 1; after the colon a constraint (`struct`, `number`, `int`, `text`) limits a type.
+`struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }` declares a struct with parameters: `T` is a type, `N: count` a whole-number literal of at least 1; after the colon a constraint (`struct`, `number`, `int`, `text`) limits a type; `key: field of T` names an integer field of the struct `T` (`Sorted<Entry, 8, score>`), read as `self.items[i].key` and typed `T.key`.
 `undo: Stack<i64, 64>;` and `pool<Stack<string<12>, 8>, 4>` use it; each distinct use is its own ordinary struct (`Stack<i64, 64>` in messages), with its own storage and ranges. A function of a generic struct names the parameters in its receiver:
-`fn push(self: Stack<T, N>, x: T) { ... }` is called `game.undo.push(3)`, `T` and `N` taken from the receiver's type. A function the program never names is not copied; an error in a copy names the instance. At most 1000 instances, nested at most 64 deep.
-Not yet: `table<...>` fields, constant or computed counts, `K: field of T`, generic functions without a receiver (DESIGN.md, Generics).
+`fn push(self: Stack<T, N>, x: T) { ... }` is called `game.undo.push(3)`, `T` and `N` taken from the receiver's type. A function is copied only for the instances a call names, so `fn pop(self: Stack<T, N>) -> T` works for `Stack<i64, 8>` while a `Stack<string<12>, 8>` nobody pops exists; an error in a copy names the instance and is reported at the template's line.
+Without `pub`, a function of a generic struct is private to the file it is written in. At most 1000 instances, nested at most 64 deep.
+Not yet: `table<...>` fields, constant or computed counts, `pub` fields, generic functions without a receiver (DESIGN.md, Generics).
 
 ## Entry points
 

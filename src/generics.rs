@@ -27,7 +27,7 @@ enum Kind { Any, Struct, Number, Int, Text, Count, Field(String) }
 
 struct Template { name: String, params: Vec<(String, Kind)>, body: String }
 /// A function of a generic type: the names its receiver gives the parameters (`Stack<U, M>`), and its text.
-struct Method { template: usize, name: String, names: Vec<String>, text: String, line: usize }
+struct Method { template: usize, name: String, names: Vec<String>, text: String, line: usize, public: bool }
 struct Inst { name: String, display: String, depth: usize, args: Vec<String>, body: String }
 
 thread_local! { static NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new()); }
@@ -169,6 +169,10 @@ impl Ctx {
             let f = self.rewrite(&f)?;
             // the copy's lines are the template's lines in the program's own source (see `//# line` in src/lang.rs)
             self.out_api += &format!("//# line {} {}\n{}\n", self.methods[mi].line, self.insts[k].display, f);
+            if !self.methods[mi].public {
+                let file = crate::origin(self.methods[mi].line).map(|o| o.0);
+                PRIVATE.with(|p| { p.borrow_mut().insert(format!("{}.{}", self.insts[k].name, self.methods[mi].name), (format!("{}.{}", self.insts[k].display, self.methods[mi].name), file)); });
+            }
         }
     }
 
@@ -360,6 +364,7 @@ fn collect_methods(api: &str, templates: &[Template]) -> Result<(Vec<Method>, Ve
     let mut i = 0;
     while i < s.t.len() {
         if !(s.is_id(i, "fn") && !s.after_dot(i)) { i += 1; continue; }
+        let public = s.prev(i).map_or(false, |p| s.is_id(p, "pub"));
         let start = match s.prev(i) { Some(p) if s.is_id(p, "pub") => s.t[p].s, _ => s.t[i].s };
         let n = s.sig(i + 1);
         let name = s.txt(n.min(s.t.len() - 1));
@@ -398,7 +403,7 @@ fn collect_methods(api: &str, templates: &[Template]) -> Result<(Vec<Method>, Ve
         j = end;
         let text: String = s.c[start..s.t[end - 1].e].iter().collect();
         let line = 1 + s.c[..start].iter().filter(|&&c| c == '\n').count();
-        methods.push(Method { template: ti, name, names, text, line });
+        methods.push(Method { template: ti, name, names, text, line, public });
         cut.push((start, s.t[end - 1].e));
         i = j;
     }
@@ -407,6 +412,19 @@ fn collect_methods(api: &str, templates: &[Template]) -> Result<(Vec<Method>, Ve
 
 // The calls found to name a function that is not there yet: (instance as written, function name).
 thread_local! { static MISSING: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new()); }
+
+// The copies of functions without `pub`: the function's name, and what to call it in a message and the file it is private to.
+thread_local! { static PRIVATE: RefCell<HashMap<String, (String, Option<String>)>> = RefCell::new(HashMap::new()); }
+
+/// May the code at line `at` of the program call the function `name` (`__mito__Stack__i64__8.grow`)? A copy of a function
+/// of a generic struct without `pub` is private to the file it was written in; anything else is open.
+pub fn check_call(name: &str, at: u32) -> Result<(), String> {
+    let Some((shown, file)) = PRIVATE.with(|p| p.borrow().get(name).cloned()) else { return Ok(()) };
+    let here = crate::origin(at as usize).map(|o| o.0);
+    if here == file { return Ok(()); }
+    let place = |f: &Option<String>| f.clone().unwrap_or_else(|| "the program's own file".to_string());
+    Err(format!("`{}` is private to {} (it is not `pub`), and is called from {}", shown, place(&file), place(&here)))
+}
 
 thread_local! { static TEMPLATE_METHODS: RefCell<HashSet<String>> = RefCell::new(HashSet::new()); }
 
@@ -424,6 +442,7 @@ pub fn note_missing(ty: &str, method: &str) {
 /// (then calls may ask for more).
 fn expand_once(state: &str, api: &str, asked: &HashSet<(String, String)>) -> Result<(String, String, bool), String> {
     TEMPLATE_METHODS.with(|m| m.borrow_mut().clear());
+    PRIVATE.with(|p| p.borrow_mut().clear());
     if !state.contains('<') { return Ok((state.to_string(), api.to_string(), false)); }
     let (templates, plain, cut) = collect_structs(state)?;
     if templates.is_empty() { return Ok((state.to_string(), api.to_string(), false)); }
@@ -664,5 +683,22 @@ fn go() { g.show(); }
         let nested = "struct Pair<A, B> { a: A; b: B; }\nstruct S<T: struct, key: field of T> { v: T; }\nstruct G { x: S<Pair<i64, i64>, a>; }\nstate g: G;\n";
         assert!(plain(nested, "").is_ok(), "{:?}", plain(nested, ""));
         assert!(plain(&nested.replace("Pair<i64, i64>, a", "Pair<i64, i64>, c"), "").unwrap_err().contains("Pair<i64, i64> has no field `c`"));
+    }
+
+    #[test]
+    fn a_function_without_pub_is_private_to_its_file() {
+        let piece = |at: usize, n: usize, file: &str, from: usize| crate::Piece { at, n, file: file.to_string(), from, text: String::new() };
+        let lib = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nfn grow(self: Stack<T, N>) { self.len = self.len + 1; }\npub fn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.grow(); }\n";
+        let main = |call: &str| format!("{}struct G {{ a: Stack<i64, 8>; }}\nstate g: G;\n@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.push(1); {} return ok({{}}); }}\n", lib, call);
+        crate::PIECES.with(|p| *p.borrow_mut() = vec![piece(1, 3, "lib.mito", 1), piece(4, 3, "main.mito", 1)]);
+        // `push` is public, and calls the private `grow` from its own file
+        let ok = load(&main(""));
+        // `grow` called from the program's other file
+        let e = load(&main("g.a.grow();")).unwrap_err();
+        crate::PIECES.with(|p| p.borrow_mut().clear());
+        assert_eq!(ok, Ok(()));
+        assert!(e.contains("`Stack<i64, 8>.grow` is private to lib.mito (it is not `pub`), and is called from main.mito") && !e.contains("__mito__"), "{}", e);
+        // one file: everything is in it
+        assert_eq!(load(&main("g.a.grow();")), Ok(()));
     }
 }

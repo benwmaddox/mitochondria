@@ -259,7 +259,7 @@ int main(int argc, char **argv) {
     fn a_game_links_with_clang() {
         if super::clang().is_none() { return; }
         let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/world/world.mito");
-        let text = std::fs::read_to_string(&example).unwrap();
+        let text = crate::load_text(&example.to_string_lossy()).unwrap();   // with its `use`s expanded
         crate::lang::set_file_dir(example.parent().unwrap());
         let (st, code) = crate::source::load(&text).unwrap();
         let prog = crate::layout::Program::parse(&st).unwrap();
@@ -341,7 +341,7 @@ int main(int argc, char **argv) {
 
     /// Build a game's executable into `dir` (with the C compiler the tests use).
     fn build_game(source: &std::path::Path, dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-        let text = std::fs::read_to_string(source).unwrap();
+        let text = crate::load_text(&source.to_string_lossy()).unwrap();   // with its `use`s expanded
         crate::lang::set_file_dir(source.parent().unwrap());
         let (st, code) = crate::source::load(&text).unwrap();
         let prog = crate::layout::Program::parse(&st).unwrap();

@@ -253,6 +253,26 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A game builds with clang as well as TinyCC (link only: SDL3 is loaded when the game starts, so no GPU or SDL3 is needed here). The driver once declared `sprintf`
+    /// itself, which Windows' C headers define inline, so a clang build of the world example failed to link while the TinyCC builds the other tests use worked.
+    #[test]
+    fn a_game_links_with_clang() {
+        if super::clang().is_none() { return; }
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/world/world.mito");
+        let text = std::fs::read_to_string(&example).unwrap();
+        crate::lang::set_file_dir(example.parent().unwrap());
+        let (st, code) = crate::source::load(&text).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap_or_else(|e| panic!("{}", e));
+        let dir = std::env::temp_dir().join(format!("mito-game-clang-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(format!("world{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O0"]).unwrap_or_else(|e| panic!("{}", e));
+        assert!(exe.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The open-world example through a real window (runtime/game.c): built, run for a few frames of a hidden window, and the frame it saved read back. Needs SDL3 and a GPU, so it
     /// runs only when asked: `MITO_SDL3_DIR=<directory holding SDL3.dll> cargo test game_renders_the_world -- --ignored`.
     #[test]

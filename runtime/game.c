@@ -19,7 +19,78 @@ void *mito_start(u64 budget, u64 seed);
 int mito_begin(void *m);
 int mito_has_tables(void);
 u64 strlen(const char *s);
-int sprintf(char *s, const char *f, ...);
+/* The few printf formats the driver uses, done here so that it needs no C library formatting: on Windows `sprintf` is an inline function of the headers, not a symbol a build
+   with clang can link, and one formatter on every platform makes the text of a recorded input (`%.6f` of dt) identical everywhere. Supported: literal text, `%%`, `%s`, `%d`/`%u`
+   with `l` or `ll`, an optional zero-padded width (`%06ld`), and `%.Nf` for N 0 to 9. `sprintf(buffer, ...)` is `game_snprintf(buffer, sizeof buffer, ...)`: every call gives an array. */
+#ifdef __TINYC__
+#include <stdarg.h> /* TinyCC 0.9.27 has no __builtin_va_list: its own header */
+#define GAME_VA va_list
+#define GAME_VA_START va_start
+#define GAME_VA_ARG va_arg
+#define GAME_VA_END va_end
+#else
+#define GAME_VA __builtin_va_list
+#define GAME_VA_START __builtin_va_start
+#define GAME_VA_ARG __builtin_va_arg
+#define GAME_VA_END __builtin_va_end
+#endif
+static int game_snprintf(char *out, u64 cap, const char *f, ...) {
+    GAME_VA ap;
+    GAME_VA_START(ap, f);
+    u64 n = 0;
+#define GAME_PUT(ch) do { if (n + 1 < cap) out[n] = (char)(ch); n++; } while (0)
+    for (; *f; f++) {
+        if (*f != '%') { GAME_PUT(*f); continue; }
+        f++;
+        if (*f == '%') { GAME_PUT('%'); continue; }
+        int zero = 0, width = 0, prec = -1, lng = 0;
+        if (*f == '0') { zero = 1; f++; }
+        while (*f >= '0' && *f <= '9') { width = width * 10 + (*f - '0'); f++; }
+        if (*f == '.') { f++; prec = 0; while (*f >= '0' && *f <= '9') { prec = prec * 10 + (*f - '0'); f++; } }
+        while (*f == 'l') { lng++; f++; }
+        if (*f == 's') {
+            const char *t = GAME_VA_ARG(ap, const char *);
+            for (; *t; t++) GAME_PUT(*t);
+        } else if (*f == 'd' || *f == 'u') {
+            unsigned long long u; int neg = 0;
+            if (*f == 'd') {
+                long long v = lng == 0 ? (long long)GAME_VA_ARG(ap, int) : lng == 1 ? (long long)GAME_VA_ARG(ap, long) : GAME_VA_ARG(ap, long long);
+                if (v < 0) { neg = 1; u = 0ULL - (unsigned long long)v; } else u = (unsigned long long)v;
+            } else u = lng == 0 ? (unsigned long long)GAME_VA_ARG(ap, unsigned) : lng == 1 ? (unsigned long long)GAME_VA_ARG(ap, unsigned long) : GAME_VA_ARG(ap, unsigned long long);
+            char digits[24]; int nd = 0;
+            do { digits[nd++] = (char)('0' + u % 10); u /= 10; } while (u);
+            int len = nd + neg;
+            if (neg && zero) { GAME_PUT('-'); neg = 0; }
+            for (int k = len; k < width; k++) GAME_PUT(zero ? '0' : ' ');
+            if (neg) GAME_PUT('-');
+            while (nd) GAME_PUT(digits[--nd]);
+        } else if (*f == 'f') {
+            double v = GAME_VA_ARG(ap, double);
+            if (prec < 0) prec = 6;
+            if (v != v) { const char *t = "nan"; for (; *t; t++) GAME_PUT(*t); continue; }
+            if (v < 0) { GAME_PUT('-'); v = -v; }
+            if (v > 9e18) { const char *t = "inf"; for (; *t; t++) GAME_PUT(*t); continue; }
+            unsigned long long scale = 1; for (int k = 0; k < prec; k++) scale *= 10;
+            unsigned long long whole = (unsigned long long)v;
+            double rest = (v - (double)whole) * (double)scale;
+            unsigned long long frac = (unsigned long long)(rest + 0.5);
+            if (frac >= scale) { whole++; frac -= scale; }
+            char digits[24]; int nd = 0;
+            do { digits[nd++] = (char)('0' + whole % 10); whole /= 10; } while (whole);
+            while (nd) GAME_PUT(digits[--nd]);
+            if (prec > 0) {
+                GAME_PUT('.');
+                char fr[12]; for (int k = prec - 1; k >= 0; k--) { fr[k] = (char)('0' + frac % 10); frac /= 10; }
+                for (int k = 0; k < prec; k++) GAME_PUT(fr[k]);
+            }
+        }
+    }
+#undef GAME_PUT
+    GAME_VA_END(ap);
+    if (cap) out[n < cap ? n : cap - 1] = 0;
+    return (int)n;
+}
+#define sprintf(buf, ...) game_snprintf(buf, sizeof(buf), __VA_ARGS__)
 double strtod(const char *s, char **end);
 long strtol(const char *s, char **end, int base);
 int strcmp(const char *a, const char *b);

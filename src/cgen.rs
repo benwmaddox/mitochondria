@@ -2119,7 +2119,12 @@ impl<'p> G<'p> {
     /// A value read from a field declared with a range: the range analysis may assume it.
     fn with_field_range(&mut self, v: CV, range: Option<(i64, i64)>) -> CV {
         match (v, range) {
-            (CV::Int(e), Some(r)) => { let n = self.hold_int(e); if !self.var_names.contains(&n) { self.ranges.insert(n.clone(), r); } CV::Int(n) }
+            (CV::Int(e), Some(r)) => {
+                // a range recorded from the stores seen may be looser than what the load itself guarantees (a `u8` element is 0..255 whatever
+                // was stored: a store of -255..255 is checked, and a failed store changes nothing): keep the narrower of the two ends
+                let r = match self.interval(&e) { Some((a, b)) if a.max(r.0) <= b.min(r.1) => (a.max(r.0), b.min(r.1)), _ => r };
+                let n = self.hold_int(e); if !self.var_names.contains(&n) { self.ranges.insert(n.clone(), r); } CV::Int(n)
+            }
             (v, _) => v,
         }
     }
@@ -5769,6 +5774,19 @@ state app: A;
         assert!(checked("var i = app.big; i = i + 1; let x = app.xs[i]; return ok({ x: x });") > 0); // the step came before the access
         assert!(checked("var i = app.big; let h = app.n > 5 && app.xs[i] == 1; i = i + 1; return ok({ x: i });") > 0); // the test may not have run: it says nothing of the code after
         assert!(checked("var i = app.big; if app.n > 5 { let x = app.xs[i]; } i = i + 1; return ok({ x: i });") > 0);
+    }
+
+    /// What every store into an array put there is assumed of a read, but never wider than what the element type itself gives: a `u8` array that was fed values
+    /// of -255..255 (each store is tested, so what is read is still 0..255) keeps the 16-bit shape of `lo | (hi << 8)`; an `i16` array fed only 0..100 keeps that, a narrower range than its type.
+    #[test]
+    fn a_range_seen_in_stores_never_widens_the_element_type() {
+        let reader = "@get(\"/r\") fn r() -> Response<{ x: i64 }> { return ok({ x: app.xs[0] | (app.xs[1] << 8) }); }";
+        let code = |state: &str, store: &str| endpoint_code(state, &format!("@post(\"/w\") fn w() -> Response<{{ x: i64 }}> {{ {} return ok({{ x: 0 }}); }}\n{}", store, reader));
+        let wide_state = "struct A { n: i64 in -255..255; xs: u8[2]; }\nstate app: A;";
+        assert!(code(wide_state, "app.xs[0] = app.n; app.xs[1] = app.n;").contains("BOR16("), "a u8 element read stays 0..255");
+        let i16_state = "struct A { n: i64 in 0..100; m: i64 in -5..5; xs: i16[2]; }\nstate app: A;";
+        assert!(code(i16_state, "app.xs[0] = app.n; app.xs[1] = app.n;").contains("BOR16("), "an i16 array that only ever held 0..100 reads as 0..100");
+        assert!(!code(i16_state, "app.xs[0] = app.m; app.xs[1] = app.m;").contains("BOR16("), "an i16 array that held -5..5 may be negative: no 16-bit or");
     }
 
     /// A constant is exactly its value: code that uses one is the code written with the number (so a loop over a constant range is bounded, and its checks removed, as for a literal).

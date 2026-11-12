@@ -19,7 +19,7 @@ fn post_players(name: string<4096>?) -> Response<{ slot: i64 }> { let p = app.pl
 @post("/players/{p}/hit/{k}")
 fn post_players_p_hit_k(p: i64, k: i64) -> Response<{ hits: i64 }> {
     let p = app.players[p];
-    
+
     p.hits[k] = p.hits[k] + 1;
     return ok({ "hits": p.hits[k] });
 }

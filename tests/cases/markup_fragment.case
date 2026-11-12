@@ -8,7 +8,7 @@ fn item(k: i64) -> html { <li id="i{k}">{k}</li> }
 @post("/n/{n}")
 fn set(n: i64) -> Response<{ n: i64 }> { app.n = n; return ok({ n: app.n }); }
 @get("/items")
-fn items() -> Response<html> { return ok({foreach k in 1..app.n { item(k); }}); }
+fn items() -> Response<html> { return ok({ foreach k in 1..app.n { item(k); } }); }
 --- requests
 GET /items
 POST /n/3

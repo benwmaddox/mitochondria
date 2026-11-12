@@ -1,0 +1,46 @@
+// tutorial section 12: functions of a type (`fn hurt(self: Player, n: i64)`, `p.hurt(3)`), one name on two types, numbers and strings as `self`
+--- program
+struct Player { name: string<16>; hp: i64; }
+struct Monster { hp: i64; rage: i64; }
+struct World { players: pool<Player, 8>; monsters: pool<Monster, 8>; }
+state world: World;
+
+fn hurt(self: Player, n: i64) { self.hp -= n; }
+fn hurt(self: Monster, n: i64) { self.hp -= n * 2; self.rage += 1; }
+fn alive(self: Player) -> bool { return self.hp > 0; }
+fn double(self: i64) -> i64 { return self * 2; }
+fn shout(self: string) -> text { return self + "!"; }
+
+@post("/players")
+fn add_player(name: string<1..16>) -> Response<{ id: i64 }> {
+    let p = world.players.add { name: name, hp: 10 };
+    return created({ id: slot(p) });
+}
+@post("/monsters")
+fn add_monster() -> Response<{ id: i64 }> {
+    let m = world.monsters.add { hp: 10 };
+    return created({ id: slot(m) });
+}
+@post("/players/{id}/hurt")
+fn hurt_player(id: i64, n: i64 in 0..100) -> Response<{ hp: i64, alive: bool }> {
+    let p = world.players[id];
+    p.hurt(n);
+    return ok({ hp: p.hp, alive: p.alive() });
+}
+@post("/monsters/{id}/hurt")
+fn hurt_monster(id: i64, n: i64 in 0..100) -> Response<{ hp: i64, rage: i64 }> {
+    let m = world.monsters[id];
+    m.hurt(n);
+    return ok({ hp: m.hp, rage: m.rage });
+}
+@get("/words/{x}")
+fn words(x: i64 in 0..100) -> Response<{ twice: i64, loud: string }> {
+    return ok({ twice: x.double(), loud: "hey".shout() });
+}
+--- requests
+POST /players {"name": "ada"}
+POST /monsters
+POST /players/0/hurt {"n": 3}
+POST /monsters/0/hurt {"n": 3}
+POST /players/0/hurt {"n": 9}
+GET /words/21

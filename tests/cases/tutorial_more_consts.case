@@ -1,0 +1,38 @@
+// tutorial section 14: constants in a group, used in a range, a size, a loop and match arms
+--- program
+const Limits { MAX_HP: i64 = 100; MAX_NAME = 8; SLOTS = 4; }
+const Key { W = 119; S = 115; }
+
+struct Unit { name: string<Limits.MAX_NAME>; hp: i64 in 0..Limits.MAX_HP; tag: i64[Limits.SLOTS]; }
+struct World { units: pool<Unit, Limits.SLOTS>; }
+state world: World;
+
+@post("/units")
+fn add_unit(name: string<1..8>) -> Response<{ id: i64, hp: i64 }> {
+    let u = world.units.add { name: name, hp: Limits.MAX_HP };
+    return created({ id: slot(u), hp: u.hp });
+}
+@post("/units/{id}/tag")
+fn tag(id: i64, v: i64 in 0..100) -> Response<{ sum: i64 }> {
+    let u = world.units[id];
+    var sum = 0;
+    foreach i in 0..Limits.SLOTS - 1 { u.tag[i] = v + i; sum += u.tag[i]; }
+    return ok({ sum: sum });
+}
+@get("/key/{c}")
+fn key(c: i64 in 0..255) -> Response<{ dir: i64 }> {
+    var d = 0;
+    match c {
+        Key.W => { d = 1; }
+        Key.S => { d = 2; }
+        else => { d = 0; }
+    }
+    return ok({ dir: d });
+}
+--- requests
+POST /units {"name": "ada"}
+POST /units/0/tag {"v": 10}
+GET /key/119
+GET /key/115
+GET /key/7
+POST /units {"name": "a name too long"}

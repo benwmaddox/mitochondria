@@ -1,0 +1,9 @@
+POST /units -> 201 {"id":0,"hp":100}
+POST /units/0/tag -> 200 {"sum":46}
+GET /key/119 -> 200 {"dir":1}
+GET /key/115 -> 200 {"dir":2}
+GET /key/7 -> 200 {"dir":0}
+POST /units -> 413 {"error":"`name`: 15 bytes, at most 8"}
+state <plain values> 0
+state world.units 71
+memory reserved=4096 committed=4096 live=71

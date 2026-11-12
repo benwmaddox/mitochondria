@@ -1,0 +1,35 @@
+// tutorial section 16: lib/std/math.mito, random.mito and vec.mito (the tutorial writes `use "std/math.mito";`, which a case file cannot resolve, so the case includes the file), Rng declared by the program, Vec3 nested in state
+--- program
+include lib/std/math.mito
+include lib/std/random.mito
+include lib/std/vec.mito
+
+struct Rng { state: i64; }
+struct Ship { pos: Vec3; vel: Vec3; }
+struct Game { rng: Rng; ship: Ship; }
+state game: Game;
+
+@get("/math/{n}")
+fn math(n: i64 in 0..8) -> Response<{ clamped: f64, mid: f64, smooth: f64, pi: f64 }> {
+    let lo = 10.0;
+    let x = n * 0.25;
+    return ok({ clamped: x.clamp(0.0, 1.0), mid: lo.lerp(20.0, x), smooth: x.smoothstep(0.0, 1.0), pi: Math.PI });
+}
+@post("/roll/{seed}")
+fn roll(seed: i64) -> Response<{ a: i64, b: i64, c: i64 }> {
+    game.rng.seed(seed);
+    return ok({ a: game.rng.range(1, 6), b: game.rng.range(1, 6), c: game.rng.range(1, 6) });
+}
+@post("/fly")
+fn fly() -> Response<{ x: f64, y: f64, z: f64, speed: f64 }> {
+    game.ship.pos.set(1.0, 2.0, 3.0);
+    game.ship.vel.set(0.0, 3.0, 4.0);
+    game.ship.pos.plus(game.ship.vel);
+    return ok({ x: game.ship.pos.x, y: game.ship.pos.y, z: game.ship.pos.z, speed: game.ship.vel.length() });
+}
+--- requests
+GET /math/1
+GET /math/2
+GET /math/6
+POST /roll/42
+POST /fly

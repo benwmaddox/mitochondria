@@ -1,0 +1,34 @@
+// tutorial section 15: a generic struct `Stack<T, N: count>` used twice, and a function of the generic type
+--- program
+struct Stack<T, N: count> {
+    items: T[N];
+    len: i64 in 0..N;
+}
+struct Game { scores: Stack<i64, 3>; names: Stack<string<12>, 2>; }
+state game: Game;
+
+fn push(self: Stack<T, N>, x: T) {
+    if self.len == N { fail 409 "stack is full"; }
+    self.items[self.len] = x;
+    self.len += 1;
+}
+fn room(self: Stack<T, N>) -> i64 { return N - self.len; }
+
+@post("/scores")
+fn add_score(points: i64 in 0..1000) -> Response<{ room: i64 }> {
+    game.scores.push(points);
+    return ok({ room: game.scores.room() });
+}
+@post("/names")
+fn add_name(name: string<1..12>) -> Response<{ room: i64 }> {
+    game.names.push(name);
+    return ok({ room: game.names.room() });
+}
+--- requests
+POST /scores {"points": 40}
+POST /scores {"points": 50}
+POST /names {"name": "ada"}
+POST /scores {"points": 60}
+POST /scores {"points": 70}
+POST /names {"name": "bo"}
+POST /names {"name": "cy"}

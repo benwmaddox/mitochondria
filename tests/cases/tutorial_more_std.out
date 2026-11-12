@@ -1,0 +1,7 @@
+GET /math/1 -> 200 {"clamped":0.25,"mid":12.5,"smooth":0.15625,"pi":3.141592653589793}
+GET /math/2 -> 200 {"clamped":0.5,"mid":15,"smooth":0.5,"pi":3.141592653589793}
+GET /math/6 -> 200 {"clamped":1,"mid":25,"smooth":1,"pi":3.141592653589793}
+POST /roll/42 -> 200 {"a":1,"b":2,"c":2}
+POST /fly -> 200 {"x":1,"y":5,"z":7,"speed":5}
+state <plain values> 56
+memory reserved=4096 committed=4096 live=56

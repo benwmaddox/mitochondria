@@ -18,7 +18,7 @@ fn put(k: i64, fail_after: bool) -> Response<{}> {
 @get("/look/{k}")
 fn look(k: i64) -> Response<{ m: i64, n: i64, inner: i64, inner_total: i64, logged: i64, logged_total: i64 }> {
     return ok({ m: app.m.get_or(k, -1), n: app.n.get_or(k, -1), inner: app.inner.items.count(), inner_total: app.inner.total,
-                logged: app.logged.items.count(), logged_total: app.logged.total });
+        logged: app.logged.items.count(), logged_total: app.logged.total });
 }
 --- requests
 POST /put/3/false

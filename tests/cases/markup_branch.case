@@ -10,11 +10,11 @@ fn path(n: i64) -> html { if n > 1 { "/many/"; } else { "/n/"; } html_text(n); "
 fn help() -> html {
     <div>{if app.n == 0 {
         <h2>none</h2>
-        {steps("<zero>");}
-    } else if app.n == 1 {
-        <h2>one</h2> {app.n}
-    } else {
-        <h2>many</h2>
+        { steps("<zero>"); }
+        } else if app.n == 1 {
+            <h2>one</h2> { app.n }
+        } else {
+            <h2>many</h2>
     }}</div>
 }
 @post("/n/{n}")

@@ -28,7 +28,7 @@ fn home() -> Response<html> {
                 </ul>
                 <span class="todo-count"><strong>{left}</strong> {if left == 1 { "item" } else { "items" }} left</span>
             </body>
-        </html>);
+    </html>);
 }
 @post("/name/{n}")
 fn name(n: utf8<32>) -> Response<{}> { app.name = n; return ok({}); }

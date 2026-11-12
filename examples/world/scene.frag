@@ -110,7 +110,7 @@ float figure(vec3 p) {
     float arms = min(capsule(pl, shL, handL, 0.055), capsule(pl, shR, handR, 0.055));
     float d = min(min(legs, shoes), min(torso, head));
     d = min(d, arms);
-    // which part is nearest decides the colour
+    // which part is nearest decides the color
     figureColor = SHIRT;
     float best = torso;
     if (legs < best) { best = legs; figureColor = TROUSERS; }

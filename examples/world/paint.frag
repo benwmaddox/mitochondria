@@ -21,7 +21,7 @@ float noise(vec2 p) {
 
 // ---- the painting ----
 // The picture is laid down in broad brush strokes instead of being drawn pixel by pixel. A stroke is a long, narrow cell; every pixel
-// it covers takes the colour of the world seen at the stroke's middle, so a stroke is one flat colour, a little darker at its edges,
+// it covers takes the color of the world seen at the stroke's middle, so a stroke is one flat color, a little darker at its edges,
 // streaked along its length by the bristles. Three layers of strokes, big under small, are laid one over another, each at its own
 // angle; the angle follows a slowly changing flow field, so the strokes sweep around like a hand does.
 
@@ -55,7 +55,7 @@ vec3 formVector(vec2 pix, float radius) {
     return vec3(-(T.x - T.y), -2.0 * T.z, 0.0) / 4.0;
 }
 
-// the colour of a stroke, given the window position of its middle; a little paint's worth of variation from stroke to stroke.
+// the color of a stroke, given the window position of its middle; a little paint's worth of variation from stroke to stroke.
 // paint is more saturated than light, and stronger in its lights and darks
 vec3 grade(vec3 light) {
     vec3 c = tone(light);
@@ -64,8 +64,8 @@ vec3 grade(vec3 light) {
     return clamp((c - 0.5) * 1.22 + 0.5, 0.0, 1.0);
 }
 
-// Where a world stroke takes its colour when its middle is on the figure: its flat colour would smear the figure's red over the grass, so it takes the
-// colour of the nearest place off the figure, going outward from the middle of the window (the camera looks at the figure, so that is where the figure is).
+// Where a world stroke takes its color when its middle is on the figure: its flat color would smear the figure's red over the grass, so it takes the
+// color of the nearest place off the figure, going outward from the middle of the window (the camera looks at the figure, so that is where the figure is).
 vec2 offFigure(vec2 centre) {
     vec2 away = normalize(centre - uResolution * 0.5 + vec2(0.01, 0.02));
     vec2 p = centre;
@@ -76,8 +76,8 @@ vec2 offFigure(vec2 centre) {
     return p;
 }
 
-// the colour of a stroke, given the window position of its middle; a little paint's worth of variation from stroke to stroke.
-// A figure stroke whose middle is off the figure takes its own pixel's colour instead.
+// the color of a stroke, given the window position of its middle; a little paint's worth of variation from stroke to stroke.
+// A figure stroke whose middle is off the figure takes its own pixel's color instead.
 vec3 paint(vec2 centre, vec2 pix, vec2 id, float layer, bool ofFigure) {
     bool middleOnFigure = idAt(centre) > 2.5;
     vec2 at = centre;
@@ -90,7 +90,7 @@ vec3 paint(vec2 centre, vec2 pix, vec2 id, float layer, bool ofFigure) {
     return c;
 }
 
-// One layer of strokes: x is the colour and y how much of this pixel the stroke covers (0 where the brush did not reach).
+// One layer of strokes: x is the color and y how much of this pixel the stroke covers (0 where the brush did not reach).
 // `len` and `wid` are the stroke's size in pixels, `turn` the layer's own angle added to the flow, `fill` 1 for a layer that covers everything.
 vec4 strokes(vec2 pix, float layer, float len, float wid, float turn, float fill, float radius, bool ofFigure) {
     // the flow field: a direction that changes slowly across the window, held in steps so that neighbouring strokes agree

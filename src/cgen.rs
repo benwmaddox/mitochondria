@@ -1138,7 +1138,11 @@ pub(crate) fn set_methods(api: &Api) {
     METHODS.with(|m| {
         let mut m = m.borrow_mut();
         m.clear();
-        for (k, f) in api.fns.iter().enumerate() { if f.recv { if let Some((_, name)) = f.name.rsplit_once('.') { m.entry(name.to_string()).or_default().push(k as u32); } } }
+        for (k, f) in api.fns.iter().enumerate() {
+            if f.recv { if let Some((_, name)) = f.name.rsplit_once('.') { m.entry(name.to_string()).or_default().push(k as u32); } }
+            // a plain function a receiver-form call may also reach (`x.f()` for `fn f(x: T)`): counted too, so the analyses stay conservative
+            else if f.test.is_none() && f.ptys.first().map_or(false, |t| t.is_some()) { m.entry(f.name.clone()).or_default().push(k as u32); }
+        }
     });
 }
 /// The functions a call can reach: its function, or every function declared for the method an `x.f(...)` names.
@@ -4725,11 +4729,10 @@ impl<'p> G<'p> {
                 // a name that is also a collection operation (`count`, `capacity`, `truncate`): the collection's own unless the receiver's type declares the function
                 let own = match (&n[1..], args.len()) { ("count", 1) => Some(B::Count), ("capacity", 1) => Some(B::Capacity), ("truncate", 2) => Some(B::Truncate), _ => None };
                 if let Some(b) = own { if !self.user_method_for(&n[1..], &args[0], env)? { return self.callx(n, args, CallRes::Builtin(b), env, dead); } }
-                let mut vals = Vec::new();
                 let ctx = self.ret_ctx.take();
-                for a in args { let v = self.expr(a, env, dead)?; vals.push(self.hold(v, false)?); }
-                self.ret_ctx = ctx;
-                let Some(ty) = self.receiver_type(&vals[0]) else { return no(format!("`{}` is called on something that is not a struct, a number, a string or a bool, and only those have functions of their own", &n[1..])) };
+                // the receiver is evaluated first only to learn its type; a `write` receiver is then resolved as a place (see `write_place`), anything else is held
+                let v0 = self.expr(&args[0], env, dead)?;
+                let Some(ty) = self.receiver_type(&v0) else { return no(format!("`{}` is called on something that is not a struct, a number, a string or a bool, and only those have functions of their own", &n[1..])) };
                 let want = format!("{}.{}", ty, &n[1..]);
                 let Some(k) = self.api.fns.iter().position(|f| f.recv && f.name == want).or_else(|| self.api.fns.iter().position(|f| !f.recv && f.test.is_none() && f.name == n[1..] && f.ptys.first().map_or(false, |t| t.is_some()))) else {
                     if crate::generics::note_missing(&ty, &n[1..]) { return Ok(CV::Int("0LL".into())); } // a probe of `generics::expand`: go on to find the next missing copy
@@ -4738,7 +4741,21 @@ impl<'p> G<'p> {
                     return no(format!("`{}` has no function `{}` (declare `fn {}(self: {}, ...)`; `{}` is declared for {})", ty, &n[1..], &n[1..], ty, &n[1..], has.join(", ")));
                 };
                 crate::generics::check_call(&want, self.at.0)?;
-                self.call_values(k as u32, vals, dead)
+                let k = k as u32;
+                let mut vals = Vec::new();
+                let mut places: Vec<Option<WPlace<'p>>> = Vec::new();
+                for (j, a) in args.iter().enumerate() {
+                    if scalar_write_at(k, j) {
+                        if j == 0 && !no_calls(a) { return no(format!("`{}: write` in `{}`: `write` needs a place to write to, not a value computed by a call", self.api.fns[k as usize].params[0], want)); }
+                        let (v, pl) = self.write_place(a, k, j, env, dead)?; vals.push(v); places.push(Some(pl));
+                    } else {
+                        let v = if j == 0 { v0.clone() } else { self.expr(a, env, dead)? };
+                        vals.push(self.hold(v, false)?); places.push(None);
+                    }
+                }
+                self.ret_ctx = ctx;
+                self.wargs = places;
+                self.call_values(k, vals, dead)
             }
             CallRes::Unbound if n == "split" => no("`split` is what a loop walks: `foreach part in split(text, \", \") { ... }` (or `split(text)` for words)"),
             CallRes::Unbound => no("unbound call"),
@@ -6680,6 +6697,10 @@ fn scalar_write_flags(api: &Api) -> Vec<Vec<bool>> {
 /// A parameter type that is a number or bool by name (an integer type, `f32`, `f64`, `bool`), not nullable.
 fn is_scalar_pty(t: &PTy) -> bool {
     t.arg.is_none() && t.field.is_none() && t.coll.is_none() && !t.opt && matches!(t.name.as_str(), "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool")
+}
+/// An expression with no call in it (evaluating it twice is harmless).
+fn no_calls(e: &Expr) -> bool {
+    match e { Expr::Call(..) => false, Expr::Field(b, ..) | Expr::Un(_, b) => no_calls(b), Expr::Index(a, b) | Expr::Bin(_, a, b) => no_calls(a) && no_calls(b), _ => true }
 }
 fn scalar_write_at(k: u32, j: usize) -> bool { SCALARW.with(|s| s.borrow().get(k as usize).and_then(|v| v.get(j)).copied().unwrap_or(false)) }
 /// The locals this expression hands to a `write` parameter of a number or bool (so a call may assign them).

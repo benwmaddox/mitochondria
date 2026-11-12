@@ -1,0 +1,106 @@
+// `write` parameters in a call written with a receiver (`x.bump()`): the receiver and the other arguments are places in the caller, exactly as in `bump(x)`
+--- program
+struct P { x: i64; y: i64; }
+struct Item { n: i64; name: string<16>; }
+struct S { count: i64; ratio: f64; flag: bool; arr: i64[4]; label: string<16>; p: P; out: i64; k: i64; items: pool<Item, 4>; }
+state g: S;
+
+fn bump(self: write i64) { self += 1; }
+fn add_to(self: write i64, k: i64) { self += k; }
+fn flip(self: write bool) { self = !self; }
+fn grow(self: write f64, x: f64) { self += x; }
+fn shout(self: write string<16>) { self += "!"; }
+fn nudge(self: write P) { self.x += 1; }
+fn scale_into(self: P, out: write i64) { out = self.x * 10; }
+fn both(self: write i64, other: write i64) { self += 1; other += 2; }
+
+@post("/count")
+fn post_count() -> Response<{ count: i64, local: i64 }> {
+    g.count = 1;
+    g.count.bump();
+    g.count.bump();
+    g.count.add_to(5);
+    var x = 10;
+    x.bump();
+    x.add_to(5);
+    return ok({ "count": g.count, "local": x });
+}
+@post("/arr")
+fn post_arr() -> Response<{ a1: i64, a2: i64, i: i64 }> {
+    g.arr[1] = 5;
+    g.arr[1].bump();
+    var i = 2;
+    g.arr[i].add_to(7);
+    i.bump();
+    return ok({ "a1": g.arr[1], "a2": g.arr[2], "i": i });
+}
+@post("/item")
+fn post_item() -> Response<{ n: i64, total: i64, name: string }> {
+    let it = g.items.add();
+    it.n = 4;
+    it.name = "rex";
+    it.n.bump();
+    it.name.shout();
+    foreach t in g.items { t.n.add_to(10); }
+    return ok({ "n": it.n, "total": it.n, "name": it.name });
+}
+@post("/kinds")
+fn post_kinds() -> Response<{ flag: bool, local: bool, ratio: f64, fl: f64, label: string, px: i64 }> {
+    g.flag.flip();
+    var b = false;
+    b.flip();
+    b.flip();
+    b.flip();
+    g.ratio.grow(1.5);
+    var f = 0.25;
+    f.grow(0.5);
+    g.label = "hi";
+    g.label.shout();
+    g.label.shout();
+    g.p.x = 3;
+    g.p.nudge();
+    return ok({ "flag": g.flag, "local": b, "ratio": g.ratio, "fl": f, "label": g.label, "px": g.p.x });
+}
+@post("/two")
+fn post_two() -> Response<{ out: i64, x: i64, y: i64, k: i64 }> {
+    g.p.x = 4;
+    g.p.scale_into(g.out);
+    var x = 1;
+    var y = 1;
+    x.both(y);
+    g.k.both(g.k);
+    return ok({ "out": g.out, "x": x, "y": y, "k": g.k });
+}
+// the stale-interval hazard: `i` looks like 0 by its assignments, the call moves it out of the array
+@get("/stale1")
+fn get_stale1() -> Response<{ v: i64 }> {
+    var i = 0;
+    i.bump();
+    i.add_to(9);
+    return ok({ "v": g.arr[i] });
+}
+@get("/stale2/{n}")
+fn get_stale2(n: i64 in 0..10) -> Response<{ v: i64 }> {
+    var i = 0;
+    foreach r in 1..n { i.bump(); }
+    return ok({ "v": g.arr[i] });
+}
+@get("/stale3")
+fn get_stale3() -> Response<{ v: i64 }> {
+    var i = 0;
+    var j = 0;
+    j.both(i);
+    j.both(i);
+    j.both(i);
+    return ok({ "v": g.arr[i] });
+}
+--- requests
+POST /count
+POST /arr
+POST /item
+POST /kinds
+POST /two
+GET /stale1
+GET /stale2/2
+GET /stale2/9
+GET /stale3

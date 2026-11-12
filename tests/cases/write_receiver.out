@@ -1,0 +1,12 @@
+POST /count -> 200 {"count":8,"local":16}
+POST /arr -> 200 {"a1":6,"a2":7,"i":3}
+POST /item -> 200 {"n":15,"total":15,"name":"rex!"}
+POST /kinds -> 200 {"flag":true,"local":true,"ratio":1.5,"fl":0.75,"label":"hi!!","px":4}
+POST /two -> 200 {"out":40,"x":2,"y":3,"k":3}
+GET /stale1 -> 400 {"error":"index 10 out of range (fixed size 4)","line":78}
+GET /stale2/2 -> 200 {"v":7}
+GET /stale2/9 -> 400 {"error":"index 9 out of range (fixed size 4)","line":84}
+GET /stale3 -> 400 {"error":"index 6 out of range (fixed size 4)","line":93}
+state <plain values> 112
+state g.items 40
+memory reserved=8192 committed=8192 live=152

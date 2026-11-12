@@ -244,6 +244,10 @@ pub struct Api { pub eps: Vec<Endpoint>, pub fns: Vec<Func> }
 pub const MAX_NAME: usize = 128;
 pub const MAX_FAIL: usize = 1024;
 
+/// The tokens of a source text, without places (the formatter's tests compare them before and after formatting).
+#[cfg(test)]
+pub fn tokens(src: &str) -> Result<Vec<Tok>, String> { lex_lines(src).map(|t| t.0) }
+
 /// Tokens, and the source line and column (1-based, in characters) each one starts on.
 fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
     let c: Vec<char> = src.chars().collect();

@@ -16,6 +16,7 @@ A test (`docs_mention_everything` in src/platform.rs) fails when a built-in, opt
 | `serve <program> [--clang] [--watch] [executable options]` | builds with TinyCC (or clang) and runs a server at once; `--watch` rebuilds and restarts when a file of the program changes (state starts empty each time). |
 | `test <program> [--clang]` | runs the program's `test "name" { ... }` blocks, each on a fresh state with the clock fixed; exit code 1 if one fails. |
 | `emit-c <program> [-o file.c]` | the generated C, to read or build yourself (a system: `-o dir`, one file per worker kind and system.c). |
+| `fmt <file.mito>... [--check] [--write]` | the formatter: prints one file formatted, `--write` rewrites the files in place, `--check` lists the files that would change and exits 1 if any does. Changes only white space (DESIGN.md, Formatting). |
 | `sigs <program>` | a tool: every function's parameter and result kinds as the compiler sees them at its calls. |
 
 The platform (web, cli, test) is the entry file's own: `platform cli;` in it, or what its entry points show. There is no `--platform` switch (it is refused with a message saying so): one entry file, one platform (DESIGN.md, Platforms).

@@ -1,0 +1,7 @@
+POST /add/ann -> 201 {"id":1}
+POST /work/ann/7 -> 200 {"hits":2,"level":7,"done":true}
+POST /work/ann/200 -> 200 {"hits":4,"level":200,"done":false}
+POST /work/ann/300 -> 400 {"error":"`v` must be in 0..255","line":6}
+POST /work/bob/1 -> 404 {"error":"no row","line":14}
+state <plain values> 1
+memory reserved=4096 committed=4096 live=1

@@ -234,6 +234,8 @@ double tan(double); double asin(double); double acos(double); double atan(double
 #define BXOR32(r, x, y) BOPN_(u32, ^, r, x, y)
 #define SHL(r, x, y) i64 r; if (UNLIKELY((u64)(y) > 63)) FAIL(500, "shift count out of range", 24); r = (i64)((u64)(x) << (y))
 #define SHR(r, x, y) i64 r; if (UNLIKELY((u64)(y) > 63)) FAIL(500, "shift count out of range", 24); r = (x) >> (y)
+#define SHRL(r, x, y) i64 r; if (UNLIKELY((u64)(y) > 63)) FAIL(500, "shift count out of range", 24); r = (i64)((u64)(x) >> (y))
+#define NSHRL(r, x, y) i64 r = (i64)((u64)(x) >> (y))
 #define NSHL(r, x, y) i64 r = (i64)((u64)(x) << (y))
 #define NSHR(r, x, y) i64 r = (x) >> (y)
 #define NADD(r, x, y) i64 r = (x) + (y)
@@ -4429,7 +4431,7 @@ impl<'p> G<'p> {
             let mac = match op { "+" => "ADD", "-" => "SUB", "*" => "MUL", "/" => "DIV", "%" => "MOD", _ => "" };
             match op {
                 "<" | "<=" | ">" | ">=" => return Ok(CV::Bool(format!("({} {} {})", x, op, y))),
-                "&" | "|" | "^" | "<<" | ">>" => {
+                "&" | "|" | "^" | "<<" | ">>" | ">>>" => {
                     let (ix, iy) = (self.interval(&x), self.interval(&y));
                     let nonneg = |i: Option<(i64, i64)>| i.filter(|(l, _)| *l >= 0);
                     match op {
@@ -4452,9 +4454,13 @@ impl<'p> G<'p> {
                             // a count proven inside 0..63 needs no test
                             let counted = iy.map_or(false, |(l, h)| l >= 0 && h <= 63);
                             let left = op == "<<";
-                            self.line(&format!("{}{}({}, {}, {});", if counted { "N" } else { "" }, if left { "SHL" } else { "SHR" }, r, x, y));
+                            let mac = match op { "<<" => "SHL", ">>>" => "SHRL", _ => "SHR" };
+                            self.line(&format!("{}{}({}, {}, {});", if counted { "N" } else { "" }, mac, r, x, y));
                             if let (Some((xl, xh)), Some((sl, sh))) = (ix, iy) {
-                                if counted {
+                                if counted && op == ">>>" && xl < 0 {
+                                    // a negative operand becomes a large positive one unless the count is 0
+                                    if sl >= 1 { self.ranges.insert(r.clone(), (0, i64::MAX >> (sl - 1))); }
+                                } else if counted {
                                     let mut lo = i128::MAX; let mut hi = i128::MIN;
                                     for &xv in &[xl as i128, xh as i128] { for &sv in &[sl, sh] {
                                         let v = if left { xv * (1i128 << sv) } else { xv >> sv };
@@ -5568,7 +5574,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "TAN_", "ASIN_", "ACOS_", "ATAN_", "SINH_", "COSH_", "TANH_", "LN_", "LOG2_", "LOG10_", "CEIL_", "ROUNDF_", "TRUNC_", "CBRT_", "HYPOT_", "FMOD_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "SCRMOVE", "SCRZERO", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "SHRL", "NSHRL", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "TAN_", "ASIN_", "ACOS_", "ATAN_", "SINH_", "COSH_", "TANH_", "LN_", "LOG2_", "LOG10_", "CEIL_", "ROUNDF_", "TRUNC_", "CBRT_", "HYPOT_", "FMOD_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "SCRMOVE", "SCRZERO", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
@@ -5599,7 +5605,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
                 j += 1;
             }
         }
-        if ["ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "ABS_"].contains(&tok) && next == "(" { if let Some(r) = t.get(i + 2) { declared.push(r); } }
+        if ["ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "SHRL", "NSHRL", "NSHL", "NSHR", "ABS_"].contains(&tok) && next == "(" { if let Some(r) = t.get(i + 2) { declared.push(r); } }
         if is_id(tok) && next == "(" {
             let member = prev == "->";
             if member {

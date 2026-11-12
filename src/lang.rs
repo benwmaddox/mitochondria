@@ -402,7 +402,8 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
         }
         else {
             let two: String = c[i..(i + 2).min(c.len())].iter().collect();
-            if ["==", "!=", "<=", ">=", "&&", "||", "->", "..", "+=", "-=", "*=", "/=", "<<", ">>", "=>"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
+            if c[i..].starts_with(&['>', '>', '>']) { out.push(Tok::Sym(">>>".into())); i += 3; }
+            else if ["==", "!=", "<=", ">=", "&&", "||", "->", "..", "+=", "-=", "*=", "/=", "<<", ">>", "=>"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
             else { out.push(Tok::Sym(ch.to_string())); i += 1; }
         }
     }
@@ -1212,7 +1213,7 @@ impl P {
     fn bin(&mut self, level: usize) -> R<Expr> {
         // Rust's precedence, loosest first: `||`, `&&`, comparisons, `|`, `^`, `&`, shifts, `+ -`, `* / %` (comparisons bind looser than the
         // bit operators, unlike C)
-        const LV: [&[&str]; 9] = [&["||"], &["&&"], &["==", "!=", "<", "<=", ">", ">="], &["|"], &["^"], &["&"], &["<<", ">>"], &["+", "-"], &["*", "/", "%"]];
+        const LV: [&[&str]; 9] = [&["||"], &["&&"], &["==", "!=", "<", "<=", ">", ">="], &["|"], &["^"], &["&"], &["<<", ">>", ">>>"], &["+", "-"], &["*", "/", "%"]];
         if level == LV.len() { return self.unary(); }
         let mut l = self.bin(level + 1)?;
         loop {

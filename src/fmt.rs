@@ -233,7 +233,7 @@ fn scan(src: &str, raw_all: bool) -> Result<Scan, String> {
                     last = Last::Other;
                 } else {
                     let two: String = c[i..(i + 2).min(n)].iter().collect();
-                    let len = if TWO.contains(&two.as_str()) { 2 } else { 1 };
+                    let len = if c[i..].starts_with(&['>', '>', '>']) { 3 } else if TWO.contains(&two.as_str()) { 2 } else { 1 };
                     let (opener, closer) = match ch { '(' | '[' => (Some(Ent::Paren), None), ')' | ']' => (None, Some(Ent::Paren)), _ => (None, None) };
                     sc.emit(src, offs[i], offs[i + len], K::Sym, plain, closer, opener);
                     last = if len == 1 && matches!(ch, '(' | ',' | ';') { Last::Open(ch) } else { Last::Other };

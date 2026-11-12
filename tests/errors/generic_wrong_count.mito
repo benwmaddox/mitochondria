@@ -1,0 +1,4 @@
+// expect: `Stack<i64, 0>`: N is a `count` in Stack<T, N>, but 0 is not a whole number of at least 1
+struct Stack<T, N: count> { items: T[N]; len: i64; }
+struct G { a: Stack<i64, 0>; }
+state g: G;

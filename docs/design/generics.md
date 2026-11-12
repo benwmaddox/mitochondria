@@ -1,6 +1,6 @@
-# Generics (design proposal, not built)
+# Generics (design; steps 1 to 3 built)
 
-**Status.** For the owner's review. Nothing here is implemented; no compiler changes accompany it.
+**Status.** Decided by the owner: generics replace modules. Steps 1 to 3 of the plan (section 9) are built in `src/generics.rs`: generic structs, functions of a generic type, instance names in messages. Section 12 lists where the build differs from this text.
 
 **Why.** Today the only way to write a reusable container is a library module (`lib/*.mito`): `module sorted<T: struct, N: count, key: field of T>`.
 Modules work, but they are a second mechanism beside structs and functions of a type, they are expanded by *text substitution* before parsing
@@ -282,3 +282,17 @@ Read narrowly: `src/modules.rs` (parse, subst, instantiate, expand), type defini
 functions in `src/cgen.rs`. Not verified: how the binder resolves `self` and `T.key` in signatures, how `foreach` finds `iter_first` for
 module instances, how `ModInst` is consumed in cgen, the exact endpoint syntax, and the expected format in `tests/errors`. Step 1 of the
 plan reads these before anything is written.
+
+## 12. Deviations from the design (as built, steps 1 to 3)
+
+1. **Expansion works on token streams of the program text, not on a parse tree.** The state and the code are still text when `modules::expand` is called (and it now calls `generics::expand` first), so the pass lexes them
+   (identifiers, numbers, strings, comments), replaces parameters token by token (never inside a string or comment, never a field after a `.`) and writes text the existing parsers read. Generated text is appended to the state and the code.
+2. **Functions are copied for the instances of a struct only if the program names them.** The design copies every function for every instance. The expansion does not know the type of a receiver (`a.push(3)`), so it cannot copy only
+   what is called on an instance; the choice made is: a function whose *name* appears anywhere in the program (or in a copy already made) is copied for *every* instance of its struct. Consequence: a function that cannot work for one element type
+   (it returns `T` and `T` is a text or struct, which no function can return by value; it assigns a struct into an array element, not compiled yet) fails to build as soon as its name is used for any instance. Exact per-call instantiation needs the
+   type of the receiver, so it belongs in the binder: step 3 in its stricter form, listed as the next step.
+3. **No `check --costs` instance count and no `generic_bounds_proof` emit-c assertion in this step**; the range proof is tested through the generated checks (`generic_instances_are_separate_state_to_the_range_analyses` in `src/cgen.rs`, both directions).
+4. **Errors found while expanding carry no line**; a runtime `fail` or an error inside a copied function reports a line in the generated copy (after the end of the source), not the template's. The message names the instance.
+5. **`K: field of T`** and `table<...>` fields are rejected with a message instead of being supported (steps 4 and the design's own v1 rule); counts are literals only.
+6. **Mangled names** start with `__mito__` (as module instances do) and sanitize the arguments (`__mito__Stack__string_12__8`); a name that would be too long or that collides is numbered.
+

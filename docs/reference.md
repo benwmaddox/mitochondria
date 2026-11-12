@@ -87,6 +87,13 @@ A function can take a plain struct (a struct that is a field of the state, also 
 
 `const Limits { MAX_HP: i64 = 100; MAX_NAME = 16; DOUBLE: i64 = Limits.MAX_HP * 2; }` names compile-time constants, used as `Limits.MAX_HP`. The type is optional for integers (a value that does not fit the type is an error); a float needs one (`const Tune { GRAVITY: f64 = 9.8; }`). A value is a number, an earlier constant of any group, and `- + * / % << >> & | ^ ( )` of them, folded when read; overflow is an error naming the constant. A constant is usable in code (also as a `match` arm), in a field's `in lo..hi`, and in a size (`string<Limits.MAX_NAME>`, `u8[Limits.MAX_NAME]`, `pool<Item, Limits.N>`), not yet in an endpoint input's range (`DESIGN.md`, Const groups).
 
+## Generic structs
+
+`struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }` declares a struct with parameters: `T` is a type, `N: count` a whole-number literal of at least 1; after the colon a constraint (`struct`, `number`, `int`, `text`) limits a type.
+`undo: Stack<i64, 64>;` and `pool<Stack<string<12>, 8>, 4>` use it; each distinct use is its own ordinary struct (`Stack<i64, 64>` in messages), with its own storage and ranges. A function of a generic struct names the parameters in its receiver:
+`fn push(self: Stack<T, N>, x: T) { ... }` is called `game.undo.push(3)`, `T` and `N` taken from the receiver's type. A function the program never names is not copied; an error in a copy names the instance. At most 1000 instances, nested at most 64 deep.
+Not yet: `table<...>` fields, constant or computed counts, `K: field of T`, generic functions without a receiver (DESIGN.md, Generics).
+
 ## Entry points
 
 `@get("/p")`, `@post`, `@put`, `@patch` and `@delete` are endpoints (a function with an HTTP route and typed inputs; `@get` and `@delete` read their inputs from the query, the others from the body, a path

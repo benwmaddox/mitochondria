@@ -109,6 +109,9 @@ fn instantiate(inst: &str, module: &str, args: &[String]) -> Result<(String, Str
 /// is a field of a struct (`board: sorted<...>;` in `struct Game`), and a struct holding one must be reached exactly
 /// once, through plain structs from the state, so the instance exists once.
 pub fn expand(state: &str, api: &str) -> Result<(String, String), String> {
+    // generic structs and their functions first (src/generics.rs): what is left is plain declarations
+    let (state, api) = crate::generics::expand(state, api)?;
+    let (state, api) = (state.as_str(), api.as_str());
     if !state.contains('<') { return Ok((state.to_string(), api.to_string())); }
     let mut out_api = api.to_string();
     if !out_api.ends_with('\n') { out_api.push('\n'); }

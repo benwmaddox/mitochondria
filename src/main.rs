@@ -12,6 +12,7 @@ mod error_corpus;
 mod test_runner;
 mod lang;
 mod modules;
+mod generics;
 mod layout;
 mod cgen;
 mod source;

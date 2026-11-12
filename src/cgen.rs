@@ -759,6 +759,9 @@ pub fn test_names(api: &Api) -> Vec<String> { api.fns.iter().filter_map(|f| f.te
 /// problem found, one per line: parsing stops at the first; binding and code generation go on to the next function or
 /// endpoint (a problem in a function several endpoints call is reported once, at its place).
 pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
+    check_inner(prog, api_src).map_err(|e| crate::generics::name_instances(&e))
+}
+fn check_inner(prog: &Program, api_src: &str) -> Result<Api, String> {
     let mut api = parse(api_src)?;
     crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table(), &prog.const_table())?;
     set_methods(&api);
@@ -5581,6 +5584,29 @@ state app: A;
         // a proven small value written through a parameter keeps the range small
         let g = gen_of(&format!("{}@post(\"/w\") fn w() -> Response<{{}}> {{ app.p.v = 3; return ok({{}}); }}\n@post(\"/s/{{x}}\") fn s(x: i64 in 0..7) -> Response<{{}}> {{ set_v(app.p, x); return ok({{}}); }}\n{}", head, read));
         assert!(!g.src.contains("c->h->elem("), "stores of 0..7 through a parameter keep the index inside buf");
+    }
+
+    /// Generic instances are ordinary state to the range analyses, in both directions: a declared range is its own per instance (`in 0..N`), and the whole-program
+    /// range of a field is made of the stores into that instance only.
+    #[test]
+    fn generic_instances_are_separate_state_to_the_range_analyses() {
+        // `n: i64 in 0..N`: the same function copied for Box<100> and Box<20>; a value in 0..50 is proven inside 0..100 and not inside 0..20
+        let head = "struct Box<N: count> { n: i64 in 0..N; }\nstruct A { big: Box<100>; small: Box<20>; }\nstate app: A;\nfn set_n(self: Box<N>, x: i64) { self.n = x; }\n";
+        let both = gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in 0..50) -> Response<{{}}> {{ app.big.set_n(x); app.small.set_n(x); return ok({{}}); }}\n", head));
+        assert!(both.src.contains("`n` must be in 0..20") && !both.src.contains("`n` must be in 0..100"), "Box<100> proves 0..50 inside, Box<20> keeps its test");
+        let big = gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in 0..50) -> Response<{{}}> {{ app.big.set_n(x); return ok({{}}); }}\n", head));
+        assert!(!big.src.contains("`n` must be in 0..100"));
+        let wide = gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in 0..500) -> Response<{{}}> {{ app.big.set_n(x); return ok({{}}); }}\n", head));
+        assert!(wide.src.contains("`n` must be in 0..100"), "a value outside the instance's range is checked");
+        // whole-program field ranges: `big.v` only ever holds 3, `small.v` takes any value; each read is judged by its own instance's stores
+        let head = "struct Cell<N: count> { v: i64; buf: i64[N]; }\nstruct A { big: Cell<8>; small: Cell<4>; }\nstate app: A;\nfn put(self: Cell<N>, x: i64) { self.v = x; }\n";
+        let w = "@post(\"/w\") fn w() -> Response<{}> { app.big.put(3); return ok({}); }\n";
+        let ws = "@post(\"/s/{x}\") fn s(x: i64) -> Response<{}> { app.small.put(x); return ok({}); }\n";
+        let rb = "@get(\"/rb\") fn rb() -> Response<{ n: i64 }> { return ok({ n: app.big.buf[app.big.v] }); }\n";
+        let rs = "@get(\"/rs\") fn rs() -> Response<{ n: i64 }> { return ok({ n: app.small.buf[app.small.v] }); }\n";
+        assert!(!gen_of(&format!("{}{}{}", head, w, rb)).src.contains("c->h->elem("), "every store to big.v is 3: inside buf[8]");
+        assert!(!gen_of(&format!("{}{}{}{}", head, w, ws, rb)).src.contains("c->h->elem("), "an unbounded store to small.v does not widen big.v");
+        assert!(gen_of(&format!("{}{}{}{}", head, w, ws, rs)).src.contains("c->h->elem("), "small.v is unbounded: its index is tested");
     }
 
     /// How many overflow-checked operations (`ADD`, `SUB`, `MUL`) an endpoint's generated code keeps, for a body written in a program with one range-typed field and one free field.

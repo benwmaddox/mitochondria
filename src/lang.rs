@@ -436,7 +436,7 @@ pub fn parse(src: &str) -> R<Api> {
     let (t, lines) = lex_lines(src)?;
     let mut p = P { t, i: 0, lines, pre: Vec::new(), init_ok: true, tmp: 0, in_endpoint: false, in_test: false, markup: None, typed: Vec::new(), ret_code: None };
     let mut api = Api::default();
-    parse_items(&mut p, &mut api).map_err(|e| {
+    parse_items(&mut p, &mut api).map_err(|e| crate::generics::name_instances(&e)).map_err(|e| {
         if starts_with_place(&e) { return e; }
         // a missing `;` or `}` belongs at the end of what came before, not at the next token (often on the next line)
         let k = if e.starts_with("expected `;`") || e.starts_with("missing `}`") { p.i.saturating_sub(1) } else { p.i.min(p.t.len().saturating_sub(1)) };
@@ -1332,6 +1332,9 @@ pub type Enums = [(String, Vec<(String, i64)>)];
 /// The const groups' names and values, for `Group.NAME` in code (each folds to a literal, so the analyses see its value).
 pub type Consts = [(String, Vec<(String, crate::layout::CVal)>)];
 pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: &Enums, consts: &Consts) -> R<()> {
+    bind_with_inner(api, globals, enums, consts).map_err(|e| crate::generics::name_instances(&e))
+}
+fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: &Enums, consts: &Consts) -> R<()> {
     let fns: Vec<(String, usize, bool, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public, f.recv)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
     let mut errs = Vec::new();

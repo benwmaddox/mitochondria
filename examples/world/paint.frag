@@ -160,6 +160,7 @@ vec4 grid(vec2 pix, float layer, float len, float wid, float fill, float ang, fl
     return vec4(c, cover);
 }
 
+const float STROKE_MIX = 0.55;   // how much of the picture is brush strokes; the rest is the shaded scene
 const float STEP = 0.34906585;   // the stroke angle is held in steps of a ninth of a half turn
 
 // One layer of strokes. `turn` is the layer's own angle added to the flow, `calm` (0..1) how much to ignore the form here (near the figure, whose outline would otherwise
@@ -276,20 +277,23 @@ void main() {
     col = mix(col, s1.rgb, s1.a);
     vec4 s2 = strokes(pix, 2.0, 64.0 * k, 19.0 * k, -0.25, 0.0, 1.5, 0.0, calm);    // the small strokes that pick out detail
     col = mix(col, s2.rgb, s2.a * 0.95);
+    // the shaded picture underneath: the strokes are a texture laid over it, not a replacement for it. Where the stroke is lighter or darker than its neighbors the shading shows through that much.
+    vec3 shaded = grade(texture(uImage, pix / uResolution).rgb);
+    col = mix(shaded, col, STROKE_MIX);
     // the figure, in finer strokes (0.4 of the world's) so that it keeps its detail; they only land where the scene drew the figure
     float a4 = texture(uImage1, pix / uResolution).a * 4.0;
     float fig = isId(a4, 3.0);
     if (fig > 0.0) {
         col = mix(col, grade(thingColor(pix, 3.0)), fig);   // under the figure's strokes: the figure itself, not the world's strokes
         vec4 s3 = strokes(pix, 3.0, 64.0 * 0.4 * k, 19.0 * 0.4 * k, 0.2, 0.0, 1.0, 3.0, 0.0);
-        col = mix(col, s3.rgb, s3.a);
+        col = mix(col, s3.rgb, s3.a * 0.5);
     }
     // the orbs, in small strokes too
     float orb = isId(a4, 4.0);
     if (orb > 0.0) {
         col = mix(col, grade(thingColor(pix, 4.0)), orb);
         vec4 s4 = strokes(pix, 4.0, 64.0 * 0.25 * k, 19.0 * 0.25 * k, 0.5, 0.0, 1.0, 4.0, 0.0);
-        col = mix(col, s4.rgb, s4.a);
+        col = mix(col, s4.rgb, s4.a * 0.5);
     }
 
     // the orbs' glow, laid over the paint as soft light (the scene keeps it in the alpha of its picture): a screen of the light's color, so it never clips

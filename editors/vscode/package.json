@@ -2,7 +2,7 @@
   "name": "mitochondria",
   "displayName": "Mitochondria",
   "description": "Syntax highlighting for Mitochondria (.mito) programs",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "maddox-labs",
   "license": "Apache-2.0",
   "engines": {

@@ -1,66 +1,811 @@
 {
-  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-  "name": "Mitochondria",
-  "scopeName": "source.mitochondria",
-  "patterns": [
-    { "include": "#comment" },
-    { "include": "#string" },
-    { "include": "#attribute" },
-    { "include": "#declaration" },
-    { "include": "#test" },
-    { "include": "#keyword" },
-    { "include": "#type" },
-    { "include": "#constant" },
-    { "include": "#number" },
-    { "include": "#call" },
-    { "include": "#operator" }
-  ],
-  "repository": {
-    "comment": { "name": "comment.line.double-slash.mitochondria", "match": "//.*$" },
-    "string": {
-      "name": "string.quoted.double.mitochondria",
-      "begin": "\"",
-      "end": "\"",
-      "patterns": [{ "name": "constant.character.escape.mitochondria", "match": "\\\\." }]
-    },
-    "attribute": {
-      "match": "(@)(get|post|put|patch|delete)\\b",
-      "captures": { "1": { "name": "punctuation.definition.annotation.mitochondria" }, "2": { "name": "entity.name.function.decorator.mitochondria" } }
-    },
-    "declaration": {
-      "patterns": [
-        { "match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)", "captures": { "1": { "name": "storage.type.mitochondria" }, "2": { "name": "entity.name.type.mitochondria" } } },
-        { "match": "\\b(module)\\s+([A-Za-z_][A-Za-z0-9_]*)", "captures": { "1": { "name": "storage.type.mitochondria" }, "2": { "name": "entity.name.type.module.mitochondria" } } },
-        { "match": "\\b(state|request)\\s+([A-Za-z_][A-Za-z0-9_]*)", "captures": { "1": { "name": "storage.type.mitochondria" }, "2": { "name": "variable.other.global.mitochondria" } } },
-        { "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_.]*)", "captures": { "1": { "name": "storage.type.function.mitochondria" }, "2": { "name": "entity.name.function.mitochondria" } } },
-        { "match": "\\b(let|var)\\s+([A-Za-z_][A-Za-z0-9_]*)", "captures": { "1": { "name": "storage.type.mitochondria" }, "2": { "name": "variable.other.mitochondria" } } }
-      ]
-    },
-    "test": {
-      "match": "\\b(test)\\s+(?=\")",
-      "captures": { "1": { "name": "keyword.other.test.mitochondria" } }
-    },
-    "keyword": {
-      "patterns": [
-        { "name": "keyword.control.mitochondria", "match": "\\b(if|else|foreach|for|while|break|continue|match|return|fail|forward|in|from|reverse|where|limit)\\b" },
-        { "name": "storage.modifier.mitochondria", "match": "\\b(pub|logged|checked|drop_oldest|instance|of|key|system|use)\\b" }
-      ]
-    },
-    "type": {
-      "patterns": [
-        { "name": "support.type.primitive.mitochondria", "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|string|utf8|ascii)\\b" },
-        { "name": "support.type.collection.mitochondria", "match": "\\b(pool|list|Response)\\b" },
-        { "name": "entity.name.type.mitochondria", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" }
-      ]
-    },
-    "constant": { "name": "constant.language.mitochondria", "match": "\\b(true|false|null)\\b" },
-    "number": { "name": "constant.numeric.mitochondria", "match": "\\b(0x[0-9A-Fa-f]+|[0-9]+(\\.[0-9]+)?)\\b" },
-    "call": {
-      "patterns": [
-        { "name": "support.function.builtin.mitochondria", "match": "\\b(ok|created|no_content|status|exists|or|len|maxlen|substr|text_from|str|int|now|random|min|max|slot|stat|token|sqrt|exp|floor|abs|wrapping_add|wrapping_sub|wrapping_mul|field|get|post|put|patch|delete)(?=\\s*\\()" },
-        { "name": "entity.name.function.call.mitochondria", "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\()" }
-      ]
-    },
-    "operator": { "name": "keyword.operator.mitochondria", "match": "(=>|->|\\.\\.|==|!=|<=|>=|&&|\\|\\||\\+=|-=|\\*=|/=|<<|>>|[-+*/%=<>!&|^?])" }
+ "name": "Mitochondria",
+ "scopeName": "source.mitochondria",
+ "patterns": [
+  {
+   "include": "#code-core"
   }
+ ],
+ "repository": {
+  "code-core": {
+   "patterns": [
+    {
+     "include": "#comment"
+    },
+    {
+     "include": "#string"
+    },
+    {
+     "include": "#markup-doctype"
+    },
+    {
+     "include": "#markup-void"
+    },
+    {
+     "include": "#markup-element"
+    },
+    {
+     "include": "#attribute-call"
+    },
+    {
+     "include": "#attribute"
+    },
+    {
+     "include": "#platform"
+    },
+    {
+     "include": "#use"
+    },
+    {
+     "include": "#config-block"
+    },
+    {
+     "include": "#declaration"
+    },
+    {
+     "include": "#test"
+    },
+    {
+     "include": "#foreach"
+    },
+    {
+     "include": "#input-source"
+    },
+    {
+     "include": "#storage-suffix"
+    },
+    {
+     "include": "#keyword"
+    },
+    {
+     "include": "#type"
+    },
+    {
+     "include": "#constant"
+    },
+    {
+     "include": "#self"
+    },
+    {
+     "include": "#number"
+    },
+    {
+     "include": "#method"
+    },
+    {
+     "include": "#call"
+    },
+    {
+     "include": "#operator"
+    }
+   ]
+  },
+  "code": {
+   "patterns": [
+    {
+     "include": "#braces"
+    },
+    {
+     "include": "#code-core"
+    }
+   ]
+  },
+  "braces": {
+   "begin": "\\{",
+   "end": "\\}",
+   "patterns": [
+    {
+     "include": "#code"
+    }
+   ]
+  },
+  "comment": {
+   "name": "comment.line.double-slash.mitochondria",
+   "match": "//.*$"
+  },
+  "escape": {
+   "patterns": [
+    {
+     "name": "constant.character.escape.mitochondria",
+     "match": "\\\\(?:[ntr0\"\\\\\\x27]|u\\{[0-9A-Fa-f]{1,6}\\})"
+    },
+    {
+     "name": "invalid.illegal.escape.mitochondria",
+     "match": "\\\\."
+    }
+   ]
+  },
+  "string": {
+   "name": "string.quoted.double.mitochondria",
+   "begin": "\"",
+   "end": "\"",
+   "beginCaptures": {
+    "0": {
+     "name": "punctuation.definition.string.begin.mitochondria"
+    }
+   },
+   "endCaptures": {
+    "0": {
+     "name": "punctuation.definition.string.end.mitochondria"
+    }
+   },
+   "patterns": [
+    {
+     "include": "#escape"
+    }
+   ]
+  },
+  "route-string": {
+   "name": "string.quoted.double.mitochondria",
+   "begin": "\"",
+   "end": "\"",
+   "patterns": [
+    {
+     "include": "#escape"
+    },
+    {
+     "name": "variable.parameter.mitochondria",
+     "match": "\\{[^}\"]*\\}"
+    }
+   ]
+  },
+  "attribute-call": {
+   "begin": "(@)(get|post|put|patch|delete|socket_message|socket_close|socket|every|start|main|frame|shader)\\b\\s*(\\()",
+   "beginCaptures": {
+    "1": {
+     "name": "punctuation.definition.annotation.mitochondria"
+    },
+    "2": {
+     "name": "entity.other.attribute-name.mitochondria"
+    },
+    "3": {
+     "name": "punctuation.section.arguments.begin.mitochondria"
+    }
+   },
+   "end": "\\)",
+   "endCaptures": {
+    "0": {
+     "name": "punctuation.section.arguments.end.mitochondria"
+    }
+   },
+   "name": "meta.attribute.mitochondria",
+   "patterns": [
+    {
+     "include": "#comment"
+    },
+    {
+     "include": "#route-string"
+    },
+    {
+     "include": "#number"
+    }
+   ]
+  },
+  "attribute": {
+   "match": "(@)(get|post|put|patch|delete|socket_message|socket_close|socket|every|start|main|frame|shader)\\b",
+   "name": "meta.attribute.mitochondria",
+   "captures": {
+    "1": {
+     "name": "punctuation.definition.annotation.mitochondria"
+    },
+    "2": {
+     "name": "entity.other.attribute-name.mitochondria"
+    }
+   }
+  },
+  "platform": {
+   "match": "\\b(platform)\\s+(web|cli|game|test)\\b",
+   "captures": {
+    "1": {
+     "name": "storage.type.mitochondria"
+    },
+    "2": {
+     "name": "support.constant.platform.mitochondria"
+    }
+   }
+  },
+  "use": {
+   "match": "\\b(use)\\s+(\")([^\"]*)(\")",
+   "captures": {
+    "1": {
+     "name": "keyword.control.import.mitochondria"
+    },
+    "2": {
+     "name": "punctuation.definition.string.begin.mitochondria"
+    },
+    "3": {
+     "name": "string.quoted.double.mitochondria"
+    },
+    "4": {
+     "name": "punctuation.definition.string.end.mitochondria"
+    }
+   }
+  },
+  "config-block": {
+   "begin": "\\b(system|web)\\s*(\\{)",
+   "beginCaptures": {
+    "1": {
+     "name": "storage.type.mitochondria"
+    },
+    "2": {
+     "name": "punctuation.section.block.begin.mitochondria"
+    }
+   },
+   "end": "\\}",
+   "endCaptures": {
+    "0": {
+     "name": "punctuation.section.block.end.mitochondria"
+    }
+   },
+   "patterns": [
+    {
+     "include": "#comment"
+    },
+    {
+     "include": "#string"
+    },
+    {
+     "include": "#number"
+    },
+    {
+     "include": "#config-nested"
+    },
+    {
+     "include": "#config-word"
+    }
+   ]
+  },
+  "config-nested": {
+   "begin": "\\{",
+   "end": "\\}",
+   "patterns": [
+    {
+     "include": "#comment"
+    },
+    {
+     "include": "#string"
+    },
+    {
+     "include": "#number"
+    },
+    {
+     "include": "#config-nested"
+    },
+    {
+     "include": "#config-word"
+    }
+   ]
+  },
+  "config-word": {
+   "name": "keyword.other.config.mitochondria",
+   "match": "\\b(worker|program|count|mailbox|slot|entry|inflight|budget|headers|etag|gzip|static|from|types)\\b"
+  },
+  "declaration": {
+   "patterns": [
+    {
+     "match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+     "captures": {
+      "1": {
+       "name": "storage.type.mitochondria"
+      },
+      "2": {
+       "name": "entity.name.type.mitochondria"
+      }
+     }
+    },
+    {
+     "match": "\\b(module)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+     "captures": {
+      "1": {
+       "name": "storage.type.mitochondria"
+      },
+      "2": {
+       "name": "entity.name.type.module.mitochondria"
+      }
+     }
+    },
+    {
+     "match": "\\b(instance)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+     "captures": {
+      "1": {
+       "name": "storage.type.mitochondria"
+      },
+      "2": {
+       "name": "variable.other.global.mitochondria"
+      }
+     }
+    },
+    {
+     "match": "\\b(state|request)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+     "captures": {
+      "1": {
+       "name": "storage.type.mitochondria"
+      },
+      "2": {
+       "name": "variable.other.global.mitochondria"
+      }
+     }
+    },
+    {
+     "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+     "captures": {
+      "1": {
+       "name": "storage.type.function.mitochondria"
+      },
+      "2": {
+       "name": "entity.name.function.mitochondria"
+      }
+     }
+    },
+    {
+     "match": "\\b(let|var)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+     "captures": {
+      "1": {
+       "name": "storage.type.mitochondria"
+      },
+      "2": {
+       "name": "variable.other.readwrite.mitochondria"
+      }
+     }
+    }
+   ]
+  },
+  "test": {
+   "match": "\\b(test)\\s+(?=\")",
+   "captures": {
+    "1": {
+     "name": "storage.type.test.mitochondria"
+    }
+   }
+  },
+  "foreach": {
+   "begin": "\\b(foreach)\\b",
+   "beginCaptures": {
+    "1": {
+     "name": "keyword.control.mitochondria"
+    }
+   },
+   "end": "(?=\\{)",
+   "patterns": [
+    {
+     "include": "#comment"
+    },
+    {
+     "include": "#string"
+    },
+    {
+     "name": "keyword.operator.word.mitochondria",
+     "match": "\\bin\\b"
+    },
+    {
+     "name": "keyword.control.mitochondria",
+     "match": "\\b(reverse|where|limit|scan|by|after|from|while)\\b"
+    },
+    {
+     "include": "#constant"
+    },
+    {
+     "include": "#self"
+    },
+    {
+     "include": "#number"
+    },
+    {
+     "include": "#method"
+    },
+    {
+     "include": "#call"
+    },
+    {
+     "include": "#operator"
+    }
+   ]
+  },
+  "input-source": {
+   "patterns": [
+    {
+     "match": "\\b(from)\\s+(header|cookie|key|mouse|arg)(?=\\s*\\()",
+     "captures": {
+      "1": {
+       "name": "keyword.control.mitochondria"
+      },
+      "2": {
+       "name": "support.function.input-source.mitochondria"
+      }
+     }
+    },
+    {
+     "match": "\\b(from)\\s+(query|body|stdin|time)\\b(?=\\s*(?:[,)=;{?]|//|$))",
+     "captures": {
+      "1": {
+       "name": "keyword.control.mitochondria"
+      },
+      "2": {
+       "name": "support.constant.input-source.mitochondria"
+      }
+     }
+    }
+   ]
+  },
+  "storage-suffix": {
+   "name": "storage.modifier.mitochondria",
+   "match": "(?<=[>)])(\\s+)(unique|index)(?=\\s*\\()",
+   "captures": {
+    "2": {
+     "name": "storage.modifier.mitochondria"
+    }
+   }
+  },
+  "keyword": {
+   "patterns": [
+    {
+     "name": "keyword.control.mitochondria",
+     "match": "\\b(if|else|foreach|for|while|break|continue|match|return|fail|forward|from|reverse|where|limit)\\b"
+    },
+    {
+     "name": "keyword.operator.word.mitochondria",
+     "match": "\\b(in|as)\\b"
+    },
+    {
+     "name": "storage.modifier.mitochondria",
+     "match": "\\b(pub|logged|checked|drop_oldest|of)\\b"
+    }
+   ]
+  },
+  "type": {
+   "patterns": [
+    {
+     "name": "support.type.primitive.mitochondria",
+     "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|string|utf8|ascii)\\b"
+    },
+    {
+     "name": "support.type.collection.mitochondria",
+     "match": "\\b(pool|list|table|sorted|Response)(?=\\s*<)"
+    },
+    {
+     "match": "(->|:|<)(\\s*)(html|text)\\b",
+     "captures": {
+      "3": {
+       "name": "support.type.primitive.mitochondria"
+      }
+     }
+    },
+    {
+     "match": "(:)(\\s*)(struct|count|field)\\b",
+     "captures": {
+      "3": {
+       "name": "support.type.primitive.mitochondria"
+      }
+     }
+    },
+    {
+     "match": "(:)(\\s*)(?!(?:string|utf8|ascii|pool|list|table|sorted)\\b)([a-z_][A-Za-z0-9_]*)(?=<)",
+     "captures": {
+      "3": {
+       "name": "entity.name.type.mitochondria"
+      }
+     }
+    },
+    {
+     "name": "entity.name.type.mitochondria",
+     "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+    }
+   ]
+  },
+  "constant": {
+   "name": "constant.language.mitochondria",
+   "match": "\\b(true|false|null)\\b"
+  },
+  "self": {
+   "name": "variable.language.self.mitochondria",
+   "match": "\\bself\\b"
+  },
+  "number": {
+   "patterns": [
+    {
+     "name": "constant.numeric.hex.mitochondria",
+     "match": "\\b0[xX][0-9A-Fa-f]+\\b"
+    },
+    {
+     "name": "constant.numeric.float.mitochondria",
+     "match": "\\b[0-9]+\\.[0-9]+\\b"
+    },
+    {
+     "name": "constant.numeric.integer.mitochondria",
+     "match": "\\b[0-9]+\\b"
+    }
+   ]
+  },
+  "method": {
+   "name": "support.function.builtin.mitochondria",
+   "match": "(?<=\\.)(add|try_add|remove|move|copy_from|sort|fill|clear|truncate|count_below|count|capacity|json_field|len|exists)(?=\\s*\\()"
+  },
+  "call": {
+   "patterns": [
+    {
+     "name": "support.function.builtin.mitochondria",
+     "match": "(?<![.\\w])(abs|add_years|aes256gcm_open|aes256gcm_seal|all_emoji|all_word|atan2|auth|base64|base64_url|bcrypt_check|bcrypt_hash|body|broadcast|byte_at|cache_get|cache_hole|cache_label|cache_part|cache_put|cache_start|capacity|chr|contains|cos|count|crc32|created|data_version|ends_with|env|escape_html|exists|exp|field|floor|form_decode|form_encode|format_time|fwd|header|hex|hmac_sha1|hmac_sha256|html_parse|html_parse_in|html_raw|html_text|index_of|int|json_field|json_quote|json_unquote|last_index_of|len|log|lower|max|maxlen|min|no_content|no_default_headers|node_append|node_attr|node_attr_count|node_attr_name|node_attr_value|node_clone|node_content|node_detach|node_first|node_html|node_html_escaped|node_inner_html|node_insert_before|node_kind|node_last|node_name|node_new_element|node_new_text|node_next|node_parent|node_prev|node_remove_attr|node_set_attr|node_set_text|now|ok|or|param|pbkdf2_sha256|pow|query|random|random_bytes|random_text|read_stored|replace|request_target|secret_equal|set_cookie|set_header|sha1|sha256|sin|slot|socket_close|socket_send|socket_send_all|socket_subscribe|socket_tag|socket_unsubscribe|sqrt|starts_with|stat|status|str|substr|text_from|token|trim|trim_end|trim_start|try_add|unbase64|upper|worker_count|worker_index|wrapping_add|wrapping_mul|wrapping_sub|xor_bytes)(?=\\s*\\()"
+    },
+    {
+     "name": "entity.name.function.call.mitochondria",
+     "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\()"
+    }
+   ]
+  },
+  "operator": {
+   "patterns": [
+    {
+     "name": "keyword.operator.range.mitochondria",
+     "match": "\\.\\."
+    },
+    {
+     "name": "keyword.operator.mitochondria",
+     "match": "(=>|->|==|!=|<=|>=|&&|\\|\\||\\+=|-=|\\*=|/=|<<|>>|[-+*/%=<>!&|^?])"
+    }
+   ]
+  },
+  "markup-doctype": {
+   "match": "(?:(?<=[(,{;}>])|^)\\s*(<!)(doctype)\\s+(html)\\s*(>)",
+   "captures": {
+    "1": {
+     "name": "punctuation.definition.tag.html.mitochondria"
+    },
+    "2": {
+     "name": "meta.tag.metadata.doctype.html.mitochondria"
+    },
+    "3": {
+     "name": "entity.name.tag.html.mitochondria"
+    },
+    "4": {
+     "name": "punctuation.definition.tag.html.mitochondria"
+    }
+   }
+  },
+  "markup-void": {
+   "begin": "(?:(?<=[(,{;}>])|^)\\s*(<)(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)(?![\\w:-])",
+   "beginCaptures": {
+    "1": {
+     "name": "punctuation.definition.tag.begin.html.mitochondria"
+    },
+    "2": {
+     "name": "entity.name.tag.html.mitochondria"
+    }
+   },
+   "end": "/?>",
+   "endCaptures": {
+    "0": {
+     "name": "punctuation.definition.tag.end.html.mitochondria"
+    }
+   },
+   "name": "meta.tag.html.mitochondria",
+   "patterns": [
+    {
+     "include": "#html-attr-value-expr"
+    },
+    {
+     "include": "#html-attr-value-str"
+    },
+    {
+     "include": "#html-attr-name"
+    }
+   ]
+  },
+  "markup-element": {
+   "begin": "(?:(?<=[(,{;}>])|^)\\s*(<)([A-Za-z][\\w:-]*)(?![\\w:-])",
+   "beginCaptures": {
+    "1": {
+     "name": "punctuation.definition.tag.begin.html.mitochondria"
+    },
+    "2": {
+     "name": "entity.name.tag.html.mitochondria"
+    }
+   },
+   "end": "(/>)|(</)(\\2)\\s*(>)",
+   "endCaptures": {
+    "1": {
+     "name": "punctuation.definition.tag.end.html.mitochondria"
+    },
+    "2": {
+     "name": "punctuation.definition.tag.begin.html.mitochondria"
+    },
+    "3": {
+     "name": "entity.name.tag.html.mitochondria"
+    },
+    "4": {
+     "name": "punctuation.definition.tag.end.html.mitochondria"
+    }
+   },
+   "name": "meta.tag.html.mitochondria",
+   "patterns": [
+    {
+     "begin": ">",
+     "end": "(?=</)",
+     "name": "meta.element.content.html.mitochondria",
+     "beginCaptures": {
+      "0": {
+       "name": "punctuation.definition.tag.end.html.mitochondria"
+      }
+     },
+     "patterns": [
+      {
+       "include": "#child-void"
+      },
+      {
+       "include": "#child-element"
+      },
+      {
+       "include": "#child-code"
+      },
+      {
+       "include": "#entity"
+      }
+     ]
+    },
+    {
+     "include": "#html-attr-value-expr"
+    },
+    {
+     "include": "#html-attr-value-str"
+    },
+    {
+     "include": "#html-attr-name"
+    }
+   ]
+  },
+  "child-void": {
+   "begin": "(<)(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)(?![\\w:-])",
+   "beginCaptures": {
+    "1": {
+     "name": "punctuation.definition.tag.begin.html.mitochondria"
+    },
+    "2": {
+     "name": "entity.name.tag.html.mitochondria"
+    }
+   },
+   "end": "/?>",
+   "endCaptures": {
+    "0": {
+     "name": "punctuation.definition.tag.end.html.mitochondria"
+    }
+   },
+   "name": "meta.tag.html.mitochondria",
+   "patterns": [
+    {
+     "include": "#html-attr-value-expr"
+    },
+    {
+     "include": "#html-attr-value-str"
+    },
+    {
+     "include": "#html-attr-name"
+    }
+   ]
+  },
+  "child-element": {
+   "begin": "(<)([A-Za-z][\\w:-]*)(?![\\w:-])",
+   "beginCaptures": {
+    "1": {
+     "name": "punctuation.definition.tag.begin.html.mitochondria"
+    },
+    "2": {
+     "name": "entity.name.tag.html.mitochondria"
+    }
+   },
+   "end": "(/>)|(</)(\\2)\\s*(>)",
+   "endCaptures": {
+    "1": {
+     "name": "punctuation.definition.tag.end.html.mitochondria"
+    },
+    "2": {
+     "name": "punctuation.definition.tag.begin.html.mitochondria"
+    },
+    "3": {
+     "name": "entity.name.tag.html.mitochondria"
+    },
+    "4": {
+     "name": "punctuation.definition.tag.end.html.mitochondria"
+    }
+   },
+   "name": "meta.tag.html.mitochondria",
+   "patterns": [
+    {
+     "begin": ">",
+     "end": "(?=</)",
+     "name": "meta.element.content.html.mitochondria",
+     "beginCaptures": {
+      "0": {
+       "name": "punctuation.definition.tag.end.html.mitochondria"
+      }
+     },
+     "patterns": [
+      {
+       "include": "#child-void"
+      },
+      {
+       "include": "#child-element"
+      },
+      {
+       "include": "#child-code"
+      },
+      {
+       "include": "#entity"
+      }
+     ]
+    },
+    {
+     "include": "#html-attr-value-expr"
+    },
+    {
+     "include": "#html-attr-value-str"
+    },
+    {
+     "include": "#html-attr-name"
+    }
+   ]
+  },
+  "child-code": {
+   "begin": "\\{",
+   "end": "\\}",
+   "name": "meta.embedded.expression.mitochondria",
+   "beginCaptures": {
+    "0": {
+     "name": "punctuation.section.embedded.begin.mitochondria"
+    }
+   },
+   "endCaptures": {
+    "0": {
+     "name": "punctuation.section.embedded.end.mitochondria"
+    }
+   },
+   "patterns": [
+    {
+     "include": "#code"
+    }
+   ]
+  },
+  "entity": {
+   "name": "constant.character.entity.html.mitochondria",
+   "match": "&(?:#[0-9]+|#x[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);"
+  },
+  "html-attr-name": {
+   "name": "entity.other.attribute-name.html.mitochondria",
+   "match": "[A-Za-z0-9_:@-][\\w:@.-]*"
+  },
+  "html-attr-value-str": {
+   "begin": "(?<==)\"",
+   "end": "\"",
+   "beginCaptures": {
+    "0": {
+     "name": "string.quoted.double.html.mitochondria"
+    }
+   },
+   "endCaptures": {
+    "0": {
+     "name": "string.quoted.double.html.mitochondria"
+    }
+   },
+   "patterns": [
+    {
+     "include": "#child-code"
+    },
+    {
+     "include": "#entity"
+    },
+    {
+     "name": "string.quoted.double.html.mitochondria",
+     "match": "[^\"{&]+|&"
+    }
+   ]
+  },
+  "html-attr-value-expr": {
+   "begin": "(?<==)\\{",
+   "end": "\\}",
+   "name": "meta.embedded.expression.mitochondria",
+   "patterns": [
+    {
+     "include": "#code"
+    }
+   ]
+  }
+ }
 }

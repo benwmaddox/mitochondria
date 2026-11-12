@@ -2166,13 +2166,8 @@ impl<'p> G<'p> {
         let mut seen = Vec::new();
         self.prog.globals.iter().any(|g| walk(self.prog, &g.ty, sid, &mut seen))
     }
-    /// The kind a function's declared result stands for: a struct that is part of the state cannot be returned (it has no place of its own to point at).
-    fn ret_kind(&self, t: &crate::lang::PTy, f: &str) -> R<K> {
-        match self.decl_kind(t, f)? {
-            K::Plain(sd, _) if false => no(format!("`{}` returns `{}`, a struct that is part of the state: a function can take it as a parameter but not return it yet (struct returns are step 3 of \"Struct values\" in DESIGN.md: return its fields, or an item)", f, self.prog.structs[sd].name)),
-            k => Ok(k),
-        }
-    }
+    /// The kind a function's declared result stands for (a struct result is written into the place the call was given).
+    fn ret_kind(&self, t: &crate::lang::PTy, f: &str) -> R<K> { self.decl_kind(t, f) }
     /// The kind a signature's type stands for (an item type `T?` is a reference; a scalar `T?` is its scalar, and also takes null).
     /// `f`: the function whose signature it is; in a module instance's function (`inst.f`), an item type names the instance's own items.
     fn decl_kind(&self, t: &crate::lang::PTy, f: &str) -> R<K> {

@@ -267,6 +267,8 @@ double tan(double); double asin(double); double acos(double); double atan(double
 #define MOVE_(to, from, n) __builtin_memmove(b + (to), b + (from), (n))
 #define COPY_(to, from, n) __builtin_memcpy(b + (to), b + (from), (n))
 #define ZERO_(to, n) __builtin_memset(b + (to), 0, (n))
+#define SCRMOVE(to, from, n) __builtin_memmove(b + (to), b + (from), (n)) /* struct values: a copy into the request's own scratch area (not a state write: a reader may do it) */
+#define SCRZERO(to, n) __builtin_memset(b + (to), 0, (n))
 #else
 #define ST1_(a, v) (*(u8 *)(b + (a)) = (u8)(v))
 #define ST2_(a, v) (*(u16 *)(b + (a)) = (u16)(v))
@@ -275,6 +277,8 @@ double tan(double); double asin(double); double acos(double); double atan(double
 #define MOVE_(to, from, n) memmove(b + (to), b + (from), (n))
 #define COPY_(to, from, n) memcpy(b + (to), b + (from), (n))
 #define ZERO_(to, n) memset(b + (to), 0, (n))
+#define SCRMOVE(to, from, n) memmove(b + (to), b + (from), (n))
+#define SCRZERO(to, n) memset(b + (to), 0, (n))
 #endif
 #ifdef __clang__
 #define ADD(r, x, y) i64 r; if (UNLIKELY(__builtin_add_overflow((x), (y), &r))) OVERFLOW_
@@ -455,7 +459,7 @@ fn rtype_of(prog: &Program, t: &Ty) -> RType {
 }
 
 /// Generated endpoint C, and one note per endpoint that cannot be compiled (such a program does not load).
-pub struct Generated { pub src: String, pub notes: Vec<String>, pub lits: Vec<u8>,
+pub struct Generated { pub scratch: bool, pub src: String, pub notes: Vec<String>, pub lits: Vec<u8>,
     /// per endpoint, the request struct's byte ranges it must find zeroed (merged, in order), or None for the whole struct
     pub zeros: Vec<Option<Vec<(usize, usize)>>>,
     /// per endpoint, whether its code never changes state (the request struct and the text area are its own): a reader may run it
@@ -591,6 +595,9 @@ fn coll_name(prog: &Program, c: usize) -> String { match tab(c) { Some(t) => pro
 const MAX_DEPTH: u32 = 64;
 const DEPTH_MSG: &str = "calls nested more than 64 deep";
 
+#[derive(Default)]
+struct ScratchUse { unique: std::collections::HashMap<(String, usize), (usize, usize)>, top: usize, bottom: usize }
+
 /// The kind of a value that a `var` or a function's result holds, when it must be the same everywhere.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum K { Null, Int, Flt, Bool, Txt, Any, Item(usize), Ref(usize), Coll(usize), Plain(usize, usize) }
@@ -611,6 +618,10 @@ fn unify(a: K, b: K) -> K {
 thread_local! {
     /// Per function: compiled as a C function of its own though not recursive (see `outlined_fns`), for the program being generated.
     static OUTLINED: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The scratch area for struct values (see `G::scratch_alloc`): slots of the C functions generated apart, handed out from the area's top end
+    /// (`unique`: (function's spec key, n-th struct local) -> offset and size; `top`: bytes used from the end), and the most bytes any endpoint's own locals
+    /// (handed out from the start, and given back at the end of their block) take at once (`bottom`).
+    static SCRATCH: std::cell::RefCell<ScratchUse> = std::cell::RefCell::new(Default::default());
     /// Ranges of plain integer fields worked out from the whole program (see `generate_with`): `.0` the ranges reads may assume, `.1` what
     /// each field was seen given by every store compiled (None once a store's value has no proven range).
     // pools nothing in the program removes from (assumed by this build; see `generate_with`), and the pools this build saw a removal from
@@ -744,6 +755,11 @@ struct G<'p> {
     loop_body: Option<LoopBody<'p>>,
     /// Inner loops merged into their outer loop's query: the inner loop, the merge cursor's C name.
     merged: Vec<(*const Iter, String)>,
+    /// Struct values (locals): where the next one goes in the scratch area (bytes from its start; given back at the end of a block); in a C function
+    /// generated apart (`spec_key`), each local has its own place from the area's top end instead, `scr_n` counting them; `spec_rec`: that function is recursive
+    scr_top: usize, spec_key: Option<String>, scr_n: usize, spec_rec: bool,
+    /// slots of `let` struct locals (their fields may not be assigned): (function, slot)
+    immut: std::collections::HashSet<(Option<u32>, u32)>,
 }
 type R<T> = Result<T, String>;
 fn no<T>(what: impl Into<String>) -> R<T> { Err(what.into()) }
@@ -849,7 +865,7 @@ fn program_c_full(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefi
     o += OS;
     o += RUNTIME_TYPES;
     o += &format!("#define MITO(x) {}##x\n", prefix);
-    o += &layout_c(prog, api, &g.zeros, &g.reads);
+    o += &layout_c(prog, api, &g.zeros, &g.reads, g.scratch);
     if tests {
         // the tests, for the runner (MITO(run_test))
         let names = test_names(api);
@@ -965,7 +981,7 @@ pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
 
 /// The layout and the routes as C data for the runtime: collections with their columns and nested collections,
 /// endpoints with their path segments.
-pub fn layout_c(prog: &Program, api: &Api, zeros: &[Option<Vec<(usize, usize)>>], reads: &[bool]) -> String {
+pub fn layout_c(prog: &Program, api: &Api, zeros: &[Option<Vec<(usize, usize)>>], reads: &[bool], scratch: bool) -> String {
     let mut o = String::from("\n/* ---- the program's layout and routes (generated) ---- */\n");
     for (k, c) in prog.colls.iter().enumerate() {
         o += &format!("static const MitoCol mito_cols{}[] = {{\n", k);
@@ -1014,9 +1030,13 @@ pub fn layout_c(prog: &Program, api: &Api, zeros: &[Option<Vec<(usize, usize)>>]
     o += " 0 };\n";
     o += "static const u64 mito_unlogged[] = {";
     for (a, b) in &prog.unlogged { o += &format!(" {}ULL, {}ULL,", a, b); }
+    // the scratch area for struct values, when the code uses it: after everything else, the request's own like the request struct
+    let (so, sn) = if scratch { prog.scratch } else { (0, 0) };
+    if scratch { o += &format!(" {}ULL, {}ULL,", so, so + sn); }
     o += " 0, 0 };\n";
     let (ro, rs) = prog.request.unwrap_or((0, 0));
-    o += &format!("static const MitoProg mito_prog = {{ {}, mito_colls, {}, {}, {}, mito_routes, {}, mito_unlogged, {}, {} }};\n", prog.colls.len(), prog.plain_end, prog.total, api.eps.len(), prog.unlogged.len(), ro, rs);
+    let total = if scratch { so + sn } else { prog.total };
+    o += &format!("static const MitoProg mito_prog = {{ {}, mito_colls, {}, {}, {}, mito_routes, {}, mito_unlogged, {}, {}, {}, {} }};\n", prog.colls.len(), prog.plain_end, total, api.eps.len(), prog.unlogged.len() + scratch as usize, ro, rs, so, sn);
     o
 }
 
@@ -1469,6 +1489,7 @@ fn generate_with(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
 
 fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkage: &str, tests: bool) -> Generated {
     LITS.with(|l| *l.borrow_mut() = (Vec::new(), Vec::new()));
+    SCRATCH.with(|s| *s.borrow_mut() = Default::default());
     let mut src = String::from(PRELUDE);
     let mut notes = Vec::new();
     let recursive = recursive_fns(api);
@@ -1543,7 +1564,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             let k = api.fns[..fk].iter().filter(|x| x.test.is_some()).count();
             let title = f.test.clone().unwrap_or_default();
             let ep = Endpoint { method: "TEST".into(), segs: Vec::new(), body: Vec::new(), text: format!("test \"{}\"", title), slots: f.slots, lines: (0, 0), name: f.name.clone(), resp: crate::lang::RType::Name("null".into()), inputs: Vec::new() };
-            if writes(api, &f.body, &mut Vec::new()) {
+            if writes_in(api, &f.body, &mut Vec::new(), true) {
                 let at = match f.body.first() { Some(Stmt::At(l, c)) => format!("{}:{}: ", l, c), _ => String::new() };
                 notes.push(format!("{}{}: calls a function that changes the state: a test changes it only through requests", at, ep.text));
                 continue;
@@ -1580,7 +1601,8 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
         }
     }
     let lits = LITS.with(|l| l.borrow().0.clone());
-    Generated { src, notes, lits, zeros, reads, costs }
+    let scratch = SCRATCH.with(|s| { let s = s.borrow(); s.bottom + s.top > 0 });
+    Generated { scratch, src, notes, lits, zeros, reads, costs }
 }
 
 /// What generating a C function's body for one guess of its result kind gave.
@@ -1588,7 +1610,10 @@ enum SpecErr { Conflict(K), Other(String) }
 
 /// Does running these statements (including inlined calls) write state or allocate? A loop with `where` whose body
 /// does collects its items first, as the interpreter does, so the body cannot change which items the filter keeps.
-fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
+fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool { writes_in(api, stmts, seen, false) }
+/// `locals`: an assignment to a field or element of a local (`v.x = 1;`, a struct value of the code's own: the code generator checks that it is one) is not a write of state here.
+/// What a called function does is judged strictly: through a parameter it may write state.
+fn writes_in(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>, locals: bool) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
             Expr::Call(_, _, CallRes::Builtin(B::Truncate)) => true,
@@ -1599,6 +1624,7 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         }
     }
     stmts.iter().any(|s| match s {
+        Stmt::Assign(l @ (Expr::Field(..) | Expr::Index(..)), r) if locals && G::root_local(l).is_some() => ex(api, l, seen) || ex(api, r, seen),
         Stmt::Alloc { .. } | Stmt::Move(..) | Stmt::Copy(..) | Stmt::Sort(..) | Stmt::Fill(..) | Stmt::Clear(..) | Stmt::Assign(Expr::Field(..) | Expr::Index(..), _) => true,
         Stmt::Let(_, _, e) | Stmt::Var(_, _, e) | Stmt::Do(e) | Stmt::Return(Some(e)) => ex(api, e, seen),
         Stmt::Remove(c, e) => ex(api, c, seen) || ex(api, e, seen),
@@ -1608,8 +1634,8 @@ fn writes(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
         Stmt::Fill(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Sort(a, f, t2, n) => ex(api, a, seen) || ex(api, f, seen) || ex(api, t2, seen) || ex(api, n, seen),
         Stmt::Assign(a, b) => ex(api, a, seen) || ex(api, b, seen),
-        Stmt::If(c, t, e) => ex(api, c, seen) || writes(api, t, seen) || writes(api, e, seen),
-        Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || writes(api, b, seen),
+        Stmt::If(c, t, e) => ex(api, c, seen) || writes_in(api, t, seen, locals) || writes_in(api, e, seen, locals),
+        Stmt::Each(it, b) => ex(api, &it.coll, seen) || it.hi.as_ref().map_or(false, |h| ex(api, h, seen)) || writes_in(api, b, seen, locals),
         Stmt::Forward { key, fields, .. } => ex(api, key, seen) || fields.iter().any(|f| ex(api, &f.1, seen)),
         _ => false,
     })
@@ -1659,7 +1685,7 @@ fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return
 impl<'p> G<'p> {
     #[allow(clippy::too_many_arguments)]
     fn new(prog: &'p Program, api: &'p Api, ep: &'p Endpoint, slot_kinds: &'p [((Option<u32>, u32), K)], ret_kinds: &'p [(u32, K)], recursive: &'p [bool], specs: &'p std::cell::RefCell<Vec<Spec>>) -> G<'p> {
-        G { var_iv: std::collections::HashMap::new(), loop_frames: Vec::new(), var_depth: std::collections::HashMap::new(), loop_stmts: None, loop_entry: None, loop_heads: None, rq_touched: Vec::new(), uses_spec: false, wrote_state: std::cell::Cell::new(false), narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), own_region: false, region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, u32_vars: std::collections::HashSet::new(), rest: &[], var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new() }
+        G { var_iv: std::collections::HashMap::new(), loop_frames: Vec::new(), var_depth: std::collections::HashMap::new(), loop_stmts: None, loop_entry: None, loop_heads: None, rq_touched: Vec::new(), uses_spec: false, wrote_state: std::cell::Cell::new(false), narrowed: Vec::new(), txt_bounds: std::collections::HashMap::new(), region_lets: Vec::new(), own_region: false, region_live: 0, region_peak: 0, region_unbounded: Vec::new(), txt_caps: std::collections::HashMap::new(), prog, api, ep, body: String::new(), n: 0, depth: 0, inlining: Vec::new(), ret: Vec::new(), frame: None, slot_kinds, ret_kinds, widen: None, u32_vars: std::collections::HashSet::new(), rest: &[], var_names: std::collections::HashSet::new(), fast_sites: std::collections::HashSet::new(), skip_save: false, presave: None, checked: Vec::new(), at: (0, 0), test: false, str_lens: std::collections::HashMap::new(), loop_n: 0, loops: Vec::new(), loop_hint: None, versioned: 0, txt_escapes: Vec::new(), recursive, specs, dep: false, inl: 0, ranges: std::collections::HashMap::new(), or_dead: None, loop_body: None, merged: Vec::new(), scr_top: 0, spec_key: None, scr_n: 0, spec_rec: false, immut: std::collections::HashSet::new() }
     }
 
     /// An endpoint's typed inputs, read and checked before its body, into slots 0.. in order. For a request with a body,
@@ -1791,9 +1817,126 @@ impl<'p> G<'p> {
         if items && m.key.as_deref() == Some(path) { return Err(format!("`{}` is the key of {}; change it with {}.set_key(item, value)", path, m.name, m.name)); }
         Ok(())
     }
+    // ---- struct values: locals are places in the request region's scratch area ("Struct values" in DESIGN.md) ----
+    fn in_scratch(&self, off: usize) -> bool { let (a, n) = self.prog.scratch; off >= a && off < a + n }
+    /// A place of `size` bytes in the scratch area for a struct value: from the area's start in the code of an endpoint or an inlined function (given back at the end of the
+    /// block, so locals of blocks that do not overlap share it); in a C function generated apart from the area's top end, one place for each local, kept for the whole program
+    /// (such a function is never running twice at once, and its caller's places are lower).
+    fn scratch_alloc(&mut self, size: usize) -> R<usize> {
+        if self.spec_rec { return no("a struct value inside a recursive function is not supported yet (each call would need its own place: a frame); keep the struct in the state and pass it, or make the function not recursive"); }
+        let (so, cap) = self.prog.scratch;
+        let size = (size.max(1) + 7) / 8 * 8;
+        let full = format!("the struct values live at once here need more than the {} bytes of scratch a request has: use fewer or smaller struct locals", cap);
+        if let Some(key) = self.spec_key.clone() {
+            let n = self.scr_n;
+            self.scr_n += 1;
+            return SCRATCH.with(|s| {
+                let mut s = s.borrow_mut();
+                if let Some((o, sz)) = s.unique.get(&(key.clone(), n)).copied() { if sz == size { return Ok(so + o); } }
+                if s.top + size + s.bottom > cap { return Err(full.clone()); }
+                s.top += size;
+                let o = cap - s.top;
+                s.unique.insert((key, n), (o, size));
+                Ok(so + o)
+            });
+        }
+        let o = self.scr_top;
+        self.scr_top += size;
+        let top = self.scr_top;
+        SCRATCH.with(|s| { let mut s = s.borrow_mut(); s.bottom = s.bottom.max(top); if s.top + s.bottom > cap { Err(full.clone()) } else { Ok(()) } })?;
+        Ok(so + o)
+    }
+    /// The bytes of the request struct the code reads or writes here are ones the endpoint must find zeroed first.
+    fn touch_range(&mut self, off: usize, n: usize) {
+        let Some((ro, rn)) = self.prog.request else { return };
+        if off < ro || off >= ro + rn { return; }
+        let r = (off, off + n.max(1));
+        if !self.rq_touched.contains(&r) { self.rq_touched.push(r); }
+    }
+    /// A store into every number leaf of struct `sid` at `off` that no range is proven for (the whole-program ranges of what each field holds: see `generate_with`).
+    fn seen_struct(&mut self, sid: usize, off: usize) {
+        for k in 0..self.prog.structs[sid].fields.len() {
+            let (t, at) = (self.prog.structs[sid].fields[k].1.clone(), off + self.prog.structs[sid].offs[k]);
+            self.seen_ty(&t, at);
+        }
+    }
+    fn seen_ty(&mut self, t: &Ty, at: usize) {
+        match t {
+            Ty::Scalar(_) => self.field_store_seen(at, None),
+            Ty::Arr(e, n) => match &**e { Ty::Scalar(_) => self.field_store_seen(at, None), e => { let sz = self.prog.plain_size(e).0; for i in 0..*n { self.seen_ty(e, at + i * sz); } } },
+            Ty::Struct(s) => self.seen_struct(*s, at),
+            _ => {}
+        }
+    }
+    /// Copy struct `sid` from the place at `src` to the one at `dst` (a whole copy, as a memmove: the places may be the same or overlap). A destination in the state is a state
+    /// write: it saves the logged lines it covers for the undo log first, and counts for the endpoint's reads and the whole-program ranges; one in the request region (the
+    /// scratch area, the request struct) is the request's own and is not.
+    fn copy_struct(&mut self, sid: usize, dst: usize, src: usize) -> R<()> {
+        let n = self.prog.structs[sid].size;
+        if dst == src || n == 0 { return Ok(()); }
+        self.touch_range(src, n);
+        let (ro, rn) = self.prog.request.unwrap_or((0, 0));
+        let own = (dst >= ro && dst < ro + rn) || self.in_scratch(dst);
+        if own { self.touch_range(dst, n); } else {
+            self.may_write_plain(dst)?;
+            self.may_write_plain(dst + n - 1)?;
+            self.seen_struct(sid, dst);
+            for l in dst / 64..=(dst + n - 1) / 64 {
+                if !self.unlogged_at((l * 64).max(dst)) { self.line(&format!("SAVE_({}ULL, 64);", l * 64)); }
+            }
+        }
+        self.line(&format!("{}({}ULL, {}ULL, {});", if own { "SCRMOVE" } else { "MOVE_" }, dst, src, n));
+        Ok(())
+    }
+    /// What a `let` or `var` of a struct becomes: a new place in the scratch area holding a copy. `src`: the place the value is (a hidden temporary of a literal is the place itself).
+    fn struct_local(&mut self, sid: usize, src: usize, hidden: bool) -> R<CV> {
+        if hidden { return Ok(CV::Plain(sid, src)); }
+        self.prog.value_check(sid)?;
+        let off = self.scratch_alloc(self.prog.structs[sid].size)?;
+        self.copy_struct(sid, off, src)?;
+        Ok(CV::Plain(sid, off))
+    }
+    /// `Name { f: e, ..base }` (the parser's `__mito__struct("Name", mode, fields...)`): a new struct place, all zero: its fields are set by the assignments that follow.
+    /// `mode`: "full" (every field given), "zero" (`Name {}`), "update" (`..base` and the fields listed, copied over a copy of `base`).
+    fn struct_new(&mut self, args: &[Expr]) -> R<CV> {
+        let strs: Vec<&str> = args.iter().filter_map(|a| if let Expr::Str(s) = a { Some(s.as_str()) } else { None }).collect();
+        let (name, mode) = (strs[0], strs[1]);
+        let Some(sid) = self.prog.structs.iter().position(|s| s.name == name) else { return no(format!("`{} {{ ... }}`: no struct `{}`{}", name, name, crate::lang::suggest(name, self.prog.structs.iter().map(|s| s.name.as_str())))) };
+        let sd = &self.prog.structs[sid];
+        for f in &strs[2..] {
+            if !sd.fields.iter().any(|x| x.0 == *f) { return no(format!("`{} {{ ... }}`: no field `{}`{}", name, f, crate::lang::suggest(f, sd.fields.iter().map(|x| x.0.as_str())))); }
+        }
+        if mode == "full" {
+            let missing: Vec<&str> = sd.fields.iter().filter(|x| !strs[2..].contains(&x.0.as_str())).map(|x| x.0.as_str()).collect();
+            if !missing.is_empty() {
+                let arr = sd.fields.iter().any(|x| missing.contains(&x.0.as_str()) && matches!(x.1, Ty::Arr(..)));
+                return no(format!("`{} {{ ... }}` is missing {}: a struct literal gives every field{}", name, missing.iter().map(|m| format!("`{}`", m)).collect::<Vec<_>>().join(", "), if arr { " (an array field cannot be given in a literal: start from `Name {}` or `Name { ..base }` and set its elements)" } else { "; `Name {}` is all zero, `Name { ..base, f: e }` changes some" }));
+            }
+        }
+        self.prog.value_check(sid)?;
+        let off = self.scratch_alloc(self.prog.structs[sid].size)?;
+        let n = self.prog.structs[sid].size;
+        self.line(&format!("SCRZERO({}ULL, {});", off, n));
+        Ok(CV::Plain(sid, off))
+    }
+    /// The slot of the local at the root of `e` (`v`, `v.pos.x`, `v.xs[i]`), and its name.
+    fn root_local(e: &Expr) -> Option<(&str, u32)> {
+        match e { Expr::Var(n, VarRes::Local(s)) => Some((n.as_str(), *s)), Expr::Field(b, _) | Expr::Index(b, _) => Self::root_local(b), _ => None }
+    }
+    /// Before an assignment to `lhs` (not a bare variable): a `let` struct local's fields are not assigned; a test changes only its own struct locals.
+    fn check_assign_target(&self, lhs: &Expr, env: &[Option<CV>]) -> R<()> {
+        if matches!(lhs, Expr::Var(..)) { return Ok(()); }
+        let root = Self::root_local(lhs);
+        if let Some((n, slot)) = root { if self.immut.contains(&(self.frame, slot)) { return no(format!("`{}` is a `let`: declare it with `var` to change its fields", n)); } }
+        if self.test && self.frame.is_none() {
+            let mine = root.map_or(false, |(_, s)| matches!(env.get(s as usize), Some(Some(CV::Plain(_, o))) if self.in_scratch(*o)));
+            if !mine { return no("a test changes the state only through requests (`post(...)` and the others); it can read the state directly"); }
+        }
+        Ok(())
+    }
     /// Writing the plain value at `off` from here: an instance's plain state is its own.
     fn may_write_plain(&self, off: usize) -> R<()> {
-        if self.prog.request.map_or(true, |(a, n)| off < a || off >= a + n) { self.wrote_state.set(true); } // the request struct is the request's own
+        if !self.in_scratch(off) && self.prog.request.map_or(true, |(a, n)| off < a || off >= a + n) { self.wrote_state.set(true); } // the request struct is the request's own
         for m in &self.prog.instances {
             let Some((start, size)) = self.prog.plain_path(&m.name) else { continue };
             if off >= start && off < start + size && self.module_code().as_deref() != Some(m.name.as_str()) { return Err(self.module_err(m, &format!("the state of {}", m.name))); }
@@ -1942,6 +2085,8 @@ impl<'p> G<'p> {
         for _ in 0..32 {
             let mut g = G::new(self.prog, self.api, self.ep, &slot_kinds, &ret_kinds, self.recursive, self.specs);
             g.dep = true;
+            g.spec_key = Some(format!("{}{:?}", k, pks));
+            g.spec_rec = rec;
             g.frame = Some(k);
             g.inlining.push(k);
             let sel = if has_collecting_loop(self.api, &f.body) { Some("hm".to_string()) } else { None };
@@ -2003,7 +2148,7 @@ impl<'p> G<'p> {
     /// The kind a function's declared result stands for: a struct that is part of the state cannot be returned (it has no place of its own to point at).
     fn ret_kind(&self, t: &crate::lang::PTy, f: &str) -> R<K> {
         match self.decl_kind(t, f)? {
-            K::Plain(sd, _) => no(format!("`{}` returns `{}`, a struct that is part of the state: a function can take it as a parameter but not return it (return its fields, or an item)", f, self.prog.structs[sd].name)),
+            K::Plain(sd, _) => no(format!("`{}` returns `{}`, a struct that is part of the state: a function can take it as a parameter but not return it yet (struct returns are step 3 of \"Struct values\" in DESIGN.md: return its fields, or an item)", f, self.prog.structs[sd].name)),
             k => Ok(k),
         }
     }
@@ -2106,10 +2251,10 @@ impl<'p> G<'p> {
         Ok(CV::Int(x))
     }
     /// Is the byte at plain-state offset `off` kept out of the undo log (an unlogged field)?
-    fn unlogged_at(&self, off: usize) -> bool { self.prog.unlogged.iter().any(|(a, b)| off >= *a && off < *b) }
+    fn unlogged_at(&self, off: usize) -> bool { self.in_scratch(off) || self.prog.unlogged.iter().any(|(a, b)| off >= *a && off < *b) }
     /// A store of `range` (None: not proven) into the plain integer field at `at`, for the whole-program field ranges.
     fn field_store_seen(&mut self, at: usize, range: Option<(i64, i64)>) {
-        if self.prog.request.map_or(false, |(a, n)| at >= a && at < a + n) { return; } // the request struct starts zeroed every request; left alone
+        if self.in_scratch(at) || self.prog.request.map_or(false, |(a, n)| at >= a && at < a + n) { return; } // the request struct starts zeroed every request; left alone
         FIELD_RANGES.with(|fr| {
             let mut fr = fr.borrow_mut();
             let e = fr.1.entry(at).or_insert(range);
@@ -2423,7 +2568,9 @@ impl<'p> G<'p> {
         let (start, lets0, esc0, live0) = (self.body.len(), self.region_lets.len(), self.txt_escapes.len(), self.region_live);
         let bound_before: Vec<bool> = env.iter().map(|x| x.is_some()).collect();
         let mut live_from: Option<usize> = None; // where the first `let` of built text in this block was compiled
+        let scr0 = self.scr_top; // struct locals of this block are given back at its end
         self.block_inner(stmts, env, &mut live_from)?;
+        self.scr_top = scr0;
         if self.region_lets.len() > lets0 {
             let code = self.body[start..].to_string();
             // a text built in a `let` is not live at a recursive call (so each endpoint's worst case is known when compiling)
@@ -2575,6 +2722,7 @@ impl<'p> G<'p> {
     }
     fn stmt_inner(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<()> {
         let rest = std::mem::take(&mut self.rest); // the statements after this one in its block
+        if let Stmt::Assign(lhs, _) = s { self.check_assign_target(lhs, env)?; }
         match s {
             Stmt::At(l, c) => { self.at = (*l, *c); self.line("#undef AT_"); self.line(&format!("#define AT_ {}", l)); }
             Stmt::Break => { let l = self.loops.last_mut().ok_or("`break` outside a loop")?; l.2 = true; let g = format!("goto {};", l.0); self.line(&g); }
@@ -2608,7 +2756,17 @@ impl<'p> G<'p> {
             }
             Stmt::Let(_, slot, e) | Stmt::Var(_, slot, e) => {
                 let mutable = matches!(s, Stmt::Var(..));
+                self.immut.remove(&(self.frame, *slot));
+                // a struct value: a local struct is a copy in its own place (a hidden temporary of a struct literal is that place itself)
+                if let Expr::Call(f, args, _) = e { if f == "__mito__struct" { let v = self.struct_new(args)?; env[*slot as usize] = Some(v); return Ok(()); } }
                 let v = self.expr(e, env, None)?;
+                if let CV::Plain(sid, src) = v {
+                    let hidden = matches!(e, Expr::Var(n, _) if n.starts_with("__mito__lit"));
+                    let v = self.struct_local(sid, src, hidden)?;
+                    if !mutable && !matches!(s, Stmt::Let(n, ..) if n.starts_with("__mito__lit")) { self.immut.insert((self.frame, *slot)); }
+                    env[*slot as usize] = Some(v);
+                    return Ok(());
+                }
                 let init_iv = match &v { CV::Int(x) => self.interval(x), _ => None };
                 // text lives in fields: a local is a window onto text (a field, an input, a literal, a piece of one), never its own copy
                 // or text it builds (tests may: their messages are built text)
@@ -2646,6 +2804,15 @@ impl<'p> G<'p> {
             }
             Stmt::Assign(target @ Expr::Var(n, VarRes::Local(slot)), rhs) => {
                 let cur = env[*slot as usize].clone().ok_or_else(|| format!("`{}` has no compiled value", n))?;
+                // a struct local: the whole struct is copied in (its place stays where it is)
+                if let CV::Plain(sid, off) = cur {
+                    if self.in_scratch(off) {
+                        let v = self.expr(rhs, env, None)?;
+                        let CV::Plain(s2, src) = v else { return no(format!("`{}` is a `{}`: assign it a struct of that type", n, self.prog.structs[sid].name)) };
+                        if s2 != sid { return no(format!("`{}` is a `{}`, not a `{}`", n, self.prog.structs[sid].name, self.prog.structs[s2].name)); }
+                        return self.copy_struct(sid, off, src);
+                    }
+                }
                 // a capped var of text: written in place (`acc += a + b`: the pieces after what it holds; `acc = ...`: from the start)
                 if let CV::Txt(t) = &cur {
                     if let Some(cap) = self.txt_caps.get(t).copied() {
@@ -2703,6 +2870,15 @@ impl<'p> G<'p> {
                         let Some(k) = sd.fields.iter().position(|x| x.0 == *f) else { return no(format!("no field `{}`{}", f, crate::lang::suggest(f, sd.fields.iter().map(|x| x.0.as_str())))) };
                         self.touch_request(off, sid, k);
                         let sd = &self.prog.structs[sid];
+                        // a struct-valued field: the whole struct is copied in (`world.pos = v;`)
+                        if let Ty::Struct(s2) = sd.fields[k].1 {
+                            let at = off + sd.offs[k];
+                            let v = self.expr(rhs, env, None)?;
+                            let CV::Plain(s3, src) = v else { return no(format!("`.{}` is a `{}`: assign it a struct of that type", f, self.prog.structs[s2].name)) };
+                            if s3 != s2 { return no(format!("`.{}` is a `{}`, not a `{}`", f, self.prog.structs[s2].name, self.prog.structs[s3].name)); }
+                            self.prog.value_check(s2)?;
+                            return self.copy_struct(s2, at, src);
+                        }
                         let (code, cap) = plain_code(&sd.fields[k].1).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))?;
                         let at = off + sd.offs[k];
                         let range = sd.ranges[k];
@@ -3546,7 +3722,7 @@ impl<'p> G<'p> {
             CV::Item(c, e) => self.line(&format!("Val {} = {{ 5, {}, {}, 0, 0 }};", t, c, e)),
             CV::Ref(c, s, k) => self.line(&format!("Val {} = {{ {} == 0 ? 0 : 5, {}, {}, 0, 0 }};", t, s, c, k)),
             v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)) => { let x = self.txt_of(v)?; self.line(&format!("Val {} = {{ {}.present ? 4 : 0, {}.off, {}.len, 0, 0 }};", t, x, x, x)); }
-            CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) => return no("a collection, struct or array used as a value is not compiled yet"),
+            CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) => return no("a collection, array or struct used as a value is not compiled here yet (a struct can be copied into a local or a struct field with `let`, `var` or `=`; passing, returning, comparing and answering with struct values come in later steps of \"Struct values\" in DESIGN.md)"),
             CV::Resp(..) => return no("an answer is read through `.status` and `.body`"),
         }
         Ok(t)
@@ -5392,7 +5568,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "TAN_", "ASIN_", "ACOS_", "ATAN_", "SINH_", "COSH_", "TANH_", "LN_", "LOG2_", "LOG10_", "CEIL_", "ROUNDF_", "TRUNC_", "CBRT_", "HYPOT_", "FMOD_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "TAN_", "ASIN_", "ACOS_", "ATAN_", "SINH_", "COSH_", "TANH_", "LN_", "LOG2_", "LOG10_", "CEIL_", "ROUNDF_", "TRUNC_", "CBRT_", "HYPOT_", "FMOD_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "SCRMOVE", "SCRZERO", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
@@ -5604,6 +5780,107 @@ state app: A;
         // `bump` writes for a Node and only reads for a Leaf: what a GET does is what its generated code does, so the call follows the function its receiver's type names
         let want = [("peek", true), ("leaf", true), ("bump", false)];
         for (k, (name, reads)) in want.iter().enumerate() { assert_eq!(g.reads[k], *reads, "endpoint {}", name); }
+    }
+
+    /// Struct locals live in the request's scratch area, which is the request's own: an endpoint that only builds locals (from state, from other locals, through a function that writes
+    /// them) is still a reader; one that copies a struct (or a literal) into the state, or writes the state's struct through a function, is not. Both directions.
+    #[test]
+    fn struct_locals_are_the_requests_own_for_readers() {
+        let src = "struct V { x: i64; y: i64; }
+struct A { p: V; q: V logged; n: i64; }
+state app: A;
+            fn bump(p: V) { p.x += 1; }
+            fn shift(self: V, d: i64) { self.x += d; self.y += d; }
+            @get(\"/locals\") fn locals() -> Response<{ n: i64 }> { var a = app.p; var b = app.q; b = a; a.x += 2; let c = V { ..b, y: 4 }; return ok({ n: a.x + c.y }); }
+            @get(\"/through\") fn through() -> Response<{ n: i64 }> { var a = app.p; bump(a); a.shift(3); return ok({ n: a.x }); }
+            @get(\"/into\") fn into() -> Response<{ n: i64 }> { var a = app.p; app.q = a; return ok({ n: 1 }); }
+            @get(\"/literal\") fn literal() -> Response<{ n: i64 }> { app.p = V { x: 1, y: 2 }; return ok({ n: 1 }); }
+            @get(\"/state_through\") fn state_through() -> Response<{ n: i64 }> { var a = app.p; bump(app.p); return ok({ n: a.x }); }
+            @get(\"/plain\") fn plain() -> Response<{ n: i64 }> { return ok({ n: app.p.x }); }
+";
+        let g = gen_of(src);
+        assert!(g.scratch, "an endpoint with struct locals uses the scratch area");
+        let want = [("locals", true), ("through", true), ("into", false), ("literal", false), ("state_through", false), ("plain", true)];
+        for (k, (name, reads)) in want.iter().enumerate() { assert_eq!(g.reads[k], *reads, "endpoint {}", name); }
+        // a program with no struct value has no scratch area: its layout and totals are what they were
+        let g = gen_of("struct V { x: i64; }\nstruct A { p: V; }\nstate app: A;\n@get(\"/a\") fn a() -> Response<{ n: i64 }> { return ok({ n: app.p.x }); }\n");
+        assert!(!g.scratch);
+    }
+
+    /// A copy into the state counts as the stores it is for the whole-program ranges of fields (a read through an index may drop its test only when every store is proven small);
+    /// stores into a local never count; a copy into one place does not widen another's field. Both directions.
+    #[test]
+    fn struct_copies_count_as_stores_for_field_ranges() {
+        let head = "struct P { v: i64; }\nstruct A { p: P; q: P; buf: i64[8]; }\nstate app: A;\n";
+        let read = "@get(\"/r\") fn r() -> Response<{ n: i64 }> { return ok({ n: app.buf[app.p.v] }); }\n";
+        let small = "@post(\"/w\") fn w() -> Response<{}> { app.p.v = 3; return ok({}); }\n";
+        let tested = |more: &str| gen_of(&format!("{}{}{}{}", head, small, more, read)).src.contains("c->h->elem(");
+        assert!(!tested(""), "every store to p.v is 3: the index is inside buf");
+        // a copy of a local, of a state struct, or of a literal into app.p could hold anything: the test stays
+        assert!(tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { var l = app.q; l.v = x; app.p = l; return ok({}); }\n"), "a local copied into p");
+        assert!(tested("@post(\"/c\") fn c() -> Response<{}> { app.p = app.q; return ok({}); }\n"), "a state struct copied into p (q is never proven small)");
+        assert!(tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { app.p = P { v: x }; return ok({}); }\n"), "a literal copied into p");
+        // writes to locals, and copies into another place, leave p.v at its proven range
+        assert!(!tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { var l = app.p; l.v = x; l.v = 1000; return ok({}); }\n"), "stores into a local are not stores into the state");
+        assert!(!tested("@post(\"/c\") fn c(x: i64) -> Response<{}> { var l = app.p; l.v = x; app.q = l; return ok({}); }\n"), "a copy into q does not change what p.v holds");
+        assert!(!tested("@post(\"/c\") fn c() -> Response<{}> { let l = app.p; var m = l; m = l; return ok({}); }\n"), "copies between locals store nothing in the state");
+    }
+
+    /// A range-declared field keeps its check when a literal or a field store of a local writes it, unless the value is proven inside; a copy needs none (the source holds the range).
+    #[test]
+    fn struct_locals_keep_declared_ranges() {
+        let head = "struct G { n: i64 in 0..100; }\nstruct A { g: G; }\nstate app: A;\n";
+        let msg = "`n` must be in 0..100";
+        let lit = |x: &str| gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in {}) -> Response<{{}}> {{ let l = G {{ n: x }}; app.g = l; return ok({{}}); }}\n", head, x)).src.contains(msg);
+        assert!(lit("0..500"), "a literal field outside the range is tested");
+        assert!(!lit("0..50"), "a literal field inside the range is proven");
+        let store = |x: &str| gen_of(&format!("{}@post(\"/a/{{x}}\") fn a(x: i64 in {}) -> Response<{{}}> {{ var l = app.g; l.n = x; app.g = l; return ok({{}}); }}\n", head, x)).src.contains(msg);
+        assert!(store("0..500") && !store("0..50"));
+        let copy_only = gen_of(&format!("{}@post(\"/a\") fn a() -> Response<{{}}> {{ var l = app.g; app.g = l; let m = app.g; return ok({{}}); }}\n", head));
+        assert!(!copy_only.src.contains(msg), "a copy cannot leave the range: no test");
+    }
+
+    /// Locals of blocks that do not overlap share their scratch place; locals alive together do not; a C function generated apart has places of its own above everything an endpoint uses.
+    #[test]
+    fn struct_locals_get_places_by_scope() {
+        let zeros = |s: &str| -> Vec<usize> {
+            let mut v = Vec::new();
+            for l in s.lines() { if let Some(r) = l.trim().strip_prefix("SCRZERO(") { v.push(r.split("ULL").next().unwrap().parse::<usize>().unwrap()); } }
+            v
+        };
+        let head = "struct V { x: i64; y: i64; }\nstruct A { p: V; n: i64; }\nstate app: A;\n";
+        let g = gen_of(&format!("{}@post(\"/a\") fn a() -> Response<{{ n: i64 }}> {{ var t = V {{}}; if app.n > 0 {{ let u = V {{ x: 1, y: 2 }}; t.x = u.x; }} else {{ let w = V {{ x: 3, y: 4 }}; t.y = w.y; }} return ok({{ n: t.x }}); }}\n", head));
+        let z = zeros(&g.src);
+        // t, then u and w (one place for both), then the hidden temporaries of the literals (also given back at the block's end)
+        let t = z[0];
+        assert!(z.iter().all(|o| (*o - t) % 8 == 0) && z.iter().filter(|o| **o == t).count() == 1, "t's place is its own: {:?}", z);
+        let mut uniq = z.clone(); uniq.sort(); uniq.dedup();
+        assert!(uniq.len() < z.len(), "blocks that do not overlap reuse places: {:?}", z);
+    }
+
+    /// A function too big to inline is a C function of its own: its struct locals have places of their own, apart from its caller's and from every other such function's, so a call in the
+    /// middle of the caller's locals (or one such function calling another) cannot overwrite them; a caller's local passes to it as a view.
+    #[test]
+    fn struct_locals_of_functions_compiled_apart_have_places_of_their_own() {
+        let body: String = (0..400).map(|_| "    p.x += 1.0;\n    t.y += 0.5;\n").collect();
+        let src = format!("struct V {{ x: f64; y: f64; z: f64; }}\nstruct A {{ pos: V; b: V; }}\nstate app: A;\nfn big(p: V, n: f64) -> f64 {{ var t = V {{ x: 1.0, y: 2.0, z: 3.0 }};\n{}    return t.x + t.y + n; }}\n\
+            fn big2(p: V) -> f64 {{ var t = p;\n{}    let r = big(t, 1.0); return t.z + r; }}\n\
+            @post(\"/a\") fn a() -> Response<{{ n: f64 }}> {{ var l = app.pos; let k = V {{ x: 5.0, y: 6.0, z: 7.0 }}; let a = big(l, 1.0); let c = big2(l); return ok({{ n: a + c + k.z }}); }}\n", body, body);
+        let g = gen_of(&src);
+        let mut places: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+        let mut cur = String::new();
+        for l in g.src.lines() {
+            if (l.starts_with("static int ") || l.starts_with("int ")) && l.ends_with('{') { cur = l.split('(').next().unwrap().to_string(); }
+            if let Some(r) = l.trim().strip_prefix("SCRZERO(") { places.entry(cur.clone()).or_default().push(r.split("ULL").next().unwrap().parse().unwrap()); }
+        }
+        let apart: Vec<&Vec<usize>> = places.iter().filter(|(k, _)| k.contains("fn_")).map(|x| x.1).collect();
+        assert!(apart.len() >= 2, "the big functions are compiled apart: {:?}", places);
+        let own: Vec<usize> = places.iter().filter(|(k, _)| k.contains(" ep")).flat_map(|x| x.1.clone()).collect();
+        let mut all: Vec<usize> = apart.iter().flat_map(|x| x.iter().copied()).collect();
+        let n = all.len();
+        all.sort(); all.dedup();
+        assert_eq!(all.len(), n, "no two C functions share a place: {:?}", places);
+        assert!(!own.is_empty() && own.iter().all(|o| *o < *all.first().unwrap()), "the endpoint's places are below those of the functions: {:?}", places);
     }
 
     fn gen_of(src: &str) -> Generated {

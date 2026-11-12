@@ -1,0 +1,3 @@
+// expect: `c` is a `let`: declare it with `var` to change its fields
+struct V { x: i64; y: i64; } struct W { v: V; } state w: W;
+@post("/a") fn a() -> Response<{ n: i64 }> { let c = w.v; c.x = 5; return ok({ n: c.x }); }

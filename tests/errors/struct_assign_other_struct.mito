@@ -1,0 +1,3 @@
+// expect: `.v` is a `V`, not a `U`
+struct V { x: i64; } struct U { x: i64; } struct W { v: V; u: U; } state w: W;
+@post("/a") fn a() -> Response<{ n: i64 }> { w.v = w.u; return ok({ n: 0 }); }

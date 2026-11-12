@@ -1,13 +1,13 @@
-# Struct values (design proposal, not built)
+# Struct values (approved design; step 1 built)
 
-**Status.** For the owner's review. Nothing here is implemented; no compiler changes accompany it. The owner has decided that struct values are wanted, so this
-is about *how*: clearly in the syntax, cheaply in the generated C.
+**Status.** The owner approved the recommendations of section 13 on 2026-11-12 (and then decided the parameter rules in "Parameters and receivers", section 2). **Step 1 is built** (struct locals, literals, copies, scratch places;
+see "Step 1 findings" at the end and "Struct values" in DESIGN.md); steps 2-6 are not. The rest of this page is the design the steps follow.
 
 **The question first, and the answer in one paragraph.** Today a plain struct can only be a *place* in the state (a view: "Struct parameters" in DESIGN.md).
 A value is something you can hold in a local, build from a literal, return, copy with `=`, and put in a response. Recommendation: add **copy values** with one new
 storage kind, *a struct local is a place in a per-request scratch area at a compile-time offset*. The existing `CV::Plain(struct, offset)` already carries every analysis
 (ranges, reads, logged, text windows, nested structs, arrays), so a local reuses all of it for free. Then, as a pure optimization checked by a differential test, lower
-non-escaping locals to C scalars. Struct parameters are copies by default; `self` and parameters marked `view` stay views. Arithmetic is method calls
+non-escaping locals to C scalars. A struct parameter is a copy unless it is declared `view`, whatever its position or name. Arithmetic is method calls
 (`a.sum(b).scaled(2.0)`); operators wait.
 
 ## 1. What exists and what is missing
@@ -26,7 +26,7 @@ non-escaping locals to C scalars. Struct parameters are copies by default; `self
 The library author's pain points in lib/std/vec.mito all come from the missing rows: a returned `a + b`; `normalize(a - b)` needing a scratch field in the user's
 state; a whole vector in a response; a returned pair; temporaries in `cross_to`, `rotate`, `reflect_to`.
 
-I could not verify (section 12): how the per-request scratch/text area is laid out, and whether it can hold constant-offset slots. Section 3 says what is assumed and the fallback.
+The proposal assumed a per-request scratch area addressable by constant offsets; step 1 checked that (section 14: it did not exist as such; it was added, the fallback was not needed).
 
 ## 2. Value semantics and the parameter list (question a)
 
@@ -36,18 +36,18 @@ Model: **a struct variable is a place; `=` copies the contents of one place into
 - `v = world.pos;` copies into the existing place `v`. `world.pos = v;` copies into state (a state write: logged if the state is, range-checked).
 - Passing to a function: a copy, unless the parameter is a view.
 
-### Three candidates, the same four examples
+### Three candidates, the same four examples (candidate A won; the examples below predate the decision that `self` is not an implicit view: read the mutating ones as `view self`)
 
 Examples: vector add (returns), normalize, in-place plus, a function that mutates a player in state.
 
-**A. Explicit keyword `view`** (a keyword, not `&`).
+**A. Explicit keyword `view`, on any parameter including `self`** (a keyword, not `&`).
 ```
 fn sum(self: Vec3, other: Vec3) -> Vec3 { return Vec3 { x: self.x + other.x, y: self.y + other.y, z: self.z + other.z }; }
 fn normalized(self: Vec3) -> Vec3 { let len = self.length(); if len > 0.0 { return self.scaled(1.0 / len); } return self; }
 fn plus(view self: Vec3, other: Vec3) { self.x += other.x; self.y += other.y; self.z += other.z; }
 fn heal(view p: Player, n: i64) { p.hp += n; }          // heal(world.player, 5) changes the state
 ```
-**B. By position: `self` is a view, every other struct parameter is a copy.**
+**B. By position: `self` is a view, every other struct parameter is a copy.** (Rejected by the owner: `self` carries no view meaning.)
 ```
 fn sum(self: Vec3, other: Vec3) -> Vec3 { ... }               // same as A
 fn plus(self: Vec3, other: Vec3) { self.x += other.x; ... }   // self written: in place
@@ -64,14 +64,41 @@ fn plus(a: Vec3, b: Vec3) { a.x += b.x; }    // plus(world.a, ...) changes state
 ```
 C is what today's code does, but one function means two things at two call sites, and "silently useless" writes are the worst confusion.
 
-### Recommendation: A, with `self` implicitly a view
+### Decision (owner, 2026-11-12): A, and `self` is not special anywhere (see "Parameters and receivers")
 
-- `self` is the place the method is called on, so `world.pos.normalize()` and `local.normalize()` both work in place, and `a.sum(b).normalize()` normalizes the
-  temporary. This is how today's in-place methods already read, so the library keeps working.
-- A parameter other than `self` is a **copy** unless declared `view p: T`. Writing a non-view, non-self struct parameter is a compile error: "`dst` is a copy: writes to it are lost;
-  declare it `view dst: Pos` to change the caller's struct" (the migration note, section 9).
+- **A parameter is a view only when declared `view`, `self` included.** The keyword is `view` (not `inout`, `mut` or `&`). No keyword means a copy for every struct parameter:
+  `fn length(self: Vec3) -> f64` gets a copy (elided when the callee never writes it, so it costs nothing), `fn plus(view self: Vec3, o: Vec3)` changes the caller's struct in place,
+  `fn heal(view p: Player, n: i64)`. So `world.pos.normalize()` and `local.normalize()` both work in place when `normalize` declares its first parameter `view`; `a.sum(b).normalize()` is an error
+  (a call result is not a place; use the returning form `normalized`).
+- Writing a non-view struct parameter (self included) is a compile error from step 3 (a warning before): "`dst` is a copy: writes to it are lost; declare it `view dst: Pos` to change the caller's struct".
+- Pool, list and table **items** stay references to their row, as today: they are handles, not struct values, and need no keyword.
 - `view` accepts a place (state or local). It does not accept a literal or a call result ("a view needs a place"); that check turns C's silent bug into an error.
 - A `view` parameter may alias another parameter (`add_into(a, a)` is fine, as today). A copy is never an alias.
+
+### Parameters and receivers (owner decisions, 2026-11-12; implemented with step 3, not before)
+
+- The keyword is `view`, on any parameter, first or not. Without it a struct parameter is a copy ("in theory you can work off of something without changing it"); the compiler elides the copy when
+  the callee never writes it. Pool, list and table **items** stay references to their row (handles, not struct values) and need no keyword.
+- **The receiver is simply the first parameter, whatever it is called.** The name `self` is not special anywhere: `fn hurt(self: Player, n: i64)` stays valid because `self` is just a name.
+  There is no marker for "this is a method": any function can be called as a method on its first parameter, `f(x, y)` is the same call as `x.f(y)`, and the same function name may be declared for different
+  first-parameter types (the type of the first argument picks the function). Two functions with the same name and the same first-parameter type are a duplicate error. (Stasis does it this way: `damage(e, 5)` equals `e.damage(5)`.)
+- View-ness is only the `view` keyword. `fn plus(view a: Vec3, b: Vec3)` called as `v.plus(w)` changes `v`; `fn length(a: Vec3) -> f64` called as `length(v)` or `v.length()` copies (or elides the copy).
+
+**What the CURRENT compiler assumes about the name `self` (the migration cost of the rule above):**
+
+| where | assumption |
+|---|---|
+| `src/lang.rs` ~472 (`parse`) | a function whose first parameter is *named* `self` gets `Func.recv = true` and the mangled name `Type.name` (the type from the parameter's annotation); a duplicate is reported for `recv` functions only |
+| `src/lang.rs` ~1338-1342 (`bind_with`) | the binder's function table carries `recv`; `owner` (the module instance a function belongs to) is derived from the mangled name when `recv` is false |
+| `src/lang.rs` ~1536 (`Binder::expr`) | in module code `self` (not shadowed by a local) is rewritten to the instance's path (`game.board`); `self` outside module code is an error |
+| `src/generics.rs` ~300 | the functions of a generic type are found by the shape `self: Stack<T, N>`: first parameter named `self`, colon, a generic type name |
+| `src/modules.rs` (header comment, rewriting) | module code is written with `self` for the instance, and `self` is deliberately not renamed |
+| call resolution in `src/cgen.rs` (`recv`, method lookup by `Type.name`) | method calls `x.f(y)` look up `Type.f` among `recv` functions by the receiver's type |
+| `lib/std/*.mito`, `tests/cases/*.case`, docs | every in-place or query function of a type is written `fn name(self: T, ...)` |
+
+Migration: (1) mangle by first-parameter type for *every* function with a typed first parameter (no `recv` flag), keeping `Type.name` as the internal name; (2) generics match on "first parameter has a generic
+type" instead of the name; (3) module code needs its own spelling for the instance (keep `self` meaning "the instance" there only if the owner wants one special name; otherwise the module's functions name their first parameter
+and the binder maps *that* parameter); (4) `f(x, y)` free-call syntax resolves by first-argument type when several functions share a name. None of this is done in step 1.
 
 ### Copy elision (never visible to the user)
 
@@ -84,8 +111,8 @@ or recursive functions and for large structs.
 
 ### Locals: scratch places first, scalar replacement second
 
-**Step-1 storage.** A struct local gets a *place in a per-request scratch area* at an offset fixed at compile time (locals in disjoint blocks may share slots; an inlined
-function's locals get slots in the caller's frame). The local is `CV::Plain(sid, scratch_off)`, so every existing operation works unchanged: field reads and writes, ranges,
+**Step-1 storage (built).** A struct local gets a *place in a per-request scratch area* at an offset fixed at compile time (locals in disjoint blocks share slots; an inlined
+function's locals get slots above the caller's live ones; a function compiled apart has places of its own at the area's top end; section 14). The local is `CV::Plain(sid, scratch_off)`, so every existing operation works unchanged: field reads and writes, ranges,
 nested structs, arrays, text fields, passing as a view, `touch_request`. The cost is memory traffic through `LD_`/`ST_` instead of registers: a few loads and stores per
 operation on a 3-field vector.
 
@@ -118,7 +145,7 @@ anywhere: every value has a compile-time slot.
 
 Pairs: return a declared struct (`struct Hit { point: Vec3; normal: Vec3; }`). No tuples: one way.
 
-Recursive functions with struct locals need a frame (the slot differs per depth). Step 1 refuses struct locals inside recursive functions with a clear message; a later step gives
+Recursive functions with struct locals need a frame (the slot differs per depth). Step 1 refuses struct locals inside recursive functions with a clear message (built); a later step gives
 recursive specializations a frame base. (Struct *results* of recursive functions work: the slot is the caller's.)
 
 ### Generated C
@@ -232,21 +259,23 @@ format. `log v` and responses print JSON text (`{"x":1,"y":2,"z":3}`) because th
 
 ## 9. Migration of lib/std/vec.mito (question g)
 
-Compatibility: every existing in-place method keeps its name and behavior (`pos.plus(vel)` still changes `pos`); `self` stays a view; tests/cases/std_vec.case and struct_params.case
-pass unchanged. The one intentional break: a non-`self` struct parameter written in the body now needs `view`. In the library the written struct is always `self`, so it is unaffected;
-user code such as `fn add_into(dst: Pos, src: Pos)` gets a one-line fix the compiler spells out. To soften it: a **warning** in step 2, an **error** in step 3.
+Compatibility: every existing in-place method keeps its name and behavior (`pos.plus(vel)` still changes `pos`); every in-place method gains `view` on `self`; tests/cases/std_vec.case and struct_params.case
+pass unchanged once the library says `view self` (until step 3 a plain-struct parameter is a view whatever it says, so nothing changes before then). The intentional break at step 3: **any** struct
+parameter that the body writes needs `view`, `self` included. In the library that means every in-place method (`plus`, `minus`, `scale`, `add_scaled`, `negate`, `normalize`, `perp`, `rotate`, `set`,
+`project_on`, `assign`, `cross_to`, `lerp_to`, `reflect_to`) becomes `view self`; user code such as `fn add_into(dst: Pos, src: Pos)` gets a one-line fix the compiler spells out. tests/cases/struct_params.case
+writes through plain parameters (`fn move_by(p: Pos, ...)`, a `self` that mutates): those functions get `view` at step 3, answers unchanged. To soften it: a **warning** in step 2, an **error** in step 3.
 
 Same operations, old and new:
 ```
 // old: in place, results into self
-fn plus(self: Vec3, other: Vec3) { self.x += other.x; self.y += other.y; self.z += other.z; }
-fn cross_to(self: Vec3, a: Vec3, b: Vec3) {
+fn plus(view self: Vec3, other: Vec3) { self.x += other.x; self.y += other.y; self.z += other.z; }
+fn cross_to(view self: Vec3, a: Vec3, b: Vec3) {
     let x = a.y * b.z - a.z * b.y; let y = a.z * b.x - a.x * b.z; let z = a.x * b.y - a.y * b.x;
     self.x = x; self.y = y; self.z = z;
 }
-fn normalize(self: Vec3) { let len = self.length(); if len > 0.0 { self.x /= len; self.y /= len; self.z /= len; } }
-fn reflect_to(self: Vec3, v: Vec3, n: Vec3) { let d = 2.0 * (v.x*n.x + v.y*n.y + v.z*n.z); self.x = v.x - d*n.x; /* y, z likewise */ }
-fn rotate(self: Vec2, radians: f64) { let c = cos(radians); let s = sin(radians); let x = ...; let y = ...; self.x = x; self.y = y; }
+fn normalize(view self: Vec3) { let len = self.length(); if len > 0.0 { self.x /= len; self.y /= len; self.z /= len; } }
+fn reflect_to(view self: Vec3, v: Vec3, n: Vec3) { let d = 2.0 * (v.x*n.x + v.y*n.y + v.z*n.z); self.x = v.x - d*n.x; /* y, z likewise */ }
+fn rotate(view self: Vec2, radians: f64) { let c = cos(radians); let s = sin(radians); let x = ...; let y = ...; self.x = x; self.y = y; }
 
 // new: returning forms (struct values)
 fn sum(self: Vec3, other: Vec3) -> Vec3 { return Vec3 { x: self.x + other.x, y: self.y + other.y, z: self.z + other.z }; }
@@ -312,7 +341,7 @@ Each step merges alone and leaves the old library working.
 
 **Step 1: struct locals, literals and copy-assignment, with scratch places. No returns, no `view` change.**
 `let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };`, `let c = world.pos;` (copy), `world.pos = c;`, `v = w;`, `world.pos = Vec3 { ... };`, `Vec3 {}`, `..base`. Passing a local to today's struct
-parameters already works because a local is a `CV::Plain`. Struct locals are refused in recursive functions. Useful at once: a temporary vector needs no scratch field in user state.
+parameters already works because a local is a `CV::Plain`. **Built 2026-11-12 on branch struct-values-1** (what differs from this plan: section 14). Struct locals are refused in recursive functions. Useful at once: a temporary vector needs no scratch field in user state.
 Files: `src/lang.rs` (literal parse), `src/cgen.rs` (`Let` lowering, scratch allocation, the assignment arm at ~3544, `ST_LOCAL_*`, size limit); `layout.rs` only exposes sizes.
 Tests (new `tests/cases/struct_values.case`): all fields given; missing, unknown and duplicate field errors; copy independence in both directions (write `v`: state unchanged; write state: `v` unchanged);
 `v = w`; same place both sides (`world.pos = world.pos`); the size limit at 257 bytes (error) and 256 (ok); nested struct, array and text field copies;
@@ -323,7 +352,7 @@ Tests (new `tests/cases/struct_values.case`): all fields given; missing, unknown
 **Step 2: scalar replacement and the differential harness.** Escape analysis on locals; a test flag to disable it; every step-1 test runs both ways and compares output; a physics-loop benchmark must be
 no slower (expect a clear gain on vector chains). Also the non-`view` write **warning**. Files: `src/cgen.rs`.
 
-**Step 3: struct returns, copy parameters with elision, `view`, `==`.** `-> Vec3` for inlined, outlined and recursive functions; `K::Val`, `PK::Val`; the `view` keyword; non-view write becomes an **error**.
+**Step 3: struct returns, copy parameters with elision, `view`, receiver = first parameter, `==`.** (Receiver rule: "Parameters and receivers" in section 2.) `-> Vec3` for inlined, outlined and recursive functions; `K::Val`, `PK::Val`; the `view` keyword; non-view write becomes an **error**.
 Files: `ret_kind`, `call_spec`, `to_declared`, `fn writes` (places), `lang.rs`. Tests: `a.sum(b).scaled(2.0)` chains; alias safety (`a = a.cross(b)`, `world.v = world.v.cross(world.w)`);
 copy versus view observed (the callee writes the source while holding a copy: the copy keeps the old value, a view sees the new one; both directions); a recursive function returning a struct; a returned pair
 struct; struct equality including NaN. The library gains the returning forms.
@@ -336,8 +365,7 @@ struct; struct equality including NaN. The library gains the returning forms.
 
 ## 12. Risks and what I could not verify
 
-- **Scratch area.** I assumed a per-request region addressable by constant offsets with `LD_`/`ST_`. I did not verify how the request text area, workers and `touch_request` interact. If requests have no
-  private fixed-layout area, the fallback is a generated C `S_Vec3 c;` per local with a second place kind (the `Place` abstraction paid up front, as in section 3).
+- **Scratch area.** Resolved in step 1 (section 14): the scratch area exists and the fallback (a generated C `S_Vec3 c;` per local with a second place kind) was not needed. Still open: recursion needs a frame (step 5).
 - **Copy elision needs place-level write sets** (the current `writes` walk is yes/no). Until then every copy parameter really copies: correct, slower for large structs.
 - **Aliasing** in `a = a.cross(b)`: a bug here is silent wrong math; the test is mandatory.
 - **Float semantics** in `==` (documented). **Parse ambiguity** of literals in conditions (parenthesize rule).
@@ -350,13 +378,44 @@ struct; struct equality including NaN. The library gains the returning forms.
 
 | # | question | recommendation |
 |---|---|---|
-| 1 | Struct parameters: copies by default, a `view` keyword, `self` implicitly a view | yes (candidate A) |
+| 1 | Struct parameters: copies by default, a `view` keyword on any parameter, `self` not special | **decided 2026-11-12** (candidate A; keyword `view`; `self` only marks a function of a type) |
 | 2 | Literal syntax: named fields, all required, `{}` for zero, `..base` for update; no positional, no shorthand | yes |
 | 3 | Operators `a + b` | not now; revisit at step 6; if added they are the documented spelling |
 | 4 | Value size limit | 256 bytes, a constant; `view` bypasses it |
 | 5 | Text and fixed arrays inside a value; collections never | yes |
-| 6 | A write to a non-view, non-self struct parameter | warning in step 2, error in step 3 |
+| 6 | A write to a non-view struct parameter (self included) | warning in step 2, error in step 3 |
 | 7 | Library names: returning `sum diff scaled normalized cross reflected rotated`; in-place keep `plus minus scale normalize rotate`; deprecate `*_to` and `assign` | yes |
 | 8 | Tuples for multiple returns | no; return a declared struct |
 | 9 | `==` on structs, `str(v)` | `==` in step 3; no `str` |
 | 10 | Storage: scratch places first, scalar replacement second | yes: it reuses every existing analysis |
+
+## 14. Step 1 findings (2026-11-12)
+
+**The question.** The design's central assumption was that a struct local can be a `CV::Plain(struct, offset)` view at a compile-time offset in a per-request scratch area, so ranges, reads, logging, text and arrays work unchanged;
+it had not been verified that the compiler's layout can hold such slots. **Answer: the assumption holds; the primary plan (a scratch area) is built, the fallback (a C local `S_T c;` and a second kind of place) was not needed.**
+
+**Evidence.**
+- *What existed.* The only per-request memory was the optional `request work: Work;` struct (`Program::request`): whole pages after the state's plain values, zeroed per request only in the ranges an endpoint names (`touch_request`, `Generated::zeros`),
+  on the undo log's unlogged list, mapped private by each reader (`MITO(reader)`), and a write to it does not count as a state write (`may_write_plain`, `field_store_seen`). That is exactly the kind of memory a local needs, but it exists only when the program declares
+  one, with a size fixed by that declaration, and the text area (`tx_`) is a bump region of text, not addressable by constant offsets. So there was no scratch area, but every property of one (private, unlogged, own for readers, constant offsets) was in place for the request struct.
+- *The layout is fixed when the state is parsed* (`Program::parse(state)`, 20+ callers, none with the api), and every case's recorded `.out` ends with the memory totals (`memory reserved=... live=...`, `state <plain values> N`). A scratch area reserved in every program
+  would change the recorded answers of every existing case, so it cannot be always on. **Decision:** `Program::scratch` is a fixed 16,384-byte region after everything else (a page-aligned offset known at parse time: `total` rounded up), and it becomes part of the program only when the generated code
+  uses it (`Generated::scratch`): then `layout_c` adds it to `total`, to the unlogged list and to two new `MitoProg` fields (`scr_off`, `scr_size`), and the runtime commits it at start, keeps it live under trim, maps it private in a reader and lets a reader write in it (`in_request`). A program without struct values is laid out, sized and
+  recorded exactly as before (all existing cases unchanged).
+- *Slots.* An endpoint's or inlined function's locals are handed out from the area's start by a bump pointer that a block gives back at its end (`G::scratch_alloc`, `block`); a C function generated apart (outlined, `spec_body`) gets one place per local from the area's top end, kept in a
+  thread-local table keyed by (function and argument kinds, n-th local) so the retries of `spec_body` find the same places, and a check that the two ends never meet. Unit test `struct_locals_of_functions_compiled_apart_have_places_of_their_own`; case `struct_values_outlined`.
+- *Recursion* needs a frame (the place differs per depth): refused with a clear message, as the plan said.
+
+**Differences from the plan.**
+1. A literal is parsed into a hidden local plus assignments (`Name { f: e, ..base }` becomes `var __mito__litN = __mito__struct("Name", mode, fields...); [__mito__litN = base;] __mito__litN.f = e; ...`, the hidden local replacing the literal), the way `coll.add() { ... }` is, instead of a new expression kind.
+   Every store check of an ordinary field store (ranges, text, ascii, undo log) therefore applies to a literal unchanged; a swap (`v = Vec3 { x: v.y, y: v.x, z: v.z }`) needs no special alias rule because the literal is built before the target is touched; a `let v = <literal>` takes the hidden local as its place (no second copy). A literal can only be the whole value of `let`, `var` or `=`:
+   anywhere else the hidden statements would run at another time than the expression (inside `&&`, a condition, an argument), so it is an error that says to name it first. The design's "parenthesize in `if` headers" rule is not needed.
+2. Scratch stores use their own macros (`SCRMOVE`, `SCRZERO`), as the design said (`ST_LOCAL_*`): the reader test that scans the C for `SAVE_(`, `MOVE_(`, `COPY_(` must not see them. The copy itself is one `memmove` of the struct's bytes (whole struct, so text and arrays come along); a copy into the state first saves the logged 64-byte lines it covers (an unlogged line is not saved), counts as `may_write_plain`, and gives every number
+   it writes an unknown range in the whole-program field ranges (`seen_struct`: sound, less precise than tracking the source's ranges; a test shows both directions).
+3. `let` struct fields are not assignable (`var` for that): the design did not say; a `let` scalar is immutable, and an item bound by `let` is a handle whose fields may be written, so the check is made where the compiler knows the local is a struct value. A `let` struct local passed as a view argument can still be written through by the callee (the callee's parameter is a plain-struct view until step 3).
+4. A test body may assign fields of its own struct locals (the binder's blanket "a test changes the state only through requests" rule moved to the code generator, which knows whether the root is a struct value); a function a test calls is still judged strictly, so a test cannot call a function that writes through a parameter.
+5. `mito check --costs` still reports the request struct's own size; the scratch area is a fixed 16,384 bytes.
+
+**What step 2 (scalar replacement) needs.** The slots are already the right abstraction: every access to a local goes through `CV::Plain(sid, scratch_off)`, so a pass can (a) decide eligibility per place from the final C (no `SCRMOVE`/`SCRZERO` with a variable range, no index by a run-time value, never passed as a view to a function compiled apart, whose
+spec key contains the offset), (b) replace the `LD_x(off, 0)` / store at `off + field` by C locals named after (offset, field), and (c) drop the `SCRZERO`/`SCRMOVE` that initialized them. Scratch offsets are unique per live local within an endpoint and unique per function compiled apart, so keying by offset is safe; blocks that reuse an offset need a rename at each `SCRZERO`/copy that starts a new life.
+The differential test is cheap: the cases and `struct_values*` records already compare three backends, and a flag that disables the pass gives the fourth. What to measure first: the physics-loop benchmark in section 10 (three `ST_`+`LD_` per field today).

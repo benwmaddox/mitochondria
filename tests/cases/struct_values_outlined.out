@@ -1,0 +1,5 @@
+POST /set/3/4 -> 200 {"x":3}
+POST /big -> 200 {"a":607,"b":605,"c":2314,"lx":403,"ly":404,"px":3,"py":4,"bx":407}
+POST /big -> 200 {"a":607,"b":1005,"c":2314,"lx":403,"ly":404,"px":3,"py":4,"bx":807}
+state <plain values> 56
+memory reserved=20480 committed=20480 live=16440

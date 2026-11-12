@@ -60,3 +60,31 @@ test \"each test starts empty\" { return app.n == 0 && get(\"/nope\").status == 
         assert!(out.contains(want), "missing {:?} in\n{}", want, out);
     }
 }
+
+/// A test may hold struct values: locals copied from the state, literals, copies between locals, fields written through them; none of it touches the state, which a test still changes
+/// only through requests. A local that is not a struct value cannot be written.
+#[test]
+fn tests_can_use_struct_values() {
+    let text = "struct V { x: i64; y: i64 in 0..10; } struct A { p: V; n: i64; } state app: A;
+@post(\"/p/{x}\") fn setp(x: i64) -> Response<{ x: i64 }> { app.p.x = x; return ok({ x: app.p.x }); }
+test \"copy is independent\" { post(\"/p/3\"); var c = app.p; c.x = 9; c.x += 1; return app.p.x == 3 && c.x == 10; }
+test \"literals\" { let v = V { x: 1, y: 2 }; var w = V { ..v, y: 5 }; w.x = w.y + v.x; var z = V {}; z = w; return w.x == 6 && v.y == 2 && z.x == 6 && z.y == 5; }
+test \"state starts empty\" { return app.p.x == 0; }
+test \"a range holds in a local\" { var c = app.p; c.y = 11; return true; }
+test \"a literal range\" { let c = V { x: 1, y: 11 }; return true; }
+";
+    let (code, out) = run_tests("values.mito", text);
+    assert_eq!(code, 1, "{}", out);
+    for want in ["ok    copy is independent", "ok    literals", "ok    state starts empty", "FAIL  a range holds in a local", "FAIL  a literal range", "3 passed, 2 failed"] {
+        assert!(out.contains(want), "missing {:?} in\n{}", want, out);
+    }
+    assert!(out.matches("`y` must be in 0..10").count() == 2, "{}", out);
+    // the state is not assignable from a test, through a local name or not
+    for bad in ["test \"t\" { app.p.x = 1; return true; }", "test \"t\" { let q = app.p; app.n = 1; return true; }"] {
+        let src = format!("struct V {{ x: i64; }} struct A {{ p: V; n: i64; }} state app: A;\n{}\n", bad);
+        let (s, code) = crate::source::load(&src).unwrap();
+        let prog = crate::layout::Program::parse(&s).unwrap();
+        let e = crate::cgen::check(&prog, &code).err().unwrap_or_default();
+        assert!(e.contains("a test changes the state only through requests"), "{}: {}", bad, e);
+    }
+}

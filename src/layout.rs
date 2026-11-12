@@ -7,6 +7,9 @@
 use std::collections::HashMap;
 
 pub const PAGE: usize = 4096;
+/// Bytes of scratch area for struct values (locals) in every request region; a struct value is at most `MAX_VALUE` bytes.
+pub const SCRATCH_BYTES: usize = 4 * PAGE;
+pub const MAX_VALUE: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scalar { I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Bool }
@@ -136,6 +139,9 @@ pub struct Program {
     /// `request work: Work;`: the per-request struct (offset, bytes on whole 64-byte lines): zeroed before each request, kept out of
     /// the undo log, never kept between requests.
     pub request: Option<(usize, usize)>,
+    /// where struct values live (offset on a page after everything else, bytes): the request's own memory like the request struct (zeroed by nobody, kept out of the undo log, private to a
+    /// reader), but only part of the program when the code uses struct values: `cgen::generate` says so (`Generated::scratch`) and then `total` and the table of ranges include it
+    pub scratch: (usize, usize),
     /// byte ranges kept out of the undo log (unlogged plain fields, unlogged collections), each on whole 64-byte lines
     pub unlogged: Vec<(usize, usize)>,
     pub instances: Vec<ModInst>,
@@ -179,6 +185,26 @@ impl Program {
             Ty::Struct(i) => self.structs[*i].name.clone(),
             Ty::Named(n) => n.clone(),
         }
+    }
+    /// Can struct `sid` be a value (a local, a copy)? At most `MAX_VALUE` bytes; no collection, no stored id inside (a copy must be a bounded plain copy that means the same anywhere).
+    pub fn value_check(&self, sid: usize) -> Result<(), String> {
+        fn walk(p: &Program, sid: usize, path: &str) -> Result<(), String> {
+            let sd = &p.structs[sid];
+            for (k, (f, t)) in sd.fields.iter().enumerate() {
+                let here = if path.is_empty() { f.clone() } else { format!("{}.{}", path, f) };
+                if sd.ids[k].is_some() { return Err(format!("`{}` holds a stored id (`{}`): a struct with an id inside is part of the state; it cannot be a value", p.structs[sid].name, here)); }
+                if contains_coll(p, t) { return Err(format!("`{}` contains a collection (`{}`): a struct with a pool, list or table inside is part of the state; it cannot be a value", p.structs[sid].name, here)); }
+                if let Ty::Struct(s2) = t { walk(p, *s2, &here)?; }
+            }
+            Ok(())
+        }
+        let sd = &self.structs[sid];
+        if sd.size > MAX_VALUE {
+            let n = sd.size.to_string(); let mut digits = String::new();
+            for (i, c) in n.chars().enumerate() { if i > 0 && (n.len() - i) % 3 == 0 { digits.push(','); } digits.push(c); }
+            return Err(format!("`{}` is {} bytes: a struct used as a value can be at most {} bytes (use it in place in the state, or split it)", sd.name, digits, MAX_VALUE));
+        }
+        walk(self, sid, "")
     }
     pub fn global(&self, name: &str) -> Option<usize> { self.globals.iter().position(|g| g.name == name) }
     /// Where a path of plain structs from the state starts and how many bytes it covers (`game.board`, a module
@@ -337,7 +363,7 @@ impl Program {
                 else { sd.fields[k].1 = Ty::Scalar(en.base); if sd.ranges[k].is_none() { sd.ranges[k] = Some((lo, hi)); } }
             }
         }
-        let mut prog = Program { ids: Vec::new(), enums, consts: std::mem::take(&mut p.consts), request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), tables: Vec::new(), plain_tables: Vec::new(), plain_end: 0, total: 0 };
+        let mut prog = Program { ids: Vec::new(), enums, consts: std::mem::take(&mut p.consts), request: None, scratch: (0, 0), unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), tables: Vec::new(), plain_tables: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
             let fs = std::mem::take(&mut prog.structs[i].fields);
@@ -390,6 +416,7 @@ impl Program {
         for c in 0..prog.colls.len() { if prog.colls[c].unlogged && prog.colls[c].parent.is_none() { let (a, b) = (prog.colls[c].start, prog.colls[c].end); prog.unlogged.push((a, up(b, 64))); } }
         if let Some((a, n)) = prog.request { prog.unlogged.push((a, a + n)); }
         prog.total = cur;
+        prog.scratch = (up(cur, PAGE), SCRATCH_BYTES);
         // a table's references, now that every table is known: each to a table (a pool's item is not kept, so a row cannot name one)
         for t in 0..prog.tables.len() {
             for ci in 0..prog.tables[t].cols.len() {

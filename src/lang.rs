@@ -986,7 +986,7 @@ impl P {
             }
             self.eat("=")?;
             if self.is_kw("alloc") || self.is_kw("try_alloc") { return Err(format!("`{}` was replaced by collection functions: `let {} = coll.add();` (or `coll.try_add()`)", self.here_word(), n)); }
-            let e = self.expr()?; self.eat(";")?;
+            let e = self.rhs()?; self.eat(";")?;
             let e = match cap { Some(k) => Expr::Call("__mito__text_cap".into(), vec![Expr::Int(k), e], CallRes::Unbound), None => e };
             // a typed number: the first value is tested (or rounded), and so is every later assignment (see the assignment below)
             let e = match num { Some(c) if c != 255 => typed_expr(e, c, &n), _ => e };
@@ -1047,6 +1047,46 @@ impl P {
         Ok(st)
     }
 
+    /// Is a struct literal next: a name, `{`, then `field :`, `..` or `}` (`Vec3 { x: 1.0 }`, `Vec3 {}`, `Vec3 { ..v }`)?
+    fn lit_at(&self, i: usize) -> bool {
+        matches!(self.t.get(i), Some(Tok::Id(n)) if !matches!(n.as_str(), "true" | "false" | "null"))
+            && matches!(self.t.get(i + 1), Some(Tok::Sym(s)) if s == "{")
+            && match self.t.get(i + 2) {
+                Some(Tok::Sym(s)) => s == "}" || s == "..",
+                Some(Tok::Id(_)) => matches!(self.t.get(i + 3), Some(Tok::Sym(s)) if s == ":"),
+                _ => false,
+            }
+    }
+    /// The initializer or right-hand side of `let`, `var` or `=`: a struct literal, or any expression. A literal is built in a hidden local before the statement
+    /// (`__mito__struct` makes it, zeroed; assignments set its fields; `..base` is a copy first), and the hidden local is what the statement sees, so a right-hand
+    /// side that reads the target (`v = Vec3 { x: v.y, y: v.x }`) reads the old value.
+    fn rhs(&mut self) -> R<Expr> {
+        if !self.lit_at(self.i) { return self.expr(); }
+        let name = self.id()?;
+        self.eat("{")?;
+        let t = format!("__mito__lit{}", self.tmp);
+        self.tmp += 1;
+        let tv = |t: &str| Expr::Var(t.to_string(), VarRes::Unbound);
+        let mut base = None;
+        let mut sets: Vec<(String, Expr)> = Vec::new();
+        if self.sym("..") { base = Some(self.expr()?); self.sym(","); }
+        while !self.sym("}") {
+            let f = self.id()?;
+            self.eat(":")?;
+            if sets.iter().any(|x| x.0 == f) { return Err(format!("`{} {{ ... }}` gives `{}` twice", name, f)); }
+            let v = self.rhs()?;
+            sets.push((f, v));
+            if !self.sym(",") && !matches!(self.peek(), Some(Tok::Sym(s)) if s == "}") { return Err(format!("expected `,` or `}}` in `{} {{ ... }}`, found {}", name, self.here())); }
+        }
+        let mode = if base.is_some() { "update" } else if sets.is_empty() { "zero" } else { "full" };
+        let mut args = vec![Expr::Str(name), Expr::Str(mode.to_string())];
+        args.extend(sets.iter().map(|x| Expr::Str(x.0.clone())));
+        self.pre.push(Stmt::Var(t.clone(), 0, Expr::Call("__mito__struct".into(), args, CallRes::Unbound)));
+        if let Some(b) = base { self.pre.push(Stmt::Assign(tv(&t), b)); }
+        for (f, v) in sets { self.pre.push(Stmt::Assign(Expr::Field(Box::new(tv(&t)), f), v)); }
+        Ok(tv(&t))
+    }
+
     /// An expression, `x = e` or `x op= e`, without its `;` (a statement, or a `for` loop's step).
     fn simple(&mut self) -> R<Stmt> {
         if matches!(self.t.get(self.i), Some(Tok::Id(_))) && matches!((self.t.get(self.i + 1), self.t.get(self.i + 2)), (Some(Tok::Sym(a)), Some(Tok::Sym(b))) if a == b && (a == "+" || a == "-")) {
@@ -1062,7 +1102,7 @@ impl P {
             if self.sym(op) { let rhs = self.expr()?; return Ok(Stmt::Assign(lhs.clone(), wrap(Expr::Bin(op[..1].to_string(), Box::new(lhs), Box::new(rhs))))); }
         }
         if !self.sym("=") { return Ok(Stmt::Do(lhs)); }
-        let rhs = self.expr()?;
+        let rhs = self.rhs()?;
         Ok(Stmt::Assign(lhs, wrap(rhs)))
     }
 
@@ -1253,6 +1293,9 @@ impl P {
             Some(Tok::Id(n)) => {
                 self.i += 1;
                 match n.as_str() { "true" => return Ok(Expr::Bool(true)), "false" => return Ok(Expr::Bool(false)), "null" => return Ok(Expr::Null), _ => {} }
+                if self.init_ok && n.chars().next().map_or(false, |c| c.is_uppercase()) && self.lit_at(self.i - 1) {
+                    return Err(format!("a struct literal can only be the whole value of `let`, `var` or `=`: name it first, `let v = {} {{ ... }};`", n));
+                }
                 // `first u in app.users where u.email == x`: the first item the loop would visit, or null; a hidden `var` and a loop with
                 // `limit 1` before this statement (for a table, one SELECT ... LIMIT 1)
                 if n == "first" && matches!(self.peek(), Some(Tok::Id(_))) && matches!(self.t.get(self.i + 1), Some(Tok::Id(k)) if k == "in") {
@@ -1322,6 +1365,11 @@ impl P {
 }
 
 // ---------------------------------------------------------------- binder
+
+/// The name at the root of `a.b[i].c`, if there is one.
+fn path_of_root(e: &Expr) -> Option<&str> {
+    match e { Expr::Var(n, _) => Some(n.as_str()), Expr::Field(b, _) | Expr::Index(b, _) => path_of_root(b), _ => None }
+}
 
 /// `a.b.c` when `e` is a name followed by fields, else None.
 pub fn path_of(e: &Expr) -> Option<String> {
@@ -1492,7 +1540,8 @@ impl Binder<'_> {
             Stmt::Let(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, false); }
             Stmt::Var(n, slot, e) => { self.expr(e)?; *slot = self.declare(n, true); }
             Stmt::Alloc { .. } | Stmt::Remove(..) | Stmt::Clear(..) | Stmt::Move(..) | Stmt::Copy(..) | Stmt::Sort(..) | Stmt::Fill(..) if self.test => return self.err("a test changes the state only through requests (`post(...)` and the others); it can read the state directly".into()),
-            Stmt::Assign(lhs, _) if self.test && !matches!(lhs, Expr::Var(..)) => return self.err("a test changes the state only through requests (`post(...)` and the others); it can read the state directly".into()),
+            // (a field of a local struct of the test's own is fine: the code generator checks the local is a struct value, not state)
+            Stmt::Assign(lhs, _) if self.test && !matches!(lhs, Expr::Var(..)) && !path_of_root(lhs).map_or(false, |r| self.names.iter().any(|x| x.0 == r)) => return self.err("a test changes the state only through requests (`post(...)` and the others); it can read the state directly".into()),
             Stmt::Alloc { var, slot, coll, .. } => { self.expr(coll)?; *slot = self.declare(var, false); }
             Stmt::Assign(lhs, rhs) => {
                 self.expr(rhs)?;
@@ -1639,7 +1688,7 @@ impl Binder<'_> {
                     CallRes::User(k as u32)
                 } else if let Some(b) = B::from(n) { CallRes::Builtin(b) }
                 // `split(...)`: what a loop walks (`foreach p in split(t, ", ")`); compiled there
-                else if n == "split" || n == "__mito__text_cap" { CallRes::Unbound }
+                else if n == "split" || n == "__mito__text_cap" || n == "__mito__struct" { CallRes::Unbound }
                 else { let hint = suggest(n, self.fns.iter().map(|f| f.0.as_str()).chain(BUILTIN_NAMES.iter().copied())); return self.err(format!("unknown function `{}`{}", n, hint)); };
             }
             _ => {}

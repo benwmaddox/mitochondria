@@ -954,6 +954,63 @@ state a: A;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Struct locals on readers: a GET that copies state into locals, builds literals and writes them runs on a reader at once with others (the scratch area is the reader's own, and never
+    /// torn against a writer: a write runs alone), while a GET that copies a struct into the state is a write and runs again alone, in order.
+    #[test]
+    fn readers_run_struct_locals_and_rerun_struct_copies_into_state() {
+        use std::io::{BufRead, Read, Write};
+        if super::clang().is_none() { return; }
+        let dir = std::env::temp_dir().join(format!("mito-readers-sv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = r#"struct P { x: i64; y: i64; z: i64; }
+struct A { p: P; q: P; hits: i64; }
+state a: A;
+@post("/set/{c}") fn set(c: i64) -> Response<{ c: i64 }> { a.p.x = c; a.p.y = c; a.p.z = c; return ok({ c: c }); }
+@get("/peek") fn peek() -> Response<{ s: i64; d: i64 }> { var l = a.p; l.x += 1; let m = P { ..l, z: l.z * 2 }; return ok({ s: l.x + l.y + l.z, d: m.z - m.y }); }
+@get("/into") fn into() -> Response<{ h: i64 }> { var l = a.p; a.q = l; a.hits += 1; return ok({ h: a.hits }); }
+@get("/q") fn q() -> Response<{ x: i64 }> { return ok({ x: a.q.x }); }
+"#;
+        let (st, code) = crate::source::load(src).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap();
+        let exe = dir.join(format!("readers_sv{}", std::env::consts::EXE_SUFFIX));
+        super::exe(&crate::cgen::program_exe(&prog, &api, None, "").unwrap(), &exe, false, &["-O1"]).unwrap();
+        let port = 18000 + (std::process::id() % 1000) as u16;
+        let mut srv = std::process::Command::new(&exe).args(["--port", &port.to_string(), "--workers", "4"]).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut first = String::new();
+        std::io::BufReader::new(srv.stdout.take().unwrap()).read_line(&mut first).unwrap();
+        if !cfg!(target_os = "linux") {
+            assert!(first.contains("--workers above 1") && first.contains("Linux only"), "{}", first);
+            let _ = srv.wait();
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(first.contains("reads on 4 readers"), "{}", first);
+        let call = move |method: &str, path: &str| -> String {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(format!("{} {} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", method, path).as_bytes()).unwrap();
+            let mut r = String::new(); s.read_to_string(&mut r).unwrap();
+            r.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+        };
+        let num = |body: &str, k: &str| -> i64 { let at = body.find(&format!("\"{}\":", k)).unwrap() + k.len() + 3; body[at..].chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect::<String>().parse().unwrap() };
+        call("POST", "/set/7");
+        // a copy into the state from a GET: a write, run again alone, each answered in order, and the state holds the copy
+        for h in 1..=5 { assert_eq!(num(&call("GET", "/into"), "h"), h); }
+        assert_eq!(num(&call("GET", "/q"), "x"), 7);
+        // reads at once with writes going on: the locals are each reader's own, and every answer is made of one value of c
+        let writer = std::thread::spawn(move || { for c in 1..=200 { call("POST", &format!("/set/{}", c)); } });
+        let readers: Vec<_> = (0..6).map(|_| std::thread::spawn(move || {
+            for _ in 0..300 { let b = call("GET", "/peek"); let (s, d) = (num(&b, "s"), num(&b, "d")); assert_eq!(s, 3 * d + 1, "{}", b); }
+        })).collect();
+        writer.join().unwrap();
+        for r in readers { r.join().unwrap(); }
+        let b = call("GET", "/peek");
+        assert_eq!((num(&b, "s"), num(&b, "d")), (601, 200));
+        let _ = srv.kill(); let _ = srv.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn answer_cache_keeps_pieces_and_fills_holes() {
         use std::io::{BufRead, Read, Write};

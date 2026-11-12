@@ -21,6 +21,17 @@ fn the_examples_tests_pass() {
     assert!(out.contains("5 passed, 0 failed"), "{}", out);
 }
 
+/// The open-world game's rules (where the orbs lie, when one is collected) are tested without a window.
+#[test]
+fn the_world_games_rules_pass() {
+    let file = "examples/world/world.mito";
+    let text = crate::load_text(file).unwrap();
+    crate::lang::set_file_dir(std::path::Path::new(file).parent().unwrap());
+    let (code, out) = run_tests("world.mito", &text);
+    assert_eq!(code, 0, "{}", out);
+    assert!(out.contains("3 passed, 0 failed"), "{}", out);
+}
+
 #[test]
 fn failing_tests_name_their_line() {
     let text = "struct App { n: i64; } state app: App;

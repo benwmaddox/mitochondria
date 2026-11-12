@@ -4,13 +4,17 @@
 // For each pixel a ray leaves the camera and is marched over a height field until it meets the ground; the height field is
 // fractal value noise, so it exists everywhere and needs no stored map.
 in vec2 vUv;
-out vec4 color;
+layout(location = 0) out vec4 color;   // the world, in light
+layout(location = 1) out vec4 aux;     // what the strokes follow: depth, normal (x, z) and what it is (0 sky, 1 ground, 2 water, 3 figure) over 4
 
 uniform vec2 uResolution;   // the window, in pixels (set by the driver)
 uniform float px, pz;       // where the player stands
 uniform float yaw, pitch;   // where the player looks
 uniform float day;          // time of day, 0..1: 0 sunrise, 0.25 noon, 0.5 sunset
 uniform float seed;         // which world
+uniform float heading;      // the way the figure faces (radians; 0 faces +z)
+uniform float walk;         // its stride phase, in radians
+uniform float moving;       // 1 while it walks, 0 standing
 
 const float WATER = 0.0;    // the height of the lakes
 
@@ -75,14 +79,69 @@ float shadow(vec3 p, vec3 sun) {
     return clamp(lit, 0.0, 1.0);
 }
 
+
+// ---- the figure: a small walker made of signed-distance shapes, drawn only where the ray meets a sphere around it ----
+float capsule(vec3 p, vec3 a, vec3 b, float r) {
+    vec3 pa = p - a, ba = b - a;
+    return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0)) - r;
+}
+const vec3 SHIRT = vec3(0.75, 0.12, 0.10), TROUSERS = vec3(0.10, 0.16, 0.42), SKIN = vec3(0.85, 0.60, 0.45), HAIR = vec3(0.12, 0.07, 0.04), SHOES = vec3(0.08, 0.06, 0.05);
+vec3 figureColor;
+// p is relative to the figure's feet, already turned to face +z; its x is the figure's right
+float figure(vec3 p) {
+    float sw = sin(walk) * 0.7 * moving;
+    float bob = abs(cos(walk)) * 0.035 * moving;
+    p.y -= bob;
+    float lean = 0.06 * moving;
+    // legs swing about the hips
+    vec3 hipL = vec3(-0.09, 0.62, 0.0), hipR = vec3(0.09, 0.62, 0.0);
+    vec3 footL = hipL + vec3(0.0, -0.52 * cos(sw), 0.52 * sin(sw));
+    vec3 footR = hipR + vec3(0.0, -0.52 * cos(-sw), 0.52 * sin(-sw));
+    float legs = min(capsule(p, hipL, footL, 0.075), capsule(p, hipR, footR, 0.075));
+    float shoes = min(capsule(p, footL, footL + vec3(0.0, 0.0, 0.10), 0.08), capsule(p, footR, footR + vec3(0.0, 0.0, 0.10), 0.08));
+    // torso and head
+    vec3 pl = p; pl.z -= (p.y - 0.62) * lean;
+    float torso = capsule(pl, vec3(0.0, 0.70, 0.0), vec3(0.0, 0.98, 0.0), 0.17);
+    float head = length(pl - vec3(0.0, 1.20, 0.015)) - 0.125;
+    // arms swing against the legs
+    vec3 shL = vec3(-0.21, 0.96, 0.0), shR = vec3(0.21, 0.96, 0.0);
+    vec3 handL = shL + vec3(-0.03, -0.42 * cos(-sw), 0.42 * sin(-sw));
+    vec3 handR = shR + vec3(0.03, -0.42 * cos(sw), 0.42 * sin(sw));
+    float arms = min(capsule(pl, shL, handL, 0.055), capsule(pl, shR, handR, 0.055));
+    float d = min(min(legs, shoes), min(torso, head));
+    d = min(d, arms);
+    // which part is nearest decides the colour
+    figureColor = SHIRT;
+    float best = torso;
+    if (legs < best) { best = legs; figureColor = TROUSERS; }
+    if (shoes < best) { best = shoes; figureColor = SHOES; }
+    if (head < best) { best = head; figureColor = (pl.y > 1.24 - 0.5 * max(pl.z - 0.02, 0.0) || pl.z < -0.02) ? HAIR : ((pl.z > 0.07 && abs(abs(pl.x) - 0.05) < 0.022 && abs(pl.y - 1.21) < 0.02) ? vec3(0.05, 0.04, 0.04) : SKIN); }
+    if (arms < best) { best = arms; figureColor = pl.y > 0.80 ? SHIRT : SKIN; }
+    return d;
+}
+const float FS = 1.35;   // the figure's size over its modelled 1.3 m
+vec3 toFigure(vec3 w, vec3 feet) {
+    vec3 d = (w - feet) / FS;
+    float c = cos(heading), s = sin(heading);
+    return vec3(c * d.x - s * d.z, d.y, s * d.x + c * d.z);
+}
+vec3 fromFigureDir(vec3 v) {
+    float c = cos(heading), s = sin(heading);
+    return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
+}
+
 void main() {
     vec2 q = (vUv * 2.0 - 1.0) * vec2(uResolution.x / uResolution.y, 1.0);
 
-    // the camera: standing on the ground (or on the water), looking where yaw and pitch say
+    // the camera orbits the figure: behind and above it, looking at it, and never below the ground
     float ground = max(height(vec2(px, pz)), WATER);
-    vec3 ro = vec3(px, ground + 1.7, pz);
-    vec3 f = vec3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch));
-    vec3 r = vec3(cos(yaw), 0.0, -sin(yaw));
+    vec3 feet = vec3(px, ground, pz);
+    vec3 target = feet + vec3(0.0, 1.15, 0.0);
+    vec3 look = vec3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch));
+    vec3 ro = target - look * 4.2;
+    ro.y = max(ro.y, max(height(ro.xz), WATER) + 0.35);
+    vec3 f = normalize(target - ro);
+    vec3 r = normalize(vec3(f.z, 0.0, -f.x));
     vec3 u = cross(f, r);
     vec3 rd = normalize(f + (q.x * r + q.y * u) * 0.75);
 
@@ -107,7 +166,10 @@ void main() {
     float tw = rd.y < -0.0001 ? (WATER - ro.y) / rd.y : FAR * 2.0;
     bool water = rd.y < -0.0001 && tw > 0.0 && (!hit || tw < t) && tw < FAR;
 
+    float matId = 0.0;
+    vec3 nrm = vec3(0.0, 1.0, 0.0);
     if (water) {
+        matId = 2.0;
         vec3 p = ro + rd * tw;
         vec2 w = p.xz * 0.35 + vec2(day * 40.0, 0.0);
         vec3 n = normalize(vec3((noise(w) - 0.5) * 0.12, 1.0, (noise(w + 9.0) - 0.5) * 0.12));
@@ -118,8 +180,10 @@ void main() {
         col = mix(deep, refl, 0.25 + 0.75 * fres);
         t = tw;
     } else if (hit) {
+        matId = 1.0;
         vec3 p = ro + rd * t;
         vec3 n = groundNormal(p.xz, t);
+        nrm = n;
         float h = p.y;
         float slope = 1.0 - n.y;
         // what the ground is made of: sand by the water, grass, rock on steep places, snow high up
@@ -137,9 +201,43 @@ void main() {
         col = base * (vec3(1.0, 0.93, 0.80) * diff * 1.5 * daylight + ambient + vec3(0.02, 0.025, 0.04));
     }
 
+    // the figure's soft blob shadow on the ground or the water, and the figure itself where the ray meets it
+    if (matId > 0.5) {
+        vec3 p = ro + rd * t;
+        vec2 off = (p.xz - feet.xz) + sun.xz / max(sun.y, 0.25) * 0.4;
+        col *= 1.0 - 0.5 * exp(-dot(off, off) / 0.28) * smoothstep(-0.05, 0.2, sun.y) * smoothstep(1.5, 0.0, abs(p.y - ground));
+    }
+    vec3 bc = feet + vec3(0.0, 0.65 * FS, 0.0);
+    vec3 oc = ro - bc;
+    float bb = dot(oc, rd), disc = bb * bb - (dot(oc, oc) - 0.9 * FS * 0.9 * FS);
+    if (disc > 0.0) {
+        float tc = max(-bb - sqrt(disc), 0.0), tend = -bb + sqrt(disc);
+        for (int i = 0; i < 28; i++) {
+            vec3 pf = toFigure(ro + rd * tc, feet);
+            float d = figure(pf) * FS;
+            if (d < 0.002) {
+                if (tc < t) {
+                    vec3 body = figureColor;
+                    float e = 0.01;
+                    vec3 nl = normalize(vec3(figure(pf + vec3(e, 0.0, 0.0)) - figure(pf - vec3(e, 0.0, 0.0)), figure(pf + vec3(0.0, e, 0.0)) - figure(pf - vec3(0.0, e, 0.0)), figure(pf + vec3(0.0, 0.0, e)) - figure(pf - vec3(0.0, 0.0, e))));
+                    nrm = fromFigureDir(nl);
+                    float diff = max(dot(nrm, sun), 0.0);
+                    float under = clamp(1.0 - pf.y / 0.6, 0.0, 1.0);   // the feet are in the grass's shade
+                    col = body * (vec3(1.0, 0.93, 0.80) * diff * 1.5 * daylight + skyColor(nrm, sun) * 0.35 + vec3(0.03, 0.035, 0.05)) * (1.0 - 0.3 * under);
+                    t = tc;
+                    matId = 3.0;
+                }
+                break;
+            }
+            tc += d * 0.9;
+            if (tc > tend || tc > t) break;
+        }
+    }
+
     // distance fades into the air
     float fog = 1.0 - exp(-t * 0.0011);
     col = mix(col, skyColor(vec3(rd.x, max(rd.y, 0.0) * 0.4, rd.z), sun), fog);
 
-    color = vec4(col, 1.0);   // light, not yet tone mapped: the painting does that
+    color = vec4(col, 1.0);
+    aux = vec4(1.0 - 1.0 / (1.0 + min(t, 3000.0) * 0.02), nrm.x * 0.5 + 0.5, nrm.z * 0.5 + 0.5, matId * 0.25);   // light, not yet tone mapped: the painting does that
 }

@@ -5,7 +5,7 @@
 
 platform game;
 
-struct Player { x: f64; z: f64; yaw: f64; pitch: f64; }
+struct Player { x: f64; z: f64; yaw: f64; pitch: f64; heading: f64; walk: f64; moving: f64; }   // heading: the way the figure faces; walk: its stride phase
 struct World {
     seed: i64;       // which world: the shader shifts its noise by it
     day: f64;        // time of day, 0..1 (0.25 is noon)
@@ -20,7 +20,8 @@ fn init() {
     world.player.x = 330.0;
     world.player.z = 60.0;
     world.player.yaw = 0.35;
-    world.player.pitch = -0.03;
+    world.player.pitch = -0.22;
+    world.player.heading = 0.35;
 }
 
 // the two shaders: `scene` draws the world small, `paint` lays that down in brush strokes over the whole window
@@ -49,14 +50,26 @@ fn frame(dt: f64 from time, forward: bool from key("w"), back: bool from key("s"
     if run { speed = 22.0; }
     let s = sin(world.player.yaw);
     let c = cos(world.player.yaw);
-    world.player.x += (s * ahead + c * aside) * speed * dt;
-    world.player.z += (c * ahead - s * aside) * speed * dt;
+    let dx = s * ahead + c * aside;
+    let dz = c * ahead - s * aside;
+    world.player.x += dx * speed * dt;
+    world.player.z += dz * speed * dt;
+
+    // the figure turns smoothly toward the way it travels (the angle's difference wrapped to -pi..pi), and its stride advances with the distance walked
+    world.player.moving = 0.0;
+    if ahead != 0.0 || aside != 0.0 {
+        world.player.moving = 1.0;
+        let want = atan2(dx, dz);
+        let d = want - world.player.heading;
+        world.player.heading += atan2(sin(d), cos(d)) * min(1.0, 12.0 * dt);
+        world.player.walk += speed * dt * 1.6;
+    }
 
     // a full day takes eight minutes
     world.day += dt / 480.0;
     if world.day >= 1.0 { world.day -= 1.0; }
 
-    return ok("scene@0.25 px=" + str(world.player.x) + " pz=" + str(world.player.z) + " yaw=" + str(world.player.yaw) + " pitch=" + str(world.player.pitch)
+    return ok("scene@0.25 px=" + str(world.player.x) + " pz=" + str(world.player.z) + " yaw=" + str(world.player.yaw) + " pitch=" + str(world.player.pitch) + " heading=" + str(world.player.heading) + " walk=" + str(world.player.walk) + " moving=" + str(world.player.moving)
         + " day=" + str(world.day) + " seed=" + str(world.seed % 1000) + "
 paint");
 }

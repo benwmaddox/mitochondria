@@ -1,0 +1,121 @@
+// a plain struct (a field of the state) can be a function's parameter or `self`: the function is given a view of where the struct lives, reads see the state and writes change it, nothing is copied; the same struct may also be an item of a pool
+--- program
+struct Pos { x: i64; y: i64; }
+struct Gauge { n: i64 in 0..100; hist: i64[4]; }
+struct Hero { name: string<16>; pos: Pos; gauge: Gauge; }
+struct World { origin: Pos; hero: Hero logged; pts: pool<Pos, 4>; }
+state world: World;
+
+fn len2(self: Pos) -> i64 { return self.x * self.x + self.y * self.y; }
+fn norm1(p: Pos) -> i64 { return p.x + p.y; }
+fn move_by(p: Pos, dx: i64, dy: i64) { p.x += dx; p.y += dy; }
+fn add_into(dst: Pos, src: Pos) { dst.x += src.x; dst.y += src.y; }
+// the same name for two structs
+fn shift(self: Pos, d: i64) { self.x += d; }
+fn shift(self: Gauge, d: i64) { self.n += d; }
+fn set_n(g: Gauge, v: i64) { g.n = v; }
+fn put(g: Gauge, i: i64, v: i64) { g.hist[i] = v; }
+fn hist_sum(self: Gauge) -> i64 { return self.hist[0] + self.hist[1] + self.hist[2] + self.hist[3]; }
+// recursion, by a plain function and by a function of a type
+fn walk(p: Pos, n: i64) { if n > 0 { p.x += 1; walk(p, n - 1); } }
+fn count_up(self: Pos, n: i64) -> i64 { if n == 0 { return self.x; } self.x += 1; return self.count_up(n - 1); }
+
+@post("/origin/{x}/{y}")
+fn set_origin(x: i64 in 0..50, y: i64 in 0..50) -> Response<{ x: i64, y: i64, len2: i64, norm1: i64 }> {
+    move_by(world.origin, x, y);
+    return ok({ x: world.origin.x, y: world.origin.y, len2: world.origin.len2(), norm1: norm1(world.origin) });
+}
+@post("/hero/{x}/{y}")
+fn set_hero(x: i64 in 0..50, y: i64 in 0..50) -> Response<{ x: i64, y: i64, len2: i64 }> {
+    move_by(world.hero.pos, x, y);
+    return ok({ x: world.hero.pos.x, y: world.hero.pos.y, len2: world.hero.pos.len2() });
+}
+// the same struct is both arguments
+@post("/double")
+fn double() -> Response<{ x: i64, y: i64 }> {
+    add_into(world.origin, world.origin);
+    return ok({ x: world.origin.x, y: world.origin.y });
+}
+@post("/merge")
+fn merge() -> Response<{ x: i64, y: i64 }> {
+    add_into(world.origin, world.hero.pos);
+    return ok({ x: world.origin.x, y: world.origin.y });
+}
+// Pos is an item of a pool too: the same functions take either
+@post("/pt/{x}/{y}")
+fn add_pt(x: i64 in 0..50, y: i64 in 0..50) -> Response<{ slot: i64 }> {
+    let p = world.pts.add();
+    p.x = x;
+    p.y = y;
+    return created({ slot: slot(p) });
+}
+@post("/pt/{id}/by/{dx}")
+fn move_pt(id: i64, dx: i64 in 0..50) -> Response<{ x: i64, y: i64, len2: i64, norm1: i64, origin_len2: i64 }> {
+    let p = world.pts[id];
+    move_by(p, dx, 1);
+    return ok({ x: p.x, y: p.y, len2: p.len2(), norm1: norm1(p), origin_len2: world.origin.len2() });
+}
+@post("/gauge/set/{v}")
+fn gauge_set(v: i64 in 0..1000) -> Response<{ n: i64 }> {
+    set_n(world.hero.gauge, v);
+    return ok({ n: world.hero.gauge.n });
+}
+// the origin moves first and is unlogged, so a failure leaves it moved (the hero is logged: see /herofail/{x})
+@post("/shift/{d}")
+fn shift_both(d: i64 in 0..1000) -> Response<{ x: i64, n: i64 }> {
+    world.origin.shift(d);
+    world.hero.gauge.shift(d);
+    return ok({ x: world.origin.x, n: world.hero.gauge.n });
+}
+@post("/hist/{i}/{v}")
+fn hist_put(i: i64 in 0..3, v: i64 in 0..1000) -> Response<{ sum: i64 }> {
+    put(world.hero.gauge, i, v);
+    return ok({ sum: world.hero.gauge.hist_sum() });
+}
+@post("/walk/{n}")
+fn do_walk(n: i64 in 0..20) -> Response<{ x: i64, up: i64, x2: i64 }> {
+    walk(world.origin, n);
+    let up = world.hero.pos.count_up(n);
+    return ok({ x: world.origin.x, up: up, x2: world.hero.pos.x });
+}
+@get("/state")
+fn get_state() -> Response<{ ox: i64, oy: i64, hx: i64, hy: i64, n: i64, sum: i64, len2: i64 }> {
+    return ok({ ox: world.origin.x, oy: world.origin.y, hx: world.hero.pos.x, hy: world.hero.pos.y, n: world.hero.gauge.n, sum: world.hero.gauge.hist_sum(), len2: world.origin.len2() });
+}
+// the hero is logged: writes through a parameter go into the undo log, and the failure at the end undoes them
+@post("/herofail/{x}")
+fn hero_fail(x: i64 in 0..50) -> Response<{ x: i64 }> {
+    move_by(world.hero.pos, x, 0);
+    set_n(world.hero.gauge, 500);
+    return ok({ x: world.hero.pos.x });
+}
+--- requests
+GET /state
+POST /origin/3/4
+POST /origin/1/2
+POST /hero/5/12
+POST /hero/1/1
+POST /double
+POST /merge
+POST /pt/2/3
+POST /pt/0/by/7
+POST /pt/0/by/1
+POST /pt/9/by/1
+POST /gauge/set/60
+POST /gauge/set/100
+POST /gauge/set/101
+POST /gauge/set/50
+GET /state
+POST /shift/30
+POST /shift/10
+POST /shift/11
+GET /state
+POST /hist/0/10
+POST /hist/3/5
+POST /hist/1/7
+POST /hist/4/1
+POST /walk/3
+POST /walk/0
+POST /walk/20
+POST /herofail/2
+GET /state

@@ -14,6 +14,16 @@
 //! in (its path), so no local of the module can shadow it. Every way of loading a program calls `expand`.
 use std::collections::HashMap;
 
+/// Library files a program takes with `use "std/math.mito";` (plain code, no instances): path, source. A `use` path
+/// starting with `std/` is looked up here, before anything beside the program.
+pub const STD_FILES: &[(&str, &str)] = &[("std/math.mito", include_str!("../lib/std/math.mito")), ("std/random.mito", include_str!("../lib/std/random.mito")), ("std/vec.mito", include_str!("../lib/std/vec.mito"))];
+
+/// The source of the library file `name` (`std/math.mito`), or an error naming the known ones.
+pub fn std_file(name: &str) -> Result<&'static str, String> {
+    STD_FILES.iter().find(|f| f.0 == name).map(|f| f.1)
+        .ok_or_else(|| format!("no library file `{}`; the known ones are {}", name, STD_FILES.iter().map(|f| format!("`{}`", f.0)).collect::<Vec<_>>().join(", ")))
+}
+
 /// The standard library: module name, source.
 pub const STDLIB: &[(&str, &str)] = &[("bag", include_str!("../lib/bag.mito")), ("sorted", include_str!("../lib/sorted.mito")), ("btree", include_str!("../lib/btree.mito")), ("ordmap", include_str!("../lib/ordmap.mito")), ("rowmap", include_str!("../lib/rowmap.mito")), ("strmap", include_str!("../lib/strmap.mito")), ("intmap", include_str!("../lib/intmap.mito")), ("queue", include_str!("../lib/queue.mito")), ("ring", include_str!("../lib/ring.mito")), ("set", include_str!("../lib/set.mito")), ("heap", include_str!("../lib/heap.mito")), ("bitset", include_str!("../lib/bitset.mito")), ("grid", include_str!("../lib/grid.mito"))];
 

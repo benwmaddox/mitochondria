@@ -66,6 +66,7 @@ DESIGN.md describes most built-ins where they come up (text, JSON, time, crypto,
 | `abs(x)` | absolute value of an integer or a float |
 | `min(a, b)`, `max(a, b)` | the smaller or larger of two numbers: integers give an integer, and a float on either side gives a float |
 | `sqrt(x)`, `exp(x)`, `floor(x)`, `sin(x)`, `cos(x)`, `atan2(y, x)`, `pow(x, y)` | the platform's math functions on floats (a negative square root is NaN; angles are in radians); an integer is taken as a float |
+| `tan(x)`, `asin(x)`, `acos(x)`, `atan(x)`, `sinh(x)`, `cosh(x)`, `tanh(x)`, `ln(x)`, `log2(x)`, `log10(x)`, `ceil(x)`, `round(x)`, `trunc(x)`, `cbrt(x)`, `hypot(x, y)`, `fmod(x, y)` | more of the same: `ln` is the natural logarithm (`log` prints for debugging); `round` goes half away from zero; `trunc` drops the fraction; `hypot` is `sqrt(x*x + y*y)` without overflow; `fmod` is the remainder with the sign of `x`. Edges are the C library's: `asin`/`acos` outside -1..1, `ln`/`log2`/`log10` of a negative number and `fmod(x, 0)` are NaN, the logarithms of 0 are minus infinity; NaN and infinity are written as `null` in JSON. The standard library adds more (below) |
 | `wrapping_add(a, b)`, `wrapping_sub(a, b)`, `wrapping_mul(a, b)` | two's-complement arithmetic that wraps at 64 bits (the operators `+ - *` fail the request on overflow); for hashes and generators |
 | `x as TYPE` | a conversion that keeps the low bits (DESIGN.md, Conversions) |
 | `add_years(t, n)` | a time `n` calendar years later (or earlier), the same day and time of day; February 29 becomes February 28 where the year has none |
@@ -121,6 +122,57 @@ A module is a `.mito` file in `lib/`, used with an `instance` declaration (DESIG
 | `heap<N>` | a binary min-heap priority queue of up to `N` entries of `i64` priority and `i64` payload: `push(priority, payload)`, `pop_min()`, `peek()`, `peek_priority()`, `count()`; full is 507, empty is 404 |
 | `bitset<N>` | `N` bits: `set`, `unset`, `flip`, `test`, `count`, `clear_all`; an index outside 0 to N - 1 is a 400 |
 | `grid<W, H>` | a `W` by `H` grid of `i64` cells: `get(x, y)`, `set(x, y, value)`, `fill(value)`, `in_bounds(x, y)`; a position outside the grid is a 400 |
+
+## Standard library
+
+Plain library files, embedded in the compiler: `use "std/math.mito";` (a line of its own, from any program) puts the file's text there. A `use` path starting with `std/` names one of these files; any other path is looked up beside the program. An unknown `std/` name is an error listing the known ones. Their functions are functions of a type (`x.clamp(0.0, 1.0)`; the receiver's type picks the function), so the names do not clash with yours. Floats follow IEEE: nothing fails, NaN and infinity come out of the arithmetic (in JSON they are `null`).
+
+**`std/math.mito`**
+
+| Function | What it does |
+| --- | --- |
+| `Math.PI`, `Math.TAU`, `Math.E`, `Math.SQRT2` | float constants (a const group) |
+| `x.clamp(lo, hi)` | `x` limited to `lo..hi`; floats and integers |
+| `x.saturate()` | `x` limited to 0..1 |
+| `x.sign()` | -1, 0 or 1 (a float for a float, an integer for an integer); NaN gives 0 |
+| `x.fract()` | `x - floor(x)`, in 0 up to 1 (negative `x` too) |
+| `a.lerp(b, t)` | `a + (b - a) * t`, not clamped |
+| `a.inverse_lerp(b, v)` | the `t` for which `a.lerp(b, t) == v` (infinity or NaN when `a == b`) |
+| `v.remap(in_lo, in_hi, out_lo, out_hi)` | `v` moved from one range to another, not clamped |
+| `x.smoothstep(edge0, edge1)` | 0 below `edge0`, 1 above `edge1`, `3t^2 - 2t^3` between |
+| `x.wrap(lo, hi)` | `x` brought into `lo..hi` (`hi` excluded) by whole widths |
+| `x.to_radians()`, `x.to_degrees()` | angle units |
+| `a.angle_diff(b)` | the shortest signed turn from angle `a` to angle `b`, in (-PI, PI] |
+| `t.ease_in_quad()`, `ease_out_quad()`, `ease_in_out_quad()`, `ease_in_cubic()`, `ease_out_cubic()`, `ease_in_out_cubic()` | easing curves from 0 to 1 over `t` in 0..1 (`t` is limited to it) |
+| `n.gcd(m)` | the greatest common divisor, never negative (`gcd(0, 0)` is 0) |
+| `n.isqrt()` | the largest `r` with `r * r <= n`; a negative `n` is a 400 |
+| `n.ipow(e)` | `n` to the power `e`; a negative `e` is a 400, a result that does not fit fails as the operators do (500) |
+
+**`std/random.mito`**: a deterministic generator for a struct the program declares, `struct Rng { state: i64; }`, kept in its state (`game.rng.next()`). It is xorshift64* with wrapping arithmetic, so a seed gives the same stream on every platform; not for secrets.
+
+| Function | What it does |
+| --- | --- |
+| `r.seed(s)` | starts the stream from `s` (an unseeded generator behaves as seed 0) |
+| `r.next()` | the next 64-bit value, any `i64` |
+| `r.range(lo, hi)` | a whole number from `lo` to `hi`, both included, unbiased (it draws again when a value falls in the short last block); `hi < lo` is a 400 |
+| `r.unit()` | a float from 0 up to but not including 1 (53 random bits) |
+| `r.chance(p)` | true with probability `p` |
+| `hash2(x, y, seed)` | a 64-bit hash of a point and a seed, for value noise |
+| `x.mix64()`, `x.shr_logical(n)` | the splitmix64 finalizer; a right shift filling with zeros (1 to 63) |
+
+**`std/vec.mito`**: `Vec2 { x, y }` and `Vec3 { x, y, z }`, plain structs the program nests in its state (`struct Player { pos: Vec3; vel: Vec3; }`). Every function takes them as views and changes the receiver in place (`world.player.pos.plus(world.player.vel)`); a function that would return a vector writes into its receiver (`out.cross_to(a, b)`, where `out` may be `a` or `b`). `add`, `sub` and `copy_from` are collection operations, so the names are `plus`, `minus` and `assign`.
+
+| Function | What it does |
+| --- | --- |
+| `v.set(x, y[, z])`, `v.assign(o)` | set the components; copy another vector |
+| `v.plus(o)`, `v.minus(o)`, `v.scale(k)`, `v.add_scaled(o, k)`, `v.negate()` | in place: `v += o`, `v -= o`, `v *= k`, `v += o * k`, `v = -v` |
+| `v.dot(o)`, `v.length_squared()`, `v.length()`, `v.distance(o)` | numbers |
+| `v.normalize()` | to length 1, in place; a zero vector stays zero |
+| `v.lerp_to(a, b, t)` | `v = a + (b - a) * t` |
+| `v.reflect_to(w, n)` | `v = w - 2 (w . n) n` for a unit `n` |
+| `v.project_on(o)` | `v` replaced by its projection on `o` (zero when `o` is zero) |
+| `v.cross_to(a, b)` (Vec3) | `v = a x b` |
+| `v.rotate(radians)`, `v.perp()` (Vec2) | turn counterclockwise by an angle, or a quarter turn: `(x, y)` becomes `(-y, x)` |
 
 ## Examples
 

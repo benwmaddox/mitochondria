@@ -1,0 +1,43 @@
+// tan, asin, acos, atan, sinh, cosh, tanh, ln, log2, log10, ceil, round, trunc, cbrt, hypot, fmod on floats (the platform's math library), over a table of inputs; the edges (a domain error is NaN, ln of zero is minus infinity) come out as the C library gives them
+--- program
+struct S { n: i64; }
+state s: S;
+
+@get("/m/{n}")
+fn m(n: i64) -> Response<{ x: f64, tan: f64, asin: f64, acos: f64, atan: f64, sinh: f64, cosh: f64, tanh: f64 }> {
+    let x = n * 0.25;
+    return ok({ x: x, tan: tan(x), asin: asin(x), acos: acos(x), atan: atan(x), sinh: sinh(x), cosh: cosh(x), tanh: tanh(x) });
+}
+@get("/l/{n}")
+fn l(n: i64) -> Response<{ x: f64, ln: f64, log2: f64, log10: f64, ceil: f64, round: f64, trunc: f64, cbrt: f64, hypot: f64, fmod: f64, fmod_neg: f64 }> {
+    let x = n * 0.25;
+    return ok({ x: x, ln: ln(x), log2: log2(x), log10: log10(x), ceil: ceil(x), round: round(x), trunc: trunc(x), cbrt: cbrt(x), hypot: hypot(x, 1.5), fmod: fmod(x, 0.75), fmod_neg: fmod(x, -0.75) });
+}
+@get("/int/{n}")
+fn int_args(n: i64) -> Response<{ ln: f64, log2: f64, log10: f64, cbrt: f64, hypot: f64, fmod: f64, ceil: f64, round: f64 }> {
+    return ok({ ln: ln(n), log2: log2(n), log10: log10(n), cbrt: cbrt(n), hypot: hypot(n, 4), fmod: fmod(n, 3), ceil: ceil(n), round: round(n) });
+}
+--- requests
+GET /m/-8
+GET /m/-4
+GET /m/-1
+GET /m/0
+GET /m/1
+GET /m/2
+GET /m/4
+GET /m/6
+GET /l/-10
+GET /l/-6
+GET /l/-2
+GET /l/-1
+GET /l/0
+GET /l/1
+GET /l/2
+GET /l/3
+GET /l/5
+GET /l/10
+GET /l/40
+GET /int/-27
+GET /int/0
+GET /int/8
+GET /int/1000

@@ -173,6 +173,22 @@ struct H {
 #define EXP_(x) __builtin_exp(x)
 #define FLOOR_(x) __builtin_floor(x)
 #define FABS_(x) __builtin_fabs(x)
+#define TAN_(x) __builtin_tan(x)
+#define ASIN_(x) __builtin_asin(x)
+#define ACOS_(x) __builtin_acos(x)
+#define ATAN_(x) __builtin_atan(x)
+#define SINH_(x) __builtin_sinh(x)
+#define COSH_(x) __builtin_cosh(x)
+#define TANH_(x) __builtin_tanh(x)
+#define LN_(x) __builtin_log(x)
+#define LOG2_(x) __builtin_log2(x)
+#define LOG10_(x) __builtin_log10(x)
+#define CEIL_(x) __builtin_ceil(x)
+#define ROUND_(x) __builtin_round(x)
+#define TRUNC_(x) __builtin_trunc(x)
+#define CBRT_(x) __builtin_cbrt(x)
+#define HYPOT_(x, y) __builtin_hypot(x, y)
+#define FMOD_(x, y) __builtin_fmod(x, y)
 #else
 double sqrt(double); double exp(double); double floor(double); double fabs(double); double sin(double); double cos(double); double atan2(double, double); double pow(double, double);
 #define SQRT_(x) sqrt(x)
@@ -183,6 +199,23 @@ double sqrt(double); double exp(double); double floor(double); double fabs(doubl
 #define EXP_(x) exp(x)
 #define FLOOR_(x) floor(x)
 #define FABS_(x) fabs(x)
+double tan(double); double asin(double); double acos(double); double atan(double); double sinh(double); double cosh(double); double tanh(double); double log(double); double log2(double); double log10(double); double ceil(double); double round(double); double trunc(double); double cbrt(double); double hypot(double, double); double fmod(double, double); 
+#define TAN_(x) tan(x)
+#define ASIN_(x) asin(x)
+#define ACOS_(x) acos(x)
+#define ATAN_(x) atan(x)
+#define SINH_(x) sinh(x)
+#define COSH_(x) cosh(x)
+#define TANH_(x) tanh(x)
+#define LN_(x) log(x)
+#define LOG2_(x) log2(x)
+#define LOG10_(x) log10(x)
+#define CEIL_(x) ceil(x)
+#define ROUND_(x) round(x)
+#define TRUNC_(x) trunc(x)
+#define CBRT_(x) cbrt(x)
+#define HYPOT_(x, y) hypot(x, y)
+#define FMOD_(x, y) fmod(x, y)
 #endif
 #define ABS_(r, x) i64 r; if (UNLIKELY((x) == I64MIN)) OVERFLOW_; r = (x) < 0 ? -(x) : (x)
 #define BAND(r, x, y) i64 r = (x) & (y)
@@ -4721,15 +4754,15 @@ impl<'p> G<'p> {
                 Some(CV::Ref(..)) => return no("`slot(x)` of a value that may be null: check it first with `if exists(x) {{ ... }}` (inside, x is the item), or give a fallback with `or(...)`"),
                 _ => unreachable!("generic above"),
             },
-            B::Atan2 | B::Pow => {
-                let name = if bi == B::Atan2 { "atan2" } else { "pow" };
+            B::Atan2 | B::Pow | B::Hypot | B::Fmod => {
+                let name = match bi { B::Atan2 => "atan2", B::Hypot => "hypot", B::Fmod => "fmod", _ => "pow" };
                 let num = |v: &CV| match v { CV::Flt(e) => Some(e.clone()), CV::Int(e) => Some(format!("(double)({})", e)), _ => None };
                 let (x, y) = match a.as_slice() { [p, q] => match (num(p), num(q)) { (Some(x), Some(y)) => (x, y), _ => return no(format!("`{}` takes two numbers", name)) }, _ => return no(format!("`{}` takes two numbers", name)) };
                 CV::Flt(format!("{}_({}, {})", name.to_uppercase(), x, y))
             }
-            B::Sqrt | B::Exp | B::Floor | B::Sin | B::Cos => {
+            B::Sqrt | B::Exp | B::Floor | B::Sin | B::Cos | B::Tan | B::Asin | B::Acos | B::Atan | B::Sinh | B::Cosh | B::Tanh | B::Ln | B::Log2 | B::Log10 | B::Ceil | B::Round | B::Trunc | B::Cbrt => {
                 // IEEE results, as the platform's math library gives them (a negative square root is NaN)
-                let name = match bi { B::Sqrt => "sqrt", B::Exp => "exp", B::Sin => "sin", B::Cos => "cos", _ => "floor" };
+                let name = match bi { B::Sqrt => "sqrt", B::Exp => "exp", B::Sin => "sin", B::Cos => "cos", B::Tan => "tan", B::Asin => "asin", B::Acos => "acos", B::Atan => "atan", B::Sinh => "sinh", B::Cosh => "cosh", B::Tanh => "tanh", B::Ln => "ln", B::Log2 => "log2", B::Log10 => "log10", B::Ceil => "ceil", B::Round => "round", B::Trunc => "trunc", B::Cbrt => "cbrt", _ => "floor" };
                 let x = match a.as_slice() { [CV::Flt(e)] => e.clone(), [CV::Int(e)] => format!("(double)({})", e), _ => return no(format!("`{}` takes one number", name)) };
                 CV::Flt(format!("{}_({})", name.to_uppercase(), x))
             }
@@ -5350,7 +5383,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "TAN_", "ASIN_", "ACOS_", "ATAN_", "SINH_", "COSH_", "TANH_", "LN_", "LOG2_", "LOG10_", "CEIL_", "ROUND_", "TRUNC_", "CBRT_", "HYPOT_", "FMOD_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];

@@ -61,14 +61,17 @@ fn expand(path: &str, text: &str, seen: &mut Vec<String>, out: &mut String, piec
             // `use "file.mito";`, a comment after it allowed
             let Some((name, after)) = rest.split_once("\";").filter(|(_, a)| { let a = a.trim(); a.is_empty() || a.starts_with("//") }) else { return Err(format!("{}:{}:1: `use \"file.mito\";` names a file in double quotes", path, k + 1)) };
             flush(pieces, start, run, from);
+            // `std/...` is a library file embedded in the compiler (modules::STD_FILES), before anything beside the program
+            let std = name.starts_with("std/");
             let p = dir.join(name);
-            let ps = p.to_string_lossy().replace('\\', "/");
+            let ps = if std { name.to_string() } else { p.to_string_lossy().replace('\\', "/") };
             let ps = ps.strip_prefix("./").map(String::from).unwrap_or(ps);
             // the same file by any path (`lib/../app.mito` is `app.mito`)
-            let key = std::fs::canonicalize(&p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| ps.clone());
+            let key = if std { ps.clone() } else { std::fs::canonicalize(&p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| ps.clone()) };
             if seen.contains(&key) { return Err(format!("{}:{}:1: `{}` is used twice (or uses itself): each file once", path, k + 1, name)); }
             seen.push(key);
-            let inner = std::fs::read_to_string(&p).map_err(|e| format!("{}:{}:1: {}: {}", path, k + 1, ps, e))?;
+            let inner = if std { modules::std_file(name).map(String::from).map_err(|e| format!("{}:{}:1: {}", path, k + 1, e))? }
+                else { std::fs::read_to_string(&p).map_err(|e| format!("{}:{}:1: {}: {}", path, k + 1, ps, e))? };
             expand(&ps, &inner, seen, out, pieces)?;
             // the `use` line itself stays (blank), so this file's lines after it keep their numbers in their own piece
             out.push('\n');
@@ -406,6 +409,31 @@ fn kinds(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn std_files_come_from_the_compiler() {
+        // a program anywhere (here: a directory with no lib/ at all) can use the embedded library files
+        let dir = std::env::temp_dir().join(format!("mito-std-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = dir.join("app.mito");
+        let head = "struct App { n: i64; }\nstate app: App;\n";
+        let tail = "@get(\"/n\") fn n() -> Response<{ v: f64, g: i64 }> { return ok({ v: 1.5.clamp(0.0, 1.0), g: 12.gcd(18) }); }\n";
+        std::fs::write(&app, format!("{}use \"std/math.mito\";\nuse \"std/random.mito\";\n{}", head, tail)).unwrap();
+        let f = app.to_string_lossy().replace('\\', "/");
+        let text = super::load_text(&f).unwrap();
+        assert!(text.contains("fn clamp(self: f64") && text.contains("fn next(self: Rng)"));
+        // beside the program is not searched: a std/ directory there changes nothing
+        std::fs::create_dir_all(dir.join("std")).unwrap();
+        std::fs::write(dir.join("std/math.mito"), "this is not code\n").unwrap();
+        assert!(super::load_text(&f).unwrap().contains("fn clamp(self: f64"));
+        // an unknown library file names the known ones; a file twice is refused as for any file
+        std::fs::write(&app, format!("{}use \"std/nope.mito\";\n{}", head, tail)).unwrap();
+        let e = super::load_text(&f).unwrap_err();
+        assert!(e.contains("std/nope.mito") && e.contains("`std/math.mito`") && e.contains("`std/random.mito`"), "{}", e);
+        std::fs::write(&app, format!("{}use \"std/math.mito\";\nuse \"std/math.mito\";\n{}", head, tail)).unwrap();
+        assert!(super::load_text(&f).unwrap_err().contains("used twice"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn a_program_in_several_files() {
         let dir = std::env::temp_dir().join(format!("mito-use-{}", std::process::id()));

@@ -518,6 +518,7 @@ mod tests {
                 let t = line.trim();
                 if let Some(rest) = t.strip_prefix("use \"") {
                     let name = rest.split('"').next()?;
+                    if name.starts_with("std/") { expand(None, crate::modules::std_file(name).ok()?, fmt, depth + 1, out)?; out.push('\n'); continue; }
                     let p = dir?.join(name);
                     let inner = std::fs::read_to_string(&p).ok()?;
                     expand(p.parent(), &inner, fmt, depth + 1, out)?;

@@ -1,0 +1,110 @@
+// lib/std/math.mito (`use "std/math.mito";` in a program): the Math constants, float and integer helpers as functions of a type, easing, angles, and the checked integer functions
+--- program
+struct S { n: i64; }
+state s: S;
+include lib/std/math.mito
+
+@get("/consts")
+fn consts() -> Response<{ pi: f64, tau: f64, e: f64, sqrt2: f64, check: f64 }> {
+    return ok({ pi: Math.PI, tau: Math.TAU, e: Math.E, sqrt2: Math.SQRT2, check: Math.SQRT2 * Math.SQRT2 });
+}
+@get("/f/{n}")
+fn f(n: i64) -> Response<{ x: f64, clamp: f64, saturate: f64, sign: f64, fract: f64, wrap: f64, rad: f64, deg: f64, lerp: f64, inv: f64, remap: f64 }> {
+    let x = n * 0.125;
+    let lo = -1.0;
+    return ok({ x: x, clamp: x.clamp(-0.5, 0.5), saturate: x.saturate(), sign: x.sign(), fract: x.fract(), wrap: x.wrap(-1.0, 1.0),
+        rad: (x * 45.0).to_radians(), deg: x.to_degrees(), lerp: x.lerp(10.0, 0.25), inv: lo.inverse_lerp(3.0, x), remap: x.remap(-1.0, 3.0, 100.0, 0.0) });
+}
+@get("/e/{n}")
+fn e(n: i64) -> Response<{ t: f64, smooth: f64, in_q: f64, out_q: f64, io_q: f64, in_c: f64, out_c: f64, io_c: f64 }> {
+    let t = n * 0.125;
+    return ok({ t: t, smooth: t.smoothstep(0.25, 0.75), in_q: t.ease_in_quad(), out_q: t.ease_out_quad(), io_q: t.ease_in_out_quad(),
+        in_c: t.ease_in_cubic(), out_c: t.ease_out_cubic(), io_c: t.ease_in_out_cubic() });
+}
+@get("/wrap/{n}")
+fn wrap_t(n: i64) -> Response<{ x: f64, w: f64, deg: f64 }> {
+    let x = n * 0.75;
+    return ok({ x: x, w: x.wrap(2.0, 5.0), deg: (x * 100.0).wrap(0.0, 360.0) });
+}
+@get("/angle/{a}/{b}")
+fn angle(a: i64, b: i64) -> Response<{ diff: f64, back: f64 }> {
+    let x = a * 0.5;
+    let y = b * 0.5;
+    return ok({ diff: x.angle_diff(y), back: y.angle_diff(x) });
+}
+@get("/i/{a}/{b}")
+fn ints(a: i64, b: i64) -> Response<{ clamp: i64, sign: i64, gcd: i64 }> {
+    return ok({ clamp: a.clamp(-5, b), sign: a.sign(), gcd: a.gcd(b) });
+}
+@get("/isqrt/{n}")
+fn isqrt_t(n: i64) -> Response<{ r: i64 }> { return ok({ r: n.isqrt() }); }
+@get("/ipow/{b}/{e}")
+fn ipow_t(b: i64, e: i64) -> Response<{ r: i64 }> { return ok({ r: b.ipow(e) }); }
+--- requests
+GET /consts
+GET /f/-24
+GET /f/-9
+GET /f/-4
+GET /f/-1
+GET /f/0
+GET /f/1
+GET /f/3
+GET /f/8
+GET /f/9
+GET /f/24
+GET /e/-2
+GET /e/0
+GET /e/1
+GET /e/2
+GET /e/3
+GET /e/4
+GET /e/5
+GET /e/6
+GET /e/7
+GET /e/8
+GET /e/10
+GET /wrap/-5
+GET /wrap/-1
+GET /wrap/0
+GET /wrap/2
+GET /wrap/4
+GET /wrap/7
+GET /angle/0/1
+GET /angle/1/0
+GET /angle/0/6
+GET /angle/12/0
+GET /angle/-3/3
+GET /angle/0/0
+GET /angle/20/-20
+GET /i/-7/3
+GET /i/0/0
+GET /i/12/18
+GET /i/-12/18
+GET /i/0/9
+GET /i/17/5
+GET /i/9/-6
+GET /isqrt/-1
+GET /isqrt/0
+GET /isqrt/1
+GET /isqrt/2
+GET /isqrt/15
+GET /isqrt/16
+GET /isqrt/17
+GET /isqrt/999999
+GET /isqrt/1000000
+GET /isqrt/9223372030926249000
+GET /isqrt/9223372030926249001
+GET /isqrt/9223372036854775807
+GET /ipow/2/0
+GET /ipow/2/10
+GET /ipow/-3/3
+GET /ipow/0/0
+GET /ipow/7/1
+GET /ipow/2/62
+GET /ipow/2/63
+GET /ipow/10/18
+GET /ipow/10/19
+GET /ipow/-2/63
+GET /ipow/3/-1
+GET /ipow/1/1000000
+GET /ipow/-1/1000001

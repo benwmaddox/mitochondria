@@ -208,7 +208,7 @@ pub fn exe(units: &[String], out: &std::path::Path, tcc: bool, flags: &[&str]) -
     let (objs, libs) = extra_links(&refs, tcc, "-O2")?;
     cmd.args(&objs);
     if !tcc && cfg!(windows) { cmd.arg("-lkernel32"); }
-    for l in crate::tcc::LIBS.iter().chain(libs.iter()) { cmd.arg(format!("-l{}", l)); } // after the sources: system libraries imported normally
+    for l in crate::tcc::LIBS.iter().chain(if tcc { crate::tcc::TCC_LIBS } else { &[] }).chain(libs.iter()) { cmd.arg(format!("-l{}", l)); } // after the sources: system libraries imported normally
     let r = cmd.output().map_err(|e| e.to_string())?;
     for c in &cs { let _ = std::fs::remove_file(c); }
     let _ = std::fs::remove_dir(&dir);

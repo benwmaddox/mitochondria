@@ -85,8 +85,8 @@ DESIGN.md describes most built-ins where they come up (text, JSON, time, crypto,
 ## Functions of a type
 
 A function whose first parameter is `self: Type` belongs to that type: `fn hurt(self: Player, n: i64) { ... }` declares `hurt` for `Player`, and `p.hurt(3)` calls it. The same name may be declared for any number of types and beside a
-function of no type. `self` is an item, an integer (`i64`, or any narrower integer type), a float (`f64`), a `string` or a `bool`, or a plain struct (below); not a nullable value. A collection operation's name (`add`, `remove`,
-`count`, `sort` ...) cannot be used (DESIGN.md, Functions of a type).
+function of no type. `self` is an item, an integer (`i64`, or any narrower integer type), a float (`f64`), a `string` or a `bool`, or a plain struct (below); not a nullable value. A collection operation's name (`add`, `remove`, `clear`,
+`count`, `sort` ...) may be used too: the receiver's type decides, a function of its type if it has one, the collection operation otherwise (DESIGN.md, Functions of a type).
 
 A function can take a plain struct (a struct that is a field of the state, also nested): `fn move_by(p: Pos, dx: i64) { p.x += dx; }` is called `move_by(world.origin, 2)`, and `fn len2(self: Pos) -> i64` is called `world.hero.pos.len2()`. The parameter is a view of the struct where it lives, not a copy: reads see the state and writes through it change the state, with every range, `logged` rule and read-only check of a write written with the full path. A struct that is also an item type takes either a plain struct or an item (the argument decides). A plain struct cannot be a function's result or a nullable parameter (DESIGN.md, Struct parameters).
 

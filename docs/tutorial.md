@@ -272,7 +272,7 @@ POST /players/0/hurt {"n": 9}              200 {"hp":-2,"alive":false}
 GET /words/21                              200 {"twice":42,"loud":"hey!"}
 ```
 
-The monster took twice the damage and got angrier: `hurt` is one name with one rule per type. The name of a collection operation (`add`, `remove`, `count`, ...) cannot be used this way.
+The monster took twice the damage and got angrier: `hurt` is one name with one rule per type. The name of a collection operation (`add`, `remove`, `count`, ...) can be used this way too: on a monster it is your function, on a pool it is still the pool's operation.
 
 ## 13. Struct parameters
 

@@ -1619,6 +1619,7 @@ fn writes_in(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>, locals: bool) -> bo
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
             Expr::Call(_, _, CallRes::Builtin(B::Truncate)) => true,
+            Expr::Call(nm, _, CallRes::Unbound) if matches!(nm.as_str(), ".add" | ".try_add" | ".remove" | ".clear" | ".fill" | ".move" | ".sort" | ".copy_from" | ".truncate") => true,
             Expr::Call(nm, a, r) => a.iter().any(|x| ex(api, x, seen)) || callees(nm, r).into_iter().any(|k| if seen.contains(&k) { false } else { seen.push(k); writes(api, &api.fns[k as usize].body, seen) }),
             Expr::Field(b, ..) | Expr::Un(_, b) => ex(api, b, seen),
             Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),
@@ -1648,6 +1649,7 @@ fn writes_in(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>, locals: bool) -> bo
 fn allocates(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
+            Expr::Call(nm, _, CallRes::Unbound) if matches!(nm.as_str(), ".add" | ".try_add") => true,
             Expr::Call(nm, a, r) => a.iter().any(|x| ex(api, x, seen)) || callees(nm, r).into_iter().any(|k| if seen.contains(&k) { false } else { seen.push(k); allocates(api, &api.fns[k as usize].body, seen) }),
             Expr::Field(b, ..) | Expr::Un(_, b) => ex(api, b, seen),
             Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),
@@ -2702,7 +2704,25 @@ impl<'p> G<'p> {
         if !list.contains(&(off, size)) { list.push((off, size)); }
         true
     }
+    /// Is this receiver one a function of a type was declared for (`fn clear(self: Grid)`)? A name that is also a collection operation means the function
+    /// when the receiver's type has one declared, and the collection operation otherwise.
+    fn user_method_for(&mut self, op: &str, recv: &'p Expr, env: &mut Vec<Option<CV>>) -> R<bool> {
+        let v = self.expr(recv, env, None)?;
+        Ok(match self.receiver_type(&v) { Some(ty) => { let want = format!("{}.{}", ty, op); self.api.fns.iter().any(|f| f.recv && f.name == want) } None => false })
+    }
+    /// A statement the binder left as a call because its name is also declared for some type: where the receiver is a collection it becomes the collection statement.
+    fn deferred_op(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<Option<&'p Stmt>> {
+        let (Stmt::Let(_, _, Expr::Call(op, args, CallRes::Unbound)) | Stmt::Do(Expr::Call(op, args, CallRes::Unbound))) = s else { return Ok(None) };
+        if !op.starts_with('.') || !crate::lang::AMBIGUOUS_OPS.contains(&&op[1..]) || args.is_empty() { return Ok(None); }
+        if self.user_method_for(&op[1..], &args[0], env)? { return Ok(None); }
+        Ok(crate::lang::lower_op(s, 0).map(|l| &*Box::leak(Box::new(l))))
+    }
     fn stmt(&mut self, s: &'p Stmt, env: &mut Vec<Option<CV>>) -> R<()> {
+        if let Some(l) = self.deferred_op(s, env)? {
+            // the lowered statement is a collection's own: `Let` named the slot the binder declared, which the allocation takes over
+            let l: &'p Stmt = match (s, l) { (Stmt::Let(_, slot, _), Stmt::Alloc { var, coll, try_, .. }) => Box::leak(Box::new(Stmt::Alloc { var: var.clone(), slot: *slot, coll: coll.clone(), try_: *try_ })), _ => l };
+            return self.stmt(l, env);
+        }
         if let (Stmt::Each(..), None) = (s, &self.presave) {
             // an outermost loop: generate it, then put the saves of the small fields it stores into in front of it
             let start = self.body.len();
@@ -4597,6 +4617,9 @@ impl<'p> G<'p> {
             CallRes::User(k) => self.inline(k, args, env, dead),
             // `x.f(args)` on a receiver whose function depends on its type: the receiver is evaluated, its type names the function (`Type.f`), and it is called with the receiver first
             CallRes::Unbound if n.starts_with('.') && !args.is_empty() => {
+                // a name that is also a collection operation (`count`, `capacity`, `truncate`): the collection's own unless the receiver's type declares the function
+                let own = match (&n[1..], args.len()) { ("count", 1) => Some(B::Count), ("capacity", 1) => Some(B::Capacity), ("truncate", 2) => Some(B::Truncate), _ => None };
+                if let Some(b) = own { if !self.user_method_for(&n[1..], &args[0], env)? { return self.callx(n, args, CallRes::Builtin(b), env, dead); } }
                 let mut vals = Vec::new();
                 for a in args { let v = self.expr(a, env, dead)?; vals.push(self.hold(v, false)?); }
                 let Some(ty) = self.receiver_type(&vals[0]) else { return no(format!("`{}` is called on something that is not a struct, a number, a string or a bool, and only those have functions of their own", &n[1..])) };
@@ -6491,6 +6514,7 @@ fn assigns_field(api: &Api, stmts: &[Stmt], seen: &mut Vec<u32>) -> bool {
     fn ex(api: &Api, e: &Expr, seen: &mut Vec<u32>) -> bool {
         match e {
             Expr::Call(_, _, CallRes::Builtin(B::Truncate)) => true,
+            Expr::Call(nm, _, CallRes::Unbound) if nm == ".clear" => true,
             Expr::Call(nm, a, r) => a.iter().any(|x| ex(api, x, seen)) || callees(nm, r).into_iter().any(|k| if seen.contains(&k) { false } else { seen.push(k); assigns_field(api, &api.fns[k as usize].body, seen) }),
             Expr::Field(b, _) | Expr::Un(_, b) => ex(api, b, seen),
             Expr::Index(a, b) | Expr::Bin(_, a, b) => ex(api, a, seen) || ex(api, b, seen),

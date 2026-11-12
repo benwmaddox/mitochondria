@@ -423,6 +423,8 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
 /// different time); `tmp`: hidden locals made so far.
 /// `markup`: inside code in markup (`{if ...}`), where a bare string statement writes itself: Some(false) in content, Some(true) in an attribute.
 /// The collection operations `x.f(...)` names (a receiver function may not be called one of these).
+/// The collection operations a function of a type may share a name with: the receiver's type decides which is meant.
+pub const AMBIGUOUS_OPS: [&str; 11] = ["add", "try_add", "remove", "clear", "fill", "move", "sort", "copy_from", "count", "capacity", "truncate"];
 pub const BUILTIN_METHODS: [&str; 15] = ["add", "try_add", "remove", "move", "copy_from", "sort", "fill", "clear", "truncate", "count_below", "count", "capacity", "json_field", "len", "exists"];
 /// Keys besides a letter or a digit that `from key("...")` names (the game platform's).
 pub const GAME_KEYS: [&str; 7] = ["space", "up", "down", "left", "right", "shift", "escape"];
@@ -485,7 +487,7 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
                 if rt.arg.is_some() || rt.field.is_some() || rt.opt { return Err(format!("`fn {}(self: ...)`: `self` is a struct, a number, `string` or `bool`, and not nullable", name)); }
                 // a number is any integer type or any float, a string any string: the type's name is the kind
                 let ty = match rt.name.as_str() { "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" => "i64", "f32" | "f64" => "f64", "string" | "utf8" | "ascii" | "text" => "string", n => n }.to_string();
-                if name.contains('.') || BUILTIN_METHODS.contains(&name.as_str()) { return Err(format!("`fn {}(self: {}, ...)`: `{}` is a collection operation, a function of a type needs another name", name, rt.name, name)); }
+                if name.contains('.') { return Err(format!("`fn {}(self: {}, ...)`: a function's name has no dot", name, rt.name)); }
                 let method = name.clone();
                 name = format!("{}.{}", ty, name);
                 if api.fns.iter().any(|f| f.recv && f.name == name) { return Err(format!("`{}` is declared twice for `{}`", method, ty)); }
@@ -1542,29 +1544,15 @@ impl Binder<'_> {
             Stmt::Let(_, _, e) | Stmt::Do(e) => self.operation(e),
             _ => {}
         }
-        let lowered = match s {
-            Stmt::Let(n, _, Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => Some(Stmt::Alloc { var: n.clone(), slot: 0, coll: args.remove(0), try_: op == ".try_add" }),
-            Stmt::Do(Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => { self.hidden += 1; Some(Stmt::Alloc { var: format!("__mito__added{}", self.hidden), slot: 0, coll: args.remove(0), try_: op == ".try_add" }) }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".clear" && args.len() == 1 => Some(Stmt::Clear(args.remove(0))),
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".remove" && args.len() == 2 => { let item = args.remove(1); Some(Stmt::Remove(args.remove(0), item)) }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".fill" && args.len() == 4 => {
-                let value = args.remove(3); let count = args.remove(2); let from = args.remove(1);
-                Some(Stmt::Fill(args.remove(0), from, count, value))
+        // a name that is both a collection operation and a function some type declares (`clear`, `count`, ...) is decided by the receiver's type, which only the code generator knows:
+        // the call stays a call (a statement `coll.add();` gets a hidden local, as the lowering would give it)
+        let ambiguous = match s { Stmt::Let(_, _, Expr::Call(op, ..)) | Stmt::Do(Expr::Call(op, ..)) => op.starts_with('.') && AMBIGUOUS_OPS.contains(&&op[1..]) && self.declared_method(&op[1..]), _ => false };
+        if ambiguous {
+            if let Stmt::Do(e @ Expr::Call(..)) = s {
+                if matches!(e, Expr::Call(op, ..) if op == ".add" || op == ".try_add") { self.hidden += 1; let e = std::mem::replace(e, Expr::Int(0)); *s = Stmt::Let(format!("__mito__added{}", self.hidden), 0, e); }
             }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".move" && args.len() == 4 => {
-                let count = args.remove(3); let to = args.remove(2); let from = args.remove(1);
-                Some(Stmt::Move(args.remove(0), from, to, count))
-            }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".sort" && args.len() == 4 => {
-                let scratch = args.remove(3); let count = args.remove(2); let from = args.remove(1);
-                Some(Stmt::Sort(args.remove(0), from, count, scratch))
-            }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".copy_from" && args.len() == 5 => {
-                let count = args.remove(4); let to = args.remove(3); let from = args.remove(2); let src = args.remove(1);
-                Some(Stmt::Copy(args.remove(0), src, from, to, count))
-            }
-            _ => None,
-        };
+        }
+        let lowered = if ambiguous { None } else { let l = lower_op(s, self.hidden + 1); if matches!(&l, Some(Stmt::Alloc { var, .. }) if var.starts_with("__mito__added")) { self.hidden += 1; } l };
         if let Some(l) = lowered { *s = l; }
         match s {
             Stmt::At(..) => {}
@@ -1680,6 +1668,7 @@ impl Binder<'_> {
                 let Expr::Call(n, args, res) = e else { unreachable!() };
                 for a in args.iter_mut() { self.expr(a)?; }
                 *res = match (n.as_str(), args.len()) {
+                    _ if AMBIGUOUS_OPS.contains(&&n[1..]) && self.declared_method(&n[1..]) => CallRes::Unbound,
                     (".count", 1) => CallRes::Builtin(B::Count),
                     (".capacity", 1) => CallRes::Builtin(B::Capacity),
                     (".add" | ".try_add", 1) => return self.err(format!("`{}()` makes an item: write `let x = coll{}();` or `coll{}();` as a statement", &n[1..], n, n)),
@@ -1725,6 +1714,36 @@ impl Binder<'_> {
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// The collection operations that are statements, as the statements the code generator knows: `let p = coll.add();`, `coll.clear();`, `coll.remove(p);` ...
+/// (`hidden` numbers the local that `coll.add();` makes).
+pub fn lower_op(s: &Stmt, hidden: u32) -> Option<Stmt> {
+    let mut s = s.clone();
+    let s = &mut s;
+    match s {
+            Stmt::Let(n, _, Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => Some(Stmt::Alloc { var: n.clone(), slot: 0, coll: args.remove(0), try_: op == ".try_add" }),
+            Stmt::Do(Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => { Some(Stmt::Alloc { var: format!("__mito__added{}", hidden), slot: 0, coll: args.remove(0), try_: op == ".try_add" }) }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".clear" && args.len() == 1 => Some(Stmt::Clear(args.remove(0))),
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".remove" && args.len() == 2 => { let item = args.remove(1); Some(Stmt::Remove(args.remove(0), item)) }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".fill" && args.len() == 4 => {
+                let value = args.remove(3); let count = args.remove(2); let from = args.remove(1);
+                Some(Stmt::Fill(args.remove(0), from, count, value))
+            }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".move" && args.len() == 4 => {
+                let count = args.remove(3); let to = args.remove(2); let from = args.remove(1);
+                Some(Stmt::Move(args.remove(0), from, to, count))
+            }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".sort" && args.len() == 4 => {
+                let scratch = args.remove(3); let count = args.remove(2); let from = args.remove(1);
+                Some(Stmt::Sort(args.remove(0), from, count, scratch))
+            }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".copy_from" && args.len() == 5 => {
+                let count = args.remove(4); let to = args.remove(3); let from = args.remove(2); let src = args.remove(1);
+                Some(Stmt::Copy(args.remove(0), src, from, to, count))
+            }
+            _ => None,
     }
 }
 

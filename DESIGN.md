@@ -122,7 +122,7 @@ its text area, as a builtin's result is; the caller copies it where it keeps it.
 The same name can be declared for any number of types (`fn hurt(self: Monster, n: i64)` is another function, with its own rule) and beside a function of no type (`hurt(3)`); which function `x.hurt(3)` is depends on the type of `x`,
 as the compiler sees it where the call is written, so the call costs nothing at run time and is inlined like any other. `self` is an item of a pool, list or table, or a number (`fn double(self: i64)` applies to every integer type,
 `fn half(self: f64)` to floats), a string (`fn shout(self: string) -> text`) or a bool. `self` may also be a plain struct (see "Struct parameters" below). It is not nullable. A name that is a collection operation (`add`,
-`remove`, `count`, `sort` ...) cannot be a function of a type. These functions may call themselves and each other. A call on a type that does not have the function says which types do (`` `M` has no function `hit` (declare
+`remove`, `count`, `sort` ...) may be a function of a type: the receiver's type decides (a function of that type if one is declared, the collection operation otherwise), and the compiler's own names for the functions are mangled with the type. These functions may call themselves and each other. A call on a type that does not have the function says which types do (`` `M` has no function `hit` (declare
 `fn hit(self: M, ...)`; `hit` is declared for P) ``). What the compiler works out about functions (which ones may write, which are recursive, how big they are) follows every function a call could reach. (In module code `self` is the
 instance, as before; a function of a type is not module code.)
 

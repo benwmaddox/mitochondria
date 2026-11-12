@@ -1,0 +1,25 @@
+// tutorial section 13: struct parameters (a view of a struct inside the state, writes go through), a function of a type on a nested struct
+--- program
+struct Pos { x: i64; y: i64; }
+struct Hero { name: string<16>; pos: Pos; }
+struct World { origin: Pos; hero: Hero; }
+state world: World;
+
+fn move_by(p: Pos, dx: i64, dy: i64) { p.x += dx; p.y += dy; }
+fn len2(self: Pos) -> i64 { return self.x * self.x + self.y * self.y; }
+
+@post("/origin")
+fn origin(dx: i64 in 0..50, dy: i64 in 0..50) -> Response<{ x: i64, y: i64 }> {
+    move_by(world.origin, dx, dy);
+    return ok({ x: world.origin.x, y: world.origin.y });
+}
+@post("/hero")
+fn hero(dx: i64 in 0..50, dy: i64 in 0..50) -> Response<{ x: i64, y: i64, len2: i64 }> {
+    move_by(world.hero.pos, dx, dy);
+    return ok({ x: world.hero.pos.x, y: world.hero.pos.y, len2: world.hero.pos.len2() });
+}
+--- requests
+POST /origin {"dx": 1, "dy": 2}
+POST /origin {"dx": 1, "dy": 2}
+POST /hero {"dx": 3, "dy": 4}
+POST /hero {"dx": 3, "dy": 4}

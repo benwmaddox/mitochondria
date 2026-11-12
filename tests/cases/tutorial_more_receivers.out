@@ -1,0 +1,10 @@
+POST /players -> 201 {"id":0}
+POST /monsters -> 201 {"id":0}
+POST /players/0/hurt -> 200 {"hp":7,"alive":true}
+POST /monsters/0/hurt -> 200 {"hp":4,"rage":1}
+POST /players/0/hurt -> 200 {"hp":-2,"alive":false}
+GET /words/21 -> 200 {"twice":42,"loud":"hey!"}
+state <plain values> 0
+state world.players 39
+state world.monsters 40
+memory reserved=8192 committed=8192 live=79

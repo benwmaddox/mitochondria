@@ -1,0 +1,6 @@
+POST /origin -> 200 {"x":1,"y":2}
+POST /origin -> 200 {"x":2,"y":4}
+POST /hero -> 200 {"x":3,"y":4,"len2":25}
+POST /hero -> 200 {"x":6,"y":8,"len2":100}
+state <plain values> 56
+memory reserved=4096 committed=4096 live=56

@@ -32,7 +32,7 @@ many messages a room keeps. Reaching a limit is an ordinary error the program an
 an out-of-memory kill, and peak memory is known before the program runs. In return, data whose size you cannot bound
 (documents, large uneven text, graphs of unknown shape) fits poorly; it belongs in a database or another language.
 
-Start with the [tutorial](docs/tutorial.md). The design is in [DESIGN.md](DESIGN.md); every command, option, built-in and library module is listed in [docs/reference.md](docs/reference.md).
+Start with the [tutorial](docs/tutorial.md) (a web program, tests, a command-line tool, functions of a type, struct parameters, constants, generic structs, the standard library, a game). The design is in [DESIGN.md](DESIGN.md); every command, option, built-in and library module is listed in [docs/reference.md](docs/reference.md).
 
 **Kinds of programs.** A program is built for a *platform*, which is its entry file's: a **web** program has endpoints (`@get`, `@post`, ...) and is a server; a **cli** program has one `@main` function and is a
 command-line tool (arguments, stdin and flags in, stdout out, an exit code); a **game** program has an `@frame` function and `@shader`s and opens a window (SDL3 and OpenGL, loaded when it starts); a **test** program is tests only. `platform cli;` on a line of its own says so, or the entry points show it. A platform is a driver plus a list of

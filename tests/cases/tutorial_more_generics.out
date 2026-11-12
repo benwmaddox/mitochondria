@@ -1,0 +1,9 @@
+POST /scores -> 200 {"room":2}
+POST /scores -> 200 {"room":1}
+POST /names -> 200 {"room":1}
+POST /scores -> 200 {"room":0}
+POST /scores -> 409 {"error":"stack is full","line":27}
+POST /names -> 200 {"room":0}
+POST /names -> 409 {"error":"stack is full","line":35}
+state <plain values> 72
+memory reserved=4096 committed=4096 live=72

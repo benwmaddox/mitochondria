@@ -138,6 +138,11 @@ struct H {
 #define LD_U8(off, idx) LD_(u8, off, idx, 1)
 #define LD_F32(off, idx) LD_(float, off, idx, 4)
 #define LD_F64(off, idx) LD_(double, off, idx, 8)
+#ifdef __clang__
+#define CELL_(T, v) ({ T t_; __builtin_memcpy(&t_, &(v), sizeof t_); t_; }) /* a struct field kept in a C local (src/scalar.rs) */
+#else
+#define CELL_(T, v) (*(const T *)&(v))
+#endif
 /* AT_: the source line of the statement being run, defined before each statement's code (0 outside any); every way out with an error
    records it in the context, so the answer can name the line. It costs nothing until something fails. */
 #define AT_ 0
@@ -903,7 +908,7 @@ static const unsigned char mito_lits[] = {{ {} }};
     // lower / upper (builtins 59, 60): Unicode's case tables
     if g.src.contains("builtin(c, 59,") || g.src.contains("builtin(c, 60,") { o += "#define MITO_UNICASE 1\n"; o += UNICASE; }
     o += RUNTIME;
-    o += &direct(&g.src[PRELUDE.len()..]);
+    o += &direct(&crate::scalar::replace(&g.src[PRELUDE.len()..]));
     Ok(o)
 }
 
@@ -1875,6 +1880,25 @@ impl<'p> G<'p> {
         SCRATCH.with(|s| { let mut s = s.borrow_mut(); s.bottom = s.bottom.max(top); if s.top + s.bottom > cap { Err(full.clone()) } else { Ok(()) } })?;
         Ok(so + o)
     }
+    /// Declares the struct `sid` at scratch `off` for the scalar replacement pass (src/scalar.rs): a comment line listing its scalar cells (`width@offset`), or `!` when it
+    /// holds text or an array (never replaced).
+    fn scratch_marker(&mut self, sid: usize, off: usize) {
+        fn walk(prog: &Program, sid: usize, base: usize, out: &mut Vec<String>) -> bool {
+            let sd = &prog.structs[sid];
+            for (k, (_, t)) in sd.fields.iter().enumerate() {
+                match t {
+                    Ty::Scalar(sc) => out.push(format!("{}@{}", sc.size(), base + sd.offs[k])),
+                    Ty::Struct(s2) => { if !walk(prog, *s2, base + sd.offs[k], out) { return false; } }
+                    _ => return false,
+                }
+            }
+            true
+        }
+        let mut cells = Vec::new();
+        let ok = walk(self.prog, sid, 0, &mut cells);
+        let n = self.prog.structs[sid].size;
+        self.line(&format!("/*SCR {} {} {}*/", off, n, if ok { cells.join(" ") } else { "!".to_string() }));
+    }
     /// The bytes of the request struct the code reads or writes here are ones the endpoint must find zeroed first.
     fn touch_range(&mut self, off: usize, n: usize) {
         let Some((ro, rn)) = self.prog.request else { return };
@@ -1937,6 +1961,7 @@ impl<'p> G<'p> {
         self.prog.value_check(sid)?;
         let off = self.scratch_alloc(self.prog.structs[sid].size)?;
         let n = self.prog.structs[sid].size;
+        self.scratch_marker(sid, off);
         self.line(&format!("SCRZERO({}ULL, {});", off, n));
         Ok(CV::Plain(sid, off))
     }
@@ -2018,7 +2043,7 @@ impl<'p> G<'p> {
                 CV::Item(c, e) => { pks.push(PK::V(K::Item(c))); cargs.push(e); }
                 CV::Ref(c, s, i) => { pks.push(PK::V(K::Ref(c))); cargs.push(s); cargs.push(i); }
                 CV::Null => pks.push(PK::V(K::Null)),
-                CV::Plain(sd, o) => pks.push(PK::Plain(sd, o)),
+                CV::Plain(sd, o) => { let n = self.prog.structs[sd].size; self.line(&format!("/*SCRX {} {}*/", o, n)); pks.push(PK::Plain(sd, o)) } // the callee has this place's offset built in: src/scalar.rs must keep it in memory
                 _ => return no("passing a struct field or array of an item to a recursive function is not compiled yet"),
             }
         }
@@ -2087,7 +2112,8 @@ impl<'p> G<'p> {
                     let rp = match cand { K::Null | K::Plain(..) => "", K::Int => ", i64 *ret_v", K::Flt => ", double *ret_v", K::Bool => ", int *ret_v", K::Txt => ", Txt *ret_v", K::Any => ", Val *ret_v", K::Item(_) | K::Coll(_) => ", u32 *ret_v", K::Ref(_) => ", u32 *ret_s, u32 *ret_v" };
                     let mut sp = self.specs.borrow_mut();
                     sp[si].proto = format!("{}{})", proto, rp);
-                    sp[si].body = Some(body);
+                    sp[si].body = Some(if matches!(cand, K::Plain(..)) { format!("/*SCRALL*/
+{}", body) } else { body }); // a returned place is read by the caller: all of this function's places stay in memory
                     (sp[si].peak, sp[si].kept, sp[si].ret_bound) = (peak, kept, ret_bound);
                     return Ok(si);
                 }
@@ -5240,7 +5266,7 @@ impl<'p> G<'p> {
                     return no(format!("`{}` returns a struct, which has to go somewhere: write `target = {}(...);`, `let x = {}(...);` or `var x = {}(...);` (name the middle of a chain: `let t = a.plus(b); world.pos = t.scaled(2.0);`)", f.name, short, short, short));
                 }
                 Some(Some(off)) => Some((sid, off)),
-                Some(None) => { self.prog.value_check(sid)?; let off = self.scratch_alloc(self.prog.structs[sid].size)?; Some((sid, off)) }
+                Some(None) => { self.prog.value_check(sid)?; let off = self.scratch_alloc(self.prog.structs[sid].size)?; self.scratch_marker(sid, off); Some((sid, off)) }
             },
             _ => None,
         };

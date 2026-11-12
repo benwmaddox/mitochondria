@@ -15,6 +15,7 @@ mod modules;
 mod generics;
 mod layout;
 mod cgen;
+mod scalar;
 mod source;
 mod spec;
 mod web;

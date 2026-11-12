@@ -277,3 +277,32 @@ fn line(l: &str, places: &[Place], aliases: &std::collections::HashMap<String, u
     for (s, e) in ids { if let Some(&a) = aliases.get(&o[s..e]) { if let Some(p) = ok_at(a) { bad.push(p); } } }
     if bad.is_empty() { Some(o) } else { Some(l.to_string()) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::replace;
+    fn f(body: &str) -> String { format!("static int ep0(Ctx *c) {{
+{}
+}}", body.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("
+")) }
+    #[test]
+    fn a_place_touched_only_by_constant_fields_becomes_locals() {
+        let src = f("/*SCR 4096 16 8@0 8@8*/\nSCRZERO(4096ULL, 16);\n{\nu64 a1 = (u64)(4096ULL);\nST8_(a1, BITS_F64(1.5));\n}\nMOVE_(0ULL, 4096ULL, 16);\nCALL(x(c, LD_F64(4096, 0)));");
+        let out = replace(&src);
+        assert!(out.contains("u64 sr4096 = 0;") && out.contains("sr4096 = (u64)(BITS_F64(1.5));") && out.contains("CELL_(double, sr4096)"), "{}", out);
+        assert!(out.contains("ST8_((0ULL) + 0, sr4096); ST8_((0ULL) + 8, sr4104);"), "{}", out);
+        assert!(!out.contains("SCRZERO") && !out.contains("a1"), "{}", out);
+    }
+    #[test]
+    fn a_place_with_another_use_stays_in_memory() {
+        // the offset is passed on, a run-time index, a place handed to a function compiled apart, text, a returned place
+        for bad in ["CALL(g(c, 4096ULL));", "CALL(x(c, LD_F64(4096, i)));", "/*SCRX 4096 16*/", "CALL(x(c, LD_F64(4096 + k, 0)));"] {
+            let src = f(&format!("/*SCR 4096 16 8@0 8@8*/\nSCRZERO(4096ULL, 16);\n{}", bad));
+            assert_eq!(replace(&src), src, "{}", bad);
+        }
+        let src = f("/*SCR 4096 16 !*/\nSCRZERO(4096ULL, 16);");
+        assert_eq!(replace(&src), src);
+        let src = f("/*SCRALL*/\n/*SCR 4096 16 8@0 8@8*/\nSCRZERO(4096ULL, 16);");
+        assert_eq!(replace(&src), src);
+    }
+}

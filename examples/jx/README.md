@@ -36,9 +36,9 @@ the last step. Numbers are compared as integers, and `==` compares the written f
 
 ## What it shows
 
-- **A program that is not a server.** `@main fn main(filter: utf8<1..1000> from arg(0), doc: utf8<33554432> from stdin, c: bool = false, ...)`:
+- **A program that is not a server.** `@main fn main(filter: utf8<1..1000> from arg(0), doc: utf8<4294967295> from stdin, c: bool = false, ...)`:
   the Nth argument is `from arg(N)`, what is piped in is `from stdin`, and any other input is a flag (`-c`, `--name value`). The answer's
   body goes to standard output; an answer with status 400 or more goes to standard error, and the exit code is 1.
-- **Fixed memory, no allocation.** The input is at most 32 MB and the output at most 32 MB, both declared. A value is a position in the input
+- **Fixed memory, no allocation.** The input and the output are each declared at 4294967295 bytes (4 GiB - 1: a length is 32 bits, so that is the most Mitochondria can hold; a longer input stops with "the input is larger than 4294967295 bytes"). The memory is reserved address space, not committed: a 1 KB input commits a few MB, and a 500 MB input a bit over twice its size (the input as read, and its copy in the request text area, which the program works on). Both the copy and the output sit in a text area of 4 GiB - 1 bytes, so the real limit of the input is a few KB under 4 GiB - 1, less the other text a run builds. `out` is declared last in `J`: a field after it would start beyond 4 GiB, where offsets do not reach. A value is a position in the input
   text; nothing is parsed into a tree, and the filter is not parsed either: `eval` walks its text.
 - **Several files, as in a web program** (`use "json.mito";`).

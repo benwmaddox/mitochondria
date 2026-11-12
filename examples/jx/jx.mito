@@ -9,17 +9,17 @@
 
 platform cli;
 struct J {
-    out: utf8<33554432>;   // everything written, at most 32 MB
     fp: i64;               // where a path ended in the filter (set by `path`)
     pretty: bool;          // indent the output (off with -c)
     raw: bool;             // a string result is written without its quotes (-r)
     sep: bool;             // a result was written already: a newline comes first
     err: utf8<200>;        // what went wrong, if something did
+    out: utf8<4294967295>;  // everything written, at most 4 GiB - 1 (address space, committed as written); last, so every other field has a small offset
 }
 state j: J;
 
 @main
-fn main(filter: utf8<1..1000> from arg(0), doc: utf8<33554432> from stdin, c: bool = false, r: bool = false) -> Response<text> {
+fn main(filter: utf8<1..1000> from arg(0), doc: utf8<4294967295> from stdin, c: bool = false, r: bool = false) -> Response<text> {
     j.pretty = !c;
     j.raw = r;
     let start = skip_ws(doc, 0);

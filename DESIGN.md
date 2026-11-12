@@ -454,7 +454,10 @@ other input is a flag: `--name value`, `--name=value`, a bare `--name` or a shor
 answers 400). The answer's body goes to standard output with exit code 0; an answer of status 400 or more goes to standard error with exit code 1; a program that
 fails to start exits 2. A program with `@main` has no endpoints beside it (`@start` is allowed), and no tables yet. `mito run tool.mito -- args < in` builds and
 runs it; `mito build` makes a standalone executable. The driver is runtime/cli.c; `examples/jx` is a jq-like tool written this way.
-The inputs travel as the internal headers `:argN` and `:stdin`, as a socket's travel as `:socket`.
+A text field's declared size is at most 4294967295 (4 GiB - 1): a length is 32 bits. Where a field sits is not limited that way: a state's byte offsets are 64 bits, so any number of such fields may be declared, each reserved as address space and committed as it is written (the text values a request reads are 32-bit offsets into the request's text area, not into the state).
+The exit code is the program's to choose: `return exit(n, body)` writes the body to standard output and exits with `n` (0 to 255), `return exit_error(n, body)` writes it, as it is, to standard error and exits with `n`; they exist only in `@main` (a jq-like tool exits 2 on a usage error, 5 on invalid input). They are answers of status 1000 + n and 1256 + n, a range no HTTP status uses, so every other rule is unchanged: 200-399 exit 0, 400 or more exit 1 with the body and a line break on standard error.
+A program with an input `from args` gets every argument as written, each followed by a 0 byte (no argument can contain one), and does its own flag parsing: the runtime then binds no `--name` flags and every argument (`--tab`, `-n`) is a plain one; the first 32 are also available as `from arg(N)`. The arguments may total 1 MiB.
+The inputs travel as the internal headers `:argN`, `:args` and `:stdin`, as a socket's travel as `:socket`.
 
 ## Modules
 A module is a `.mito` file in `lib/`: parameters, structs, a `state { ... }` block (what an instance holds) and

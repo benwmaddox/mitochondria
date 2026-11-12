@@ -2,7 +2,8 @@
    The command line is the request. A positional argument N is the input `from arg(N)` (header ":argN"), what is piped in is the input
    `from stdin` (header ":stdin"; read only when the program has one), and `--name value`, `--name=value` or a bare `--name` (true)
    is the input called `name` (a short flag, `-c`, is the input `c`, true). The answer's body is written to standard output and the exit code is 0; an answer of status 400 or
-   more goes to standard error with exit code 1; a program that fails to start exits 2. Memory is the program's own declared state. */
+   more goes to standard error with exit code 1; `exit(n, body)` answers with exit code n (body on standard output), `exit_error(n, body)` with exit code n and the body on
+   standard error (the body as it is, no line break added); a program that fails to start exits 2. Memory is the program's own declared state. */
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 void *mito_start(u64 budget, u64 seed);
@@ -32,20 +33,27 @@ static int cli_enc(char *t, u32 *n, const char *s, u32 len) {
 }
 
 int main(int argc, char **argv) {
-    static MitoPair pairs[33];
+    static MitoPair pairs[35];
     static char names[32][8];
     static char target[CLI_TARGET_MAX];
     u32 np = 0, tn = 0, npos = 0;
     int flags = 0;
+#ifdef MITO_CLI_ARGS
+    const int raw = 1; /* the program reads `from args`: it parses its own flags, so every argument is a plain one */
+    static char argbuf[1 << 20];
+    u32 an = 0;
+#else
+    const int raw = 0;
+#endif
     target[tn++] = '/';
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (a[0] == '-' && ((a[1] >= 'a' && a[1] <= 'z') || (a[1] >= 'A' && a[1] <= 'Z')) && !a[2]) {
+        if (!raw && a[0] == '-' && ((a[1] >= 'a' && a[1] <= 'z') || (a[1] >= 'A' && a[1] <= 'Z')) && !a[2]) {
             /* a short flag, `-c`: the input called `c`, true */
             target[tn++] = flags ? '&' : '?';
             flags = 1;
             target[tn++] = a[1]; target[tn++] = '='; target[tn++] = 't'; target[tn++] = 'r'; target[tn++] = 'u'; target[tn++] = 'e';
-        } else if (a[0] == '-' && a[1] == '-' && a[2]) {
+        } else if (!raw && a[0] == '-' && a[1] == '-' && a[2]) {
             const char *name = a + 2, *value = "true";
             u32 nl = (u32)strlen(name);
             const char *eq = (const char *)memchr(name, '=', nl);
@@ -55,6 +63,10 @@ int main(int argc, char **argv) {
             flags = 1;
             if (!cli_enc(target, &tn, name, nl) || (target[tn++] = '=', !cli_enc(target, &tn, value, (u32)strlen(value)))) { os_err("error: the flags are too long\n", 30); return 2; }
         } else {
+#ifdef MITO_CLI_ARGS
+            { u32 l = (u32)strlen(a) + 1; if (an + l > sizeof argbuf) { os_err("error: the arguments are too long\n", 34); return 2; } memcpy(argbuf + an, a, l); an += l; }
+            if (npos > 31) continue; /* only the first 32 are also `from arg(N)` */
+#endif
             if (npos > 31) { os_err("error: at most 32 arguments\n", 28); return 2; }
             u32 k = npos++;
             names[k][0] = ':'; names[k][1] = 'a'; names[k][2] = 'r'; names[k][3] = 'g';
@@ -65,6 +77,9 @@ int main(int argc, char **argv) {
             np++;
         }
     }
+#ifdef MITO_CLI_ARGS
+    pairs[np].k = ":args"; pairs[np].kn = 5; pairs[np].v = argbuf; pairs[np].vn = an; np++; /* every argument, each followed by a 0 byte */
+#endif
     if (mito_has_tables()) { os_err("error: a command-line program has no tables yet\n", 48); return 2; }
     mito_set_areas(0xFFFFFFFFULL, 0xFFFFFFFFULL); /* the request text and the answer: 4 GiB - 1 of address space each, committed as used */
     void *app = mito_start(1ULL << 40, 0);
@@ -97,7 +112,10 @@ int main(int argc, char **argv) {
 #endif
     int code = mito_handle(app, "MAIN", 4, target, tn, pairs, np, 0, 0, "", 0);
     u32 bn; const char *body = mito_response(app, &bn);
-    if (code >= 400) { os_err(body, bn); os_err("\n", 1); return 1; }
+    int exit_code = 0;
+    if (code >= 1256 && code <= 1511) { os_err(body, bn); return code - 1256; } /* `exit_error(n, body)`: the body as it is on standard error, exit code n */
+    if (code >= 1000 && code <= 1255) exit_code = code - 1000;                  /* `exit(n, body)`: the body on standard output, exit code n */
+    else if (code >= 400) { os_err(body, bn); os_err("\n", 1); return 1; }
     while (bn) { u32 c = bn > CLI_READ_CHUNK ? CLI_READ_CHUNK : bn; os_out(body, c); body += c; bn -= c; }
-    return 0;
+    return exit_code;
 }

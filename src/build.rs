@@ -527,6 +527,48 @@ int main(int argc, char **argv) {
         (o.status.code().unwrap(), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
     }
 
+    /// `exit(n, body)` and `exit_error(n, body)`: a command-line program chooses its exit code (0 to 255); statuses of 400 or more still exit 1.
+    #[test]
+    fn a_main_program_chooses_its_exit_code() {
+        let src = "struct A { n: i64; }\nstate a: A;\n@main\nfn main(w: ascii<1..20> from arg(0)) -> Response<text> {\n    if w == \"usage\" { return exit_error(2, \"usage: x\n\"); }\n    if w == \"five\" { return exit_error(5, \"bad input\"); }\n    if w == \"one\" { return exit(1, \"null\n\"); }\n    if w == \"max\" { return exit(255, \"m\"); }\n    if w == \"zero\" { return exit(0, \"z\"); }\n    if w == \"http\" { return status(404, \"nf\"); }\n    if w == \"fail\" { fail 422 \"no\"; }\n    return ok(w);\n}\n";
+        let Some((dir, exe)) = cli_build(src, "exit") else { return };
+        assert_eq!(cli_run(&exe, &["usage"], ""), (2, "".into(), "usage: x\n".into()));
+        assert_eq!(cli_run(&exe, &["five"], ""), (5, "".into(), "bad input".into()));
+        assert_eq!(cli_run(&exe, &["one"], ""), (1, "null\n".into(), "".into()));
+        assert_eq!(cli_run(&exe, &["max"], ""), (255, "m".into(), "".into()));
+        assert_eq!(cli_run(&exe, &["zero"], ""), (0, "z".into(), "".into()));
+        assert_eq!(cli_run(&exe, &["http"], ""), (1, "".into(), "nf\n".into()));
+        let (c, o, e) = cli_run(&exe, &["fail"], ""); assert!(c == 1 && o.is_empty() && e.contains("no"), "{} {:?}", c, e);
+        assert_eq!(cli_run(&exe, &["plain"], ""), (0, "plain".into(), "".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // outside `@main` there is no `exit`; the code is 0 to 255
+        for (src, want) in [
+            ("struct A { n: i64; }\nstate a: A;\n@get(\"/x\")\nfn x() -> Response<text> { return exit(2, \"a\"); }\n", "exit"),
+            ("struct A { n: i64; }\nstate a: A;\n@main\nfn main() -> Response<text> { return exit(256, \"a\"); }\n", "0 to 255"),
+        ] {
+            let r = crate::source::load(src).map_err(|e| e.to_string()).and_then(|(st, code)| crate::layout::Program::parse(&st).map_err(|e| e.to_string()).and_then(|p| crate::cgen::check(&p, &code).map(|_| ()).map_err(|e| e.to_string())));
+            let e = r.err().unwrap_or_else(|| "no error".into());
+            assert!(e.contains(want), "{}", e);
+        }
+    }
+
+    /// `from args`: the program gets every argument as written, each followed by a 0 byte, and the runtime binds no flags (it parses its own).
+    #[test]
+    fn a_main_program_can_read_its_raw_arguments() {
+        let src = "struct A { n: i64; }\nstate a: A;\n@main\nfn main(args: utf8<1000> from args, first: utf8<0..100> = \"\" from arg(0), loud: bool = false) -> Response<text> {\n    if loud { return ok(\"loud\"); }\n    return ok(args + \"|\" + first);\n}\n";
+        let Some((dir, exe)) = cli_build(src, "args") else { return };
+        assert_eq!(cli_run(&exe, &[".x", "--raw-output", "-n", "--tab", "--indent", "3"], ""), (0, ".x\0--raw-output\0-n\0--tab\0--indent\03\0|.x".into(), "".into()));
+        assert_eq!(cli_run(&exe, &["--tab", ".x"], ""), (0, "--tab\0.x\0|--tab".into(), "".into()));
+        // `--loud` is not a flag here: a plain argument, and `loud` stays false
+        assert_eq!(cli_run(&exe, &["--loud"], ""), (0, "--loud\0|--loud".into(), "".into()));
+        assert_eq!(cli_run(&exe, &[], ""), (0, "|".into(), "".into()));
+        let many: Vec<String> = (0..40).map(|i| format!("a{}", i)).collect();
+        let refs: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        let (c, o, _) = cli_run(&exe, &refs, "");
+        assert!(c == 0 && o.starts_with("a0\0a1\0") && o.contains("a39\0|a0"), "{} {:?}", c, o);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A text field declared with the largest size (4 GiB - 1) puts the fields after it beyond 4 GiB into the state: they must work (the plain-state
     /// handlers take 64-bit offsets).
     #[test]

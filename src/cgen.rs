@@ -934,7 +934,9 @@ pub fn program_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>, web:
     if let Some(e) = api.eps.iter().find(|e| e.method == "MAIN") {
         if api.eps.iter().any(|x| !matches!(x.method.as_str(), "MAIN" | "START")) { return Err("a program with `@main` is a command-line program: it has no endpoints (`@get` ...) beside it".into()); }
         let stdin = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":stdin"));
-        return Ok(vec![program_c(prog, api, source)? + if stdin { "#define MITO_CLI_STDIN 1\n" } else { "" } + CLI]);
+        // a program with `from args` reads the arguments as written and parses its own flags
+        let raw = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":args"));
+        return Ok(vec![program_c(prog, api, source)? + if stdin { "#define MITO_CLI_STDIN 1\n" } else { "" } + if raw { "#define MITO_CLI_ARGS 1\n" } else { "" } + CLI]);
     }
     // a program whose entry is `@frame` is a game: its `main` is runtime/game.c, which loads SDL3 and OpenGL when it starts
     if api.eps.iter().any(|e| e.method == "FRAME") {

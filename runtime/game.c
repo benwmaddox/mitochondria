@@ -115,7 +115,7 @@ static const struct { const char *name; void **at; } gl_table[] = {
     { "glActiveTexture", (void **)&glActiveTexture }, { "glUniform1i", (void **)&glUniform1i }, { "glDrawBuffers", (void **)&glDrawBuffers },
 };
 
-/* the offscreen image the passes with a scale draw into: two 16-bit float textures on one framebuffer (colour attachments 0 and 1) */
+/* the offscreen image the passes with a scale draw into: two 16-bit float textures on one framebuffer (color attachments 0 and 1) */
 static unsigned game_fbo = 0, game_tex[2] = { 0, 0 };
 static int game_tex_w = 0, game_tex_h = 0;
 static int game_image(int w, int h) {

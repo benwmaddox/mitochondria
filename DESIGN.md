@@ -416,6 +416,25 @@ A pass can draw into an image instead of the window: `scene@0.25 px=1 pz=2` draw
 and a pass after it that draws on the window reads that image as `uniform sampler2D uImage`. The image can carry two pictures: a scene shader that declares `layout(location = 0) out vec4 color;` and `layout(location = 1) out vec4 aux;` draws both at once (two 16-bit float textures, both made again when the window or the scale changes), and the window pass reads the second as `uniform sampler2D uImage1` (linear filtering; `texelFetch` gives exact values such as an id). examples/world keeps in the second what the brush strokes follow: depth, the surface's normal and what each pixel is (sky, ground, water, the figure), so that the strokes run along edges and contours and the figure gets finer strokes. That is how an expensive picture is drawn small and used large: examples/world draws its world at a quarter of the window's size and paints from it, 23 times faster than doing both for every pixel (1.2 ms against 28 ms a frame at 1280x720).
 The picture is made on the GPU and the rules stay in the program: state and rules are ordinary Mitochondria (fixed-size state, `sin`, `cos`, `min`, `max` on floats), and the game's logic can be tested without a window like any other program's.
 `--frames N --screenshot f.ppm` renders N frames in a window that is not shown and saves the last, to look at or to test with (src/build.rs, `game_renders_the_world`, needs SDL3 and a GPU, so it runs only when asked).
+**Record and replay.** `--record FILE` writes what the program was given, so that `--replay FILE` can run it again and prove the run is the same. A recording is the program's inputs and nothing else: each frame's `dt` as a 64-bit double, the state of the keys the program reads and the pointer's `dx`, `dy` as 32-bit floats; replay feeds them to `@frame` in place of the window's events (the window is still created, hidden, to render and to allow `--screenshot` and `--capture`). The run is made repeatable on both sides: the clock is fixed (`now()` starts at 2026-01-01 00:00 UTC as in `mito test` and moves on by the sum of the frames' `dt`, in whole milliseconds) and the random generator has the recording's seed (`--seed`; when it is 0, which means a seed of the machine's own, a fresh nonzero one is chosen and stored). Everything is little-endian:
+
+```
+offset  size  field
+0       8     magic `MITOREP1`
+8       4     format version (1)
+12      4     checkpoint interval N (0: none but the last)
+16      8     seed
+24      4+4   window width, height
+32      8     frame count (all ones until the recording is finished: such a file is refused)
+40      8     hash of the state after the last frame
+48      8     program hash: the key names and shader names in order and the state layout (sizes, offsets, collections' capacities and columns)
+56      ...   u32 number of keys, each u16 length + name (the program's key order); u32 number of shaders, each u16 length + name
+then for each frame: f64 dt; (keys + 7) / 8 bytes of key bits (key k is bit k % 8 of byte k / 8); f32 mouse dx; f32 mouse dy;
+        and, when (frame number + 1) is a multiple of N, a u64 state hash taken after the frame
+```
+
+The state hash (`mito_state_hash` in runtime/mito.c, 64 bits, not cryptographic) covers exactly the live declared state: the plain values (offset 0 up to the request struct) and, for every collection, the ranges the memory trimmer treats as live (the header words, a pool's live bits and generations, the columns of the live items, a string column up to its length), each mixed with its offset and length. It leaves out the request struct, the text and answer areas, the undo log, SQLite tables and the clock, which may differ between runs without the state differing. A replay recomputes the hash at the same frames and on the first mismatch prints `replay diverged at frame K: expected H1, got H2` and exits with code 1 (K counts from 0 and is the checkpoint's frame: the state went wrong at or after the frame N before it); after the last frame the recorded final hash is compared the same way. A file that is not a recording, is cut short, has another version, is unfinished, or was made by another program (its program hash differs) is refused with exit code 2 and a message naming what is wrong. A change to the program's rules alone does not change the program hash: the replay then diverges at the first checkpoint. `--capture DIR` writes `DIR/frame_NNNNNN.png` every `--capture-every N` frames (default 1), numbered by frame, live, with `--frames` or with `--replay`; the PNG is written by the driver with no library (8-bit RGB, deflate stored blocks, Adler-32 and CRC-32 by hand). src/build.rs `game_record_and_replay` (needs SDL3 and a GPU) records `examples/world`, replays it twice and compares checkpoints and pictures, refuses damaged files and catches tampered inputs.
+
 `examples/world` is an open world made this way. Not built yet: tables in a game, sound, mouse buttons, more than one offscreen pass.
 
 ## Command-line programs

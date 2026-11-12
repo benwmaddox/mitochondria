@@ -2904,6 +2904,24 @@ MITO_API int MITO(wants_write)(void *mp_) { return ((Mito *)mp_)->wants_write; }
 #define MITO_MAX_LOOP_BUDGET (1LL << 50)
 MITO_API void MITO(set_loop_budget)(void *mp_, i64 n) { ((Mito *)mp_)->loop_budget = n > MITO_MAX_LOOP_BUDGET ? MITO_MAX_LOOP_BUDGET : n; }
 MITO_API void MITO(set_clock)(void *mp_, i64 ms, int fixed) { Mito *m = (Mito *)mp_; m->clock = ms; m->fixed_clock = fixed; }
+/* A 64-bit hash of the live declared state, for record and replay (runtime/game.c compares it between a recording and its replay): the plain values
+   (bytes 0 up to the request struct, which is scratch and left out) and, for every collection, exactly the live ranges the trims see (inst_ranges: header
+   words, a pool's live bits and generations, the columns of the live items; a string column only up to its length), each range mixed with its offset and
+   length. Left out: the request struct, the text and answer areas, the undo log, SQLite tables and the clock. Not cryptographic. */
+static u64 hash_word(u64 h, u64 w) { h = (h ^ w) * 0x9E3779B97F4A7C15ULL; h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ULL; return h ^ (h >> 32); }
+static void hash_range(Mem *m, u64 a, u64 b, void *x) {
+    u64 h = *(u64 *)x; const u8 *p = m->base + a; u64 n = b - a;
+    h = hash_word(hash_word(h, a), n);
+    for (; n >= 8; n -= 8, p += 8) { u64 w; memcpy(&w, p, 8); h = hash_word(h, w); }
+    if (n) { u64 w = 0; memcpy(&w, p, n); h = hash_word(h, w); }
+    *(u64 *)x = h;
+}
+MITO_API u64 MITO(state_hash)(void *mp_) {
+    Mem *m = &((Mito *)mp_)->mem; const MitoProg *pg = m->prog; u64 h = 0x6D69746F72657031ULL;
+    hash_range(m, 0, pg->req_size ? pg->req_off : pg->plain_end, &h);
+    for (u32 c = 0; c < pg->ncolls; c++) coll_ranges(m, c, hash_range, &h);
+    return h;
+}
 MITO_API void MITO(set_web_etag)(void *mp_, int on) { ((Mito *)mp_)->web_etag = on; }
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn);
 /* Run the program's `@start` function (if it has one): after its tables are open, before any request. 0, or the failure's status

@@ -83,6 +83,10 @@ function of no type. `self` is an item, an integer (`i64`, or any narrower integ
 
 A function can take a plain struct (a struct that is a field of the state, also nested): `fn move_by(p: Pos, dx: i64) { p.x += dx; }` is called `move_by(world.origin, 2)`, and `fn len2(self: Pos) -> i64` is called `world.hero.pos.len2()`. The parameter is a view of the struct where it lives, not a copy: reads see the state and writes through it change the state, with every range, `logged` rule and read-only check of a write written with the full path. A struct that is also an item type takes either a plain struct or an item (the argument decides). A plain struct cannot be a function's result or a nullable parameter (DESIGN.md, Struct parameters).
 
+## Const groups
+
+`const Limits { MAX_HP: i64 = 100; MAX_NAME = 16; DOUBLE: i64 = Limits.MAX_HP * 2; }` names compile-time constants, used as `Limits.MAX_HP`. The type is optional for integers (a value that does not fit the type is an error); a float needs one (`const Tune { GRAVITY: f64 = 9.8; }`). A value is a number, an earlier constant of any group, and `- + * / % << >> & | ^ ( )` of them, folded when read; overflow is an error naming the constant. A constant is usable in code (also as a `match` arm), in a field's `in lo..hi`, and in a size (`string<Limits.MAX_NAME>`, `u8[Limits.MAX_NAME]`, `pool<Item, Limits.N>`), not yet in an endpoint input's range (`DESIGN.md`, Const groups).
+
 ## Entry points
 
 `@get("/p")`, `@post`, `@put`, `@patch` and `@delete` are endpoints (a function with an HTTP route and typed inputs; `@get` and `@delete` read their inputs from the query, the others from the body, a path

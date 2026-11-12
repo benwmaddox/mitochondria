@@ -637,7 +637,7 @@ fn closed() -> Response<null> { a.opened -= 1; return no_content(); }
             let (st, api) = crate::source::load(&src).unwrap();
             let prog = crate::layout::Program::parse(&st).unwrap();
             let mut api = crate::lang::parse(&api).unwrap();
-            crate::lang::bind_with(&mut api, &|g| prog.global(g), &prog.enum_table()).unwrap();
+            crate::lang::bind_with(&mut api, &|g| prog.global(g), &prog.enum_table(), &prog.const_table()).unwrap();
             let exe = dir.join(format!("{}{}", n, std::env::consts::EXE_SUFFIX));
             // clang: Windows Defender's machine-learning heuristics now and then take a small unsigned TinyCC executable for malware
             // (Sabsik/Wacatac "!ml"), which would make this test about Defender instead of about migration

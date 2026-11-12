@@ -760,7 +760,7 @@ pub fn test_names(api: &Api) -> Vec<String> { api.fns.iter().filter_map(|f| f.te
 /// endpoint (a problem in a function several endpoints call is reported once, at its place).
 pub fn check(prog: &Program, api_src: &str) -> Result<Api, String> {
     let mut api = parse(api_src)?;
-    crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table())?;
+    crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table(), &prog.const_table())?;
     set_methods(&api);
     let notes = generate_tests(prog, &api).notes;
     let mut seen: Vec<&str> = Vec::new();
@@ -912,7 +912,7 @@ pub fn system_c(spec: &crate::spec::Spec) -> Result<Vec<String>, String> {
         let prog = Program::parse(&k.state).map_err(|e| format!("worker {}: {}", k.name, e))?;
         total = total.saturating_add(prog.total.saturating_mul(k.count));
         let mut api = crate::lang::parse(&k.api).map_err(|e| format!("worker {}: {}", k.name, e))?;
-        crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table()).map_err(|e| format!("worker {}: {}", k.name, e))?;
+        crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table(), &prog.const_table()).map_err(|e| format!("worker {}: {}", k.name, e))?;
         let pre = format!("k{}_", i);
         units.push(program_c_named(&prog, &api, None, &pre).map_err(|e| format!("worker {}: {}", k.name, e))?);
         for s in &sigs { table += &s.replace("{}", &pre); table.push('\n'); }
@@ -5622,7 +5622,7 @@ state app: A;
         let (state, api) = crate::source::load(&src).unwrap();
         let prog = Program::parse(&state).unwrap();
         let mut api = crate::lang::parse(&api).unwrap();
-        crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+        crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table(), &prog.const_table()).unwrap();
         let g = generate(&prog, &api);
         assert!(g.notes.is_empty(), "{:?}", g.notes);
         g.src[g.src.find("int ep0(Ctx").unwrap()..].to_string()
@@ -5689,6 +5689,19 @@ state app: A;
         assert!(checked("var i = app.big; i = i + 1; let x = app.xs[i]; return ok({ x: x });") > 0); // the step came before the access
         assert!(checked("var i = app.big; let h = app.n > 5 && app.xs[i] == 1; i = i + 1; return ok({ x: i });") > 0); // the test may not have run: it says nothing of the code after
         assert!(checked("var i = app.big; if app.n > 5 { let x = app.xs[i]; } i = i + 1; return ok({ x: i });") > 0);
+    }
+
+    /// A constant is exactly its value: code that uses one is the code written with the number (so a loop over a constant range is bounded, and its checks removed, as for a literal).
+    #[test]
+    fn a_constant_is_its_value_to_the_analyses() {
+        let ep = |range: &str, bound: &str| format!("@get(\"/t\") fn t() -> Response<{{ x: i64 }}> {{ var s = 0; foreach i in 0..{} {{ app.xs[i] = 1; s += app.xs[i] + {}; }} return ok({{ x: s }}); }}", range, bound);
+        let lit = |range: &str| endpoint_code("struct A { xs: u8[4]; } state app: A;", &ep(range, "7"));
+        let cst = |range: &str| endpoint_code("const L { N = 4; K: i64 = L.N + 3; } struct A { xs: u8[L.N]; } state app: A;", &ep(range, "L.K"));
+        assert_eq!(lit("3"), cst("L.N - 1"));
+        assert_eq!(lit("4"), cst("L.N")); // one too many: the index test stays, as with the literal
+        assert_ne!(lit("3"), lit("4"));
+        let (a, b) = (cst("L.N - 1"), cst("L.N"));
+        assert!(b.len() > a.len(), "the unbounded loop keeps a test the bounded one lost");
     }
 
     #[test]

@@ -117,6 +117,13 @@ pub struct ModInst { pub name: String, pub module: String, pub key: Option<Strin
 #[derive(Clone, Debug)]
 pub struct EnumDef { pub name: String, pub base: Scalar, pub values: Vec<(String, i64)> }
 
+/// A compile-time constant's value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CVal { Int(i64), Flt(f64) }
+/// `const Limits { MAX_HP: i64 = 100; MAX_NAME = 16; }`: a named group of constants, used as `Limits.MAX_HP`.
+#[derive(Clone, Debug)]
+pub struct ConstGroup { pub name: String, pub items: Vec<(String, CVal)> }
+
 /// Where a stored id lives: an item's column (collection, column) or a plain value (its offset).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IdAt { Col(usize, usize), Plain(usize) }
@@ -125,6 +132,7 @@ pub struct Program {
     /// The stored-id fields and the pool each names (a top-level `checked` pool).
     pub ids: Vec<(IdAt, usize)>,
     pub enums: Vec<EnumDef>,
+    pub consts: Vec<ConstGroup>,
     /// `request work: Work;`: the per-request struct (offset, bytes on whole 64-byte lines): zeroed before each request, kept out of
     /// the undo log, never kept between requests.
     pub request: Option<(usize, usize)>,
@@ -146,6 +154,8 @@ pub fn up(n: usize, to: usize) -> usize { (n + to - 1) / to * to }
 
 impl Program {
     /// The enums as the binder takes them.
+    /// The constants as the binder takes them.
+    pub fn const_table(&self) -> Vec<(String, Vec<(String, CVal)>)> { self.consts.iter().map(|g| (g.name.clone(), g.items.clone())).collect() }
     pub fn enum_table(&self) -> Vec<(String, Vec<(String, i64)>)> { self.enums.iter().map(|e| (e.name.clone(), e.values.clone())).collect() }
     /// Size and alignment of a plain (record-style) value. Collections inside a plain struct take no bytes there.
     pub fn plain_size(&self, t: &Ty) -> (usize, usize) {
@@ -189,7 +199,7 @@ impl Program {
 
     pub fn parse(src: &str) -> Result<Program, String> {
         let (t, pos) = tokenize(src);
-        let mut p = P { t, i: 0, pos };
+        let mut p = P { t, i: 0, pos, consts: Vec::new() };
         let places = declared_places(&p);
         Self::parse_tokens(&mut p).map_err(|e| {
             if crate::lang::starts_with_place(&e) { return e; }
@@ -212,8 +222,11 @@ impl Program {
         let mut instances: Vec<ModInst> = Vec::new();
         let mut enums: Vec<EnumDef> = Vec::new();
         let mut request: Option<(String, Ty)> = None;
+        p.read_consts()?;
         while p.i < p.t.len() {
             match p.ident()?.as_str() {
+                // read before everything else (so a size or range can use them): skipped here
+                "const" => { p.ident()?; p.skip_block()?; }
                 "enum" => {
                     let name = p.ident()?;
                     let declared = if p.peek() == Some(":") { p.eat(":")?; let b = p.ident()?; Some(Scalar::parse(&b).filter(|s| !matches!(s, Scalar::F32 | Scalar::F64 | Scalar::Bool)).ok_or(format!("enum `{}`: `{}` is not an integer type", name, b))?) } else { None };
@@ -304,8 +317,13 @@ impl Program {
                     p.eat(";")?;
                     instances.push(ModInst { name, module, key });
                 }
-                o => return Err(format!("expected `struct`, `enum`, `state` or `request`, found `{}`", o)),
+                o => return Err(format!("expected `struct`, `enum`, `const`, `state` or `request`, found `{}`", o)),
             }
+        }
+        for g in &p.consts {
+            if enums.iter().any(|e| e.name == g.name) { return Err(format!("const group `{}` has the name of an enum", g.name)); }
+            if structs.iter().any(|x| x.name == g.name) { return Err(format!("const group `{}` has the name of a struct", g.name)); }
+            if globals.iter().any(|x| x.0 == g.name) { return Err(format!("const group `{}` has the name of the state", g.name)); }
         }
         if globals.is_empty() { return Err("a program has one state (`state game: Game;`), and this one has none".into()); }
         // a field of an enum type is its integer, checked to hold one of the enum's values' range (which includes 0, the value it starts with)
@@ -319,7 +337,7 @@ impl Program {
                 else { sd.fields[k].1 = Ty::Scalar(en.base); if sd.ranges[k].is_none() { sd.ranges[k] = Some((lo, hi)); } }
             }
         }
-        let mut prog = Program { ids: Vec::new(), enums, request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), tables: Vec::new(), plain_tables: Vec::new(), plain_end: 0, total: 0 };
+        let mut prog = Program { ids: Vec::new(), enums, consts: std::mem::take(&mut p.consts), request: None, unlogged: Vec::new(), instances, structs, globals: Vec::new(), colls: Vec::new(), plain_colls: Vec::new(), tables: Vec::new(), plain_tables: Vec::new(), plain_end: 0, total: 0 };
         let names: HashMap<String, usize> = prog.structs.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for i in 0..prog.structs.len() {
             let fs = std::mem::take(&mut prog.structs[i].fields);
@@ -716,7 +734,7 @@ fn declared_places(p: &P) -> Vec<(String, (u32, u32))> {
     out
 }
 
-struct P { t: Vec<String>, i: usize, pos: Vec<(u32, u32)> }
+struct P { t: Vec<String>, i: usize, pos: Vec<(u32, u32)>, consts: Vec<ConstGroup> }
 impl P {
     fn peek(&self) -> Option<&str> { self.t.get(self.i).map(|s| s.as_str()) }
     fn eat(&mut self, s: &str) -> Result<(), String> { if self.peek() == Some(s) { self.i += 1; Ok(()) } else { Err(format!("expected `{}`, found `{}`", s, self.peek().unwrap_or("end of file"))) } }
@@ -726,6 +744,11 @@ impl P {
     /// An integer, with an optional minus sign.
     fn signed(&mut self) -> Result<i64, String> {
         let neg = self.word("-");
+        if self.is_const_path() {
+            let (path, v) = self.const_path()?;
+            let CVal::Int(v) = v else { return Err(format!("`{}` is a float: a range, size or enum value takes an integer", path)) };
+            return if neg { v.checked_neg() } else { Some(v) }.ok_or(format!("`{}` does not fit in an i64", path));
+        }
         let s = self.ident()?;
         let v: i128 = s.parse().map_err(|_| format!("expected a number, found `{}`", s))?;
         let v = if neg { -v } else { v };
@@ -746,7 +769,121 @@ impl P {
             match self.peek() { Some("*") => { self.i += 1; v = v.checked_mul(self.atom()?).ok_or("size too large")?; } Some("/") => { self.i += 1; let d = self.atom()?; if d == 0 { return Err("size divided by zero".into()); } v /= d; } _ => return Ok(v) }
         }
     }
-    fn atom(&mut self) -> Result<usize, String> { if self.peek() == Some("(") { self.i += 1; let v = self.count()?; self.eat(")")?; Ok(v) } else { self.num() } }
+    fn atom(&mut self) -> Result<usize, String> {
+        if self.peek() == Some("(") { self.i += 1; let v = self.count()?; self.eat(")")?; Ok(v) }
+        else if self.is_const_path() {
+            let (path, v) = self.const_path()?;
+            match v { CVal::Int(v) if v >= 0 => Ok(v as usize), CVal::Int(_) => Err(format!("`{}` is negative: a size is not", path)), CVal::Flt(_) => Err(format!("`{}` is a float: a size takes an integer", path)) }
+        } else { self.num() }
+    }
+    /// Is the next thing `Group.NAME`, a path into a const group?
+    fn is_const_path(&self) -> bool {
+        let word = |x: &String| x.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_');
+        self.t.get(self.i).map_or(false, word) && self.t.get(self.i + 1).map(|s| s.as_str()) == Some(".") && self.t.get(self.i + 2).map_or(false, word)
+    }
+    /// `Group.NAME`: the path as written and its value.
+    fn const_path(&mut self) -> Result<(String, CVal), String> {
+        let g = self.ident()?; self.eat(".")?; let n = self.ident()?;
+        let path = format!("{}.{}", g, n);
+        let Some(grp) = self.consts.iter().find(|x| x.name == g) else { return Err(format!("`{}` is not a constant: there is no const group `{}`", path, g)) };
+        match grp.items.iter().find(|x| x.0 == n) { Some(x) => Ok((path, x.1)), None => Err(format!("const group `{}` has no `{}`: it has {}", g, n, grp.items.iter().map(|x| format!("`{}`", x.0)).collect::<Vec<_>>().join(", "))) }
+    }
+    /// Skips a `{ ... }` block (nested braces included).
+    fn skip_block(&mut self) -> Result<(), String> {
+        self.eat("{")?;
+        let mut d = 1;
+        while d > 0 { match self.ident()?.as_str() { "{" => d += 1, "}" => d -= 1, _ => {} } }
+        Ok(())
+    }
+    /// Reads every top-level `const Name { NAME [: type] = value; ... }` in file order (a value may use the constants before it).
+    fn read_consts(&mut self) -> Result<(), String> {
+        let (mut i, mut depth) = (0, 0);
+        while i < self.t.len() {
+            match self.t[i].as_str() {
+                "{" => depth += 1,
+                "}" => depth -= 1,
+                "const" if depth == 0 && i + 2 < self.t.len() && self.t[i + 2] == "{" => {
+                    self.i = i + 1;
+                    let name = self.ident()?;
+                    if self.consts.iter().any(|g| g.name == name) { return Err(format!("const group `{}` is declared twice", name)); }
+                    self.eat("{")?;
+                    let mut items: Vec<(String, CVal)> = Vec::new();
+                    // the group is visible inside itself too: its own earlier names
+                    self.consts.push(ConstGroup { name: name.clone(), items: Vec::new() });
+                    let at = self.consts.len() - 1;
+                    while self.peek() != Some("}") {
+                        let n = self.ident()?;
+                        if self.peek().is_none() { return Err(format!("const group `{}` is not closed", name)); }
+                        if items.iter().any(|x| x.0 == n) { return Err(format!("const group `{}` has `{}` twice", name, n)); }
+                        let ty = if self.word(":") { let t = self.ident()?; Some((t.clone(), Scalar::parse(&t).filter(|s| *s != Scalar::Bool).ok_or(format!("constant `{}.{}`: `{}` is not a number type (i8..i64, u8..u64, f32, f64)", name, n, t))?)) } else { None };
+                        self.eat("=").map_err(|e| format!("constant `{}.{}`: {}", name, n, e))?;
+                        let v = self.cexpr().map_err(|e| format!("constant `{}.{}`: {}", name, n, e))?;
+                        self.eat(";").map_err(|e| format!("constant `{}.{}`: {}", name, n, e))?;
+                        let v = match (ty, v) {
+                            (None, CVal::Flt(_)) => return Err(format!("constant `{}.{}` is a float: give it a type, `{}: f64 = ...`", name, n, n)),
+                            (None, v) => v,
+                            (Some((t, s)), v) => match (s, v) {
+                                (Scalar::F64, CVal::Int(v)) => CVal::Flt(v as f64),
+                                (Scalar::F32, CVal::Int(v)) => CVal::Flt(v as f32 as f64),
+                                (Scalar::F32, CVal::Flt(v)) => CVal::Flt(v as f32 as f64),
+                                (Scalar::F64, v) => v,
+                                (_, CVal::Flt(_)) => return Err(format!("constant `{}.{}` is a float but declared `{}`", name, n, t)),
+                                (s, CVal::Int(v)) => {
+                                    let (lo, hi): (i128, i128) = match s { Scalar::I8 => (-128, 127), Scalar::I16 => (-32768, 32767), Scalar::I32 => (i32::MIN as i128, i32::MAX as i128), Scalar::U8 => (0, 255), Scalar::U16 => (0, 65535), Scalar::U32 => (0, u32::MAX as i128), Scalar::U64 => (0, i64::MAX as i128), _ => (i64::MIN as i128, i64::MAX as i128) };
+                                    if (v as i128) < lo || (v as i128) > hi { return Err(format!("constant `{}.{}` is {}, which does not fit {}", name, n, v, t)); }
+                                    CVal::Int(v)
+                                }
+                            },
+                        };
+                        items.push((n.clone(), v));
+                        self.consts[at].items = items.clone();
+                    }
+                    self.eat("}")?;
+                    if items.is_empty() { return Err(format!("const group `{}` has no constants", name)); }
+                    i = self.i;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        self.i = 0;
+        Ok(())
+    }
+    /// A constant expression: numbers, `Group.NAME`, parentheses and `- | ^ & << >> + - * / %`, folded when read.
+    fn cexpr(&mut self) -> Result<CVal, String> { self.clevel(0) }
+    fn clevel(&mut self, lv: usize) -> Result<CVal, String> {
+        const LV: [&[&str]; 6] = [&["|"], &["^"], &["&"], &["<", ">"], &["+", "-"], &["*", "/", "%"]];
+        if lv == LV.len() { return self.cunary(); }
+        let mut a = self.clevel(lv + 1)?;
+        loop {
+            let Some(op) = self.peek().map(|s| s.to_string()) else { return Ok(a) };
+            // `<<` and `>>` arrive as two tokens
+            let shift = lv == 3 && (op == "<" || op == ">") && self.t.get(self.i + 1) == Some(&op);
+            if !LV[lv].contains(&op.as_str()) || (lv == 3 && !shift) { return Ok(a); }
+            self.i += if shift { 2 } else { 1 };
+            let b = self.clevel(lv + 1)?;
+            let name = if shift { format!("{0}{0}", op) } else { op.clone() };
+            a = cbin(&name, a, b)?;
+        }
+    }
+    fn cunary(&mut self) -> Result<CVal, String> {
+        if self.word("-") { return match self.cunary()? { CVal::Int(v) => v.checked_neg().map(CVal::Int).ok_or("overflow".to_string()), CVal::Flt(v) => Ok(CVal::Flt(-v)) }; }
+        if self.word("(") { let v = self.cexpr()?; self.eat(")")?; return Ok(v); }
+        if self.is_const_path() { return Ok(self.const_path()?.1); }
+        let s = self.ident()?;
+        if !s.chars().next().map_or(false, |c| c.is_ascii_digit()) { return Err(format!("`{}` is not a constant (a number or `Group.NAME` of an earlier constant)", s)); }
+        // `9.8`: the digits, a `.` and digits, written together
+        if self.peek() == Some(".") && self.t.get(self.i + 1).map_or(false, |x| x.chars().next().map_or(false, |c| c.is_ascii_digit())) {
+            let (a, d, f) = (self.pos[self.i - 1], self.pos[self.i], self.pos[self.i + 1]);
+            if a.0 == d.0 && a.1 + s.chars().count() as u32 == d.1 && d.0 == f.0 && d.1 + 1 == f.1 {
+                self.i += 1; let frac = self.ident()?;
+                return format!("{}.{}", s, frac).parse::<f64>().map(CVal::Flt).map_err(|_| format!("`{}.{}` is not a number", s, frac));
+            }
+        }
+        let v = if let Some(h) = s.strip_prefix("0x") { i64::from_str_radix(&h.replace('_', ""), 16).ok() } else { s.replace('_', "").parse::<i64>().ok() };
+        v.map(CVal::Int).ok_or(format!("`{}` is not an integer that fits an i64", s))
+    }
     fn ty(&mut self) -> Result<Ty, String> {
         let n = self.ident()?;
         let mut t = if let Some(s) = Scalar::parse(&n) { Ty::Scalar(s) }
@@ -778,9 +915,75 @@ impl P {
     }
 }
 
+/// One folded operation of a constant expression: integers stay integers (overflow is an error), a float with an integer is a float.
+fn cbin(op: &str, a: CVal, b: CVal) -> Result<CVal, String> {
+    match (a, b) {
+        (CVal::Int(x), CVal::Int(y)) => {
+            let r = match op {
+                "+" => x.checked_add(y), "-" => x.checked_sub(y), "*" => x.checked_mul(y),
+                "/" | "%" => { if y == 0 { return Err("division by zero".into()); } if op == "/" { x.checked_div(y) } else { x.checked_rem(y) } }
+                "|" => Some(x | y), "^" => Some(x ^ y), "&" => Some(x & y),
+                "<<" => if (0..63).contains(&y) { x.checked_mul(1i64 << y) } else { None },
+                ">>" => if (0..64).contains(&y) { Some(x >> y) } else { None },
+                _ => None,
+            };
+            r.map(CVal::Int).ok_or(format!("`{} {} {}` overflows an i64 (or shifts by a bad amount)", x, op, y))
+        }
+        (a, b) => {
+            let f = |v: CVal| match v { CVal::Int(i) => i as f64, CVal::Flt(f) => f };
+            let (x, y) = (f(a), f(b));
+            let r = match op { "+" => x + y, "-" => x - y, "*" => x * y, "/" => { if y == 0.0 { return Err("division by zero".into()); } x / y }, _ => return Err(format!("`{}` takes integers, not floats", op)) };
+            if r.is_finite() { Ok(CVal::Flt(r)) } else { Err("not a finite number".into()) }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn const_err(consts: &str) -> String { Program::parse(&format!("{} struct A {{ n: i64; }} state a: A;", consts)).err().unwrap_or_else(|| "no error".into()) }
+
+    #[test]
+    fn const_groups_fold_and_name_their_mistakes() {
+        let p = Program::parse("const L { N: i64 = 6; M = L.N * 2 + 1; NEG = -L.M; SH = 1 << 4; } const T { G: f64 = 9.8; H: f64 = T.G / 2; I: f32 = 3; } struct A { s: string<L.N>; v: i64 in L.NEG..L.M; xs: u8[L.N + 2]; } state a: A;").unwrap();
+        let v = |g: &str, n: &str| p.consts.iter().find(|x| x.name == g).and_then(|x| x.items.iter().find(|y| y.0 == n)).map(|y| y.1);
+        assert_eq!(v("L", "M"), Some(CVal::Int(13)));
+        assert_eq!(v("L", "NEG"), Some(CVal::Int(-13)));
+        assert_eq!(v("L", "SH"), Some(CVal::Int(16)));
+        assert_eq!(v("T", "G"), Some(CVal::Flt(9.8)));
+        assert_eq!(v("T", "H"), Some(CVal::Flt(4.9)));
+        assert_eq!(v("T", "I"), Some(CVal::Flt(3.0)));
+        let s = &p.structs[0];
+        assert!(matches!(s.fields[0].1, Ty::Str(6)) && s.ranges[1] == Some((-13, 13)) && matches!(&s.fields[2].1, Ty::Arr(_, 8)));
+        // mistakes name the constant
+        assert!(const_err("const L { A = 9223372036854775807 + 1; }").contains("constant `L.A`") && const_err("const L { A = 9223372036854775807 + 1; }").contains("overflows"));
+        assert!(const_err("const L { A: u8 = 256; }").contains("constant `L.A` is 256, which does not fit u8"));
+        assert!(const_err("const L { A = 1.5; }").contains("constant `L.A` is a float: give it a type"));
+        assert!(const_err("const L { A: i64 = 1.5; }").contains("is a float but declared"));
+        assert!(const_err("const L { A = x; }").contains("constant `L.A`: `x` is not a constant"));
+        assert!(const_err("const L { A = M.B; }").contains("constant `L.A`") && const_err("const L { A = M.B; }").contains("not a constant"));
+        assert!(const_err("const L { A = 1; B = L.C; }").contains("constant `L.B`") && const_err("const L { A = 1; B = L.C; }").contains("has no `C`: it has `A`"));
+        assert!(const_err("const L { A = 1; A = 2; }").contains("`A` twice"));
+        assert!(const_err("const L { A = 1; } const L { B = 2; }").contains("const group `L` is declared twice"));
+        assert!(const_err("const A { X = 1; }").contains("has the name of a struct"));
+        assert!(const_err("enum E { X } const E { Y = 1; }").contains("has the name of an enum"));
+        assert!(const_err("const a { Y = 1; }").contains("has the name of the state"));
+        assert!(const_err("const L { A = 1 / 0; }").contains("division by zero"));
+        assert!(const_err("const L { }").contains("has no constants"));
+        assert!(Program::parse("const L { N: f64 = 2; } struct A { s: string<L.N>; } state a: A;").err().unwrap_or_default().contains("is a float"));
+        assert!(Program::parse("const L { N = 2; } struct A { s: string<L.M>; } state a: A;").err().unwrap_or_default().contains("has no `M`: it has `N`"));
+    }
+
+    #[test]
+    fn code_names_the_constants_it_misses() {
+        let src = "const L { N = 4; G: f64 = 1.5; } struct A { n: i64; } state a: A;\n@get(\"/t\") fn t() -> Response<{ x: i64 }> { return ok({ x: L.NOPE }); }";
+        let (state, api) = crate::source::load(src).unwrap();
+        let prog = Program::parse(&state).unwrap();
+        let mut api = crate::lang::parse(&api).unwrap();
+        let e = crate::lang::bind_with(&mut api, &|n| prog.global(n), &prog.enum_table(), &prog.const_table()).unwrap_err();
+        assert!(e.contains("const group `L` has no `NOPE`: it has `N`, `G`"), "{}", e);
+    }
 
     #[test]
     fn layout_rejects_what_it_cannot_bound() {

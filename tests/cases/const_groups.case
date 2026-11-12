@@ -1,0 +1,60 @@
+// const groups: `const Limits { MAX_HP: i64 = 100; }` names compile-time constants, used as `Limits.MAX_HP` in ranges, sizes, code and `match` arms; a constant may use earlier ones (integers fold at compile time), a float needs its type; a loop over a constant range is bounded like one over a literal
+--- program
+const Limits { MAX_HP: i64 = 100; MAX_NAME: i64 = 8; SLOTS = 4; DOUBLE: i64 = Limits.MAX_HP * 2; MASK = (1 << 5) - 1; }
+const Tune { GRAVITY: f64 = 9.8; HALF: f64 = Tune.GRAVITY / 2; }
+const Key { W = 119; A = 97; S = 115; D = 100; }
+
+struct Unit { name: string<Limits.MAX_NAME>; hp: i64 in 0..Limits.MAX_HP; tag: u8[Limits.SLOTS]; }
+struct World { units: pool<Unit, Limits.SLOTS>; }
+state world: World;
+
+@post("/unit/{name}")
+fn add_unit(name: string<1..8>) -> Response<{ slot: i64, hp: i64 }> {
+    let u = world.units.add();
+    u.name = name;
+    u.hp = Limits.MAX_HP;
+    return created({ slot: slot(u), hp: u.hp });
+}
+@post("/hit/{id}/{n}")
+fn hit(id: i64, n: i64 in 0..200) -> Response<{ hp: i64, dead: bool }> {
+    let u = world.units[id];
+    if n > u.hp { u.hp = 0; } else { u.hp = u.hp - n; }
+    return ok({ hp: u.hp, dead: u.hp == 0 });
+}
+// a loop over a constant range (both ends included) indexes an array of that size
+@post("/tag/{id}/{v}")
+fn tag(id: i64, v: i64 in 0..100) -> Response<{ sum: i64 }> {
+    let u = world.units[id];
+    var sum = 0;
+    foreach i in 0..Limits.SLOTS - 1 { u.tag[i] = v + i; sum += u.tag[i]; }
+    return ok({ sum: sum });
+}
+@get("/key/{c}")
+fn key(c: i64 in 0..255) -> Response<{ dir: i64 }> {
+    var d = 0;
+    match c {
+        Key.W => { d = 1; }
+        Key.A => { d = 2; }
+        Key.S, Key.D => { d = 3; }
+        else => { d = 0; }
+    }
+    return ok({ dir: d });
+}
+@get("/math")
+fn math() -> Response<{ dbl: i64, mask: i64, big: i64, g: f64, half: f64, over: bool }> {
+    return ok({ dbl: Limits.DOUBLE, mask: Limits.MASK, big: Limits.MAX_HP * 3 + Key.A, g: Tune.GRAVITY, half: Tune.HALF, over: Key.W > Limits.MAX_HP });
+}
+--- requests
+POST /unit/ann
+POST /unit/bo
+POST /hit/0/30
+POST /hit/0/90
+POST /hit/1/5
+POST /tag/0/10
+POST /tag/1/0
+GET /key/119
+GET /key/97
+GET /key/115
+GET /key/100
+GET /key/7
+GET /math

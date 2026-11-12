@@ -263,7 +263,7 @@ fn collapse_root() {
         self.inners.remove(self.inners[old_root - 1]);
     }
 }
-// leaf `leaf` lost an entry: when it and a neighbour under the same parent fit in one leaf, they become one
+// leaf `leaf` lost an entry: when it and a neighbor under the same parent fit in one leaf, they become one
 fn merge_leaf(leaf: i64) {
     let count = self.leaves[leaf - 1].count;
     let after = self.leaves[leaf - 1].next;

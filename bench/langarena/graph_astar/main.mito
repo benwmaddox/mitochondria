@@ -1,5 +1,5 @@
 // LangArena Graph::AStar (kostya/LangArena, MIT): A* search from vertex 0 to the last vertex with the heuristic target - v, using a binary min-heap ordered by (f score, vertex), as the reference's BinaryHeap<Reverse<Node>>.
-// The reference's graph: 500,000 vertices, each an object with its own list of neighbours (a pool of vertices, each with a list; capacity 48 per
+// The reference's graph: 500,000 vertices, each an object with its own list of neighbors (a pool of vertices, each with a list; capacity 48 per
 // vertex, the largest degree the reference's generator makes for the run parameters is 47), built by the reference's generator (a path through all
 // vertices, then a random number of random jumps from each, undirected). The graph is built once, in prepare. The checksum adds the path length
 // of every run, warmup runs included, modulo 2^32.

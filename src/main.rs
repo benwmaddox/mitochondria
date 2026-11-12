@@ -26,7 +26,7 @@ A program is one `.mito` file: a program, or a system of workers (a file holding
 
   check  <program> [--kinds|--costs] report the problems found, or say it loads; --kinds lists every local's kind; --costs each endpoint's work
   build  <program> [-o app.exe] [--tcc]
-                                    an executable serving HTTP (clang -O3; --tcc builds in milliseconds, unoptimised)
+                                    an executable serving HTTP (clang -O3; --tcc builds in milliseconds, unoptimized)
   run    <program> [--clang] [-- args]   serve, for a command-line program (`@main`): what follows `--` is its command line, stdin and stdout are yours
   serve  <program> [--clang] [--watch] [executable options]
                                     build with TinyCC (or clang) and run it at once; --watch rebuilds and restarts

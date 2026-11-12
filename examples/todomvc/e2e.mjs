@@ -1,4 +1,4 @@
-// TodoMVC's app spec (todomvc.com/app-spec), checked in a browser against the running app: the same behaviours as crudspec's
+// TodoMVC's app spec (todomvc.com/app-spec), checked in a browser against the running app: the same behaviors as crudspec's
 // apps/todomvc/e2e.mjs (and the reference implementations' tests), through what a person does. A second pass turns script off
 // and checks the pages and forms alone.
 //   node examples/todomvc/e2e.mjs <base-url> [screenshot.png]

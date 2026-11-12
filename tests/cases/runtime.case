@@ -1,4 +1,4 @@
-// behaviours first checked by the Rust runtime's own tests, kept here when it was removed: structs holding only
+// behaviors first checked by the Rust runtime's own tests, kept here when it was removed: structs holding only
 // collections stay distinct; a failed request rolls back every write; a freed slot is reused lowest first; a pool of
 // 100000 items with nested lists commits only the headers of items in use (see the memory line)
 // (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)

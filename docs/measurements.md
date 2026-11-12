@@ -170,7 +170,7 @@ A second `trim` right after (nothing to free) costs just the scan, 0.5-9 ms depe
 **Cost controls to add (not built):** skip dead runs shorter than a threshold (for example 16 pages) so tiny holes never reach the OS; keep a high-water slack that decays over several epochs; maintain per-page live counters on write so `trim` does not rescan live strings; run `trim` only at epoch end or when committed exceeds live by a set ratio. **Not measured:** multi-threaded decommit (it makes other cores flush their address-translation caches) and Linux `madvise` costs.
 
 ## Trimming part vs whole, and the mailbox/worker shape
-`trim <path>` (and `Instance::trim_path`) trims only the pages wholly inside one global or field. Globals of 4 KB or more now start on a page boundary so a scope never shares a page with a neighbour; a scope's two edge pages are left alone if they are shared.
+`trim <path>` (and `Instance::trim_path`) trims only the pages wholly inside one global or field. Globals of 4 KB or more now start on a page boundary so a scope never shares a page with a neighbor; a scope's two edge pages are left alone if they are shared.
 
 **Measured** (`cargo run --release -- exp trim`, second table): `big` holds 1M live strings and never changes; `worker` bursts to 50,000 rows with names and then clears. Both trims freed the same 1.14 MB.
 
@@ -342,7 +342,7 @@ the 20,000 filling posts, then all later posts and typing pings) while reads kee
 about 10 us per request) and is now a running counter; and a collection that yielded nothing was rescanned after every single free
 (1,003 trims), now only after 256 frees.
 
-**A debugging note.** A segfault after the nested-header change was not undefined behaviour: `cargo test` rebuilt only the test
+**A debugging note.** A segfault after the nested-header change was not undefined behavior: `cargo test` rebuilt only the test
 binary, and the server being run was the stale build from before the fix. Rebuild the binary before running it.
 
 ## Round 4 (2026-11-04): workers and mailboxes
@@ -497,8 +497,8 @@ assigning `a[-1] = v` wrote element 0 (now 404, as reading does).
 
 Speed is unchanged: GET messages 5.2-5.7 us compiled before and after these changes, in alternating runs.
 
-## Round 9 (2026-11-04): behaviour as recorded cases, behind one interface
-Tests that checked runtime behaviour through Rust APIs are now cases: 16 files in `tests/cases` (8 language cases, chat,
+## Round 9 (2026-11-04): behavior as recorded cases, behind one interface
+Tests that checked runtime behavior through Rust APIs are now cases: 16 files in `tests/cases` (8 language cases, chat,
 auth, input, pressure, frees, and three systems of workers), each run through a small `Backend` interface (handle a
 request, set the clock or pressure marks, report state and counters). The Rust runtime is that interface's first
 implementation, interpreted and compiled, as one program or as a system. Logs must match each other and the record; the
@@ -538,7 +538,7 @@ The generator emits the program's layout and routes as C tables, and `emit-c` wr
 (1,949 lines for the chat example, compiling on its own). In the cases the C runtime is a third backend: all 14
 single-program cases match their records on it from its first run. Worker systems are not ported yet.
 
-Speed, compiled by TinyCC (the runtime too, so almost unoptimised), chat GET 50 of 1000 messages / POST message:
+Speed, compiled by TinyCC (the runtime too, so almost unoptimized), chat GET 50 of 1000 messages / POST message:
 Rust runtime 4.1 / 0.4 us, C runtime 10.4 / 0.8 us. The clang -O2 build is expected to close this; it waits on the LLVM
 install.
 
@@ -556,7 +556,7 @@ byte-identical. Microseconds per request, steady rounds:
 | **C runtime, clang -O2** | **2.5** | **0.20** |
 | native Rust (Vec, VecDeque, String) | 2.3 | 0.24 |
 
-Built optimised, the whole program in C is on par with hand-written Rust: within 10% on the read, faster on the write
+Built optimized, the whole program in C is on par with hand-written Rust: within 10% on the read, faster on the write
 (which also journals every byte it changes so a failed request rolls back, and allocates nothing; the Rust version
 allocates a String per message). The native version checks less (a simpler body scan, no JSON validation).
 
@@ -604,13 +604,13 @@ routing by a sharded session token or in turn, `forward` with the forwarding req
 and restarts after `__crash()`. Each worker kind is its own translation unit with its interface prefixed (`k0_start`),
 so a system builds as one binary; `emit-c x.system` writes one file per kind and `system.c`. The message encoding and
 every reply text are the Rust system's, so the forward, crash and chat-sharded cases match their records on the C
-system built by TinyCC, by clang and by clang with undefined-behaviour checks. Those checks found that the program
+system built by TinyCC, by clang and by clang with undefined-behavior checks. Those checks found that the program
 interface was declared with different pointer types in the two units (`Mito *` against `void *`); it now takes `void *`.
 
 Workers now count a message before answering it (both runtimes), so counters read after an answer are exact.
 
 ## Round 14 (2026-11-04): HTTP in C, and the Rust runtime removed
-`runtime/http.c` is the HTTP front end in C, a copy of the Rust servers' behaviour: one request per connection, headers
+`runtime/http.c` is the HTTP front end in C, a copy of the Rust servers' behavior: one request per connection, headers
 up to 64 KB, a body of Content-Length bytes (at most 1 MB), invalid UTF-8 read as U+FFFD, the same response head.
 `tests/http.record` holds the Rust servers' raw answers to 30 requests chosen for edge cases (a body in pieces,
 Content-Length as `+14`, `abc` or past 2^64, more and fewer body bytes than it says, invalid UTF-8 in headers and bodies,
@@ -622,7 +622,7 @@ Then the Rust runtime went: the interpreter, the Rust servers and worker system 
 (`src/exp.rs`, `examples/*.script`). The measurements above that used them stand as recorded; they cannot be rerun
 from this commit (the last commit with them is `0070fb9`). Recording moved first: cases and the HTTP record are recorded
 by the TinyCC build, and every `.out` file and the HTTP record were unchanged by the switch. Tests of the Rust runtime
-that described language behaviour moved to the C runtime (`tests/cases/runtime.case`, JavaScript float texts and JSON
+that described language behavior moved to the C runtime (`tests/cases/runtime.case`, JavaScript float texts and JSON
 escaping, mailbox and reply-slot limits, a forward rolled back); the allocation counter went with the Rust heap. The
 live Rust comparison in `c_runtime_speed` is now only the hand-written Rust baseline; the Rust runtime's own figures are
 in Rounds 11 and earlier.
@@ -784,7 +784,7 @@ about 11 keys (hit 41 ns with the loop, 45 with count_below); it is kept as a la
 10k: range scan 1.10x -> 0.81x, increment 0.92x -> 0.88x, insert 1.71x -> 1.56x.
 
 ## Round 20 (2026-11-04): LangArena tests against the Rust reference
-Seven of LangArena's 50 tests are ported (bench/langarena, with the parameters and licence vendored and a README with the method, the
+Seven of LangArena's 50 tests are ported (bench/langarena, with the parameters and license vendored and a README with the method, the
 audit verdicts and the triage of all 50), measured against LangArena's own Rust implementation (its max-perf profile, overflow checks off) on the
 same pinned core, alternating rounds, the checksum verified on both sides in every measured run. Mitochondria / Rust, best of 3: Etc::Sieve
 4.93x, CLBG::Fannkuchredux 2.84x, Sort::Quick 1.61x, Sort::Merge 2.54x, CLBG::Spectralnorm 0.70x, CLBG::Mandelbrot 1.00x, Matmul::Single 1.25x
@@ -808,7 +808,7 @@ TextRaytracer, CRC32 and SHA256 for porting (not yet ported).
 Added since round 21 (Mitochondria / Rust, best of 3; all verified against LangArena's checksums on all three sides): Hash::CRC32 0.83x, Hash::SHA256 1.53x, CLBG::Nbody 1.36x (closest-possible),
 Etc::GameOfLife 0.83x, Graph::BFS 1.19x, Graph::DFS 1.33x, Graph::AStar 0.74x, Maze::Generator 0.70x, Maze::BFS 0.60x, Maze::AStar 0.88x, Binarytrees::Obj 1.09x, Binarytrees::Arena 3.98x.
 Against the original Crystal: 0.87x, 1.55x, 1.18x, 0.87x, 0.81x, 0.90x, 0.44x, 0.36x, 0.30x, 0.24x, 2.14x, 4.02x. Geometric mean of the 17 like-for-like and rewritten-to-match ports: 1.11x of Rust,
-0.87x of Crystal. The graph and maze ports use the reference's data shapes (pools of objects with their own neighbour lists or arrays), with array capacities set by simulating the reference's algorithms
+0.87x of Crystal. The graph and maze ports use the reference's data shapes (pools of objects with their own neighbor lists or arrays), with array capacities set by simulating the reference's algorithms
 (which also reproduced the expected checksums exactly). Slowest: Binarytrees::Arena, bound by pool add (about 28 ns per node against a Vec push of a few).
 
 ## Round 23: all 41 LangArena ports (2026-11-04)
@@ -1002,7 +1002,7 @@ All 41 ports still verify; nothing else in LangArena moved beyond the 5% between
 
 Later the same day, three more proofs (each with a test in both directions; every LangArena checksum still verifies): the range of what is stored in each plain array reaches its reads, and builds repeat until the
 ranges stop changing; a pool nothing removes from skips the live-bit test when an item is reached by number; a quotient by a positive divisor has a range. Mitochondria / Rust over the 41 ports: 0.862x to 0.835x (2 rounds
-each, best of rounds). Etc::GameOfLife 1.260 s to 1.049 s (its neighbour slots were checked live on every access); Base64::Encode 1.269 s to 0.733 s and Base64::Decode 1.008 s to 0.772 s (their indexes came
+each, best of rounds). Etc::GameOfLife 1.260 s to 1.049 s (its neighbor slots were checked live on every access); Base64::Encode 1.269 s to 0.733 s and Base64::Decode 1.008 s to 0.772 s (their indexes came
 from `size / 3`); Etc::Sieve 1.772 s to 1.300 s (Rust 1.333 s); Maze::Generator 0.579 s to 0.524 s; BF::Array 1.322 s to 1.220 s. Where range tests still cost the most, measured by compiling them out for the
 whole set (the geometric mean cost was 1.099x before these three proofs): Base64 (index values loaded from tables), Maze::Generator, HuffDecode (children read from node arrays that hold -1 for none), Graph::AStar, Etc::Words.
 

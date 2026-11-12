@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 
 # The strongest ordinary release settings, so Mitochondria is compared with Rust at its best: the standard library's
-# BTreeMap and allocator, whole-program optimisation, one codegen unit, no unwinding.
+# BTreeMap and allocator, whole-program optimization, one codegen unit, no unwinding.
 [profile.release]
 debug = false
 opt-level = 3

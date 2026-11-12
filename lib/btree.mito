@@ -6,7 +6,7 @@
 // searched by halving) and touches no item until it has found the one it wants. Leaves hold up to 16 keys and the
 // slots of their items and are linked in order; inner nodes hold up to 16 children and a key between each pair (the
 // smallest key reachable through the child on its right). A node is split into 9 and 8 when a 17th entry arrives. A
-// removed item leaves its leaf; a leaf left empty is freed, and a leaf is merged with a neighbour when the two fit in
+// removed item leaves its leaf; a leaf left empty is freed, and a leaf is merged with a neighbor when the two fit in
 // one leaf. Only leaves with the same parent merge, so a long run of removals can leave many sparse leaves: the pools
 // are sized for N/2 leaves and N/4 inner nodes, and running out is an ordinary error (507), not a wrong answer.
 // Nodes are numbered by slot + 1; 0 is none. Every item remembers its leaf, and every node its parent, so a removal
@@ -252,7 +252,7 @@ fn drop_kid(first_node: i64, gone: i64) {
         let count = inner.count;
         inner.kids.move(index + 1, index, count - 1 - index);
         if count > 1 {
-            // the separator between the removed child and its neighbour goes with it (the one on its left, else on its right)
+            // the separator between the removed child and its neighbor goes with it (the one on its left, else on its right)
             var key_at = 0;
             if index > 0 { key_at = index - 1; }
             inner.keys.move(key_at + 1, key_at, count - 2 - key_at);
@@ -279,7 +279,7 @@ fn collapse_root() {
         self.inners.remove(self.inners[old_root - 1]);
     }
 }
-// leaf `leaf` lost an item: when it and a neighbour under the same parent fit in one leaf, they become one (across
+// leaf `leaf` lost an item: when it and a neighbor under the same parent fit in one leaf, they become one (across
 // parents the separator between them would no longer hold)
 fn merge_leaf(leaf: i64) {
     let count = self.leaves[leaf - 1].count;

@@ -4,7 +4,7 @@
 --- program
 struct Score { name: string<8>; points: i64; }
 struct Word { w: string<12>; n: i64; }
-struct Fav { s: i64; } // the favourite's slot + 1; 0 for none
+struct Fav { s: i64; } // the favorite's slot + 1; 0 for none
 struct App {
     board: sorted<Score, 6, points>;
     words: sorted<Word, 8, w>;

@@ -30,7 +30,7 @@ vec3 tone(vec3 c) {
     return pow(c, vec3(1.0 / 2.2));
 }
 
-// what the scene drew at a window position, exactly (no blending between neighbouring texels): 0 sky, 1 ground, 2 water, 3 the figure
+// what the scene drew at a window position, exactly (no blending between neighboring texels): 0 sky, 1 ground, 2 water, 3 the figure
 float idAt(vec2 p) {
     ivec2 sz = textureSize(uImage1, 0);
     return floor(texelFetch(uImage1, clamp(ivec2(p / uResolution * vec2(sz)), ivec2(0), sz - 1), 0).a * 4.0 + 0.5);
@@ -66,9 +66,9 @@ vec3 grade(vec3 light) {
 
 // Where a world stroke takes its color when its middle is on the figure: its flat color would smear the figure's red over the grass, so it takes the
 // color of the nearest place off the figure, going outward from the middle of the window (the camera looks at the figure, so that is where the figure is).
-vec2 offFigure(vec2 centre) {
-    vec2 away = normalize(centre - uResolution * 0.5 + vec2(0.01, 0.02));
-    vec2 p = centre;
+vec2 offFigure(vec2 center) {
+    vec2 away = normalize(center - uResolution * 0.5 + vec2(0.01, 0.02));
+    vec2 p = center;
     for (int i = 0; i < 10; i++) {
         if (idAt(p) < 2.5) break;
         p += away * (10.0 + 4.0 * float(i)) * uResolution.y / 720.0;
@@ -78,11 +78,11 @@ vec2 offFigure(vec2 centre) {
 
 // the color of a stroke, given the window position of its middle; a little paint's worth of variation from stroke to stroke.
 // A figure stroke whose middle is off the figure takes its own pixel's color instead.
-vec3 paint(vec2 centre, vec2 pix, vec2 id, float layer, bool ofFigure) {
-    bool middleOnFigure = idAt(centre) > 2.5;
-    vec2 at = centre;
+vec3 paint(vec2 center, vec2 pix, vec2 id, float layer, bool ofFigure) {
+    bool middleOnFigure = idAt(center) > 2.5;
+    vec2 at = center;
     if (ofFigure && !middleOnFigure) at = pix;
-    else if (!ofFigure && middleOnFigure) at = offFigure(centre);
+    else if (!ofFigure && middleOnFigure) at = offFigure(center);
     vec3 c = grade(texture(uImage, clamp(at / uResolution, 0.001, 0.999)).rgb);
     float v = hash(id * 1.37 + layer * 11.0);
     c *= 0.93 + 0.14 * v;                                // each stroke a touch lighter or darker
@@ -93,7 +93,7 @@ vec3 paint(vec2 centre, vec2 pix, vec2 id, float layer, bool ofFigure) {
 // One layer of strokes: x is the color and y how much of this pixel the stroke covers (0 where the brush did not reach).
 // `len` and `wid` are the stroke's size in pixels, `turn` the layer's own angle added to the flow, `fill` 1 for a layer that covers everything.
 vec4 strokes(vec2 pix, float layer, float len, float wid, float turn, float fill, float radius, bool ofFigure) {
-    // the flow field: a direction that changes slowly across the window, held in steps so that neighbouring strokes agree
+    // the flow field: a direction that changes slowly across the window, held in steps so that neighboring strokes agree
     float flow = (noise(pix * 0.0022 + layer * 5.0) - 0.5) * 1.7 + turn;
     // ... bent to run along the form where the second image has an edge or a contour (as doubled-angle vectors), then held in steps
     vec3 form = formVector(pix, radius);
@@ -111,7 +111,7 @@ vec4 strokes(vec2 pix, float layer, float len, float wid, float turn, float fill
     vec2 local = vec2(fract((q.x + stagger) / len), fract(q.y / wid));
     // where the stroke's middle is, in the window
     vec2 mid = vec2((col + 0.5) * len - stagger, (row + 0.5) * wid) + (vec2(hash(id), hash(id + 5.0)) - 0.5) * vec2(len * 0.25, wid * 0.4);
-    vec2 centre = transpose(R) * mid;
+    vec2 center = transpose(R) * mid;
     // the stroke's shape: long, with a ragged edge and a rounded end
     float along = abs(local.x - 0.5) * 2.0 / (0.55 + 0.4 * hash(id + 2.2)), across = abs(local.y - 0.5) * 2.0;
     float ragged = (noise(vec2(q.x * 0.09, q.y * 0.5) + id) - 0.5) * 0.5;
@@ -125,7 +125,7 @@ vec4 strokes(vec2 pix, float layer, float len, float wid, float turn, float fill
     float cover = fill > 0.5 ? 1.0 : body * bristles * tip;
     if (ofFigure) cover *= smoothstep(2.35, 2.65, texture(uImage1, pix / uResolution).a * 4.0);   // the figure's own strokes stay on the figure
     if (cover <= 0.0) return vec4(0.0);
-    vec3 c = paint(centre, pix, id, layer, ofFigure);
+    vec3 c = paint(center, pix, id, layer, ofFigure);
     // bristles: fine streaks along the stroke, and the paint thinning toward the edges
     float bristle = noise(vec2(q.x * 0.035, q.y * 1.3) + id * 3.0) * 0.6 + noise(vec2(q.x * 0.1, q.y * 2.7) + id) * 0.4;
     c *= 0.86 + 0.28 * bristle;

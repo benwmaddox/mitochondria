@@ -2,7 +2,7 @@
 // added. Change an item's key with set_key (the key is read-only outside this module); other fields are the
 // program's. Walk it with `foreach s in instance [from k] [reverse] ...`.
 //
-// A skip list: every item is linked to its neighbours in order (level 0), and some items also at higher levels,
+// A skip list: every item is linked to its neighbors in order (level 0), and some items also at higher levels,
 // each about a quarter as many as the one below, so finding a key takes O(log n) steps from the top level down.
 // Links run both ways at every level, so an item is unlinked in O(levels) without searching. Nothing holds a copy
 // of a key: comparisons read the items' own keys. Positions in links are slot + 1, and 0 is the head (or the end).

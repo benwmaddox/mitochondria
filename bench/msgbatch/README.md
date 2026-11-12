@@ -19,7 +19,7 @@ One thread checks, filters and copies batches of 256 messages already in memory 
 
 (Mitochondria was 1.00x Rust before the compiler proved more of its checks unnecessary: see ../../docs/measurements.md, Rounds 28-29.)
 
-All three give the same checksum and the same counts (24 rejected, 64 skipped, 168 copied). Filter and copy alone take Rust 0.417 s and Mitochondria 0.345 s; the rest is the checksum loop (about 0.62-0.67 s), which both compilers vectorise to the same width.
+All three give the same checksum and the same counts (24 rejected, 64 skipped, 168 copied). Filter and copy alone take Rust 0.417 s and Mitochondria 0.345 s; the rest is the checksum loop (about 0.62-0.67 s), which both compilers vectorize to the same width.
 
 ## Cold vs warm and allocations (`python -I cold.py`, fresh process, no warmup, median of 7)
 

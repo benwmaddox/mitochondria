@@ -1,6 +1,6 @@
 // LangArena Etc::GameOfLife (kostya/LangArena, MIT): Conway's game of life on a w x h torus, `iterations` generations. The data-structure shape is the
-// reference's: every cell is an object holding its alive flag, its next state and its own precomputed list of its eight neighbours' (x, y) (a pool of
-// cells, each with a list), and a generation computes every cell's next state from its neighbour list and then updates every cell. Cell (x, y) is
+// reference's: every cell is an object holding its alive flag, its next state and its own precomputed list of its eight neighbors' (x, y) (a pool of
+// cells, each with a list), and a generation computes every cell's next state from its neighbor list and then updates every cell. Cell (x, y) is
 // slot y * w + x. The reference reads its checksum after the last generation: the number of live cells plus the FNV-1a hash of the alive flags
 // (hash = (hash ^ alive) * 16777619 in 32 bits, from 2166136261), which GET /checksum computes outside the timed generations as the reference does.
 // The seeding uses the reference's random generator (a cell is alive when next_float(1.0) < 0.1), which is reset before prepare.
@@ -37,7 +37,7 @@ fn prepare(w: i64 in 1..500, h: i64 in 1..500) -> Response<{}> {
     life.h = h;
     life.last = 42;
     foreach y in 0..h - 1 { foreach x in 0..w - 1 { let c = life.cells.add(); c.alive = false; c.next_state = false; } }
-    // link_neighbors: the eight neighbours in the reference's order (dy then dx, from -1), wrapping around
+    // link_neighbors: the eight neighbors in the reference's order (dy then dx, from -1), wrapping around
     foreach y in 0..h - 1 {
         foreach x in 0..w - 1 {
             let cell = life.cells[y * w + x];

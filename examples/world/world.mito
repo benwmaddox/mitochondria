@@ -1,27 +1,118 @@
 // An open world to walk through, drawn by one fragment shader. The program is the game's state and rules; the picture is made on the GPU.
-//   W A S D walk, Shift runs, the mouse looks, Escape leaves.
+//   W A S D walk, Shift runs, the mouse looks, Escape leaves. Seven orbs of light lie in a ring around where you start: walk into them.
 // The world has no edge and nothing stored: the shader makes the ground, the lakes, the sky and the fog from the seed and where you stand,
-// so every place has a fixed shape and the program keeps only the player and the time of day. See README.md.
+// so every place has a fixed shape and the program keeps only the player, the orbs and the time of day. See README.md.
 
 platform game;
 
-struct Player { x: f64; z: f64; yaw: f64; pitch: f64; heading: f64; walk: f64; moving: f64; }   // heading: the way the figure faces; walk: its stride phase
+use "std/math.mito";
+use "std/vec.mito";
+use "std/random.mito";
+
+// the numbers worth tuning
+const Tune {
+    ORBS: i64 = 7;            // how many orbs lie in the world
+    RADIUS: f64 = 3.0;        // how close (meters) you must come to collect one
+    RING_NEAR: f64 = 45.0;    // the ring of orbs: the nearest and the farthest distance from the start
+    RING_FAR: f64 = 105.0;
+    AHEAD: f64 = 42.0;        // the first orb lies this far ahead of the start along the heading, and SIDE meters to the right of the line,
+    SIDE: f64 = 2.2;          // so a walk straight forward finds it (SIDE < RADIUS) while the figure does not hide it from the camera
+    WALK: f64 = 7.0;          // meters per second
+    RUN: f64 = 22.0;
+    DAY_SECONDS: f64 = 480.0; // a day takes eight minutes
+    DAWN_DAY: f64 = 0.045;    // the golden dawn the world settles into when every orb is collected (time of day, 0..1)
+    DAWN_RATE: f64 = 0.7;     // how fast it settles (per second)
+}
+
+struct Rng { state: i64; }                           // std/random.mito: the program declares the generator in its state
+struct Player { pos: Vec2; yaw: f64; pitch: f64; heading: f64; walk: f64; moving: f64; }   // pos.x and pos.y are the world's x and z; heading: the way the figure faces; walk: its stride phase
+struct Orbs {
+    x: f64[Tune.ORBS];       // where each one hangs (world x, z)
+    z: f64[Tune.ORBS];
+    taken: bool[Tune.ORBS];  // which are collected
+    count: i64;              // how many
+    aim: Vec2;               // the nearest orb not yet collected
+    aim_dist: f64;           // how far it is (meters); 0 when none is left
+}
 struct World {
-    seed: i64;       // which world: the shader shifts its noise by it
+    seed: i64;       // which world: the shader shifts its noise by it, and the orbs are placed from it
     day: f64;        // time of day, 0..1 (0.25 is noon)
+    time: f64;       // seconds since the start (the orbs bob and pulse with it)
+    dawn: f64;       // 0..1: how far the golden dawn of the finished game has come
+    done: bool;      // every orb is collected
+    rng: Rng;
+    orbs: Orbs;
     player: Player;
 }
 state world: World;
+
+// Scatter the orbs in a wide ring around the start, from the world's seed (the same seed always gives the same places). The first lies straight ahead of the start
+// along the player's heading, the rest at random angles and distances all the way around.
+fn place_orbs() {
+    world.rng.seed(world.seed);
+    let start = world.player.yaw;
+    foreach i in 0..Tune.ORBS - 1 {
+        var a = start + atan2(Tune.SIDE, Tune.AHEAD);
+        var d = sqrt(Tune.AHEAD * Tune.AHEAD + Tune.SIDE * Tune.SIDE);
+        if i > 0 {
+            // an even share of the circle plus a little jitter, so the orbs spread out and never bunch
+            a = start + 6.2831853 * i / Tune.ORBS + (world.rng.unit() - 0.5) * 0.5;
+            d = Tune.RING_NEAR + world.rng.unit() * (Tune.RING_FAR - Tune.RING_NEAR);
+        }
+        world.orbs.x[i] = world.player.pos.x + sin(a) * d;
+        world.orbs.z[i] = world.player.pos.y + cos(a) * d;
+        world.orbs.taken[i] = false;
+    }
+    world.orbs.count = 0;
+    world.done = false;
+    world.dawn = 0.0;
+}
+
+// the distance between two places on the ground, and whether an orb that far away is collected (these write nothing, so the tests below call them)
+fn gap(ax: f64, az: f64, bx: f64, bz: f64) -> f64 { return sqrt((ax - bx) * (ax - bx) + (az - bz) * (az - bz)); }
+fn in_reach(d: f64) -> bool { return d <= Tune.RADIUS; }
+
+// Collect every orb within reach of the player, then find the nearest one left. Nothing comes back: the count only grows, and never past the number of orbs.
+fn collect() {
+    var nearest = 1000000000.0;
+    world.orbs.aim_dist = 0.0;
+    foreach i in 0..Tune.ORBS - 1 {
+        if !world.orbs.taken[i] {
+            let d = gap(world.orbs.x[i], world.orbs.z[i], world.player.pos.x, world.player.pos.y);
+            if in_reach(d) {
+                world.orbs.taken[i] = true;
+                world.orbs.count = min(world.orbs.count + 1, Tune.ORBS);
+            } else if d < nearest {
+                nearest = d;
+                world.orbs.aim.set(world.orbs.x[i], world.orbs.z[i]);
+                world.orbs.aim_dist = d;
+            }
+        }
+    }
+    if world.orbs.count >= Tune.ORBS { world.done = true; }
+}
+
+// which orbs are collected, as a number the shader reads bit by bit (bit i set: orb i is collected)
+fn taken_mask() -> f64 {
+    var m = 0.0;
+    var bit = 1.0;
+    foreach i in 0..Tune.ORBS - 1 {
+        if world.orbs.taken[i] { m += bit; }
+        bit *= 2.0;
+    }
+    return m;
+}
 
 @start
 fn init() {
     world.seed = 20261111;
     world.day = 0.10;
-    world.player.x = 330.0;
-    world.player.z = 60.0;
+    world.player.pos.set(330.0, 60.0);
     world.player.yaw = 0.35;
     world.player.pitch = -0.22;
     world.player.heading = 0.35;
+    place_orbs();
+    collect();
 }
 
 // the two shaders: `scene` draws the world small, `paint` lays that down in brush strokes over the whole window
@@ -31,13 +122,13 @@ fn scene() -> Response<text> { return ok(file("scene.frag")); }
 fn paint() -> Response<text> { return ok(file("paint.frag")); }
 
 // Called every frame with what the window saw. The answer is the frame, a line for each pass: first `scene` into an image a quarter of the window's size, with the
-// world's uniforms, then `paint` over the window, which reads that image.
+// world's uniforms, then `paint` over the window, which reads that image and draws the compass and the count on top.
 @frame
 fn frame(dt: f64 from time, forward: bool from key("w"), back: bool from key("s"), left: bool from key("a"), right: bool from key("d"),
          run: bool from key("shift"), look_x: f64 from mouse("dx"), look_y: f64 from mouse("dy")) -> Response<text> {
     // looking: the pointer turns you, and you cannot look past straight up or down
     world.player.yaw += look_x * 0.0025;
-    world.player.pitch = max(-1.4, min(1.4, world.player.pitch - look_y * 0.0025));
+    world.player.pitch = (world.player.pitch - look_y * 0.0025).clamp(-1.4, 1.4);
 
     // walking, in the direction you face (yaw 0 faces +z; the right hand is +x)
     var ahead = 0.0;
@@ -46,30 +137,79 @@ fn frame(dt: f64 from time, forward: bool from key("w"), back: bool from key("s"
     if back { ahead -= 1.0; }
     if right { aside += 1.0; }
     if left { aside -= 1.0; }
-    var speed = 7.0;
-    if run { speed = 22.0; }
+    var speed = Tune.WALK;
+    if run { speed = Tune.RUN; }
     let s = sin(world.player.yaw);
     let c = cos(world.player.yaw);
     let dx = s * ahead + c * aside;
     let dz = c * ahead - s * aside;
-    world.player.x += dx * speed * dt;
-    world.player.z += dz * speed * dt;
+    world.player.pos.x += dx * speed * dt;
+    world.player.pos.y += dz * speed * dt;
 
     // the figure turns smoothly toward the way it travels (the angle's difference wrapped to -pi..pi), and its stride advances with the distance walked
     world.player.moving = 0.0;
     if ahead != 0.0 || aside != 0.0 {
         world.player.moving = 1.0;
         let want = atan2(dx, dz);
-        let d = want - world.player.heading;
-        world.player.heading += atan2(sin(d), cos(d)) * min(1.0, 12.0 * dt);
+        world.player.heading += world.player.heading.angle_diff(want) * min(1.0, 12.0 * dt);
         world.player.walk += speed * dt * 1.6;
     }
 
-    // a full day takes eight minutes
-    world.day += dt / 480.0;
-    if world.day >= 1.0 { world.day -= 1.0; }
+    collect();
+    world.time += dt;
 
-    return ok("scene@0.25 px=" + str(world.player.x) + " pz=" + str(world.player.z) + " yaw=" + str(world.player.yaw) + " pitch=" + str(world.player.pitch) + " heading=" + str(world.player.heading) + " walk=" + str(world.player.walk) + " moving=" + str(world.player.moving)
-        + " day=" + str(world.day) + " seed=" + str(world.seed % 1000) + "
-paint");
+    // the clock runs a full day in eight minutes; once every orb is collected it turns toward the golden dawn instead (the short way round) and the light rises with it
+    if world.done {
+        world.dawn = min(1.0, world.dawn + dt * 0.4);
+        world.day += (Tune.DAWN_DAY - world.day).wrap(-0.5, 0.5) * min(1.0, Tune.DAWN_RATE * dt);
+    } else {
+        world.day += dt / Tune.DAY_SECONDS;
+    }
+    world.day = world.day.wrap(0.0, 1.0);
+
+    // where the nearest orb lies relative to where you look (positive: to the right), for the compass
+    var arrow = 0.0;
+    if world.orbs.aim_dist > 0.0 {
+        arrow = world.player.yaw.angle_diff(atan2(world.orbs.aim.x - world.player.pos.x, world.orbs.aim.y - world.player.pos.y));
+    }
+
+    var line: text<1024> = "scene@0.25 px=" + str(world.player.pos.x) + " pz=" + str(world.player.pos.y) + " yaw=" + str(world.player.yaw) + " pitch=" + str(world.player.pitch)
+        + " heading=" + str(world.player.heading) + " walk=" + str(world.player.walk) + " moving=" + str(world.player.moving)
+        + " day=" + str(world.day) + " seed=" + str(world.seed % 1000) + " time=" + str(world.time) + " dawn=" + str(world.dawn) + " taken=" + str(taken_mask());
+    foreach i in 0..Tune.ORBS - 1 {
+        line = line + " ox" + str(i) + "=" + str(world.orbs.x[i]) + " oz" + str(i) + "=" + str(world.orbs.z[i]);
+    }
+    return ok(line + "
+paint count=" + str(world.orbs.count) + " total=" + str(Tune.ORBS) + " arrow=" + str(arrow) + " near=" + str(world.orbs.aim_dist) + " dawn=" + str(world.dawn) + " time=" + str(world.time));
 }
+
+// ---- tests (`mito test world.mito`): the rules without a window. A test reads the state @start made and may call functions that do not write the state.
+test "the orbs lie in a ring, the first straight ahead" {
+    // the first orb: AHEAD meters along the heading and SIDE to the right of it, so walking straight forward passes within reach
+    let dx = world.orbs.x[0] - world.player.pos.x;
+    let dz = world.orbs.z[0] - world.player.pos.y;
+    let along = dx * sin(world.player.yaw) + dz * cos(world.player.yaw);
+    let across = dx * cos(world.player.yaw) - dz * sin(world.player.yaw);
+    if abs(along - Tune.AHEAD) > 0.001 || abs(across - Tune.SIDE) > 0.001 { return "the first orb is at " + str(along) + " ahead, " + str(across) + " aside"; }
+    if !in_reach(across) { return "walking straight ahead would miss the first orb"; }
+    foreach i in 0..Tune.ORBS - 1 {
+        let d = gap(world.orbs.x[i], world.orbs.z[i], world.player.pos.x, world.player.pos.y);
+        if d < Tune.AHEAD - 0.01 || d > Tune.RING_FAR + 0.01 { return "orb " + str(i) + " at " + str(d); }
+        if in_reach(d) { return "orb " + str(i) + " starts within reach"; }
+    }
+    return world.orbs.count == 0 && !world.done && world.orbs.aim_dist > 0.0;
+}
+test "an orb is collected only within the radius" {
+    if !in_reach(Tune.RADIUS - 0.01) || in_reach(Tune.RADIUS + 0.01) { return "the radius is not the line"; }
+    if abs(gap(3.0, 4.0, 0.0, 0.0) - 5.0) > 0.000001 { return "gap(3,4)"; }
+    return gap(world.orbs.x[0], world.orbs.z[0], world.orbs.x[0], world.orbs.z[0]) == 0.0;
+}
+test "no orb is placed on another" {
+    foreach i in 0..Tune.ORBS - 1 {
+        foreach j in 0..Tune.ORBS - 1 {
+            if i < j && gap(world.orbs.x[i], world.orbs.z[i], world.orbs.x[j], world.orbs.z[j]) < 4.0 * Tune.RADIUS { return "orbs " + str(i) + " and " + str(j) + " are close"; }
+        }
+    }
+    return taken_mask() == 0.0;
+}
+

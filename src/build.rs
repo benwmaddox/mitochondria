@@ -280,7 +280,7 @@ int main(int argc, char **argv) {
     fn game_renders_the_world() {
         let Some(sdl) = std::env::var_os("MITO_SDL3_DIR") else { eprintln!("MITO_SDL3_DIR is not set: skipped"); return };
         let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/world/world.mito");
-        let text = std::fs::read_to_string(&example).unwrap();
+        let text = crate::load_text(&example.to_string_lossy()).unwrap();   // the program with its `use`s expanded
         crate::lang::set_file_dir(example.parent().unwrap());
         let (st, code) = crate::source::load(&text).unwrap();
         let prog = crate::layout::Program::parse(&st).unwrap();
@@ -316,6 +316,26 @@ int main(int argc, char **argv) {
         assert!(differ(&rest, &render(&["--frames", "1"], "rest2.ppm")) == 0.0, "a frame at rest is repeatable");
         assert!(differ(&rest, &render(&["--frames", "120", "--hold", "w,shift"], "walk.ppm")) > 3.0, "running forward moves the view");
         assert!(differ(&rest, &render(&["--frames", "1", "--mouse", "160,0"], "turn.ppm")) > 2.0, "the pointer turns the view");
+        // the game: the first orb lies 42 m ahead of the start along the heading and 2.2 m aside (the walk is 22 m/s with Shift, 60 frames a second), so a straight run reaches it
+        // at about frame 109 and the count in the panel's corner goes from 0 to 1. Compare the digit's box (panel at 24,24 in a 720-high layout; the digit centered at 154,64, 24x42) at 640x360.
+        let big = |frames: &str, name: &str| -> Vec<u8> {
+            let f = dir.join(name);
+            let out = std::process::Command::new(&exe).args(["--size", "640x360", "--frames", frames, "--hold", "w,shift", "--screenshot"]).arg(&f).env("PATH", format!("{};{}", sdl.to_string_lossy(), std::env::var("PATH").unwrap_or_default())).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+            std::fs::read(&f).unwrap()[b"P6\n640 360\n255\n".len()..].to_vec()
+        };
+        let digit = |px: &[u8]| -> Vec<u8> {
+            let mut v = Vec::new();
+            for y in 22..44 { for x in 71..83 { let i = (y * 640 + x) * 3; v.extend_from_slice(&px[i..i + 3]); } }
+            v
+        };
+        let before = big("100", "before.ppm");
+        let nearby = big("104", "nearby.ppm");
+        let after = big("125", "after.ppm");
+        assert!(differ(&before, &after) > 3.0, "the run moved the view");
+        let (d0, d1, d2) = (digit(&before), digit(&nearby), digit(&after));
+        assert!(differ(&d0, &d1) < 6.0, "the count does not change on the way to the orb ({})", differ(&d0, &d1));
+        assert!(differ(&d0, &d2) > 14.0, "walking into the first orb changes the count in the corner ({})", differ(&d0, &d2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -8,17 +8,17 @@ state world: World;
 
 fn len2(self: Pos) -> i64 { return self.x * self.x + self.y * self.y; }
 fn norm1(p: Pos) -> i64 { return p.x + p.y; }
-fn move_by(p: Pos, dx: i64, dy: i64) { p.x += dx; p.y += dy; }
-fn add_into(dst: Pos, src: Pos) { dst.x += src.x; dst.y += src.y; }
+fn move_by(p: write Pos, dx: i64, dy: i64) { p.x += dx; p.y += dy; }
+fn add_into(dst: write Pos, src: Pos) { dst.x += src.x; dst.y += src.y; }
 // the same name for two structs
-fn shift(self: Pos, d: i64) { self.x += d; }
-fn shift(self: Gauge, d: i64) { self.n += d; }
-fn set_n(g: Gauge, v: i64) { g.n = v; }
-fn put(g: Gauge, i: i64, v: i64) { g.hist[i] = v; }
+fn shift(self: write Pos, d: i64) { self.x += d; }
+fn shift(self: write Gauge, d: i64) { self.n += d; }
+fn set_n(g: write Gauge, v: i64) { g.n = v; }
+fn put(g: write Gauge, i: i64, v: i64) { g.hist[i] = v; }
 fn hist_sum(self: Gauge) -> i64 { return self.hist[0] + self.hist[1] + self.hist[2] + self.hist[3]; }
 // recursion, by a plain function and by a function of a type
-fn walk(p: Pos, n: i64) { if n > 0 { p.x += 1; walk(p, n - 1); } }
-fn count_up(self: Pos, n: i64) -> i64 { if n == 0 { return self.x; } self.x += 1; return self.count_up(n - 1); }
+fn walk(p: write Pos, n: i64) { if n > 0 { p.x += 1; walk(p, n - 1); } }
+fn count_up(self: write Pos, n: i64) -> i64 { if n == 0 { return self.x; } self.x += 1; return self.count_up(n - 1); }
 
 @post("/origin/{x}/{y}")
 fn set_origin(x: i64 in 0..50, y: i64 in 0..50) -> Response<{ x: i64, y: i64, len2: i64, norm1: i64 }> {

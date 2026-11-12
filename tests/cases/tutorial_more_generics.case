@@ -7,7 +7,7 @@ struct Stack<T, N: count> {
 struct Game { scores: Stack<i64, 3>; names: Stack<string<12>, 2>; }
 state game: Game;
 
-fn push(self: Stack<T, N>, x: T) {
+fn push(self: write Stack<T, N>, x: T) {
     if self.len == N { fail 409 "stack is full"; }
     self.items[self.len] = x;
     self.len += 1;

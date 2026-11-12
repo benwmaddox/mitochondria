@@ -1,0 +1,8 @@
+POST /go -> 200 {"a":4,"b":40,"c":2}
+POST /clear -> 200 {"n":0,"hits":1,"dots":0,"len":1000}
+POST /drop -> 200 {"dots":2}
+POST /name -> 200 {"n":0}
+GET /dots -> 200 {"dots":1}
+state <plain values> 40
+state game.dots 40
+memory reserved=8192 committed=8192 live=80

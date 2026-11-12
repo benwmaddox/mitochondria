@@ -421,7 +421,7 @@ mod tests {
         std::fs::write(&app, format!("{}use \"std/math.mito\";\nuse \"std/random.mito\";\n{}", head, tail)).unwrap();
         let f = app.to_string_lossy().replace('\\', "/");
         let text = super::load_text(&f).unwrap();
-        assert!(text.contains("fn clamp(self: f64") && text.contains("fn next(self: Rng)"));
+        assert!(text.contains("fn clamp(self: f64") && text.contains("fn next(self: write Rng)"));
         // beside the program is not searched: a std/ directory there changes nothing
         std::fs::create_dir_all(dir.join("std")).unwrap();
         std::fs::write(dir.join("std/math.mito"), "this is not code\n").unwrap();

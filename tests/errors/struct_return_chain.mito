@@ -1,0 +1,7 @@
+// expect: which has to go somewhere
+struct V { x: i64; y: i64; }
+struct G { p: V; q: V; }
+state g: G;
+fn plus(a: V, b: V) -> V { var r = V { x: a.x + b.x, y: a.y + b.y }; return r; }
+fn scaled(a: V, k: i64) -> V { var r = V { x: a.x * k, y: a.y * k }; return r; }
+@get("/a") fn a() -> Response<{ n: i64 }> { g.q = scaled(plus(g.p, g.q), 2); return ok({ "n": g.q.x }); }

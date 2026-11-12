@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }
-//! fn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.len += 1; }
+//! fn push(self: write Stack<T, N>, x: T) { self.items[self.len] = x; self.len += 1; }
 //! struct Game { undo: Stack<i64, 64>; names: Stack<string<12>, 8>; }
 //! ```
 //!
@@ -11,7 +11,7 @@
 //! `__mito__Stack__i64__64` (generated names start with `__mito__`, which programs do not use). A function of `Stack<T, N>`
 //! is copied for an instance only where a call `x.f(...)` on it asks (`expand` and `note_missing`: the program is compiled
 //! once to see which calls lack a copy, until none does): a plain function of a type
-//! (`fn push(self: __mito__Stack__i64__64, x: i64)`), found by the receiver's type like any other, that keeps its template's
+//! (`fn push(self: write __mito__Stack__i64__64, x: i64)`), found by the receiver's type like any other, that keeps its template's
 //! line numbers (`//# line N`). Copies are made by replacing the parameters' identifiers token by token (outside
 //! strings and comments, and not after a `.`, except a parameter that names a field, `key: field of T`), then expanded
 //! again, to a fixed point: a copy may use further generics. A function without `pub` is private to its file (`check_call`).
@@ -360,7 +360,7 @@ fn is_int_type(ty: &str) -> bool {
     INT_TYPES.contains(&word.as_str()) && { let rest = ty[word.len()..].trim_start(); rest.is_empty() || rest.starts_with("in ") }
 }
 
-/// The functions of generic types in a code text (`fn push(self: Stack<T, N>, x: T) {...}`), and the ranges to blank.
+/// The functions of generic types in a code text (`fn push(self: write Stack<T, N>, x: T) {...}`), and the ranges to blank.
 fn collect_methods(api: &str, templates: &[Template]) -> Result<(Vec<Method>, Vec<(usize, usize)>), String> {
     let s = Src::new(api);
     let (mut methods, mut cut) = (Vec::new(), Vec::new());
@@ -375,7 +375,9 @@ fn collect_methods(api: &str, templates: &[Template]) -> Result<(Vec<Method>, Ve
         if s.is(j, '<') { return Err(format!("`fn {}<...>`: generic functions of no type are not supported yet; a function of a generic type, `fn {}(self: Stack<T, N>, ...)`, binds its parameters from its receiver", name, name)); }
         if !s.is(j, '(') { i += 1; continue; }
         let p0 = s.sig(j + 1);
-        let (colon, rt) = (s.sig(p0 + 1), s.sig(s.sig(p0 + 1) + 1));
+        let (colon, mut rt) = (s.sig(p0 + 1), s.sig(s.sig(p0 + 1) + 1));
+        // `self: write Stack<T, N>`: the mode word comes before the type
+        if (s.is_id(rt, "write") || s.is_id(rt, "copy")) && s.t.get(s.sig(rt + 1)).map_or(false, |t| t.k == K::Id) { rt = s.sig(rt + 1); }
         let Some(ti) = (if s.is_id(p0, "self") && s.is(colon, ':') && s.t.get(rt).map_or(false, |t| t.k == K::Id) { templates.iter().position(|t| t.name == s.txt(rt)) } else { None }) else { i = j; continue };
         let lt = s.sig(rt + 1);
         let t = &templates[ti];
@@ -500,7 +502,7 @@ mod tests {
     use super::*;
     fn plain(state: &str, api: &str) -> Result<(String, String), String> { expand(state, api, &|s, a| Ok((s.to_string(), a.to_string()))) }
     const STACK: &str = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct Game { undo: Stack<i64, 16>; names: Stack<string<12>, 8>; again: Stack<i64, 16>; }\nstate game: Game;\n";
-    const PUSH: &str = "fn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.len = self.len + 1; }\nfn full(self: Stack<T, N>) -> bool { return self.len == N; }\n";
+    const PUSH: &str = "fn push(self: write Stack<T, N>, x: T) { self.items[self.len] = x; self.len = self.len + 1; }\nfn full(self: Stack<T, N>) -> bool { return self.len == N; }\n";
 
     #[test]
     fn a_use_becomes_a_struct_and_functions_of_a_type() {
@@ -513,7 +515,7 @@ mod tests {
         // one struct per distinct use; a copy of a function only where a call asked for it
         assert!(!api.contains("fn full(self: __mito__Stack__i64__16"), "{}", api);
         assert_eq!(st.matches("struct __mito__Stack__i64__16 ").count(), 1);
-        assert!(api.contains("fn push(self: __mito__Stack__i64__16, x: i64) {") && api.contains("fn push(self: __mito__Stack__string_12__8, x: string<12>) {"), "{}", api);
+        assert!(api.contains("fn push(self: write __mito__Stack__i64__16, x: i64) {") && api.contains("fn push(self: write __mito__Stack__string_12__8, x: string<12>) {"), "{}", api);
         assert!(api.contains("return self.len == 8;") && api.contains("//# line 2 Stack<string<12>, 8>"), "{}", api);
         // line numbers are kept: the templates are blanked, not removed
         assert_eq!(st.lines().take(3).count(), 3);
@@ -605,7 +607,7 @@ fn go() { g.show(); }
 
     #[test]
     fn errors_inside_an_instance_name_it() {
-        let head = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct G { a: Stack<i64, 16>; b: Stack<string<12>, 8>; }\nstate g: G;\nfn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.len = self.len + 1; }\n";
+        let head = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct G { a: Stack<i64, 16>; b: Stack<string<12>, 8>; }\nstate g: G;\nfn push(self: write Stack<T, N>, x: T) { self.items[self.len] = x; self.len = self.len + 1; }\n";
         assert_eq!(load(&format!("{}@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.push(3); return ok({{}}); }}\n", head)), Ok(()));
         // the wrong element type: the error is in the copy for this instance, and says which
         let e = load(&format!("{}@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.push(\"hi\"); return ok({{}}); }}\n", head)).unwrap_err();
@@ -627,7 +629,7 @@ fn go() { g.show(); }
         assert_eq!(st.matches("struct __mito__S__").count(), 1, "{}", st);
     }
 
-    const POP_HEAD: &str = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct G { a: Stack<i64, 8>; b: Stack<string<12>, 8>; }\nstate g: G;\nfn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.len = self.len + 1; }\nfn pop(self: Stack<T, N>) -> T {\n    if self.len == 0 { fail 409 \"empty\"; }\n    self.len = self.len - 1;\n    return self.items[self.len];\n}\n";
+    const POP_HEAD: &str = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nstruct G { a: Stack<i64, 8>; b: Stack<string<12>, 8>; }\nstate g: G;\nfn push(self: write Stack<T, N>, x: T) { self.items[self.len] = x; self.len = self.len + 1; }\nfn pop(self: write Stack<T, N>) -> T {\n    if self.len == 0 { fail 409 \"empty\"; }\n    self.len = self.len - 1;\n    return self.items[self.len];\n}\n";
 
     #[test]
     fn a_function_is_copied_only_for_the_instances_a_call_names() {
@@ -635,8 +637,8 @@ fn go() { g.show(); }
         let ok = format!("{}@post(\"/p\") fn p() -> Response<{{ x: i64 }}> {{ g.b.push(\"hi\"); g.a.push(3); return ok({{ x: g.a.pop() }}); }}\n", POP_HEAD);
         assert_eq!(load(&ok), Ok(()));
         let (_, api) = crate::source::load(&ok).unwrap();
-        assert!(api.contains("fn pop(self: __mito__Stack__i64__8)") && !api.contains("fn pop(self: __mito__Stack__string_12__8"), "{}", api);
-        assert!(api.contains("fn push(self: __mito__Stack__i64__8, x: i64)") && api.contains("fn push(self: __mito__Stack__string_12__8, x: string<12>)"), "{}", api);
+        assert!(api.contains("fn pop(self: write __mito__Stack__i64__8)") && !api.contains("fn pop(self: write __mito__Stack__string_12__8"), "{}", api);
+        assert!(api.contains("fn push(self: write __mito__Stack__i64__8, x: i64)") && api.contains("fn push(self: write __mito__Stack__string_12__8, x: string<12>)"), "{}", api);
         // calling it on the text instance is an error that names the instance, at the template's line in the program's own source
         let bad = format!("{}@post(\"/p\") fn p() -> Response<{{}}> {{ let s = g.b.pop(); return ok({{}}); }}\n", POP_HEAD);
         let e = load(&bad).unwrap_err();
@@ -669,7 +671,7 @@ fn go() { g.show(); }
         assert!(c.contains("#define AT_ 6"), "no AT_ 6 in the C");
     }
 
-    const SORTED: &str = "struct Sorted<T: struct, N: count, key: field of T> { items: pool<T, N>; n: i64 in 0..N; }\nstruct Entry { name: string<8>; pts: i64; small: u8 in 0..9; id: i64; }\nstruct Game { board: Sorted<Entry, 4, pts>; byid: Sorted<Entry, 3, id>; }\nstate game: Game;\nfn put(self: Sorted<T, N, key>, v: T.key) { let it = self.items.add(); it.key = v; self.n = self.n + 1; }\nfn best(self: Sorted<T, N, key>) -> T.key { var top = 0; var i = 0; while i < self.n { if self.items[i].key > top { top = self.items[i].key; } i += 1; } return top; }\n@post(\"/p/{v}\") fn p(v: i64 in 0..1000) -> Response<{ a: i64, b: i64 }> { game.board.put(v); game.byid.put(v + 1); return ok({ a: game.board.best(), b: game.byid.best() }); }\n";
+    const SORTED: &str = "struct Sorted<T: struct, N: count, key: field of T> { items: pool<T, N>; n: i64 in 0..N; }\nstruct Entry { name: string<8>; pts: i64; small: u8 in 0..9; id: i64; }\nstruct Game { board: Sorted<Entry, 4, pts>; byid: Sorted<Entry, 3, id>; }\nstate game: Game;\nfn put(self: write Sorted<T, N, key>, v: T.key) { let it = self.items.add(); it.key = v; self.n = self.n + 1; }\nfn best(self: Sorted<T, N, key>) -> T.key { var top = 0; var i = 0; while i < self.n { if self.items[i].key > top { top = self.items[i].key; } i += 1; } return top; }\n@post(\"/p/{v}\") fn p(v: i64 in 0..1000) -> Response<{ a: i64, b: i64 }> { game.board.put(v); game.byid.put(v + 1); return ok({ a: game.board.best(), b: game.byid.best() }); }\n";
 
     #[test]
     fn a_parameter_naming_a_field_reads_that_field() {
@@ -706,7 +708,7 @@ fn go() { g.show(); }
     #[test]
     fn a_function_without_pub_is_private_to_its_file() {
         let piece = |at: usize, n: usize, file: &str, from: usize| crate::Piece { at, n, file: file.to_string(), from, text: String::new() };
-        let lib = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nfn grow(self: Stack<T, N>) { self.len = self.len + 1; }\npub fn push(self: Stack<T, N>, x: T) { self.items[self.len] = x; self.grow(); }\n";
+        let lib = "struct Stack<T, N: count> { items: T[N]; len: i64 in 0..N; }\nfn grow(self: write Stack<T, N>) { self.len = self.len + 1; }\npub fn push(self: write Stack<T, N>, x: T) { self.items[self.len] = x; self.grow(); }\n";
         let main = |call: &str| format!("{}struct G {{ a: Stack<i64, 8>; }}\nstate g: G;\n@post(\"/p\") fn p() -> Response<{{}}> {{ g.a.push(1); {} return ok({{}}); }}\n", lib, call);
         crate::PIECES.with(|p| *p.borrow_mut() = vec![piece(1, 3, "lib.mito", 1), piece(4, 3, "main.mito", 1)]);
         // `push` is public, and calls the private `grow` from its own file

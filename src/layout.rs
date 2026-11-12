@@ -951,6 +951,7 @@ fn cbin(op: &str, a: CVal, b: CVal) -> Result<CVal, String> {
                 "/" | "%" => { if y == 0 { return Err("division by zero".into()); } if op == "/" { x.checked_div(y) } else { x.checked_rem(y) } }
                 "|" => Some(x | y), "^" => Some(x ^ y), "&" => Some(x & y),
                 "<<" => if (0..63).contains(&y) { x.checked_mul(1i64 << y) } else { None },
+                ">>>" => if (0..64).contains(&y) { Some(((x as u64) >> y) as i64) } else { None },
                 ">>" => if (0..64).contains(&y) { Some(x >> y) } else { None },
                 _ => None,
             };

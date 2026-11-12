@@ -1,0 +1,6 @@
+// expect: is read-only here
+struct P { x: i64; y: i64; }
+struct G { p: P; }
+state g: G;
+fn f(p: P) { p.x = 1; }
+@get("/a") fn a() -> Response<{ n: i64 }> { f(g.p); return ok({ "n": g.p.x }); }

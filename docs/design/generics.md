@@ -18,7 +18,7 @@ struct Stack<T, N: count> {
     len: i64 in 0..N;
 }
 
-fn push(self: Stack<T, N>, x: T) {   // T and N are in scope because they appear in the receiver type
+fn push(self: write Stack<T, N>, x: T) {   // T and N are in scope because they appear in the receiver type
     self.items[self.len] = x;
     self.len = self.len + 1;
 }
@@ -34,7 +34,7 @@ fn is_full(self: Stack<T, N>) -> bool { return self.len == N; }
 ### Generic functions of a type
 
 A function of a type already exists (`fn hurt(self: Player, n: i64)`), found by the *type of the receiver where the call is written*.
-Generic receivers extend that rule: `fn push(self: Stack<T, N>, x: T)` is a *template*; the call `a.push(3)` binds `T = i64, N = 16`
+Generic receivers extend that rule: `fn push(self: write Stack<T, N>, x: T)` is a *template*; the call `a.push(3)` binds `T = i64, N = 16`
 from the receiver, and `x` is then checked against `T`. No new call syntax, no turbofish.
 
 Free generic functions, only when no receiver can carry the parameters (a later step):
@@ -112,7 +112,7 @@ struct Sorted<T: struct, N: count, key: field of T> {      // was: module header
     links: pool<Link, N>;
     head: Head;
 }
-pub fn add(self: Sorted<T, N, key>, kv: T.key) -> T { ... }   // was: pub fn add(kv: T.key) -> T with an implicit self
+pub fn add(self: write Sorted<T, N, key>, kv: T.key) -> T { ... }   // was: pub fn add(kv: T.key) -> T with an implicit self
 ```
 
 The module's `state { ... }` block *is* the struct body; the implicit `self` becomes an explicit receiver; the module's functions become
@@ -191,12 +191,12 @@ struct Stack<T, N: count> {
     items: T[N];
     len: i64 in 0..N;
 }
-pub fn push(self: Stack<T, N>, x: T) {
+pub fn push(self: write Stack<T, N>, x: T) {
     if self.len == N { fail 409 "stack is full"; }
     self.items[self.len] = x;
     self.len = self.len + 1;
 }
-pub fn pop(self: Stack<T, N>) -> T {
+pub fn pop(self: write Stack<T, N>) -> T {
     if self.len == 0 { fail 409 "stack is empty"; }
     self.len = self.len - 1;
     return self.items[self.len];
@@ -291,7 +291,7 @@ plan reads these before anything is written.
    runs the normal compile once as a probe, and the code generator, where it resolves `x.f(...)` by the receiver's type (`callx`), records every call whose instance has no function `f` (`note_missing`: instance as written, function name). The next expansion copies exactly those
    functions for exactly those instances; this repeats until a probe asks for nothing new. While probing, the generator goes on past a call that lacks a copy (with a placeholder value), so one probe finds every such call it reaches; a call made only from inside a copy is found by the next probe, so a program needs the depth of its chains of calls between copies, plus one, probes (the generics cases: 2 each; `MITO_EXPLAIN_GENERICS=1` prints each probe). The text of the last expansion is the program; its errors are reported as any program's are. The binder
    cannot find a function that has no copy yet, so it takes a name that some generic struct declares as "declared for some type" (`is_template_method`) and leaves the call to the code generator. Costs: a program with a generic struct and functions of it is compiled once more per probe at load; programs without are unchanged.
-   Consequences: `fn pop(self: Stack<T, N>) -> T` works for `Stack<i64, 8>` while `Stack<string<12>, 8>` exists, because that instance never calls it; calling it on the text instance reports the error inside the copy, named `Stack<string<12>, 8>.pop`. Whole-program analyses see the copies that exist; a call `x.f()` is
+   Consequences: `fn pop(self: write Stack<T, N>) -> T` works for `Stack<i64, 8>` while `Stack<string<12>, 8>` exists, because that instance never calls it; calling it on the text instance reports the error inside the copy, named `Stack<string<12>, 8>.pop`. Whole-program analyses see the copies that exist; a call `x.f()` is
    treated as reaching every function named `f`, as before, so a missing copy never hides a callee.
 3. **No `check --costs` instance count and no `generic_bounds_proof` emit-c assertion**; the range proof is tested through the generated checks (`generic_instances_are_separate_state_to_the_range_analyses` in `src/cgen.rs`, both directions).
 4. **Lines (fixed for copies).** A copy of a function is preceded by `//# line N <instance>`; the lexer (`lex_lines` in `src/lang.rs`) continues from line N, so a runtime `fail` and every error inside a copy report the template function's line in the program's own source

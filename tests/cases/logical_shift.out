@@ -1,0 +1,12 @@
+GET /shr/-16/2 -> 200 {"logical":4611686018427387900,"arithmetic":-4}
+GET /shr/-1/1 -> 200 {"logical":9223372036854775807,"arithmetic":-1}
+GET /shr/-1/0 -> 200 {"logical":-1,"arithmetic":-1}
+GET /shr/1024/3 -> 200 {"logical":128,"arithmetic":128}
+GET /shr/5/64 -> 500 {"error":"shift count out of range","line":5}
+GET /shr/5/-1 -> 500 {"error":"shift count out of range","line":5}
+GET /proven/-1/1 -> 500 {"error":"integer overflow","line":9}
+GET /proven/-256/8 -> 200 {"v":72057594037927935,"small":36028797018963968}
+GET /proven/100/2 -> 200 {"v":25,"small":13}
+GET /const -> 200 {"a":15,"b":16,"c":4}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

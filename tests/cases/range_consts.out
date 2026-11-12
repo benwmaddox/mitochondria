@@ -1,0 +1,10 @@
+GET /a/0 -> 200 {"n":0}
+GET /a/100 -> 200 {"n":200}
+GET /a/101 -> 400 {"error":"`n`: 101 is outside 0..100"}
+GET /b/-100 -> 200 {"n":-100000000000}
+GET /b/-101 -> 400 {"error":"`n`: -101 is outside -100..100"}
+GET /c/9 -> 400 {"error":"`n`: 9 is outside 10..50"}
+GET /c/10 -> 200 {"n":10}
+GET /c/51 -> 400 {"error":"`n`: 51 is outside 10..50"}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

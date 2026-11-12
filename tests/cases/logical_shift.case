@@ -1,0 +1,26 @@
+// `>>>` shifts right and fills with zeros (a negative number becomes a large positive one); `>>` fills with the sign. Shift counts are checked
+// unless an interval proves them, and a proven count gives the result a range.
+--- program
+struct T { n: i64; }
+state t: T;
+
+@get("/shr/{x}/{n}")
+fn get_shr(x: i64, n: i64) -> Response<{ logical: i64, arithmetic: i64 }> { return ok({ "logical": x >>> n, "arithmetic": x >> n }); }
+@get("/proven/{x}/{n}")
+fn get_proven(x: i64, n: i64 in 1..8) -> Response<{ v: i64, small: i64 }> {
+    let v = x >>> n;
+    return ok({ "v": v, "small": (v + 1) >>> 1 });
+}
+@get("/const")
+fn get_const() -> Response<{ a: i64, b: i64, c: i64 }> { return ok({ "a": -1 >>> 60, "b": 256 >>> 4, "c": 1 + 8 >>> 1 }); }
+--- requests
+GET /shr/-16/2
+GET /shr/-1/1
+GET /shr/-1/0
+GET /shr/1024/3
+GET /shr/5/64
+GET /shr/5/-1
+GET /proven/-1/1
+GET /proven/-256/8
+GET /proven/100/2
+GET /const

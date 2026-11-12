@@ -1,5 +1,19 @@
 # Struct values (approved design; step 1 built)
 
+## Final decision (owner, 2026-11-12): every struct is a view of a named place; a value always lands somewhere
+
+This block supersedes everything below that speaks of copy parameters, copy elision, or a `view` keyword (those sections are marked). The rules, in one place:
+
+- **A struct is always a view of a place.** `let c = world.pos;` and `var v = other;` name the same place (a second name, not a copy); a struct literal (`Vec3 { x: 1.0 }`) builds a new place in the scratch area. Nothing is copied unless a copy is written.
+- **A copy is explicit: `var c = V { ..src };`.** The literal with a base makes a place of its own in the scratch area (one move); `V { ..src, x: 5 }` is a copy with one field changed. There is no `.copy()`. Assignment copies contents already (`world.pos = v;`, `v = w;`). A literal is legal only as the whole right side of `let`, `var` or `=`, so a copy passed to a function takes two steps: `var c = V { ..x }; f(c);`.
+- **Parameters.** `p: T` is read-only: the function cannot change it, nor hand it to a callee's `write` parameter (a check on the callee's signature only, never its body). `p: write T` may change the caller's struct. `write` is allowed on a plain struct, on a text field of the state or of an item (assigning or appending stores into the caller's field), and on an item (already a handle; changes nothing, so one signature serves a state struct and an item); it is refused on a literal or computed text, and `write` of a number or `bool` is not supported yet. There is no `copy` parameter mode and no automatic copy: to give a function its own copy, write `f(x.copy())`. The receiver is the first parameter under any name.
+- **A struct value never exists as a hidden temporary** (step 3). A function returning a struct writes it straight into its destination: `world.pos = a.plus(b);` (one move, into `world.pos`). A struct-valued call is only legal as the whole right side of an assignment, a `let` or `var` (`let t = f(x);` makes `t` name the new place the result was written into); as an argument or a receiver it is an error, so a nested one, `a.plus(b).scaled(2.0)`, is an error ("name the middle": `let t = a.plus(b); world.pos = t.scaled(2.0);`).
+- **Memory.** Struct locals and `..base` copies take places in the fixed 16,384-byte scratch area; `mito check --costs` reports it. A program without them is laid out as before.
+- **Aliasing is the user's to manage.** A read-only parameter is a view: if the function writes the place the argument names, it sees the write (`snapshot(g.p)` sees it; `var cp = P { ..g.p }; snapshot(cp)` does not).
+
+Stasis passes structs as views with no modes and returns them only through a destination; this design adds the read-only default and `write`, and keeps struct returns written straight into the destination.
+
+
 **Status.** The owner approved the recommendations of section 13 on 2026-11-12 (and then decided the parameter rules in "Parameters and receivers", section 2). **Step 1 is built** (struct locals, literals, copies, scratch places;
 see "Step 1 findings" at the end and "Struct values" in DESIGN.md); steps 2-6 are not. The rest of this page is the design the steps follow.
 
@@ -44,15 +58,15 @@ Examples: vector add (returns), normalize, in-place plus, a function that mutate
 ```
 fn sum(self: Vec3, other: Vec3) -> Vec3 { return Vec3 { x: self.x + other.x, y: self.y + other.y, z: self.z + other.z }; }
 fn normalized(self: Vec3) -> Vec3 { let len = self.length(); if len > 0.0 { return self.scaled(1.0 / len); } return self; }
-fn plus(view self: Vec3, other: Vec3) { self.x += other.x; self.y += other.y; self.z += other.z; }
-fn heal(view p: Player, n: i64) { p.hp += n; }          // heal(world.player, 5) changes the state
+fn plus(self: write Vec3, other: Vec3) { self.x += other.x; self.y += other.y; self.z += other.z; }
+fn heal(p: write Player, n: i64) { p.hp += n; }          // heal(world.player, 5) changes the state
 ```
 **B. By position: `self` is a view, every other struct parameter is a copy.** (Rejected by the owner: `self` carries no view meaning.)
 ```
 fn sum(self: Vec3, other: Vec3) -> Vec3 { ... }               // same as A
-fn plus(self: Vec3, other: Vec3) { self.x += other.x; ... }   // self written: in place
+fn plus(self: write Vec3, other: Vec3) { self.x += other.x; ... }   // self written: in place
 fn heal(self: Player, n: i64) { self.hp += n; }               // fine, but only as a method
-fn add_into(dst: Pos, src: Pos)                               // dst is a copy: writing it is useless -> error, and there is no way to say "mutate this"
+fn add_into(dst: write Pos, src: Pos)                               // dst is a copy: writing it is useless -> error, and there is no way to say "mutate this"
 ```
 B breaks today's `add_into(dst, src)` and every free function that mutates a state struct.
 
@@ -64,25 +78,25 @@ fn plus(a: Vec3, b: Vec3) { a.x += b.x; }    // plus(world.a, ...) changes state
 ```
 C is what today's code does, but one function means two things at two call sites, and "silently useless" writes are the worst confusion.
 
-### Decision (owner, 2026-11-12): A, and `self` is not special anywhere (see "Parameters and receivers")
+### (Superseded by the final decision at the top) Decision (owner, 2026-11-12): A, and `self` is not special anywhere (see "Parameters and receivers")
 
 - **A parameter is a view only when declared `view`, `self` included.** The keyword is `view` (not `inout`, `mut` or `&`). No keyword means a copy for every struct parameter:
-  `fn length(self: Vec3) -> f64` gets a copy (elided when the callee never writes it, so it costs nothing), `fn plus(view self: Vec3, o: Vec3)` changes the caller's struct in place,
-  `fn heal(view p: Player, n: i64)`. So `world.pos.normalize()` and `local.normalize()` both work in place when `normalize` declares its first parameter `view`; `a.sum(b).normalize()` is an error
+  `fn length(self: Vec3) -> f64` gets a copy (elided when the callee never writes it, so it costs nothing), `fn plus(self: write Vec3, o: Vec3)` changes the caller's struct in place,
+  `fn heal(p: write Player, n: i64)`. So `world.pos.normalize()` and `local.normalize()` both work in place when `normalize` declares its first parameter `view`; `a.sum(b).normalize()` is an error
   (a call result is not a place; use the returning form `normalized`).
 - Writing a non-view struct parameter (self included) is a compile error from step 3 (a warning before): "`dst` is a copy: writes to it are lost; declare it `view dst: Pos` to change the caller's struct".
 - Pool, list and table **items** stay references to their row, as today: they are handles, not struct values, and need no keyword.
 - `view` accepts a place (state or local). It does not accept a literal or a call result ("a view needs a place"); that check turns C's silent bug into an error.
 - A `view` parameter may alias another parameter (`add_into(a, a)` is fine, as today). A copy is never an alias.
 
-### Parameters and receivers (owner decisions, 2026-11-12; implemented with step 3, not before)
+### Parameters and receivers (owner decisions, 2026-11-12; the `view` and copy-by-default parts are superseded by the final decision at the top)
 
 - The keyword is `view`, on any parameter, first or not. Without it a struct parameter is a copy ("in theory you can work off of something without changing it"); the compiler elides the copy when
   the callee never writes it. Pool, list and table **items** stay references to their row (handles, not struct values) and need no keyword.
 - **The receiver is simply the first parameter, whatever it is called.** The name `self` is not special anywhere: `fn hurt(self: Player, n: i64)` stays valid because `self` is just a name.
   There is no marker for "this is a method": any function can be called as a method on its first parameter, `f(x, y)` is the same call as `x.f(y)`, and the same function name may be declared for different
   first-parameter types (the type of the first argument picks the function). Two functions with the same name and the same first-parameter type are a duplicate error. (Stasis does it this way: `damage(e, 5)` equals `e.damage(5)`.)
-- View-ness is only the `view` keyword. `fn plus(view a: Vec3, b: Vec3)` called as `v.plus(w)` changes `v`; `fn length(a: Vec3) -> f64` called as `length(v)` or `v.length()` copies (or elides the copy).
+- View-ness is only the `view` keyword. `fn plus(a: write Vec3, b: Vec3)` called as `v.plus(w)` changes `v`; `fn length(a: Vec3) -> f64` called as `length(v)` or `v.length()` copies (or elides the copy).
 
 **What the CURRENT compiler assumes about the name `self` (the migration cost of the rule above):**
 
@@ -100,7 +114,7 @@ Migration: (1) mangle by first-parameter type for *every* function with a typed 
 type" instead of the name; (3) module code needs its own spelling for the instance (keep `self` meaning "the instance" there only if the owner wants one special name; otherwise the module's functions name their first parameter
 and the binder maps *that* parameter); (4) `f(x, y)` free-call syntax resolves by first-argument type when several functions share a name. None of this is done in step 1.
 
-### Copy elision (never visible to the user)
+### Copy elision (dropped: superseded by the final decision at the top, nothing is copied unless a `V { ..x }` literal is written)
 
 A copy parameter that the callee tree never writes, with a source place that the callee tree never writes either, is passed as a view: observationally identical, no copy.
 The compiler already walks the call tree for writes (`fn writes`, ~1554); this needs the walk to report *which places* (struct id and offset range) instead of yes/no,
@@ -194,7 +208,7 @@ An in-place method and a returning method of the same name and receiver type wou
 
 ### Operators (recommend: not now)
 
-`a + b` mapping to `fn add(self: Vec3, other: Vec3) -> Vec3`:
+`a + b` mapping to `fn add(self: write Vec3, other: Vec3) -> Vec3`:
 - For: reads like math; `a + b * 2.0` is the biggest readability gain for vector code.
 - Against: one-way principle: `a.add(b)` and `a + b` are two spellings. `k * v` (scalar on the left) needs a lookup on the *right* operand, which breaks "methods belong to the receiver".
   Operators drag in unary minus, compound assignment (`pos += vel`: in place or a new value?), precedence with the existing int/float coercion rules, and none of that is needed by step 1.
@@ -262,20 +276,20 @@ format. `log v` and responses print JSON text (`{"x":1,"y":2,"z":3}`) because th
 Compatibility: every existing in-place method keeps its name and behavior (`pos.plus(vel)` still changes `pos`); every in-place method gains `view` on `self`; tests/cases/std_vec.case and struct_params.case
 pass unchanged once the library says `view self` (until step 3 a plain-struct parameter is a view whatever it says, so nothing changes before then). The intentional break at step 3: **any** struct
 parameter that the body writes needs `view`, `self` included. In the library that means every in-place method (`plus`, `minus`, `scale`, `add_scaled`, `negate`, `normalize`, `perp`, `rotate`, `set`,
-`project_on`, `assign`, `cross_to`, `lerp_to`, `reflect_to`) becomes `view self`; user code such as `fn add_into(dst: Pos, src: Pos)` gets a one-line fix the compiler spells out. tests/cases/struct_params.case
-writes through plain parameters (`fn move_by(p: Pos, ...)`, a `self` that mutates): those functions get `view` at step 3, answers unchanged. To soften it: a **warning** in step 2, an **error** in step 3.
+`project_on`, `assign`, `cross_to`, `lerp_to`, `reflect_to`) becomes `view self`; user code such as `fn add_into(dst: write Pos, src: Pos)` gets a one-line fix the compiler spells out. tests/cases/struct_params.case
+writes through plain parameters (`fn move_by(p: write Pos, ...)`, a `self` that mutates): those functions get `view` at step 3, answers unchanged. To soften it: a **warning** in step 2, an **error** in step 3.
 
 Same operations, old and new:
 ```
 // old: in place, results into self
-fn plus(view self: Vec3, other: Vec3) { self.x += other.x; self.y += other.y; self.z += other.z; }
-fn cross_to(view self: Vec3, a: Vec3, b: Vec3) {
+fn plus(self: write Vec3, other: Vec3) { self.x += other.x; self.y += other.y; self.z += other.z; }
+fn cross_to(self: write Vec3, a: Vec3, b: Vec3) {
     let x = a.y * b.z - a.z * b.y; let y = a.z * b.x - a.x * b.z; let z = a.x * b.y - a.y * b.x;
     self.x = x; self.y = y; self.z = z;
 }
-fn normalize(view self: Vec3) { let len = self.length(); if len > 0.0 { self.x /= len; self.y /= len; self.z /= len; } }
-fn reflect_to(view self: Vec3, v: Vec3, n: Vec3) { let d = 2.0 * (v.x*n.x + v.y*n.y + v.z*n.z); self.x = v.x - d*n.x; /* y, z likewise */ }
-fn rotate(view self: Vec2, radians: f64) { let c = cos(radians); let s = sin(radians); let x = ...; let y = ...; self.x = x; self.y = y; }
+fn normalize(self: write Vec3) { let len = self.length(); if len > 0.0 { self.x /= len; self.y /= len; self.z /= len; } }
+fn reflect_to(self: write Vec3, v: Vec3, n: Vec3) { let d = 2.0 * (v.x*n.x + v.y*n.y + v.z*n.z); self.x = v.x - d*n.x; /* y, z likewise */ }
+fn rotate(self: write Vec2, radians: f64) { let c = cos(radians); let s = sin(radians); let x = ...; let y = ...; self.x = x; self.y = y; }
 
 // new: returning forms (struct values)
 fn sum(self: Vec3, other: Vec3) -> Vec3 { return Vec3 { x: self.x + other.x, y: self.y + other.y, z: self.z + other.z }; }

@@ -1,0 +1,52 @@
+// functions of a type may use the names of collection operations (`add`, `clear`, `count`, `remove`, `truncate`): the receiver's type decides which is meant, so a
+// struct's `clear` and a pool's `clear` live side by side
+--- program
+struct Counter { n: i64; hits: i64; }
+struct Dot { x: i64; }
+struct Game { c: Counter; dots: pool<Dot, 8>; name: string<16>; }
+state game: Game;
+
+fn clear(self: write Counter) { self.n = 0; self.hits = self.hits + 1; }
+fn count(self: Counter) -> i64 { return self.n * 10; }
+fn add(self: write Counter, k: i64) { self.n = self.n + k; }
+fn remove(self: write Counter, k: i64) -> i64 { self.n = self.n - k; return self.n; }
+fn len(self: Counter) -> i64 { return self.n + 1000; }
+
+@post("/go")
+fn post_go() -> Response<{ a: i64, b: i64, c: i64 }> {
+    game.c.add(5);
+    game.c.add(2);
+    let r = game.c.remove(3);
+    let d = game.dots.add();
+    d.x = 7;
+    game.dots.add();
+    return ok({ "a": r, "b": game.c.count(), "c": game.dots.count() });
+}
+@post("/clear")
+fn post_clear() -> Response<{ n: i64, hits: i64, dots: i64, len: i64 }> {
+    game.c.clear();
+    game.dots.clear();
+    return ok({ "n": game.c.n, "hits": game.c.hits, "dots": game.dots.count(), "len": game.c.len() });
+}
+@post("/drop")
+fn post_drop() -> Response<{ dots: i64 }> {
+    let d = game.dots.add();
+    game.dots.add();
+    game.dots.remove(d);
+    return ok({ "dots": game.dots.count() });
+}
+@post("/name")
+fn post_name() -> Response<{ n: i64 }> {
+    game.name = "abcdef";
+    game.name.truncate(3);
+    game.name.clear();
+    return ok({ "n": len(game.name) });
+}
+@get("/dots")
+fn get_dots() -> Response<{ dots: i64 }> { return ok({ "dots": game.dots.count() }); }
+--- requests
+POST /go
+POST /clear
+POST /drop
+POST /name
+GET /dots

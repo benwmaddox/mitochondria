@@ -205,7 +205,10 @@ pub struct Endpoint { pub method: String, pub segs: Vec<Seg>, pub body: Vec<Stmt
 
 /// A typed input: where it comes from, its type, and what an absent one is (`= default`, or `?`: null).
 #[derive(Debug, Clone)]
-pub struct Input { pub name: String, pub src: Src, pub ty: InTy, pub default: Option<Expr>, pub optional: bool }
+pub struct Input { pub name: String, pub src: Src, pub ty: InTy, pub default: Option<Expr>, pub optional: bool, pub pending: Vec<PendingBound>, pub limits: (i64, i64) }
+/// A range bound written as a constant (`in 0..Limits.MAX`), resolved by the binder, which knows the constants: `hi` says which end, `neg` a minus sign.
+#[derive(Debug, Clone)]
+pub struct PendingBound { pub hi: bool, pub group: String, pub name: String, pub neg: bool }
 /// Where an input comes from: a path segment, the JSON body, the query string, a header, or a field forwarded by
 /// another worker.
 #[derive(Debug, Clone, PartialEq)]
@@ -220,7 +223,7 @@ pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64, bool), Item(String, Opti
 /// `ret_opt`: declared `-> T?`: the result may be null, and a caller must check it (`if exists(x)`) or give a fallback (`or`).
 /// `test`: a test (`test "name" { ... }`): no parameters, a result of `bool` or text, run by `mito test` only.
 /// `html`: declared `-> html`, a function that writes markup into the answer (used inside markup, as `{item(t)}`).
-pub struct Func { pub test: Option<String>, pub recv: bool, pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool, pub html: bool }
+pub struct Func { pub test: Option<String>, pub recv: bool, pub modes: Vec<u8>, pub name: String, pub params: Vec<String>, pub ptys: Vec<Option<PTy>>, pub ret: Option<PTy>, pub body: Vec<Stmt>, pub slots: u32, pub public: bool, pub ret_opt: bool, pub html: bool }
 /// A type in a function's signature, as written: `i64`, `f64`, `bool`, `string`, a struct whose items the function takes
 /// (`Player`, or `Player in game.players` when several collections hold it), the type of a struct's field (`T.key`, for
 /// modules), each with `?` for "or null".
@@ -402,7 +405,8 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
         }
         else {
             let two: String = c[i..(i + 2).min(c.len())].iter().collect();
-            if ["==", "!=", "<=", ">=", "&&", "||", "->", "..", "+=", "-=", "*=", "/=", "<<", ">>", "=>"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
+            if c[i..].starts_with(&['>', '>', '>']) { out.push(Tok::Sym(">>>".into())); i += 3; }
+            else if ["==", "!=", "<=", ">=", "&&", "||", "->", "..", "+=", "-=", "*=", "/=", "<<", ">>", "=>"].contains(&two.as_str()) { out.push(Tok::Sym(two)); i += 2; }
             else { out.push(Tok::Sym(ch.to_string())); i += 1; }
         }
     }
@@ -419,6 +423,8 @@ fn lex_lines(src: &str) -> Result<(Vec<Tok>, Vec<(u32, u32)>), String> {
 /// different time); `tmp`: hidden locals made so far.
 /// `markup`: inside code in markup (`{if ...}`), where a bare string statement writes itself: Some(false) in content, Some(true) in an attribute.
 /// The collection operations `x.f(...)` names (a receiver function may not be called one of these).
+/// The collection operations a function of a type may share a name with: the receiver's type decides which is meant.
+pub const AMBIGUOUS_OPS: [&str; 11] = ["add", "try_add", "remove", "clear", "fill", "move", "sort", "copy_from", "count", "capacity", "truncate"];
 pub const BUILTIN_METHODS: [&str; 15] = ["add", "try_add", "remove", "move", "copy_from", "sort", "fill", "clear", "truncate", "count_below", "count", "capacity", "json_field", "len", "exists"];
 /// Keys besides a letter or a digit that `from key("...")` names (the game platform's).
 pub const GAME_KEYS: [&str; 7] = ["space", "up", "down", "left", "right", "shift", "escape"];
@@ -471,8 +477,20 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             let mut name = p.id()?;
             while p.sym(".") { name = format!("{}.{}", name, p.id()?); } // instance.function, from module expansion
             p.eat("(")?;
-            let (mut params, mut ptys) = (Vec::new(), Vec::new());
-            while !p.sym(")") { params.push(p.id()?); ptys.push(if p.sym(":") { Some(p.pty()?) } else { None }); p.sym(","); }
+            let (mut params, mut ptys, mut modes) = (Vec::new(), Vec::new(), Vec::new());
+            // `p: Player` is read-only; `p: write Player` may change the caller's struct (a type named `write` is still a type); a copy is made at the call, `var c = V { ..x }; f(c);`
+            while !p.sym(")") {
+                params.push(p.id()?);
+                let mut mode = 0u8;
+                ptys.push(if p.sym(":") {
+                    if matches!(p.t.get(p.i + 1), Some(Tok::Id(_))) {
+                        if p.is_kw("write") { mode = 1; p.i += 1; }
+                        else if p.is_kw("copy") { return Err("a parameter is never a copy: write `var c = V { ..x };` and pass `c` to give a function its own copy".into()); }
+                    }
+                    Some(p.pty()?)
+                } else { None });
+                modes.push(mode); p.sym(",");
+            }
             // a function whose first parameter is `self: Type` belongs to that type (as in Stasis): `fn hurt(self: Player, n: i64) { self.hp -= n; }` is called `p.hurt(3)`, and is named `Player.hurt`.
             // The same name may be declared for any number of types, and beside a function of no type.
             let is_recv = params.first().map_or(false, |n| n == "self");
@@ -481,7 +499,7 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
                 if rt.arg.is_some() || rt.field.is_some() || rt.opt { return Err(format!("`fn {}(self: ...)`: `self` is a struct, a number, `string` or `bool`, and not nullable", name)); }
                 // a number is any integer type or any float, a string any string: the type's name is the kind
                 let ty = match rt.name.as_str() { "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" => "i64", "f32" | "f64" => "f64", "string" | "utf8" | "ascii" | "text" => "string", n => n }.to_string();
-                if name.contains('.') || BUILTIN_METHODS.contains(&name.as_str()) { return Err(format!("`fn {}(self: {}, ...)`: `{}` is a collection operation, a function of a type needs another name", name, rt.name, name)); }
+                if name.contains('.') { return Err(format!("`fn {}(self: {}, ...)`: a function's name has no dot", name, rt.name)); }
                 let method = name.clone();
                 name = format!("{}.{}", ty, name);
                 if api.fns.iter().any(|f| f.recv && f.name == name) { return Err(format!("`{}` is declared twice for `{}`", method, ty)); }
@@ -504,7 +522,7 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             p.typed.truncate(mark);
             let mut body = body?;
             if !entry.is_empty() { entry.append(&mut body); body = entry; }
-            api.fns.push(Func { test: None, recv: is_recv, name, params, ptys, ret, body, slots: 0, public, ret_opt, html });
+            api.fns.push(Func { test: None, recv: is_recv, modes, name, params, ptys, ret, body, slots: 0, public, ret_opt, html });
             continue;
         }
         // `test "name" { ... }`: a function the test runner calls; inside, `get`, `post`, `put`, `patch`, `delete` make requests
@@ -516,7 +534,7 @@ fn parse_items(p: &mut P, api: &mut Api) -> R<()> {
             let body = p.block();
             p.in_test = false;
             let n = api.fns.iter().filter(|f| f.test.is_some()).count();
-            api.fns.push(Func { test: Some(title), recv: false, name: format!("__mito__test{}", n), params: Vec::new(), ptys: Vec::new(), ret: None, body: body?, slots: 0, public: false, ret_opt: false, html: false });
+            api.fns.push(Func { test: Some(title), recv: false, modes: Vec::new(), name: format!("__mito__test{}", n), params: Vec::new(), ptys: Vec::new(), ret: None, body: body?, slots: 0, public: false, ret_opt: false, html: false });
             continue;
         }
         if p.is_kw("endpoint") { return Err("endpoints are functions with an attribute: `@post(\"/path\") fn name() -> Response<T> { ... }`".into()); }
@@ -639,11 +657,22 @@ impl P {
         let forwarded = if self.is_kw("forwarded") { self.i += 1; true } else { false };
         let name = self.id()?; self.eat(":")?;
         let tn = self.id()?;
-        let range = |p: &mut Self, lo: i64, hi: i64| -> R<(i64, i64)> {
+        let mut pending: Vec<PendingBound> = Vec::new();
+        let mut limits = (i64::MIN, i64::MAX);
+        let mut range = |p: &mut Self, lo: i64, hi: i64| -> R<(i64, i64)> {
+            limits = (lo, hi);
             if !p.is_kw("in") { return Ok((lo, hi)); }
             p.i += 1;
-            let a = p.signed()?; p.eat("..")?; let b = p.signed()?;
-            if a > b || a < lo || b > hi { return Err(format!("input `{}`: range {}..{} does not fit its type", name, a, b)); }
+            // each end is a number or a constant of a group (`Limits.MAX`): a constant's value is only known to the binder, so for now the end is the type's own
+            let mut end = |p: &mut Self, is_hi: bool, own: i64| -> R<i64> {
+                let neg = p.sym("-");
+                if let (Some(Tok::Id(g)), Some(Tok::Sym(d)), Some(Tok::Id(n))) = (p.t.get(p.i).cloned(), p.t.get(p.i + 1).cloned(), p.t.get(p.i + 2).cloned()) {
+                    if d == "." { p.i += 3; pending.push(PendingBound { hi: is_hi, group: g, name: n, neg }); return Ok(own); }
+                }
+                let v = p.int()?; Ok(if neg { -v } else { v })
+            };
+            let a = end(p, false, lo)?; p.eat("..")?; let b = end(p, true, hi)?;
+            if pending.is_empty() && (a > b || a < lo || b > hi) { return Err(format!("input `{}`: range {}..{} does not fit its type", name, a, b)); }
             Ok((a, b))
         };
         let ty = match tn.as_str() {
@@ -719,7 +748,7 @@ impl P {
         if let (InTy::Int(lo, hi), Some(Expr::Int(d))) = (&ty, &default) { if d < lo || d > hi { return Err(format!("input `{}`: the default {} is outside {}..{}", name, d, lo, hi)); } }
         if matches!(ty, InTy::Item(..)) && !matches!(src, Src::Path | Src::Header(_) | Src::Cookie(_)) { return Err(format!("input `{}`: an item comes from the path (an id), a header or a cookie (a session token)", name)); }
         if let Src::Header(h) = &src { if matches!(ty, InTy::Item(..)) && !h.eq_ignore_ascii_case("X-Session") { return Err(format!("input `{}`: a session item comes from `header(\"X-Session\")`", name)); } }
-        Ok(Input { name, src, ty, default, optional })
+        Ok(Input { name, src, ty, default, optional, pending, limits })
     }
     fn signed(&mut self) -> R<i64> { if self.sym("-") { Ok(-self.int()?) } else { self.int() } }
 
@@ -1212,7 +1241,7 @@ impl P {
     fn bin(&mut self, level: usize) -> R<Expr> {
         // Rust's precedence, loosest first: `||`, `&&`, comparisons, `|`, `^`, `&`, shifts, `+ -`, `* / %` (comparisons bind looser than the
         // bit operators, unlike C)
-        const LV: [&[&str]; 9] = [&["||"], &["&&"], &["==", "!=", "<", "<=", ">", ">="], &["|"], &["^"], &["&"], &["<<", ">>"], &["+", "-"], &["*", "/", "%"]];
+        const LV: [&[&str]; 9] = [&["||"], &["&&"], &["==", "!=", "<", "<=", ">", ">="], &["|"], &["^"], &["&"], &["<<", ">>", ">>>"], &["+", "-"], &["*", "/", "%"]];
         if level == LV.len() { return self.unary(); }
         let mut l = self.bin(level + 1)?;
         loop {
@@ -1377,7 +1406,7 @@ pub fn path_of(e: &Expr) -> Option<String> {
 }
 
 /// `owner`: the module instance whose function is being bound (its private functions may be called from it).
-struct Binder<'g> { names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums, test: bool, coll_loops: u32, consts: &'g Consts }
+struct Binder<'g> { typed_first: Vec<String>, names: Vec<(String, u32, bool)>, next: u32, max: u32, globals: &'g dyn Fn(&str) -> Option<usize>, fns: Vec<(String, usize, bool, bool)>, place: String, owner: Option<String>, hidden: u32, at: (u32, u32), loops: u32, enums: &'g Enums, test: bool, coll_loops: u32, consts: &'g Consts }
 
 /// Resolve every name in `api`. `globals` answers whether a name is a declared global (and which).
 pub fn bind(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>) -> R<()> { bind_with(api, globals, &[], &[]) }
@@ -1391,10 +1420,12 @@ pub fn bind_with(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: 
 fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums: &Enums, consts: &Consts) -> R<()> {
     let fns: Vec<(String, usize, bool, bool)> = api.fns.iter().map(|f| (f.name.clone(), f.params.len(), f.public, f.recv)).collect();
     for (k, f) in fns.iter().enumerate() { if fns[..k].iter().any(|g| g.0 == f.0) { return Err(format!("fn `{}` is declared twice", f.0)); } if B::from(&f.0).is_some() { return Err(format!("fn `{}` has the name of a builtin", f.0)); } }
+    // a function whose first parameter has a type can also be called as a method on it: `f(x, y)` is `x.f(y)`
+    let typed_first: Vec<String> = api.fns.iter().filter(|f| !f.recv && f.test.is_none() && f.ptys.first().map_or(false, |t| t.is_some())).map(|f| f.name.clone()).collect();
     let mut errs = Vec::new();
     for f in &mut api.fns {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: if f.recv { None } else { f.name.rfind('.').map(|i| f.name[..i].to_string()) }, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
-        for p in &f.params { b.declare(p, false); }
+        let mut b = Binder { typed_first: typed_first.clone(), names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("fn {}", f.name), owner: if f.recv { None } else { f.name.rfind('.').map(|i| f.name[..i].to_string()) }, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
+        for (k, p) in f.params.iter().enumerate() { b.declare(p, f.modes.get(k).map_or(false, |m| *m != 0)); } // a `write` or `copy` parameter may be assigned
         // a full signature: every parameter's type, and the result's when the function returns a value
         if let Some(Stmt::At(l, c)) = f.body.first() { b.at = (*l, *c); }
         if f.test.is_some() { b.test = true; b.place = format!("test \"{}\"", f.test.as_deref().unwrap_or("")); }
@@ -1406,7 +1437,8 @@ fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums
         f.slots = b.max;
     }
     for e in &mut api.eps {
-        let mut b = Binder { names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
+        let mut b = Binder { typed_first: typed_first.clone(), names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
+        for i in &mut e.inputs { if let Err(m) = resolve_bounds(i, consts) { errs.push(format!("endpoint {} ({}): {}", e.name, e.text, m)); } }
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         if let Err(e) = b.block(&mut e.body) { errs.push(e); continue; }
         e.slots = b.max;
@@ -1414,6 +1446,21 @@ fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums
     }
     // every function and endpoint is bound on its own: their errors are independent, one per line
     if errs.is_empty() { Ok(()) } else { Err(errs.join("\n")) }
+}
+
+/// An input's range written with constants (`in 0..Limits.MAX`): the constants' values go in, and the range is checked as a written one is.
+fn resolve_bounds(i: &mut Input, consts: &Consts) -> R<()> {
+    let InTy::Int(lo, hi) = &mut i.ty else { return Ok(()) };
+    for pb in std::mem::take(&mut i.pending) {
+        let Some((_, items)) = consts.iter().find(|x| x.0 == pb.group) else { return Err(format!("input `{}`: `{}` is not a const group", i.name, pb.group)) };
+        let Some(x) = items.iter().find(|x| x.0 == pb.name) else { return Err(format!("input `{}`: const group `{}` has no `{}`", i.name, pb.group, pb.name)) };
+        let crate::layout::CVal::Int(v) = x.1 else { return Err(format!("input `{}`: `{}.{}` is not an integer", i.name, pb.group, pb.name)) };
+        let v = if pb.neg { v.checked_neg().ok_or_else(|| format!("input `{}`: `{}.{}` is out of range", i.name, pb.group, pb.name))? } else { v };
+        if pb.hi { *hi = v } else { *lo = v }
+    }
+    if *lo > *hi || *lo < i.limits.0 || *hi > i.limits.1 { return Err(format!("input `{}`: range {}..{} does not fit its type", i.name, lo, hi)); }
+    if let Some(Expr::Int(d)) = &i.default { if d < lo || d > hi { return Err(format!("input `{}`: the default {} is outside {}..{}", i.name, d, lo, hi)); } }
+    Ok(())
 }
 
 /// Does every path through `body` end in an answer, a `fail`, a `forward` (or the test hook `__crash()`)?
@@ -1489,7 +1536,7 @@ impl Binder<'_> {
     }
     /// Is a function named `name` declared for some type, or for a generic struct (its copies are made where a call names them)?
     fn declared_method(&self, name: &str) -> bool {
-        self.fns.iter().any(|f| f.3 && f.0.rsplit_once('.').map_or(false, |(_, m)| m == name)) || crate::generics::is_template_method(name)
+        self.fns.iter().any(|f| f.3 && f.0.rsplit_once('.').map_or(false, |(_, m)| m == name)) || self.typed_first.iter().any(|n| n == name) || crate::generics::is_template_method(name)
     }
     /// `x.f(args)` naming no function of a module instance: a collection operation, `.f(x, args)`.
     fn operation(&self, e: &mut Expr) {
@@ -1511,29 +1558,15 @@ impl Binder<'_> {
             Stmt::Let(_, _, e) | Stmt::Do(e) => self.operation(e),
             _ => {}
         }
-        let lowered = match s {
-            Stmt::Let(n, _, Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => Some(Stmt::Alloc { var: n.clone(), slot: 0, coll: args.remove(0), try_: op == ".try_add" }),
-            Stmt::Do(Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => { self.hidden += 1; Some(Stmt::Alloc { var: format!("__mito__added{}", self.hidden), slot: 0, coll: args.remove(0), try_: op == ".try_add" }) }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".clear" && args.len() == 1 => Some(Stmt::Clear(args.remove(0))),
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".remove" && args.len() == 2 => { let item = args.remove(1); Some(Stmt::Remove(args.remove(0), item)) }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".fill" && args.len() == 4 => {
-                let value = args.remove(3); let count = args.remove(2); let from = args.remove(1);
-                Some(Stmt::Fill(args.remove(0), from, count, value))
+        // a name that is both a collection operation and a function some type declares (`clear`, `count`, ...) is decided by the receiver's type, which only the code generator knows:
+        // the call stays a call (a statement `coll.add();` gets a hidden local, as the lowering would give it)
+        let ambiguous = match s { Stmt::Let(_, _, Expr::Call(op, ..)) | Stmt::Do(Expr::Call(op, ..)) => op.starts_with('.') && AMBIGUOUS_OPS.contains(&&op[1..]) && self.declared_method(&op[1..]), _ => false };
+        if ambiguous {
+            if let Stmt::Do(e @ Expr::Call(..)) = s {
+                if matches!(e, Expr::Call(op, ..) if op == ".add" || op == ".try_add") { self.hidden += 1; let e = std::mem::replace(e, Expr::Int(0)); *s = Stmt::Let(format!("__mito__added{}", self.hidden), 0, e); }
             }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".move" && args.len() == 4 => {
-                let count = args.remove(3); let to = args.remove(2); let from = args.remove(1);
-                Some(Stmt::Move(args.remove(0), from, to, count))
-            }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".sort" && args.len() == 4 => {
-                let scratch = args.remove(3); let count = args.remove(2); let from = args.remove(1);
-                Some(Stmt::Sort(args.remove(0), from, count, scratch))
-            }
-            Stmt::Do(Expr::Call(op, args, _)) if op == ".copy_from" && args.len() == 5 => {
-                let count = args.remove(4); let to = args.remove(3); let from = args.remove(2); let src = args.remove(1);
-                Some(Stmt::Copy(args.remove(0), src, from, to, count))
-            }
-            _ => None,
-        };
+        }
+        let lowered = if ambiguous { None } else { let l = lower_op(s, self.hidden + 1); if matches!(&l, Some(Stmt::Alloc { var, .. }) if var.starts_with("__mito__added")) { self.hidden += 1; } l };
         if let Some(l) = lowered { *s = l; }
         match s {
             Stmt::At(..) => {}
@@ -1649,6 +1682,7 @@ impl Binder<'_> {
                 let Expr::Call(n, args, res) = e else { unreachable!() };
                 for a in args.iter_mut() { self.expr(a)?; }
                 *res = match (n.as_str(), args.len()) {
+                    _ if AMBIGUOUS_OPS.contains(&&n[1..]) && self.declared_method(&n[1..]) => CallRes::Unbound,
                     (".count", 1) => CallRes::Builtin(B::Count),
                     (".capacity", 1) => CallRes::Builtin(B::Capacity),
                     (".add" | ".try_add", 1) => return self.err(format!("`{}()` makes an item: write `let x = coll{}();` or `coll{}();` as a statement", &n[1..], n, n)),
@@ -1689,11 +1723,43 @@ impl Binder<'_> {
                 } else if let Some(b) = B::from(n) { CallRes::Builtin(b) }
                 // `split(...)`: what a loop walks (`foreach p in split(t, ", ")`); compiled there
                 else if n == "split" || n == "__mito__text_cap" || n == "__mito__struct" { CallRes::Unbound }
+                // `f(x, y)` for a function declared for the types of its first parameter is `x.f(y)`: the receiver's type picks the function
+                else if !args.is_empty() && self.declared_method(n) { *n = format!(".{}", n); CallRes::Unbound }
                 else { let hint = suggest(n, self.fns.iter().map(|f| f.0.as_str()).chain(BUILTIN_NAMES.iter().copied())); return self.err(format!("unknown function `{}`{}", n, hint)); };
             }
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// The collection operations that are statements, as the statements the code generator knows: `let p = coll.add();`, `coll.clear();`, `coll.remove(p);` ...
+/// (`hidden` numbers the local that `coll.add();` makes).
+pub fn lower_op(s: &Stmt, hidden: u32) -> Option<Stmt> {
+    let mut s = s.clone();
+    let s = &mut s;
+    match s {
+            Stmt::Let(n, _, Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => Some(Stmt::Alloc { var: n.clone(), slot: 0, coll: args.remove(0), try_: op == ".try_add" }),
+            Stmt::Do(Expr::Call(op, args, _)) if (op == ".add" || op == ".try_add") && args.len() == 1 => { Some(Stmt::Alloc { var: format!("__mito__added{}", hidden), slot: 0, coll: args.remove(0), try_: op == ".try_add" }) }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".clear" && args.len() == 1 => Some(Stmt::Clear(args.remove(0))),
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".remove" && args.len() == 2 => { let item = args.remove(1); Some(Stmt::Remove(args.remove(0), item)) }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".fill" && args.len() == 4 => {
+                let value = args.remove(3); let count = args.remove(2); let from = args.remove(1);
+                Some(Stmt::Fill(args.remove(0), from, count, value))
+            }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".move" && args.len() == 4 => {
+                let count = args.remove(3); let to = args.remove(2); let from = args.remove(1);
+                Some(Stmt::Move(args.remove(0), from, to, count))
+            }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".sort" && args.len() == 4 => {
+                let scratch = args.remove(3); let count = args.remove(2); let from = args.remove(1);
+                Some(Stmt::Sort(args.remove(0), from, count, scratch))
+            }
+            Stmt::Do(Expr::Call(op, args, _)) if op == ".copy_from" && args.len() == 5 => {
+                let count = args.remove(4); let to = args.remove(3); let from = args.remove(2); let src = args.remove(1);
+                Some(Stmt::Copy(args.remove(0), src, from, to, count))
+            }
+            _ => None,
     }
 }
 

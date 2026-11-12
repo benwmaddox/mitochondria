@@ -967,8 +967,8 @@ state a: A;
 struct A { p: P; q: P; hits: i64; }
 state a: A;
 @post("/set/{c}") fn set(c: i64) -> Response<{ c: i64 }> { a.p.x = c; a.p.y = c; a.p.z = c; return ok({ c: c }); }
-@get("/peek") fn peek() -> Response<{ s: i64; d: i64 }> { var l = a.p; l.x += 1; let m = P { ..l, z: l.z * 2 }; return ok({ s: l.x + l.y + l.z, d: m.z - m.y }); }
-@get("/into") fn into() -> Response<{ h: i64 }> { var l = a.p; a.q = l; a.hits += 1; return ok({ h: a.hits }); }
+@get("/peek") fn peek() -> Response<{ s: i64; d: i64 }> { var l = P { ..a.p }; l.x += 1; let m = P { ..l, z: l.z * 2 }; return ok({ s: l.x + l.y + l.z, d: m.z - m.y }); }
+@get("/into") fn into() -> Response<{ h: i64 }> { var l = P { ..a.p }; a.q = l; a.hits += 1; return ok({ h: a.hits }); }
 @get("/q") fn q() -> Response<{ x: i64 }> { return ok({ x: a.q.x }); }
 "#;
         let (st, code) = crate::source::load(src).unwrap();

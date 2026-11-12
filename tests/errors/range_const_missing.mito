@@ -1,0 +1,5 @@
+// expect: const group `L` has no `B`
+const L { A: i64 = 5; }
+struct T { n: i64; }
+state t: T;
+@get("/a/{n}") fn a(n: i64 in 0..L.B) -> Response<{ n: i64 }> { return ok({ "n": n }); }

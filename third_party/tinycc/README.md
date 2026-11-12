@@ -16,6 +16,7 @@ Changed or added here (import lists only, so generated programs import system fu
 them up by name at run time, which Windows Defender's heuristics took for malware):
 - `lib/kernel32.def`: ten names appended at the end (`InitializeSRWLock` through `GetFileSizeEx`), which the 0.9.27
   list predates (the last two for SQLite).
+- `lib/ucrtbase.def` (new): the C math functions the 0.9.27 `msvcrt.def` list lacks (`round`, `trunc`, `log2`, `cbrt`, `hypot` and friends), which the language's math built-ins call; an import list only, linked for TinyCC builds (`TCC_LIBS` in src/tcc.rs).
 - `lib/ws2_32.def`, `lib/bcrypt.def`: generated with `tcc -impdef C:\Windows\System32\<name>.dll` (Windows 11).
 
 Licence: GNU Lesser General Public License 2.1 (`COPYING`). TinyCC is not covered by Mitochondria's Apache-2.0 licence.

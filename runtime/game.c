@@ -5,8 +5,9 @@
    since the last frame) and its answer is the frame: one line for each pass, a shader's name and the shader's uniforms as `name=value` words, `terrain x=1.5 yaw=0.2`.
    A pass is drawn over the whole window (one triangle; the vertex shader is the driver's: it gives `in vec2 vUv` 0..1 across the window) and the driver sets
    `uniform vec2 uResolution`, the size in pixels of what is drawn on. A pass named with a scale, `scene@0.25 ...`, draws into an image of that fraction of the window
-   instead (one image, kept between frames, made again when the window or the scale changes); later passes that draw on the window read it as `uniform sampler2D uImage`
-   (16-bit floats, so light can be brighter than 1). Fragment shaders are `#version 330 core`.
+   instead (one image, kept between frames, made again when the window or the scale changes) and may write two outputs, `layout(location = 0) out vec4` and
+   `layout(location = 1) out vec4`: later passes that draw on the window read them as `uniform sampler2D uImage` and `uImage1` (16-bit floats, so light can be
+   brighter than 1, and a second output can hold what the picture is made of: how far, which way a surface faces, which thing it is). Fragment shaders are `#version 330 core`.
    Options: --size WxH (1280x720); --seed N; --hold w,shift keys held down in every frame and --mouse DX,DY pointer movement in every frame (to try a game's controls without a person); --frames N runs N frames of 1/60 s and stops (a window that is not shown); --screenshot FILE.ppm writes the
    last of them (with --frames, default 1). Without --frames the window runs until it is closed. */
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
@@ -98,6 +99,7 @@ static void (*glBindTexture)(unsigned target, unsigned tex);
 static void (*glTexImage2D)(unsigned target, int level, int internal, int w, int h, int border, unsigned format, unsigned type, const void *data);
 static void (*glTexParameteri)(unsigned target, unsigned name, int value);
 static void (*glActiveTexture)(unsigned unit);
+static void (*glDrawBuffers)(int n, const unsigned *bufs);
 static void (*glUniform1i)(int at, int x);
 static const struct { const char *name; void **at; } gl_table[] = {
     { "glCreateShader", (void **)&glCreateShader }, { "glShaderSource", (void **)&glShaderSource }, { "glCompileShader", (void **)&glCompileShader },
@@ -110,23 +112,27 @@ static const struct { const char *name; void **at; } gl_table[] = {
     { "glGenFramebuffers", (void **)&glGenFramebuffers }, { "glBindFramebuffer", (void **)&glBindFramebuffer }, { "glFramebufferTexture2D", (void **)&glFramebufferTexture2D },
     { "glCheckFramebufferStatus", (void **)&glCheckFramebufferStatus }, { "glGenTextures", (void **)&glGenTextures }, { "glDeleteTextures", (void **)&glDeleteTextures },
     { "glBindTexture", (void **)&glBindTexture }, { "glTexImage2D", (void **)&glTexImage2D }, { "glTexParameteri", (void **)&glTexParameteri },
-    { "glActiveTexture", (void **)&glActiveTexture }, { "glUniform1i", (void **)&glUniform1i },
+    { "glActiveTexture", (void **)&glActiveTexture }, { "glUniform1i", (void **)&glUniform1i }, { "glDrawBuffers", (void **)&glDrawBuffers },
 };
 
-/* the offscreen image the passes with a scale draw into: one 16-bit float texture on a framebuffer */
-static unsigned game_fbo = 0, game_tex = 0;
+/* the offscreen image the passes with a scale draw into: two 16-bit float textures on one framebuffer (colour attachments 0 and 1) */
+static unsigned game_fbo = 0, game_tex[2] = { 0, 0 };
 static int game_tex_w = 0, game_tex_h = 0;
 static int game_image(int w, int h) {
-    if (game_tex && game_tex_w == w && game_tex_h == h) return 1;
+    if (game_tex[0] && game_tex_w == w && game_tex_h == h) return 1;
     if (!game_fbo) glGenFramebuffers(1, &game_fbo);
-    if (game_tex) glDeleteTextures(1, &game_tex);
-    glGenTextures(1, &game_tex);
-    glBindTexture(0x0DE1, game_tex);                                  /* GL_TEXTURE_2D */
-    glTexImage2D(0x0DE1, 0, 0x881A, w, h, 0, 0x1908, 0x1406, 0);     /* GL_RGBA16F, GL_RGBA, GL_FLOAT */
-    glTexParameteri(0x0DE1, 0x2800, 0x2601); glTexParameteri(0x0DE1, 0x2801, 0x2601);   /* linear filtering */
-    glTexParameteri(0x0DE1, 0x2802, 0x812F); glTexParameteri(0x0DE1, 0x2803, 0x812F);   /* clamped at the edges */
     glBindFramebuffer(0x8D40, game_fbo);                              /* GL_FRAMEBUFFER */
-    glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, game_tex, 0);     /* GL_COLOR_ATTACHMENT0 */
+    for (int k = 0; k < 2; k++) {
+        if (game_tex[k]) glDeleteTextures(1, &game_tex[k]);
+        glGenTextures(1, &game_tex[k]);
+        glBindTexture(0x0DE1, game_tex[k]);                           /* GL_TEXTURE_2D */
+        glTexImage2D(0x0DE1, 0, 0x881A, w, h, 0, 0x1908, 0x1406, 0); /* GL_RGBA16F, GL_RGBA, GL_FLOAT */
+        glTexParameteri(0x0DE1, 0x2800, 0x2601); glTexParameteri(0x0DE1, 0x2801, 0x2601);   /* linear filtering */
+        glTexParameteri(0x0DE1, 0x2802, 0x812F); glTexParameteri(0x0DE1, 0x2803, 0x812F);   /* clamped at the edges */
+        glFramebufferTexture2D(0x8D40, 0x8CE0 + (unsigned)k, 0x0DE1, game_tex[k], 0);       /* GL_COLOR_ATTACHMENT0 + k */
+    }
+    static const unsigned both[2] = { 0x8CE0, 0x8CE1 };
+    glDrawBuffers(2, both);
     game_tex_w = w; game_tex_h = h;
     return glCheckFramebufferStatus(0x8D40) == 0x8CD5;               /* GL_FRAMEBUFFER_COMPLETE */
 }
@@ -304,16 +310,16 @@ int main(int argc, char **argv) {
                 tw = (int)(pw * scale); th = (int)(ph * scale); if (tw < 1) tw = 1; if (th < 1) th = 1;
                 if (!game_image(tw, th)) { printf("error: the offscreen image of %dx%d is not complete\n", tw, th); return 1; }
                 glBindFramebuffer(0x8D40, game_fbo);
-                glBindTexture(0x0DE1, 0);                      /* not read while it is drawn on */
+                for (int k = 0; k < 2; k++) { glActiveTexture(0x84C0 + (unsigned)k); glBindTexture(0x0DE1, 0); }   /* not read while it is drawn on */
             } else {
                 glBindFramebuffer(0x8D40, 0);
-                if (game_tex) { glActiveTexture(0x84C0); glBindTexture(0x0DE1, game_tex); }   /* GL_TEXTURE0 */
+                if (game_tex[0]) for (int k = 0; k < 2; k++) { glActiveTexture(0x84C0 + (unsigned)k); glBindTexture(0x0DE1, game_tex[k]); }   /* GL_TEXTURE0, 1 */
             }
             glViewport(0, 0, tw, th);
             glClearColor(0, 0, 0, 1); glClear(0x4000u);
             glUseProgram(programs[shader]);
             glUniform2f(glGetUniformLocation(programs[shader], "uResolution"), (float)tw, (float)th);
-            if (scale <= 0 && game_tex) glUniform1i(glGetUniformLocation(programs[shader], "uImage"), 0);
+            if (scale <= 0 && game_tex[0]) { glUniform1i(glGetUniformLocation(programs[shader], "uImage"), 0); glUniform1i(glGetUniformLocation(programs[shader], "uImage1"), 1); }
             /* the pass's uniforms, up to the end of its line */
             char *lineend = p; if (endc == ' ') while (*lineend && *lineend != '\n') lineend++;   /* a pass with no uniforms ends where its name did */
             char lc = *lineend; *lineend = 0;

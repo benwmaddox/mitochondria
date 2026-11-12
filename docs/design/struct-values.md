@@ -255,6 +255,8 @@ the stores it is; copies themselves cost no queries. A copy of a module's privat
 (`NaN != NaN`, so a struct holding a NaN is not equal to itself; documented). No ordering. Either side may be a place or a value. `str(v)` is not proposed: there is no one right
 format. `log v` and responses print JSON text (`{"x":1,"y":2,"z":3}`) because they need a text form anyway, and tests see the same text. Recommend `==` in step 3, no `str`.
 
+**Decision (owner, 2026-11-12): no `==` on structs for now.** Comparing every field is rarely what a program means (floats: `NaN != NaN`, `0.0 == -0.0`; text and arrays: capacity or used part?), and a byte compare would answer those differently from a fieldwise one. Compare the fields that matter (`a.x == b.x && a.y == b.y`). If a real program needs it later, add it first for structs of only integers and `bool`, where a byte compare is exactly right. The paragraph above is the old proposal and is not built.
+
 ## 8. What the compiler would have to do and where
 
 | change | where |

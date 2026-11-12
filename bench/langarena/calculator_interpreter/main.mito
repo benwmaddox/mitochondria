@@ -181,7 +181,6 @@ fn prepare(operations: i64 in 1..40000) -> Response<{}> {
     return ok({});
 }
 
-
 fn simple_div(left_value: i64, right_value: i64) -> i64 {
     if right_value == 0 { return 0; }
     if (left_value >= 0 && right_value > 0) || (left_value < 0 && right_value < 0) { return left_value / right_value; }

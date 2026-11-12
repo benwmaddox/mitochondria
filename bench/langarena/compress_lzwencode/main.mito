@@ -3,7 +3,7 @@
 // output code, 16-bit big-endian codes, no reset). The checksum adds the length of every run's output, warmup included.
 struct LZ {
     data: u8[1048576]; codes: u8[16384]; keys: i32[16384]; values: i32[16384];
-    size: i64; next_code: i64; codes_len: i64; result: i64; 
+    size: i64; next_code: i64; codes_len: i64; result: i64;
 }
 state lz: LZ;
 

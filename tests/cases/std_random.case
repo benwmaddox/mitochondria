@@ -1,0 +1,88 @@
+// lib/std/random.mito: a deterministic xorshift64* generator declared by the program (`struct Rng { state: i64; }`), checked against a Python model of the same algorithm; unit floats, inclusive ranges, chance, and the hash for value noise
+--- program
+struct Rng { state: i64; }
+struct Game { rng: Rng; other: Rng; hits: i64; }
+state game: Game;
+include lib/std/random.mito
+
+@post("/seed/{s}")
+fn seed_it(s: i64) -> Response<{ state: i64 }> { game.rng.seed(s); return ok({ state: game.rng.state }); }
+@post("/seed2/{s}")
+fn seed_other(s: i64) -> Response<{ state: i64 }> { game.other.seed(s); return ok({ state: game.other.state }); }
+@post("/next")
+fn next_t() -> Response<{ a: i64, b: i64, c: i64, d: i64 }> {
+    return ok({ a: game.rng.next(), b: game.rng.next(), c: game.rng.next(), d: game.rng.next() });
+}
+@post("/other")
+fn other_t() -> Response<{ a: i64, b: i64 }> { return ok({ a: game.other.next(), b: game.other.next() }); }
+@post("/unit")
+fn unit_t() -> Response<{ a: f64, b: f64, c: f64 }> { return ok({ a: game.rng.unit(), b: game.rng.unit(), c: game.rng.unit() }); }
+@post("/range/{lo}/{hi}")
+fn range_t(lo: i64, hi: i64) -> Response<{ a: i64, b: i64, c: i64, d: i64, e: i64, f: i64 }> {
+    return ok({ a: game.rng.range(lo, hi), b: game.rng.range(lo, hi), c: game.rng.range(lo, hi), d: game.rng.range(lo, hi), e: game.rng.range(lo, hi), f: game.rng.range(lo, hi) });
+}
+// how many of 1000 draws of a die land on each face, and of chance(0.25)
+@post("/counts")
+fn counts() -> Response<{ f1: i64, f2: i64, f3: i64, f4: i64, f5: i64, f6: i64, hits: i64, mean: f64 }> {
+    var c1 = 0; var c2 = 0; var c3 = 0; var c4 = 0; var c5 = 0; var c6 = 0;
+    for i = 0; i < 1000; i += 1 {
+        let d = game.rng.range(1, 6);
+        if d == 1 { c1 += 1; }
+        if d == 2 { c2 += 1; }
+        if d == 3 { c3 += 1; }
+        if d == 4 { c4 += 1; }
+        if d == 5 { c5 += 1; }
+        if d == 6 { c6 += 1; }
+    }
+    var hits = 0;
+    var sum = 0.0;
+    for i = 0; i < 1000; i += 1 {
+        if game.rng.chance(0.25) { hits += 1; }
+        sum += game.rng.unit();
+    }
+    return ok({ f1: c1, f2: c2, f3: c3, f4: c4, f5: c5, f6: c6, hits: hits, mean: sum / 1000.0 });
+}
+@post("/chance/{p}")
+fn chance_t(p: i64) -> Response<{ any: bool }> { return ok({ any: game.rng.chance(p * 0.5) }); }
+@get("/hash/{x}/{y}/{seed}")
+fn hash_t(x: i64, y: i64, seed: i64) -> Response<{ h: i64, mixed: i64, lsr: i64 }> {
+    return ok({ h: hash2(x, y, seed), mixed: x.mix64(), lsr: x.shr_logical(7) });
+}
+--- requests
+POST /next
+POST /seed/42
+POST /next
+POST /next
+POST /seed/42
+POST /unit
+POST /seed/0
+POST /next
+POST /seed/1
+POST /next
+POST /seed/-1
+POST /next
+POST /seed/9223372036854775807
+POST /next
+POST /seed2/42
+POST /other
+POST /seed/42
+POST /range/1/6
+POST /range/-5/5
+POST /range/7/7
+POST /range/0/1
+POST /range/-9223372036854775808/-9223372036854775805
+POST /range/0/4611686018427387903
+POST /range/0/9223372036854775806
+POST /range/5/4
+POST /range/-9223372036854775808/9223372036854775807
+POST /seed/2024
+POST /counts
+POST /chance/0
+POST /chance/2
+GET /hash/0/0/0
+GET /hash/1/0/0
+GET /hash/0/1/0
+GET /hash/0/0/1
+GET /hash/-5/17/99
+GET /hash/123456789/-987654321/42
+GET /hash/9223372036854775807/-9223372036854775808/7

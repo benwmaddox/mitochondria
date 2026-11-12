@@ -1,0 +1,101 @@
+// lib/std/vec.mito: Vec2 and Vec3 as plain structs nested in the program's state, changed in place through views (the same struct twice, as receiver and argument, included); a zero vector stays zero when normalized
+--- program
+struct Player { pos: Vec3; vel: Vec3; flat: Vec2; aim: Vec2; }
+struct World { player: Player; other: Vec3; a: Vec2; b: Vec2; }
+state world: World;
+include lib/std/vec.mito
+
+@post("/v3/{n}")
+fn v3(n: i64) -> Response<{ px: f64, py: f64, pz: f64, vx: f64, vy: f64, vz: f64, ox: f64, oy: f64, oz: f64, dot: f64, len2: f64, len: f64, dist: f64 }> {
+    let k = n * 0.5;
+    world.player.pos.set(1.0, 2.0, 3.0);
+    world.player.vel.set(0.5, -1.0, 2.0);
+    world.other.set(0.0, 0.0, 0.0);
+    world.player.pos.plus(world.player.vel);
+    let dot = world.player.pos.dot(world.player.vel);
+    let len2 = world.player.pos.length_squared();
+    let len = world.player.pos.length();
+    let dist = world.player.pos.distance(world.player.vel);
+    world.player.pos.add_scaled(world.player.vel, k);
+    world.player.pos.minus(world.player.vel);
+    world.player.pos.scale(k);
+    world.other.lerp_to(world.player.pos, world.player.vel, 0.25);
+    world.player.vel.cross_to(world.player.vel, world.player.pos);
+    world.player.pos.cross_to(world.other, world.player.pos);
+    world.other.normalize();
+    return ok({ px: world.player.pos.x, py: world.player.pos.y, pz: world.player.pos.z, vx: world.player.vel.x, vy: world.player.vel.y, vz: world.player.vel.z,
+        ox: world.other.x, oy: world.other.y, oz: world.other.z, dot: dot, len2: len2, len: len, dist: dist });
+}
+@post("/v3b/{n}")
+fn v3b(n: i64) -> Response<{ rx: f64, ry: f64, rz: f64, qx: f64, qy: f64, qz: f64, nx: f64, ny: f64, nz: f64 }> {
+    let k = n * 0.5;
+    world.player.pos.set(3.0, -4.0, k);
+    world.player.vel.set(1.0, 2.0, 2.0);
+    world.other.reflect_to(world.player.pos, world.player.vel);
+    world.player.pos.project_on(world.player.vel);
+    world.player.vel.negate();
+    world.player.vel.normalize();
+    world.player.pos.assign(world.player.vel);
+    return ok({ rx: world.other.x, ry: world.other.y, rz: world.other.z, qx: world.player.pos.x, qy: world.player.pos.y, qz: world.player.pos.z,
+        nx: world.player.vel.x, ny: world.player.vel.y, nz: world.player.vel.z });
+}
+@post("/v2/{n}")
+fn v2(n: i64) -> Response<{ len: f64, dot: f64, dist: f64, ax: f64, ay: f64, fx: f64, fy: f64, bx: f64, by: f64, gx: f64, gy: f64 }> {
+    let t = n * 0.5;
+    world.player.flat.set(3.0, 4.0);
+    world.player.aim.set(1.0, 0.0);
+    let len = world.player.flat.length();
+    let dot = world.player.flat.dot(world.player.aim);
+    let dist = world.player.flat.distance(world.player.aim);
+    world.a.assign(world.player.flat);
+    world.a.rotate(t);
+    world.a.perp();
+    world.a.negate();
+    world.player.flat.normalize();
+    world.player.aim.rotate(t);
+    world.player.aim.perp();
+    world.b.reflect_to(world.a, world.player.aim);
+    world.a.project_on(world.player.flat);
+    world.player.aim.lerp_to(world.player.aim, world.player.flat, 0.5);
+    return ok({ len: len, dot: dot, dist: dist, ax: world.a.x, ay: world.a.y, fx: world.player.flat.x, fy: world.player.flat.y, bx: world.b.x, by: world.b.y,
+        gx: world.player.aim.x, gy: world.player.aim.y });
+}
+@post("/zero")
+fn zero() -> Response<{ nx: f64, ny: f64, nz: f64, px: f64, py: f64, mx: f64, my: f64, len: f64 }> {
+    world.other.set(0.0, 0.0, 0.0);
+    world.other.normalize();
+    world.a.set(0.0, 0.0);
+    world.a.normalize();
+    world.player.pos.set(2.0, 3.0, 4.0);
+    world.player.pos.project_on(world.other);
+    world.b.set(5.0, 6.0);
+    world.b.project_on(world.a);
+    world.player.vel.set(0.0, 0.0, 0.0);
+    return ok({ nx: world.other.x, ny: world.other.y, nz: world.other.z, px: world.player.pos.x, py: world.player.pos.y, mx: world.b.x, my: world.b.y, len: world.player.vel.length() });
+}
+@post("/self")
+fn self_ops() -> Response<{ x: f64, y: f64, z: f64, d: f64 }> {
+    world.player.pos.set(1.0, 2.0, 3.0);
+    world.player.pos.plus(world.player.pos);
+    world.player.pos.minus(world.player.pos);
+    world.player.pos.set(1.0, 2.0, 3.0);
+    world.player.pos.assign(world.player.pos);
+    world.player.pos.add_scaled(world.player.pos, 2.0);
+    let d = world.player.pos.distance(world.player.pos);
+    return ok({ x: world.player.pos.x, y: world.player.pos.y, z: world.player.pos.z, d: d });
+}
+--- requests
+POST /v3/-3
+POST /v3/0
+POST /v3/1
+POST /v3/2
+POST /v3/5
+POST /v3b/-4
+POST /v3b/0
+POST /v3b/3
+POST /v2/0
+POST /v2/1
+POST /v2/-2
+POST /v2/7
+POST /zero
+POST /self

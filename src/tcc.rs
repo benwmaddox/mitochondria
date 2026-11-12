@@ -74,6 +74,8 @@ unsafe extern "C" fn on_error(opaque: *mut c_void, msg: *const c_char) {
 /// The system DLLs generated programs import from, besides kernel32 and msvcrt: sockets (ws2_32) and the OS's
 /// random numbers (bcrypt). Imported normally, never looked up by name at run time.
 pub const LIBS: &[&str] = if cfg!(windows) { &["ws2_32", "bcrypt"] } else { &["pthread", "m"] };
+/// What TinyCC also imports on Windows: msvcrt lacks round, trunc, log2, cbrt and hypot (the math built-ins), the universal CRT has them.
+pub const TCC_LIBS: &[&str] = if cfg!(windows) { &["ucrtbase"] } else { &[] };
 
 /// libtcc 0.9.27 keeps global state: one compile (or delete) at a time in the whole process.
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -132,7 +134,7 @@ impl Unit {
             (l.set_options)(s, o.as_ptr());
             (l.set_output)(s, 1); // TCC_OUTPUT_MEMORY
             // the system DLLs the runtime imports from, besides kernel32 and msvcrt (lib/*.def)
-            for name in LIBS { let n = CString::new(*name).unwrap(); if (l.add_library)(s, n.as_ptr()) != 0 { return Err(format!("tcc: no import list for {}", name)); } }
+            for name in LIBS.iter().chain(TCC_LIBS) { let n = CString::new(*name).unwrap(); if (l.add_library)(s, n.as_ptr()) != 0 { return Err(format!("tcc: no import list for {}", name)); } }
             for (name, p) in symbols { let n = CString::new(*name).unwrap(); (l.add_symbol)(s, n.as_ptr(), *p); }
             for src in srcs {
                 let c = CString::new(*src).map_err(|_| "source contains a NUL byte".to_string())?;

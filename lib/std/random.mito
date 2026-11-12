@@ -1,0 +1,56 @@
+// A deterministic random generator: `use "std/random.mito";`, and declare the generator in the program's state:
+//     struct Rng { state: i64; }
+//     struct Game { rng: Rng; }      state game: Game;
+//     game.rng.seed(42);  game.rng.range(1, 6);  game.rng.unit();
+// xorshift64* (Vigna): the same seed gives the same stream on every platform, since it uses only wrapping integer
+// arithmetic and shifts. It is not for secrets (`random_bytes` is).
+
+// self shifted right by n (1..63) filling with zeros: `>>` copies the sign bit
+fn shr_logical(self: i64, n: i64) -> i64 { return (self >> n) & wrapping_sub(1 << (64 - n), 1); }
+
+// start the stream from s (any value); an unseeded generator (state 0) behaves as if seeded with 0
+fn seed(self: Rng, s: i64) { self.state = s; if s == 0 { self.state = 88172645463325252; } }
+
+// the next 64-bit value (any i64, negative too)
+fn next(self: Rng) -> i64 {
+    var x = self.state;
+    if x == 0 { x = 88172645463325252; }
+    x = x ^ x.shr_logical(12);
+    x = x ^ (x << 25);
+    x = x ^ x.shr_logical(27);
+    self.state = x;
+    return wrapping_mul(x, 2685821657736338717);
+}
+
+// a whole number from lo to hi, both included. Unbiased: it keeps the top 63 bits of a value and draws again when
+// the value falls in the short last block that would favor small results (fewer than 2 draws on average).
+// hi < lo fails the request (400); a range of all 2^64 values overflows and fails too.
+fn range(self: Rng, lo: i64, hi: i64) -> i64 {
+    if hi < lo { fail 400 "range: hi is below lo"; }
+    let n = hi - lo + 1;
+    // draws above `top` would favor small results: 2^63 mod n values are left over
+    let top = 9223372036854775807 - (9223372036854775807 % n + 1) % n;
+    var u = self.next().shr_logical(1);
+    while u > top { u = self.next().shr_logical(1); }
+    return lo + u % n;
+}
+
+// a float from 0 up to but not including 1: 53 random bits over 2^53
+fn unit(self: Rng) -> f64 { return self.next().shr_logical(11) * (1.0 / 9007199254740992.0); }
+
+// true with probability p (p <= 0 never, p >= 1 always)
+fn chance(self: Rng, p: f64) -> bool { return self.unit() < p; }
+
+// a 64-bit mixing function (the finalizer of splitmix64): nearby inputs give unrelated outputs
+fn mix64(self: i64) -> i64 {
+    var h = self;
+    h = wrapping_mul(h ^ h.shr_logical(30), -4658895280553007687);
+    h = wrapping_mul(h ^ h.shr_logical(27), -7723592293110705685);
+    return h ^ h.shr_logical(31);
+}
+
+// a hash of a point and a seed, for value noise: `hash2(x, y, seed).shr_logical(11) * (1.0 / 9007199254740992.0)` is a float in [0, 1)
+fn hash2(x: i64, y: i64, seed: i64) -> i64 {
+    let a = wrapping_add(seed, wrapping_mul(x, -7046029254386353131)).mix64();
+    return wrapping_add(a, wrapping_mul(y, 6364136223846793005)).mix64();
+}

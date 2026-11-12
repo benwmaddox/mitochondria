@@ -1,0 +1,8 @@
+LIBRARY ucrtbase.dll
+
+EXPORTS
+cbrt
+hypot
+log2
+round
+trunc

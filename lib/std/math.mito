@@ -1,0 +1,111 @@
+// Math helpers, written in Mitochondria: `use "std/math.mito";` (docs/reference.md, Standard library).
+// Functions of a type: `x.clamp(0.0, 1.0)`, `n.gcd(m)`; the receiver's type picks the function.
+// Floats follow IEEE: a NaN in gives NaN out, a division by zero is an infinity or NaN, nothing fails.
+
+const Math {
+    PI: f64 = 3.141592653589793;
+    TAU: f64 = 6.283185307179586;
+    E: f64 = 2.718281828459045;
+    SQRT2: f64 = 1.4142135623730951;
+}
+
+// ---- floats ----
+fn clamp(self: f64, lo: f64, hi: f64) -> f64 { return max(lo, min(self, hi)); }
+fn saturate(self: f64) -> f64 { return max(0.0, min(self, 1.0)); }
+fn sign(self: f64) -> f64 {
+    if self > 0.0 { return 1.0; }
+    if self < 0.0 { return -1.0; }
+    return 0.0;
+}
+fn fract(self: f64) -> f64 { return self - floor(self); }
+fn to_radians(self: f64) -> f64 { return self * (Math.PI / 180.0); }
+fn to_degrees(self: f64) -> f64 { return self * (180.0 / Math.PI); }
+
+// a + (b - a) * t, not limited to t in 0..1
+fn lerp(self: f64, b: f64, t: f64) -> f64 { return self + (b - self) * t; }
+// the t at which a.lerp(b, t) == v (an infinity or NaN when a == b)
+fn inverse_lerp(self: f64, b: f64, v: f64) -> f64 { return (v - self) / (b - self); }
+// self from the range in_lo..in_hi to the range out_lo..out_hi, not clamped
+fn remap(self: f64, in_lo: f64, in_hi: f64, out_lo: f64, out_hi: f64) -> f64 {
+    return out_lo + (self - in_lo) / (in_hi - in_lo) * (out_hi - out_lo);
+}
+// 0 below edge0, 1 above edge1, the cubic 3t^2 - 2t^3 between
+fn smoothstep(self: f64, edge0: f64, edge1: f64) -> f64 {
+    let t = max(0.0, min((self - edge0) / (edge1 - edge0), 1.0));
+    return t * t * (3.0 - 2.0 * t);
+}
+// self brought into lo..hi (hi excluded) by adding or subtracting whole widths
+fn wrap(self: f64, lo: f64, hi: f64) -> f64 {
+    let w = hi - lo;
+    let r = self - lo;
+    let t = r - floor(r / w) * w;
+    if t >= w { return lo; }
+    return lo + t;
+}
+// the shortest signed turn from angle self to angle b, in radians, in (-PI, PI]
+fn angle_diff(self: f64, b: f64) -> f64 {
+    var d = fmod(b - self, Math.TAU);
+    if d > Math.PI { d = d - Math.TAU; }
+    if d <= -Math.PI { d = d + Math.TAU; }
+    return d;
+}
+
+// easing: t is limited to 0..1, the result goes from 0 to 1
+fn ease_in_quad(self: f64) -> f64 { let t = max(0.0, min(self, 1.0)); return t * t; }
+fn ease_out_quad(self: f64) -> f64 { let t = max(0.0, min(self, 1.0)); return 1.0 - (1.0 - t) * (1.0 - t); }
+fn ease_in_out_quad(self: f64) -> f64 {
+    let t = max(0.0, min(self, 1.0));
+    if t < 0.5 { return 2.0 * t * t; }
+    let u = 2.0 - 2.0 * t;
+    return 1.0 - u * u / 2.0;
+}
+fn ease_in_cubic(self: f64) -> f64 { let t = max(0.0, min(self, 1.0)); return t * t * t; }
+fn ease_out_cubic(self: f64) -> f64 { let t = max(0.0, min(self, 1.0)); let u = 1.0 - t; return 1.0 - u * u * u; }
+fn ease_in_out_cubic(self: f64) -> f64 {
+    let t = max(0.0, min(self, 1.0));
+    if t < 0.5 { return 4.0 * t * t * t; }
+    let u = 2.0 - 2.0 * t;
+    return 1.0 - u * u * u / 2.0;
+}
+
+// ---- integers ----
+fn clamp(self: i64, lo: i64, hi: i64) -> i64 { return max(lo, min(self, hi)); }
+fn sign(self: i64) -> i64 {
+    if self > 0 { return 1; }
+    if self < 0 { return -1; }
+    return 0;
+}
+// the greatest common divisor, never negative; gcd(0, 0) is 0 (the smallest i64 fails: its absolute value does not fit)
+fn gcd(self: i64, b: i64) -> i64 {
+    var x = abs(self);
+    var y = abs(b);
+    while y != 0 {
+        let r = x % y;
+        x = y;
+        y = r;
+    }
+    return x;
+}
+// the integer square root: the largest r with r * r <= self; a negative number fails the request (400)
+fn isqrt(self: i64) -> i64 {
+    if self < 0 { fail 400 "isqrt of a negative number"; }
+    if self < 2 { return self; }
+    var r = int(sqrt(self));
+    // the float root can be off by one near the top of the range; division keeps the test from overflowing
+    while r > self / r { r = r - 1; }
+    while r + 1 <= self / (r + 1) { r = r + 1; }
+    return r;
+}
+// self to the power e (e >= 0, else 400); the operators check overflow, so a result that does not fit fails the request
+fn ipow(self: i64, e: i64) -> i64 {
+    if e < 0 { fail 400 "ipow with a negative exponent"; }
+    var result = 1;
+    var b = self;
+    var k = e;
+    while k > 0 {
+        if k & 1 == 1 { result = result * b; }
+        k = k >> 1;
+        if k > 0 { b = b * b; }
+    }
+    return result;
+}

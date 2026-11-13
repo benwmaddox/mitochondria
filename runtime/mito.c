@@ -605,6 +605,8 @@ typedef struct Mito {
     i64 loop_budget; /* rounds of `while` and `for` loops one request may run (`--loop-budget`) */
     u64 small;       /* bytes of the block holding the page flags (released with the instance) */
     u32 stdin_off, stdin_n; /* a command-line program's stdin, read straight into the text area (MITO(text_input)): where it is and how long, so the ":stdin" input aliases it */
+    u32 text_pin;    /* text below this offset is held until the request ends: a text read on demand (stdin_text, read_file) that a loop or function return must not cut away */
+    u8 stdin_done, cli_main; /* stdin is in the text area (eagerly or by stdin_text); the request is a command-line program's `@main` */
     u32 text_base;   /* where a request's text starts: after the literals, or after a running test's own text */
     /* a test's request being made: its body (JSON), its headers, as names and values in the text area */
     u8 rqbuf[16384]; u32 nrqh; struct { T k, v; } rqh[16];
@@ -1349,7 +1351,7 @@ static int h_arr_txt(Ctx *c, u64 off, u32 count, Txt *out) { Mito *m = M_(c); T 
 /* save a range to the undo log before a loop stores into it (save skips the lines already saved) */
 static int h_save_range(Ctx *c, u64 a, u64 n) { if (M_(c)->reader) { RD_AT(M_(c), a, n); return 0; } save(&M_(c)->mem, a, n); return 0; }
 static int h_text_len(Ctx *c, u32 *len) { *len = M_(c)->text.len; return 0; }
-static int h_text_cut(Ctx *c, u32 len) { M_(c)->text.len = len; return 0; }
+static int h_text_cut(Ctx *c, u32 len) { Mito *m = M_(c); m->text.len = len < m->text_pin ? m->text_pin : len; return 0; }
 static int h_wr_plain(Ctx *c, u64 off, u32 size, i64 v) { RD_AT(M_(c), off, size); Mem *m = &M_(c)->mem; save(m, off, size); u64 x = (u64)v; memcpy(m->base + off, &x, size); return 0; }
 /* `count` elements of `esize` bytes of an array at byte offset `base`, from position `from`, are set to the value whose bits are `bits`: one commit
    (not for plain state, committed at start), one undo-log pass over the range, one fill (the generated code checked the range and that the value fits). */
@@ -2202,9 +2204,72 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
     }
     return fail(m, 500, "unknown builtin code");
 }
+/* ---- a command-line program's system access (`@main` only; the compiler refuses these built-ins in other programs): codes 100 to 103 ----
+   eprint(text) writes to standard error at once, as it is (no line break added). stdin_text(max) and read_file(path, max) read into the end of the
+   text area, straight from the system, in steps that grow the committed memory as the bytes arrive (a small input costs a small amount; no copy);
+   the text stays until the request ends (text_pin: a loop or a function return cuts later text back, never below it). At most `max` bytes:
+   more fails the request (413), a text area too small for it too (507). stdin is read once: a second stdin_text gives the same text. */
+static int text_has(Mito *m, u64 n) { return (u64)m->text.len + n <= m->text.cap || a_grow(&m->text, (u64)m->text.len + n); }
+/* up to max bytes, then one more to see whether there are more: h is a file (os_file_read), or stdin when 0. 0: all of it is at the end of the text area, its length in *got;
+   2: more than max bytes; 3: the text area is full */
+static int read_into_text(Mito *m, void *h, u64 max, u64 *got) {
+    u64 n = 0;
+    for (;;) {
+        u64 room = 16ULL << 20; if (room > max + 1 - n) room = max + 1 - n;
+        while (room > 1 && !text_has(m, n + room)) room >>= 1;
+        if (!text_has(m, n + room)) { /* the text area is full: more input is too much */
+            u8 probe[1]; u32 k = h ? os_file_read(h, probe, 1) : os_in(probe, 1);
+            if (k) return 3;
+            break;
+        }
+        u32 k = h ? os_file_read(h, m->text.p + m->text.len + n, (u32)room) : os_in(m->text.p + m->text.len + n, (u32)room);
+        if (!k) break;
+        n += k;
+        if (n > max) return 2;
+    }
+    *got = n; return 0;
+}
+static int too_long(Mito *m, const char *what, u64 max) { err(m, E_FAIL, 413); a_str(&m->emsg, what); a_str(&m->emsg, ": more than "); a_u64(&m->emsg, max); a_str(&m->emsg, " bytes (the most the program allows)"); return -1; }
+static int sys_builtin(Ctx *c, Mito *m, int code, const Val *a, u32 n, Val *out) {
+    T x; u32 start = m->text.len; u64 max = 0, got = 0;
+    if (!m->cli_main) return fail(m, 500, "eprint, stdin_text, read_file and file_exists are for the command-line program's @main (not @start)");
+    if (code == 100) { /* eprint(text) */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        os_err(t_ptr(m, x), x.len); *out = v_null(); return 0;
+    }
+    if (code != 103) { /* the most bytes: the last argument, an integer */
+        const Val *mv = &a[code == 101 ? 0 : 1];
+        if (n < (code == 101 ? 1u : 2u) || mv->tag != 1 || mv->i < 0) return fail(m, 500, "the most bytes is a non-negative integer");
+        max = mv->i > 0xFFFFFFFFLL ? 0xFFFFFFFFULL : (u64)mv->i;
+    }
+    if (code == 101) { /* stdin_text(max) */
+        if (m->stdin_done) { if (m->stdin_n > max) return too_long(m, "stdin", max); *out = v_str((T){ m->stdin_off, m->stdin_n }); return 0; }
+        int r = read_into_text(m, 0, max, &got);
+        if (r == 2) return too_long(m, "stdin", max);
+        if (r) return fail(m, 507, "stdin: the request text area is full");
+        m->stdin_off = start; m->stdin_n = (u32)got; m->stdin_done = 1;
+        c->steps += 64 * (i64)got; /* a pass over every byte of it takes several steps */
+        m->text.len = (u32)(start + got); m->text_pin = m->text.len; *out = v_str(t_since(m, start)); return 0;
+    }
+    /* read_file(path, max), file_exists(path): the path is bytes up to 4095, none 0 */
+    if (arg_txt(m, a, n, 0, &x)) return -1;
+    char path[4096]; const u8 *s = t_ptr(m, x);
+    if (x.len == 0 || x.len > 4095 || memchr(s, 0, x.len)) { *out = code == 102 ? v_null() : v_int(0); return 0; }
+    memcpy(path, s, x.len); path[x.len] = 0;
+    void *h = os_file_open(path);
+    if (code == 103) { if (h) os_file_close(h); *out = v_int(h != 0); return 0; }
+    if (!h) { *out = v_null(); return 0; }
+    int r = read_into_text(m, h, max, &got);
+    os_file_close(h);
+    if (r == 2) return too_long(m, "read_file", max);
+    if (r) return fail(m, 507, "read_file: the request text area is full");
+    c->steps += 64 * (i64)got;
+    m->text.len = (u32)(start + got); m->text_pin = m->text.len; *out = v_str(t_since(m, start)); return 0;
+}
 static int h_builtin(Ctx *c, int code, const Val *a, u32 n, Val *out) {
     Mito *m = M_(c); T k;
     Val a0 = n > 0 ? a[0] : v_null();
+    if (code >= 100) return sys_builtin(c, m, code, a, n, out);
     if (code >= 17) return bytes_builtin(m, code, a, n, out);
     switch (code) {
         case 0: /* body */ if (arg_txt(m, a, n, 0, &k)) return -1;
@@ -2830,8 +2895,9 @@ MITO_API u8 *MITO(text_room)(void *mp_, u64 n) { Mito *m = (Mito *)mp_;
     return m->text.p + m->text.len;
 }
 MITO_API void MITO(text_input)(void *mp_, u64 n) { Mito *m = (Mito *)mp_;
-    m->stdin_off = m->text.len; m->stdin_n = (u32)n; m->text.len += (u32)n; m->text_base = m->text.len;
+    m->stdin_off = m->text.len; m->stdin_n = (u32)n; m->stdin_done = 1; m->text.len += (u32)n; m->text_base = m->text.len;
 }
+MITO_API void MITO(set_cli)(void *mp_) { ((Mito *)mp_)->cli_main = 1; } /* the next request is the command-line program's `@main` (not its `@start`): the built-ins that touch the system may run */
 MITO_API void *MITO(start)(u64 budget, u64 seed) {
     const MitoProg *pg = &mito_prog;
     if (pg->total > budget) return 0;
@@ -3013,7 +3079,7 @@ static u32 route(Mito *m, const u8 *method, u64 mn, const u8 *path, u64 pn) {
 /* Handle one request, with its headers and (in a system) the fields forwarded with it. Returns the status, or 0 when
    the request was forwarded: then MITO(forward_to) says where, and MITO(finish_forward) commits or rolls back. */
 MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *hdrs, u32 nh, const MitoPair *fwd, u32 nf, const char *body, u32 bn) { Mito *m = (Mito *)mp_;
-    m->out.len = 0; m->text.len = m->text_base; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0; m->bare = 0;
+    m->out.len = 0; m->text.len = m->text_base; m->text_pin = 0; m->ekind = E_NONE; m->ctype = 0; m->head.len = 0; m->bare = 0;
 #ifdef MITO_USES_HTML
     hp_reset(&m->hp);
 #endif

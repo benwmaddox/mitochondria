@@ -17,6 +17,7 @@ void mito_set_areas(u64 text_max, u64 out_max);
 void mito_set_loop_budget(void *m, i64 n);
 u8 *mito_text_room(void *m, u64 n);
 void mito_text_input(void *m, u64 n);
+void mito_set_cli(void *m);
 #define CLI_TARGET_MAX 8192
 
 /* a flag's name or value, percent-encoded into the target; 0 when it does not fit */
@@ -110,6 +111,7 @@ int main(int argc, char **argv) {
     np++;
     mito_set_loop_budget(app, 100000000 + 64 * (i64)inn); /* the step budget grows with the input: a pass over every byte of it takes several steps */
 #endif
+    mito_set_cli(app); /* from here the built-ins that touch the system (eprint, stdin_text, read_file, file_exists) may run */
     int code = mito_handle(app, "MAIN", 4, target, tn, pairs, np, 0, 0, "", 0);
     u32 bn; const char *body = mito_response(app, &bn);
     int exit_code = 0;

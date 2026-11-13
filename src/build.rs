@@ -581,6 +581,79 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `eprint(text)`: text to standard error at once, as it is, while the program goes on; a command-line program's only.
+    #[test]
+    fn a_main_program_can_write_to_standard_error() {
+        let src = "struct A { n: i64; }\nstate a: A;\n@main\nfn main(w: ascii<1..20> from arg(0)) -> Response<text> {\n    eprint(\"one \");\n    eprint(w + \"\n\");\n    eprint(\"\");\n    return ok(\"out\");\n}\n";
+        let Some((dir, exe)) = cli_build(src, "eprint") else { return };
+        assert_eq!(cli_run(&exe, &["two"], ""), (0, "out".into(), "one two\n".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // in a server it is an error when compiling
+        let web = "struct A { n: i64; }\nstate a: A;\n@get(\"/x\")\nfn x() -> Response<text> { eprint(\"a\"); return ok(\"b\"); }\n";
+        let (st, code) = crate::source::load(web).unwrap();
+        let prog = crate::layout::Program::parse(&st).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap();
+        let e = crate::platform::resolve(None, &api, &code).err().unwrap_or_default();
+        assert!(e.contains("eprint") && e.contains("command-line"), "{}", e);
+    }
+
+    /// Run a built command-line program that is given a stdin that stays open and silent: it must finish without reading it (20 seconds at most).
+    fn cli_run_silent_stdin(exe: &std::path::Path, args: &[&str]) -> (i32, String) {
+        use std::io::Read;
+        let mut c = std::process::Command::new(exe).args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let _held = c.stdin.take().unwrap();
+        let mut out = c.stdout.take().unwrap();
+        let reader = std::thread::spawn(move || { let mut s = String::new(); out.read_to_string(&mut s).ok(); s });
+        let start = std::time::Instant::now();
+        let code = loop {
+            if let Some(st) = c.try_wait().unwrap() { break st.code().unwrap(); }
+            if start.elapsed().as_secs() > 20 { let _ = c.kill(); let _ = c.wait(); panic!("the program waited for stdin"); }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        (code, reader.join().unwrap())
+    }
+
+    /// `stdin_text(max)`: stdin read when the program asks for it (so `-n` or `--explain` never waits), once, into the text area, no matter where the call is.
+    #[test]
+    fn a_main_program_reads_stdin_when_it_asks() {
+        let src = "struct A { n: i64; }\nstate a: A;\nfn size(max: i64) -> i64 {\n    let d = stdin_text(max);\n    return len(d);\n}\n@main\nfn main(mode: ascii<1..20> from arg(0)) -> Response<text> {\n    if mode == \"none\" { return ok(\"no input\"); }\n    if mode == \"len\" { return ok(str(size(10000000))); }\n    let n = size(100);\n    let junk = \"xyz\" + str(n) + \"xyz\";\n    let d = stdin_text(100);\n    let again = stdin_text(100);\n    return ok(d + \"|\" + str(n) + \"|\" + junk + \"|\" + again);\n}\n";
+        let Some((dir, exe)) = cli_build(src, "stdintext") else { return };
+        assert_eq!(cli_run_silent_stdin(&exe, &["none"]), (0, "no input".into()));
+        assert_eq!(cli_run(&exe, &["x"], "abc def"), (0, "abc def|7|xyz7xyz|abc def".into(), "".into()));
+        assert_eq!(cli_run(&exe, &["x"], ""), (0, "|0|xyz0xyz|".into(), "".into()));
+        let big = "0123456789".repeat(500_000);
+        assert_eq!(cli_run(&exe, &["len"], &big), (0, "5000000".into(), "".into()));
+        // more than the program allows: the request fails (413), nothing is lost silently
+        let (c, o, e) = cli_run(&exe, &["x"], &"y".repeat(101));
+        assert!(c == 1 && o.is_empty() && e.contains("stdin: more than 100 bytes"), "{} {:?}", c, e);
+        let _ = std::fs::remove_dir_all(&dir);
+        // an input `from stdin` is read before main runs, and stdin_text gives the same text
+        let both = "struct A { n: i64; }\nstate a: A;\n@main\nfn main(doc: utf8<100> from stdin) -> Response<text> {\n    return ok(doc + \"|\" + stdin_text(50));\n}\n";
+        let Some((dir, exe)) = cli_build(both, "stdinboth") else { return };
+        assert_eq!(cli_run(&exe, &[], "hi"), (0, "hi|hi".into(), "".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `read_file(path, max)` and `file_exists(path)`: a file named at run time, read into the text area; null when it cannot be read, 413 when it is too big.
+    #[test]
+    fn a_main_program_reads_files_named_at_run_time() {
+        let src = "struct A { n: i64; }\nstate a: A;\nfn size(p: utf8<1..300>) -> i64 {\n    return len(or(read_file(p, 100), \"\"));\n}\n@main\nfn main(args: utf8<1..1000> from args) -> Response<text> {\n    let p = substr(args, 0, index_of(args, \"\0\"));\n    let rest = substr(args, len(p) + 1, len(args) - len(p) - 1);\n    if rest == \"exists\0\" { return ok(str(file_exists(p))); }\n    if rest == \"small\0\" { return ok(or(read_file(p, 5), \"<missing>\")); }\n    let n = size(p);\n    let t = or(read_file(p, 100), \"<missing>\");\n    let u = or(read_file(p, 100), \"<missing>\");\n    return ok(t + \"|\" + u + \"|\" + str(n));\n}\n";
+        let Some((dir, exe)) = cli_build(src, "readfile") else { return };
+        let f = dir.join("in.txt"); std::fs::write(&f, "hello\nworld").unwrap();
+        let e = dir.join("empty.txt"); std::fs::write(&e, "").unwrap();
+        let (f, e, d, nope) = (f.to_str().unwrap().to_string(), e.to_str().unwrap().to_string(), dir.to_str().unwrap().to_string(), dir.join("nope.txt").to_str().unwrap().to_string());
+        assert_eq!(cli_run(&exe, &[&f, "x"], ""), (0, "hello\nworld|hello\nworld|11".into(), "".into()));
+        assert_eq!(cli_run(&exe, &[&e, "x"], ""), (0, "||0".into(), "".into()));
+        assert_eq!(cli_run(&exe, &[&nope, "x"], ""), (0, "<missing>|<missing>|0".into(), "".into()));
+        assert_eq!(cli_run(&exe, &[&d, "x"], ""), (0, "<missing>|<missing>|0".into(), "".into()));
+        assert_eq!(cli_run(&exe, &[&f, "exists"], ""), (0, "true".into(), "".into()));
+        assert_eq!(cli_run(&exe, &[&nope, "exists"], ""), (0, "false".into(), "".into()));
+        assert_eq!(cli_run(&exe, &[&d, "exists"], ""), (0, "false".into(), "".into()));
+        let (c, o, er) = cli_run(&exe, &[&f, "small"], "");
+        assert!(c == 1 && o.is_empty() && er.contains("read_file: more than 5 bytes"), "{} {:?}", c, er);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A text field declared with the largest size (4 GiB - 1) puts the fields after it beyond 4 GiB into the state: they must work (the plain-state
     /// handlers take 64-bit offsets).
     #[test]

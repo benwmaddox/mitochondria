@@ -97,6 +97,10 @@ static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
                if (!ReadFile(h, buf + n, (u32)want, &got, 0)) { r = 0; break; } if (!got) break; n += got; }
     CloseHandle(h); *len = n; return r;
 }
+/* a file to read in steps (a command-line program's read_file): a handle, or 0 when it cannot be opened (a directory cannot) */
+static void *os_file_open(const char *path) { void *h = CreateFileA(path, 0x80000000u, 3, 0, 3, 0, 0); return h == (void *)(i64)-1 ? 0 : h; } /* GENERIC_READ, FILE_SHARE_READ | WRITE, OPEN_EXISTING */
+static u32 os_file_read(void *h, void *p, u32 n) { u32 done = 0; if (!ReadFile(h, p, n, &done, 0)) return 0; return done; }
+static void os_file_close(void *h) { CloseHandle(h); }
 
 /* threads: a record that lives as long as the thread (the caller's) */
 typedef struct { void *h; } OsThread;
@@ -242,6 +246,15 @@ static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
     for (;;) { if (n == cap) { u8 x; if (read(fd, &x, 1) == 1) r = 2; break; } i64 k = read(fd, buf + n, cap - n); if (k < 0) { r = 0; break; } if (!k) break; n += (u64)k; }
     close(fd); *len = n; return r;
 }
+/* a file to read in steps (a command-line program's read_file): a handle (the descriptor plus one), or 0 when it cannot be opened (a directory cannot) */
+static void *os_file_open(const char *path) {
+    int d = open(path, 0x90000); /* O_RDONLY | O_CLOEXEC | O_DIRECTORY: this opens only a directory */
+    if (d >= 0) { close(d); return 0; }
+    int fd = open(path, 0x80000); /* O_RDONLY | O_CLOEXEC */
+    return fd < 0 ? 0 : (void *)(u64)(fd + 1);
+}
+static u32 os_file_read(void *h, void *p, u32 n) { i64 k = read((int)(u64)h - 1, p, n); return k > 0 ? (u32)k : 0; }
+static void os_file_close(void *h) { close((int)(u64)h - 1); }
 
 /* threads, locks and condition variables (pthreads; the types are opaque blocks of glibc's sizes) */
 typedef struct { u64 id; u32 (*fn)(void *); void *arg; } OsThread; /* lives as long as the thread: the thread reads fn and arg from it */

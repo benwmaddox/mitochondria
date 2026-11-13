@@ -398,3 +398,29 @@ so the app writes that pipeline in Mitochondria, over the other options (an app'
   `tests/cases/html_fragment.case`: round trips (void elements, entities, `&nbsp;`, raw `<script>` text, a stray `</p>`, SVG and
   xlink, implied `<tbody>` and `</li>`), walking, attribute edits, insertion and moves, a parse in a `<table>` context: every output
   checked against Nokogiri::HTML5 in the reference image's Ruby, byte for byte.
+
+## Phase 9: built-ins emitted in line (proposed 2026-11-13)
+
+`byte_at` is a load in the generated C (PR #44). Other built-ins still go through `c->h->builtin(c, code, argv, n, &r)` (the `Val`
+array and the runtime's `switch`) or through a `c->h->...` helper. These are the ones worth turning into plain C, most useful first
+(a scanner such as jx runs them on every byte or line). Each step is measured against the commit before it and recorded in
+`docs/measurements.md`, as `byte_at` was.
+
+1. **`starts_with`, `ends_with`** (builtins 38, 39): a length test plus a compare of the bytes. With a literal second argument the
+   compare has a constant size, which the C compiler unrolls.
+2. **Text `==` and `!=` against a literal** (`c->h->str_cmp_lit`) and between two text columns or windows (`str_cmp_col`,
+   `str_cmp_at`): a length test, then `memcmp` against the interned literal. Probably the hottest of the set in parsers and routers.
+3. **`contains`, `index_of`, `last_index_of`** (37, 44, 45) with a literal: a one-byte literal is a `memchr`; a short one an
+   inline search loop.
+4. **`chr(n)` for n below 128** (98): a one-byte write.
+5. **`min`, `max`** when the range analysis knows both arguments are integers (today any argument of unknown kind takes the
+   generic path).
+6. **`worker_index`, `worker_count`, `data_version`** (12, 13, 67): a read of a field of the context, no call.
+7. **`lower`, `upper` on `ascii<N>` text** (59, 60): the type already says the bytes are 0..127, so the Unicode case tables are
+   not needed; a short loop over the bytes. Other text keeps the table path.
+8. **`trim_start`, `trim_end`** (69, 70): a loop over the first or last bytes that gives a window onto the same text, no copy.
+
+Lower priority (look at a profile first): `c->h->out` for writing the answer (a capacity test plus `memcpy` inline, which also
+touches the overflow handling); `text_len`, `text_cut` and `raw_at`. `elem` is already inline wherever the range analysis proves
+the index. Left as calls on purpose: cryptography, HTML, base64, hex, `crc32`, `replace`, sockets, the answer cache and files
+(their work is far larger than the call).

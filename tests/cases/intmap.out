@@ -19,7 +19,7 @@ DELETE /x/2 -> 200 {"removed":false,"size":5}
 POST /put/7/70 -> 200 {"added":true,"size":6}
 DELETE /x/7 -> 200 {"removed":true,"size":5}
 DELETE /x/6 -> 200 {"removed":false,"size":5}
-POST /fail/8 -> 400 {"error":"no","line":15}
+POST /fail/8 -> 400 {"error":"no","line":122}
 GET /get/8 -> 200 {"value":-1,"has":false}
 POST /churn/1000 -> 200 {"size":5}
 POST /clear -> 200 {"size":0,"room":6}

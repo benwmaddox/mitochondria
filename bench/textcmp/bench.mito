@@ -1,0 +1,23 @@
+// Text compare microbenchmark: a text column of 8 pool items against a literal and against a field, == and <, in a loop.
+struct Note { text: string<12>; }
+struct App { key: string<12>; notes: pool<Note, 8>; }
+state app: App;
+
+@post("/fill")
+fn fill() -> Response<{ n: i64 }> {
+    app.key = "item5";
+    foreach i in 0..7 { let it = app.notes.add(); it.text = "item" + str(i); }
+    return ok({ n: 8 });
+}
+@post("/lit/{n}")
+fn lit(n: i64 in 1..1000000000) -> Response<{ hits: i64 }> {
+    var hits = 0;
+    foreach i in 0..n - 1 { let it = app.notes[i % 8]; if it.text == "item5" { hits += 1; } if it.text < "item3" { hits += 2; } }
+    return ok({ hits: hits });
+}
+@post("/col/{n}")
+fn col(n: i64 in 1..1000000000) -> Response<{ hits: i64 }> {
+    var hits = 0;
+    foreach i in 0..n - 1 { let it = app.notes[i % 8]; if it.text == app.key { hits += 1; } if it.text >= app.key { hits += 2; } }
+    return ok({ hits: hits });
+}

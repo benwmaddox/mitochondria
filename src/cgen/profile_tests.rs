@@ -315,6 +315,27 @@ state app: A;
         assert!(calls(&generic), "a needle that is not a literal keeps the call: {}", generic);
     }
 
+    /// Text compared (a field, a column, a piece of one, a literal) is read in line: no `str_cmp_*` helper call.
+    #[test]
+    fn text_compare_is_read_in_line() {
+        let gen = |body: &str| {
+            let src = format!("struct A {{ s: string<16>; t: string<16>; }}\nstate app: A;\n@get(\"/t\") fn t() -> Response<{{ v: bool }}> {{ {} }}\n", body);
+            let (state, api) = crate::source::load(&src).unwrap();
+            let prog = Program::parse(&state).unwrap();
+            let mut api = crate::lang::parse(&api).unwrap();
+            crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+            let g = generate(&prog, &api);
+            assert!(g.notes.is_empty(), "{:?}", g.notes);
+            g.src[g.src.find("int ep0(Ctx").unwrap()..].to_string()
+        };
+        for body in ["return ok({ v: app.s == \"abc\" });", "return ok({ v: \"abc\" != app.s });", "return ok({ v: app.s == app.t });",
+                     "return ok({ v: app.s < app.t });", "return ok({ v: app.s >= \"abc\" });", "return ok({ v: substr(app.s, 0, 2) == \"ab\" });"] {
+            let c = gen(body);
+            assert!(!c.contains("str_cmp_"), "{}: {}", body, c);
+            assert!(c.contains("BEQ_(") || c.contains("BCMP_("), "{}: {}", body, c);
+        }
+    }
+
     /// How many overflow-checked operations (`ADD`, `SUB`, `MUL`) an endpoint's generated code keeps, for a body written in a program with one range-typed field and one free field.
     fn checked_ops(body: &str) -> usize {
         let src = format!("struct A {{ n: i64 in 0..1000; big: i64; }}\nstate app: A;\n@get(\"/t\") fn t() -> Response<{{ x: i64 }}> {{ {} }}\n", body);

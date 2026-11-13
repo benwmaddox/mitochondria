@@ -1135,3 +1135,16 @@ The jx scanner (examples of `D:\code\jx` main, built with `mito build` and the d
 `chr(k)` with `k` proven 0 to 127 by the range analysis is now a window onto a 128-byte table of the ascii characters (no call, no write), and `trim_start`/`trim_end` of a text are a bounded byte loop and a window (a trimmed literal is folded when compiling). Both were calls through the runtime builtin table (98, 69, 70). No benchmark in the repository exercises these built-ins, so there are no timings: only the generated C changed (unit tests check the calls are gone; `tests/cases/inline_misc.case` has a record made with the unmodified compiler).
 
 Looked at and left alone: `min`/`max` already inline for every argument kind the generator produced in probes (typed inputs, fields, `or`, recursion); `worker_index`, `worker_count` and `data_version` need runtime fields the generated code cannot read under the safety profile (`Ctx` has none, and only `c->h->` member access is allowed); `lower`/`upper` of ascii text would write new bytes into the text area, which the profile allows only helpers to do.
+
+## Text compare read in line (2026-11-13)
+
+`==`, `!=`, `<`, `<=`, `>`, `>=` on a literal, a plain text field, a text column or a `substr` piece used to call the runtime (`str_cmp_lit`, `str_cmp_col`, `str_cmp_at`) for each compare. They are now emitted in line (`src/cgen/inline_eq.rs`): equality is "same length and `memcmp` equal" (a literal's length is a constant, so the C compiler folds the `memcmp`), ordering is `bcmp_` (first differing byte as unsigned, else the shorter first: the runtime's `bytes_cmp`). An input text (`Txt`) still goes through the generic path. `tests/cases/text_compare_inline.case` (empty text, prefix, one different byte, bytes at 128 and above, both operand orders) was recorded with the compiler before the change and matches after, on every backend including clang with undefined-behavior checks.
+
+`bench/textcmp` (`python3 -I run.py`, Linux/WSL, CPU 10 under the bench lock, 3 rounds of 20 million iterations, builds alternated before/after/after/before twice; same answers). Each iteration reads a pool item's text column and does two compares:
+
+| loop | before ns/iteration | after ns/iteration | after / before |
+|---|---:|---:|---:|
+| column `==` and `<` against literals | 4.81 to 5.17 | 2.34 to 2.39 | about 0.47x |
+| column `==` and `>=` against a field | 5.40 to 5.61 | 4.78 to 5.07 | about 0.89x |
+
+The literal loop's gain is larger because the compare against a constant length folds; the column-against-column loop still loads both lengths and calls `memcmp`. Only this microbenchmark was measured; no application benchmark was run for this change.

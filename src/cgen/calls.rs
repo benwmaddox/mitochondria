@@ -147,6 +147,7 @@ impl<'p> G<'p> {
         let code = OPS.iter().position(|o| *o == op).ok_or_else(|| format!("operator `{}`", op))?;
         if compared {
             // a string column against a literal or another column is compared where it is, without copying it into the text area
+            if let Some(e) = self.inline_text_cmp(&l, &r, code) { return Ok(CV::Bool(e)); }
             let flip = [0, 1, 4, 5, 2, 3][code];
             // a window onto a plain field or a piece of a field: compared where it is, against a literal or another field
             let place = |g: &mut Self, v: &CV| -> Option<(i32, String, String)> { match v {

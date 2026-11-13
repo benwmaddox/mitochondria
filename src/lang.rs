@@ -717,6 +717,8 @@ impl P {
             else if self.is_kw("stdin") { self.i += 1; Src::Header(":stdin".into()) }
             // every argument as written (each followed by a 0 byte); a program that has this input parses its own flags (runtime/cli.c)
             else if self.is_kw("args") { self.i += 1; Src::Header(":args".into()) }
+            // the process environment: `NAME=value` entries each followed by a 0 byte (runtime/cli.c)
+            else if self.is_kw("env") { self.i += 1; Src::Header(":env".into()) }
             // a game's inputs: the seconds since the last frame, whether a key is down, how far the pointer moved
             else if self.is_kw("time") { self.i += 1; Src::Header(":dt".into()) }
             else if self.is_kw("key") {

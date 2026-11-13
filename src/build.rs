@@ -654,6 +654,24 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `from env`: the process environment as `NAME=value` entries each followed by a 0 byte (and `env("NAME")` still reads one variable).
+    #[test]
+    fn a_main_program_can_read_the_environment() {
+        let src = "struct A { n: i64; }\nstate a: A;\n@main\nfn main(vars: utf8<1000000> from env, w: ascii<1..20> from arg(0)) -> Response<text> {\n    if w == \"one\" { return ok(or(env(\"MITO_TEST_Y\"), \"unset\")); }\n    return ok(vars);\n}\n";
+        let Some((dir, exe)) = cli_build(src, "env") else { return };
+        let run = |arg: &str| {
+            let o = std::process::Command::new(&exe).arg(arg).env_clear().env("MITO_TEST_X", "h\u{e9}llo w=x").env("MITO_TEST_Y", "plain").env("B", "").env("PATH", "p").stdin(std::process::Stdio::null()).output().unwrap();
+            (o.status.code().unwrap(), String::from_utf8_lossy(&o.stdout).into_owned())
+        };
+        let (c, out) = run("all");
+        assert_eq!(c, 0);
+        let entries: Vec<&str> = out.split('\0').filter(|e| !e.is_empty()).collect();
+        assert!(entries.contains(&"MITO_TEST_X=h\u{e9}llo w=x") && entries.contains(&"B=") && entries.contains(&"PATH=p"), "{:?}", entries);
+        assert!(out.ends_with('\0') && !entries.iter().any(|e| e.starts_with('=')), "{:?}", out);
+        assert_eq!(run("one"), (0, "plain".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A text field declared with the largest size (4 GiB - 1) puts the fields after it beyond 4 GiB into the state: they must work (the plain-state
     /// handlers take 64-bit offsets).
     #[test]

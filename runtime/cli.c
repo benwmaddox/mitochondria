@@ -81,6 +81,12 @@ int main(int argc, char **argv) {
 #ifdef MITO_CLI_ARGS
     pairs[np].k = ":args"; pairs[np].kn = 5; pairs[np].v = argbuf; pairs[np].vn = an; np++; /* every argument, each followed by a 0 byte */
 #endif
+#ifdef MITO_CLI_ENV
+    static char envbuf[4 << 20];
+    { u32 en = os_environ(envbuf, sizeof envbuf);
+      if (en == 0xFFFFFFFFu) { os_err("error: the environment is too long\n", 35); return 2; }
+      pairs[np].k = ":env"; pairs[np].kn = 4; pairs[np].v = envbuf; pairs[np].vn = en; np++; } /* every `NAME=value`, each followed by a 0 byte */
+#endif
     if (mito_has_tables()) { os_err("error: a command-line program has no tables yet\n", 48); return 2; }
     mito_set_areas(0xFFFFFFFFULL, 0xFFFFFFFFULL); /* the request text and the answer: 4 GiB - 1 of address space each, committed as used */
     void *app = mito_start(1ULL << 40, 0);

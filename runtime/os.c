@@ -101,6 +101,25 @@ static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
 static void *os_file_open(const char *path) { void *h = CreateFileA(path, 0x80000000u, 3, 0, 3, 0, 0); return h == (void *)(i64)-1 ? 0 : h; } /* GENERIC_READ, FILE_SHARE_READ | WRITE, OPEN_EXISTING */
 static u32 os_file_read(void *h, void *p, u32 n) { u32 done = 0; if (!ReadFile(h, p, n, &done, 0)) return 0; return done; }
 static void os_file_close(void *h) { CloseHandle(h); }
+/* the process's environment as `NAME=value` entries each followed by a 0 byte (UTF-8; Windows' hidden `=C:=...` entries left out), at most cap bytes: the length, or 0xFFFFFFFF when it does not fit */
+unsigned short *GetEnvironmentStringsW(void);
+int FreeEnvironmentStringsW(unsigned short *p);
+int WideCharToMultiByte(u32 cp, u32 flags, const unsigned short *w, int nw, char *out, int nout, const char *def, int *used);
+static u32 os_environ(char *buf, u32 cap) {
+    unsigned short *blk = GetEnvironmentStringsW(); u32 n = 0;
+    if (!blk) return 0;
+    for (unsigned short *p = blk; *p;) {
+        u32 wl = 0; while (p[wl]) wl++;
+        if (p[0] != '=') {
+            if (n >= cap) { n = 0xFFFFFFFFu; break; }
+            int k = WideCharToMultiByte(65001, 0, p, (int)wl + 1, buf + n, (int)(cap - n), 0, 0); /* CP_UTF8, with the 0 */
+            if (k <= 0) { n = 0xFFFFFFFFu; break; }
+            n += (u32)k;
+        }
+        p += wl + 1;
+    }
+    FreeEnvironmentStringsW(blk); return n;
+}
 
 /* threads: a record that lives as long as the thread (the caller's) */
 typedef struct { void *h; } OsThread;
@@ -255,6 +274,17 @@ static void *os_file_open(const char *path) {
 }
 static u32 os_file_read(void *h, void *p, u32 n) { i64 k = read((int)(u64)h - 1, p, n); return k > 0 ? (u32)k : 0; }
 static void os_file_close(void *h) { close((int)(u64)h - 1); }
+/* the process's environment as `NAME=value` entries each followed by a 0 byte, at most cap bytes: the length, or 0xFFFFFFFF when it does not fit */
+extern char **environ;
+static u32 os_environ(char *buf, u32 cap) {
+    u32 n = 0;
+    for (char **e = environ; e && *e; e++) {
+        u64 l = 0; while ((*e)[l]) l++;
+        if (n + l + 1 > cap) return 0xFFFFFFFFu;
+        memcpy(buf + n, *e, l + 1); n += (u32)(l + 1);
+    }
+    return n;
+}
 
 /* threads, locks and condition variables (pthreads; the types are opaque blocks of glibc's sizes) */
 typedef struct { u64 id; u32 (*fn)(void *); void *arg; } OsThread; /* lives as long as the thread: the thread reads fn and arg from it */

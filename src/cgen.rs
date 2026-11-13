@@ -1012,7 +1012,9 @@ pub fn program_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>, web:
         let stdin = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":stdin"));
         // a program with `from args` reads the arguments as written and parses its own flags
         let raw = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":args"));
-        return Ok(vec![program_c(prog, api, source)? + if stdin { "#define MITO_CLI_STDIN 1\n" } else { "" } + if raw { "#define MITO_CLI_ARGS 1\n" } else { "" } + CLI]);
+        let env = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":env"));
+        let defs = [(stdin, "MITO_CLI_STDIN"), (raw, "MITO_CLI_ARGS"), (env, "MITO_CLI_ENV")].iter().filter(|d| d.0).map(|d| format!("#define {} 1\n", d.1)).collect::<String>();
+        return Ok(vec![program_c(prog, api, source)? + &defs + CLI]);
     }
     // a program whose entry is `@frame` is a game: its `main` is runtime/game.c, which loads SDL3 and OpenGL when it starts
     if api.eps.iter().any(|e| e.method == "FRAME") {

@@ -528,6 +528,7 @@ impl<'p> G<'p> {
                 return no(format!("`{}` takes {}", name, what));
             }
         }
+        if let Some(v) = self.inline_misc(bi, &a)? { return Ok(v); }
         // `str(n)` of a number or bool: its longest text, for the bounds of lets of built text
         let str_bound = self.builtin_bound(bi, &a);
         if let (true, Some(code)) = (generic, BUILTINS.iter().position(|x| *x == bi)) {

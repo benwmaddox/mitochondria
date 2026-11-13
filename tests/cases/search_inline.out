@@ -1,0 +1,29 @@
+POST /set/hello -> 200 {"len":5}
+POST /lit -> 200 {"a":true,"b":false,"c":true,"d":true,"e":false,"f":1,"g":4,"h":0,"i":2}
+POST /input -> 200 {"sw":true,"sw0":true,"ew":true,"ew0":true,"co":true,"co1":true,"co0":true,"ix":0,"ix1":1,"ix0":0,"lx":4,"lx1":5,"lx0":6,"lx3":-1}
+POST /input -> 200 {"sw":true,"sw0":true,"ew":true,"ew0":true,"co":true,"co1":true,"co0":true,"ix":0,"ix1":1,"ix0":0,"lx":2,"lx1":3,"lx0":4,"lx3":-1}
+POST /input -> 200 {"sw":false,"sw0":true,"ew":false,"ew0":true,"co":false,"co1":true,"co0":true,"ix":-1,"ix1":0,"ix0":0,"lx":-1,"lx1":0,"lx0":1,"lx3":-1}
+POST /input -> 200 {"sw":false,"sw0":true,"ew":false,"ew0":true,"co":false,"co1":false,"co0":true,"ix":-1,"ix1":-1,"ix0":0,"lx":-1,"lx1":-1,"lx0":1,"lx3":-1}
+POST /input -> 200 {"sw":false,"sw0":true,"ew":false,"ew0":true,"co":false,"co1":false,"co0":true,"ix":-1,"ix1":-1,"ix0":0,"lx":-1,"lx1":-1,"lx0":0,"lx3":-1}
+POST /input -> 200 {"sw":false,"sw0":true,"ew":true,"ew0":true,"co":true,"co1":true,"co0":true,"ix":3,"ix1":2,"ix0":0,"lx":7,"lx1":8,"lx0":9,"lx3":-1}
+POST /input -> 200 {"sw":true,"sw0":true,"ew":true,"ew0":true,"co":true,"co1":true,"co0":true,"ix":0,"ix1":1,"ix0":0,"lx":14,"lx1":15,"lx0":16,"lx3":8}
+POST /high -> 200 {"a":false,"b":true,"c":false,"d":3,"e":3,"f":-1}
+POST /high -> 200 {"a":true,"b":false,"c":true,"d":0,"e":0,"f":-1}
+POST /high -> 200 {"a":false,"b":false,"c":false,"d":-1,"e":-1,"f":-1}
+POST /high -> 200 {"a":false,"b":false,"c":false,"d":-1,"e":-1,"f":0}
+POST /high -> 200 {"a":false,"b":false,"c":false,"d":-1,"e":-1,"f":-1}
+POST /piece -> 200 {"a":true,"b":false,"c":true,"d":1,"e":0}
+POST /piece -> 400 {"error":"substring out of range","line":30}
+POST /piece -> 400 {"error":"substring out of range","line":30}
+POST /field -> 200 {"a":true,"b":true,"c":true,"d":2,"e":3,"f":true,"g":1,"h":-1}
+POST /col -> 200 {"a":true,"b":true,"c":true,"d":2,"e":3,"f":2}
+POST /maybe -> 200 {"a":true}
+POST /maybe -> 200 {"a":false}
+POST /maybe -> 500 {"error":"expected a string argument","line":44}
+POST /maybe2 -> 200 {"a":1}
+POST /maybe2 -> 500 {"error":"expected a string argument","line":48}
+POST /loop -> 200 {"n":44}
+POST /loop -> 200 {"n":0}
+state <plain values> 20
+state app.notes 33
+memory reserved=8192 committed=8192 live=53

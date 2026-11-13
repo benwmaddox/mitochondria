@@ -1,0 +1,22 @@
+// expect: 9:5: GET : no field `nme`
+// expect: 10:5: GET : `name` holds at most 8 bytes
+// expect: 15:5: GET /b: `x` is declared `i64` but the value is not a number
+// expect: 20:5: GET /c: no field `zz`
+struct S { n: i64; name: string<8>; }
+state s: S;
+@get("/")
+fn home() -> Response<text> {
+    s.nme = "a";
+    s.name = "far too long for it";
+    return ok("a");
+}
+@get("/b")
+fn b() -> Response<text> {
+    let x: i64 = "hello";
+    return ok("a");
+}
+@get("/c")
+fn c() -> Response<text> {
+    s.zz = 1;
+    return ok("a");
+}

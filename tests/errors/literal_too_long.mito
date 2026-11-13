@@ -1,0 +1,8 @@
+// expect: 6:5: GET : `name` holds at most 8 bytes, and the text written to it is 19
+struct S { name: string<8>; }
+state s: S;
+@get("/")
+fn home() -> Response<text> {
+    s.name = "far too long for it";
+    return ok("a");
+}

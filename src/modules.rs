@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 /// Library files a program takes with `use "std/math.mito";` (plain code, no instances): path, source. A `use` path
 /// starting with `std/` is looked up here, before anything beside the program.
-pub const STD_FILES: &[(&str, &str)] = &[("std/math.mito", include_str!("../lib/std/math.mito")), ("std/random.mito", include_str!("../lib/std/random.mito")), ("std/vec.mito", include_str!("../lib/std/vec.mito"))];
+pub const STD_FILES: &[(&str, &str)] = &[("std/math.mito", include_str!("../lib/std/math.mito")), ("std/random.mito", include_str!("../lib/std/random.mito")), ("std/vec.mito", include_str!("../lib/std/vec.mito")), ("std/intmap.mito", include_str!("../lib/std/intmap.mito"))];
 
 /// The source of the library file `name` (`std/math.mito`), or an error naming the known ones.
 pub fn std_file(name: &str) -> Result<&'static str, String> {

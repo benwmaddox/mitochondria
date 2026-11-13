@@ -216,6 +216,8 @@ impl<'p> G<'p> {
                             return self.copy_struct(s2, at, src);
                         }
                         let (code, cap) = plain_code(&sd.fields[k].1).ok_or_else(|| format!("assigning plain `.{}` not compiled yet", f))?;
+                        // a literal that can never fit is an error now, not when the line runs
+                        if let (20, Expr::Str(lit)) = (code, rhs) { if lit.len() as u64 > cap as u64 { return no(format!("`{}` holds at most {} bytes, and the text written to it is {}", f, cap, lit.len())); } }
                         let at = off + sd.offs[k];
                         let range = sd.ranges[k];
                         self.may_write_plain(at)?;

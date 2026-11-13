@@ -1,0 +1,9 @@
+// expect: 7:5: GET : `x` is declared `i64` but the value is not a number
+struct S { n: i64; }
+state s: S;
+@get("/")
+fn home() -> Response<text> {
+    s.n = 1;
+    let x: i64 = "hello";
+    return ok("a");
+}

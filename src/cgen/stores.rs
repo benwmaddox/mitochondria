@@ -380,7 +380,16 @@ impl<'p> G<'p> {
             }
             self.own_region = false;
             self.rest = &stmts[i + 1..];
-            self.stmt(s, env)?;
+            let (depth0, inl0) = (self.depth, self.inlining.len());
+            if let Err(e) = self.stmt(s, env) {
+                // a statement that fails is noted and skipped, so one run reports every mistake (a retry for a wider kind is not a mistake)
+                if self.widen.is_some() || self.spec_key.is_some() { return Err(e); }
+                self.errs.push(place_err(self.at, e));
+                self.depth = depth0; self.inlining.truncate(inl0);
+                // what follows a failed `let` or `var` most likely uses it: the rest of this block is skipped (its other mistakes show once this one is fixed)
+                if matches!(s, Stmt::Let(..) | Stmt::Var(..)) { break; }
+                continue;
+            }
             if matches!(s, Stmt::Let(..) | Stmt::Var(..)) && self.own_region && live_from.is_none() { *live_from = Some(self.body.len()); }
             self.own_region = false;
             // `if !exists(x) { ... }` (or `if x == null`) whose branch always leaves (return, fail, break, continue), or `if exists(x)
@@ -420,7 +429,12 @@ impl<'p> G<'p> {
     pub(super) fn user_method_for(&mut self, op: &str, recv: &'p Expr, env: &mut Vec<Option<CV>>) -> R<bool> {
         let v = self.expr(recv, env, None)?;
         Ok(match self.receiver_type(&v) {
-            Some(ty) => { let want = format!("{}.{}", ty, op); self.api.fns.iter().any(|f| (f.recv && f.name == want) || (!f.recv && f.test.is_none() && f.name == op && f.ptys.first().map_or(false, |t| t.is_some()))) }
+            Some(ty) => {
+                let want = format!("{}.{}", ty, op);
+                let declared = self.api.fns.iter().any(|f| (f.recv && f.name == want) || (!f.recv && f.test.is_none() && f.name == op && f.ptys.first().map_or(false, |t| t.is_some())));
+                // an instance of a generic struct whose function of this name has no copy yet: while the program is probed this asks for the copy, and the call is the function's
+                declared || (crate::generics::is_template_method(op) && crate::generics::note_missing(&ty, op))
+            }
             None => false,
         })
     }

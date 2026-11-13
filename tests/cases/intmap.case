@@ -2,7 +2,8 @@
 // rollback of a failed request, and many puts and removes in one request
 // (the state is `logged`: this case records what a failed request leaves, so it tests the undo log; state is unlogged by default)
 --- program
-struct App { m: intmap<6>; }
+struct App { m: IntMap<6>; }
+include lib/std/intmap.mito
 state app: App logged;
 
 @post("/put/{key}/{value}")

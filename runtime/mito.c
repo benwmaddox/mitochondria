@@ -2214,6 +2214,7 @@ static int text_has(Mito *m, u64 n) { return (u64)m->text.len + n <= m->text.cap
    2: more than max bytes; 3: the text area is full */
 static int read_into_text(Mito *m, void *h, u64 max, u64 *got) {
     u64 n = 0;
+    if (!h) os_out_flush(); /* what the program printed is out before it waits for input */
     for (;;) {
         u64 room = 16ULL << 20; if (room > max + 1 - n) room = max + 1 - n;
         while (room > 1 && !text_has(m, n + room)) room >>= 1;
@@ -2232,11 +2233,16 @@ static int read_into_text(Mito *m, void *h, u64 max, u64 *got) {
 static int too_long(Mito *m, const char *what, u64 max) { err(m, E_FAIL, 413); a_str(&m->emsg, what); a_str(&m->emsg, ": more than "); a_u64(&m->emsg, max); a_str(&m->emsg, " bytes (the most the program allows)"); return -1; }
 static int sys_builtin(Ctx *c, Mito *m, int code, const Val *a, u32 n, Val *out) {
     T x; u32 start = m->text.len; u64 max = 0, got = 0;
-    if (!m->cli_main) return fail(m, 500, "eprint, stdin_text, read_file and file_exists are for the command-line program's @main (not @start)");
+    if (!m->cli_main) return fail(m, 500, "print, flush, eprint, stdin_text, read_file and file_exists are for the command-line program's @main (not @start)");
     if (code == 100) { /* eprint(text) */
         if (arg_txt(m, a, n, 0, &x)) return -1;
-        os_err(t_ptr(m, x), x.len); *out = v_null(); return 0;
+        os_out_flush(); os_err(t_ptr(m, x), x.len); *out = v_null(); return 0; /* what was printed comes out first: the two interleave in the order written */
     }
+    if (code == 104) { /* print(text): standard output, buffered (os_out), as it is */
+        if (arg_txt(m, a, n, 0, &x)) return -1;
+        os_out(t_ptr(m, x), x.len); *out = v_null(); return 0;
+    }
+    if (code == 105) { os_out_flush(); *out = v_null(); return 0; } /* flush() */
     if (code != 103) { /* the most bytes: the last argument, an integer */
         const Val *mv = &a[code == 101 ? 0 : 1];
         if (n < (code == 101 ? 1u : 2u) || mv->tag != 1 || mv->i < 0) return fail(m, 500, "the most bytes is a non-negative integer");

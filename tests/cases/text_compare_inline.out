@@ -1,0 +1,39 @@
+POST /set -> 200 {"n":3}
+POST /lit -> 200 {"eq":true,"ne":false,"lt":false,"le":true,"gt":false,"ge":true}
+POST /litflip -> 200 {"eq":true,"ne":false,"lt":false,"le":true,"gt":false,"ge":true}
+POST /cols -> 200 {"eq":true,"ne":false,"lt":false,"le":true,"gt":false,"ge":true}
+POST /pool -> 200 {"eq":true,"lt":true,"same":true}
+POST /sub -> 200 {"eq":true,"ne":false,"lt":true,"vs":true,"vsl":true}
+POST /set -> 200 {"n":0}
+POST /lit -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+POST /empty -> 200 {"eq":true,"ne":false,"lt":false,"gt":false}
+POST /cols -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+POST /set -> 200 {"n":2}
+POST /lit -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+POST /litflip -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+POST /cols -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+POST /sub -> 200 {"eq":true,"ne":false,"lt":true,"vs":true,"vsl":true}
+POST /set -> 200 {"n":4}
+POST /lit -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+POST /cols -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+POST /set -> 503 {"error":"capacity: app.notes is full (4 of 4)","line":9}
+POST /lit -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+POST /cols -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+POST /pool -> 200 {"eq":true,"lt":true,"same":false}
+POST /set -> 503 {"error":"capacity: app.notes is full (4 of 4)","line":9}
+POST /lit -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+POST /litflip -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+POST /cols -> 200 {"eq":false,"ne":true,"lt":true,"le":true,"gt":false,"ge":false}
+POST /pool -> 200 {"eq":true,"lt":true,"same":false}
+POST /set -> 503 {"error":"capacity: app.notes is full (4 of 4)","line":9}
+POST /hi -> 200 {"eq":true,"lt":false,"gt":false}
+POST /cols -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+POST /set -> 503 {"error":"capacity: app.notes is full (4 of 4)","line":9}
+POST /hi -> 200 {"eq":false,"lt":false,"gt":true}
+POST /cols -> 200 {"eq":false,"ne":true,"lt":false,"le":false,"gt":true,"ge":true}
+POST /set -> 503 {"error":"capacity: app.notes is full (4 of 4)","line":9}
+POST /empty -> 200 {"eq":true,"ne":false,"lt":false,"gt":false}
+POST /cols -> 200 {"eq":true,"ne":false,"lt":false,"le":true,"gt":false,"ge":true}
+state <plain values> 40
+state app.notes 49
+memory reserved=8192 committed=8192 live=89

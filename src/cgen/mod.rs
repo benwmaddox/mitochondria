@@ -322,7 +322,17 @@ static i64 mito_lgamma_s(double x) { int s; mito_lgamma_r(x, &s); return s; }
 #define NMUL(r, x, y) i64 r = (x) * (y)
 #define NDIV(r, x, y) i64 r = (x) / (y)
 #define NMOD(r, x, y) i64 r = (x) % (y)
-#define TX_(i) (tx_[(i)]) /* a byte of the request's text area, where strings that are not in state live */
+#define BP_(off) ((const u8 *)(b + (off))) /* a text in state, for an in-line compare */
+#define TP_(off) ((const u8 *)(tx_ + (off))) /* a literal in the text area */
+#ifdef __clang__
+#define MEMCMP_ __builtin_memcmp
+#else
+#define MEMCMP_ memcmp
+#endif
+#define BEQ_(p, q, n) (MEMCMP_((p), (q), (n)) == 0)
+static inline int bcmp_(const u8 *p, u64 pn, const u8 *q, u64 qn) { int r = MEMCMP_(p, q, pn < qn ? pn : qn); return r ? r : pn < qn ? -1 : pn > qn; }
+#define BCMP_(p, pn, q, qn) bcmp_((p), (pn), (q), (qn))
+#define TX_(i) (tx_[(i)])/* a byte of the request's text area, where strings that are not in state live */
 /* MITO_MEASURE_NO_JOURNAL, MITO_MEASURE_NO_COMMIT and MITO_MEASURE_NO_RANGE are for measuring what the tests cost only: without the undo log a failed
    request is not rolled back; without commit tests all state is committed at start; without range tests an index out of range is undefined behavior */
 #ifdef MITO_MEASURE_NO_JOURNAL
@@ -1816,7 +1826,7 @@ fn kind(v: &CV) -> Option<K> {
 /// only themselves.)
 fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return v == k; } k == K::Any || unify(v, k) == k }
 
-mod state; mod stores; mod stmts; mod values; mod calls; mod places;
+mod inline_eq; mod state; mod stores; mod stmts; mod values; mod calls; mod places;
 #[cfg(test)] mod profile_tests;
 
 
@@ -1842,7 +1852,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
     // the statement-line markers are the only preprocessor lines allowed: `#undef AT_` and `#define AT_ <number>`
     let body: String = body.lines().filter(|l| { let l = l.trim(); l == "#undef AT_" || l.strip_prefix("#define AT_ ").map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) } == false).map(|l| format!("{}\n", l)).collect();
     let t = ctoks(&body);
-    const CALLS: &[&str] = &["if", "for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "SHRL", "NSHRL", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "TAN_", "ASIN_", "ACOS_", "ATAN_", "SINH_", "COSH_", "TANH_", "LN_", "LOG2_", "LOG10_", "CEIL_", "ROUNDF_", "TRUNC_", "CBRT_", "HYPOT_", "FMOD_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "SCRMOVE", "SCRZERO", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
+    const CALLS: &[&str] = &["if", "BP_", "TP_", "BEQ_", "BCMP_","for", "CALL", "CALL_OR_DEAD", "TAIL", "FAIL", "ROUND_", "TEST_FAIL_", "ADD", "SUB", "MUL", "DIV", "MOD", "NEG", "UNLIKELY", "BITS_F64", "NADD", "NSUB", "NMUL", "NDIV", "NMOD", "BAND8", "BAND16", "BAND32", "BOR8", "BOR16", "BOR32", "BXOR8", "BXOR16", "BXOR32", "BAND", "BOR", "BXOR", "SHL", "SHR", "SHRL", "NSHRL", "NSHL", "NSHR", "TX_", "SQRT_", "SIN_", "COS_", "TAN_", "ASIN_", "ACOS_", "ATAN_", "SINH_", "COSH_", "TANH_", "LN_", "LOG2_", "LOG10_", "CEIL_", "ROUNDF_", "TRUNC_", "CBRT_", "HYPOT_", "FMOD_", "ATAN2_", "POW_", "EXP_", "FLOOR_", "FABS_", "ABS_", "SAVE_", "COMMIT_", "RANGE_", "ST1_", "ST2_", "ST4_", "ST8_", "MOVE_", "COPY_", "ZERO_", "SCRMOVE", "SCRZERO", "LD_I64", "LD_U64", "LD_I32", "LD_U32", "LD_I16", "LD_U16", "LD_I8", "LD_U8"];
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];

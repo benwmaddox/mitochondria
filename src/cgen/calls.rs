@@ -727,6 +727,18 @@ impl<'p> G<'p> {
                 let v = self.in_field_range(v, (lo, hi), &name)?;
                 self.with_field_range(v, Some((lo, hi)))
             }
+            // `let x: i64 = e` / `let x: f64 = e`: the value must be that kind of number (an `f64` takes an integer and converts it)
+            B::Expect => {
+                let [v, k, name] = <[CV; 3]>::try_from(a).map_err(|_| "internal: a declared kind takes three arguments".to_string())?;
+                let want_f = matches!(&k, CV::Int(s) if s.trim_end_matches("LL") == "1");
+                let name = match &name { CV::Lit(s) => s.clone(), _ => "value".to_string() };
+                match (v, want_f) {
+                    (v @ CV::Int(_), false) | (v @ CV::Flt(_), true) | (v @ CV::Any(_), _) => v,
+                    (CV::Int(e), true) => CV::Flt(format!("((double)({}))", e)),
+                    (CV::Flt(_), false) => return no(&format!("`{}` is declared `i64` but the value is an `f64` (use `int(x)`)", name)),
+                    _ => return no(&format!("`{}` is declared `{}` but the value is not a number", name, if want_f { "f64" } else { "i64" })),
+                }
+            }
             // an `f32`: a number rounded to the nearest float
             B::F32 => match a.as_slice() {
                 [CV::Flt(e)] => CV::Flt(format!("((double)(float)({}))", e)),

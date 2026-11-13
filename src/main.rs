@@ -103,11 +103,24 @@ fn report(file: &str, text: &str, e: &str) -> String {
     if let Some((f2, l2, t2)) = origin(l) { return quote(&f2, &t2, l2, c, rest); }
     quote(file, text, l, c, rest)
 }
+/// The column of the first `name` the message quotes, when that word is on the line at or after the statement's column: the caret goes under it, not under the statement's first character.
+fn refine_column(line: &str, c: usize, rest: &str) -> usize {
+    let Some(word) = rest.split('`').nth(1).filter(|w| !w.is_empty() && w.chars().all(|ch| ch.is_alphanumeric() || ch == '_')) else { return c };
+    let ident = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let chars: Vec<char> = line.chars().collect();
+    let w: Vec<char> = word.chars().collect();
+    let from = c.saturating_sub(1);
+    for i in from..chars.len().saturating_sub(w.len() - 1) {
+        if chars[i..i + w.len()] == w[..] && (i == 0 || !ident(chars[i - 1])) && chars.get(i + w.len()).map_or(true, |ch| !ident(*ch)) { return i + 1; }
+    }
+    c
+}
 /// `file:line:col: message`, the line quoted and a caret under the column.
 fn quote(file: &str, text: &str, l: usize, c: usize, rest: &str) -> String {
     match text.lines().nth(l.wrapping_sub(1)) {
         Some(line) => {
             let shown = line.replace('\t', " ");
+            let c = refine_column(&shown, c, rest);
             let caret: String = shown.chars().take(c.saturating_sub(1)).map(|_| ' ').collect();
             format!("{}:{}:{}: {}\n{:>5} | {}\n      | {}^", file, l, c, rest, l, shown, caret)
         }

@@ -32,7 +32,7 @@ many messages a room keeps. Reaching a limit is an ordinary error the program an
 an out-of-memory kill, and peak memory is known before the program runs. In return, data whose size you cannot bound
 (documents, large uneven text, graphs of unknown shape) fits poorly; it belongs in a database or another language.
 
-Start with the [tutorial](docs/tutorial.md) (a web program, tests, a command-line tool, functions of a type, struct parameters, constants, generic structs, the standard library, a game). The design is in [DESIGN.md](DESIGN.md); every command, option, built-in and library module is listed in [docs/reference.md](docs/reference.md).
+New here? [Your first hour](docs/first-hour.md) is the short version. Then the [tutorial](docs/tutorial.md) (a web program, tests, a command-line tool, functions of a type, struct parameters, constants, generic structs, the standard library, a game). The design is in [DESIGN.md](DESIGN.md); every command, option, built-in and library module is listed in [docs/reference.md](docs/reference.md).
 
 **Kinds of programs.** A program is built for a *platform*, which is its entry file's: a **web** program has endpoints (`@get`, `@post`, ...) and is a server; a **cli** program has one `@main` function and is a
 command-line tool (arguments, stdin and flags in, stdout out, an exit code); a **game** program has an `@frame` function and `@shader`s and opens a window (SDL3 and OpenGL, loaded when it starts); a **test** program is tests only. `platform cli;` on a line of its own says so, or the entry points show it. A platform is a driver plus a list of
@@ -49,6 +49,7 @@ mito build examples/jx/jx.mito -o jx                                         # a
 | | Platform | |
 | --- | --- | --- |
 | [examples/scoreboard](examples/scoreboard) | web | the smallest program: state, endpoints, tests |
+| [examples/guestbook](examples/guestbook) | web | a first program: limits, a full collection, a test for it (see [your first hour](docs/first-hour.md)) |
 | [examples/chat](examples/chat), [chat-sharded](examples/chat-sharded) | web | sessions and rooms; workers on several threads |
 | [examples/todomvc](examples/todomvc) | web | server-rendered pages, tables in SQLite, the answer cache |
 | [examples/notes](examples/notes) | web | a multi-file app on tables: accounts, per-user notes, search |

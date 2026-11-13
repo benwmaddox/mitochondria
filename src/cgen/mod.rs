@@ -840,7 +840,7 @@ struct G<'p> {
     frame: Option<u32>,                                  // the function whose slots `env` holds (None: the endpoint)
     slot_kinds: &'p [((Option<u32>, u32), K)],           // widened kinds of `var` and `let` slots
     ret_kinds: &'p [(u32, K)],                           // widened result kinds of functions
-    widen: Option<Widen>,
+    widen: Option<Widen>, errs: Vec<String>,
     u32_vars: std::collections::HashSet<String>, // `var`s kept in a `u32` of the C (their range fits 0..2^32-1); read as `(i64)name`
     rest: &'p [Stmt], // set by block_inner for the statement it compiles: the statements after it in its block
     var_names: std::collections::HashSet<String>, // the C names of `var`s: a `let` of one must copy it
@@ -1627,13 +1627,13 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
         let mut lets = (0u32, 0usize, Vec::new());
         let (mut slot_kinds, mut ret_kinds): (Vec<((Option<u32>, u32), K)>, Vec<(u32, K)>) = (Vec::new(), Vec::new());
         let mut tries = 0;
-        let (res, body, specs) = loop {
+        let (res, body, specs, errs) = loop {
             tries += 1;
             let specs = std::cell::RefCell::new(done.clone());
             let mut g = G::new(prog, api, ep, &slot_kinds, &ret_kinds, &recursive, &specs);
             let mut env: Vec<Option<CV>> = vec![None; ep.slots as usize];
             let r = g.inputs(ep, &mut env).and_then(|_| g.block(&ep.body, &mut env));
-            let (widen, body, at) = (g.widen, std::mem::take(&mut g.body), g.at);
+            let (widen, body, at, errs) = (g.widen, std::mem::take(&mut g.body), g.at, std::mem::take(&mut g.errs));
             read_only = !g.wrote_state.get() && !g.uses_spec; // a call of a recursive or outlined function is compiled apart: not known to be read-only
             // the safety net: whatever the statements looked like, code that saves to the undo log, writes a table or frees an item is not read-only
             if read_only && ["SAVE_(", "->tinsert(", "->tset(", "->tadd(", "->tdel(", "->tclear(", "->free_(", "->free_val(", "->alloc(", "->clear_coll(", "->store(", "->store_elem(", "->store_field(", "MOVE_(", "COPY_("].iter().any(|t| body.contains(t)) { read_only = false; }
@@ -1646,9 +1646,10 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                     Widen::Slot(f, sl, k) => match slot_kinds.iter_mut().find(|x| x.0 == (f, sl)) { Some(x) => x.1 = unify(x.1, k), None => slot_kinds.push(((f, sl), k)) },
                     Widen::Ret(f, k) => match ret_kinds.iter_mut().find(|x| x.0 == f) { Some(x) => x.1 = unify(x.1, k), None => ret_kinds.push((f, k)) },
                 },
-                (r, _) => break (r, body, specs.into_inner()),
+                (r, _) => break (r, body, specs.into_inner(), errs),
             }
         };
+        let res = report_recovered(&mut notes, &ep.text, errs, res);
         // every value's kind is known when the program is compiled: one widened to a run-time kind does not load
         let res = res.and_then(|_| {
             let run_time = slot_kinds.iter().any(|x| x.1 == K::Any) || ret_kinds.iter().any(|x| x.1 == K::Any) || specs[done.len()..].iter().any(|sp| sp.ret == K::Any || sp.proto.contains("Val p"));
@@ -1672,6 +1673,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                 costs.push(Costs { lets: lets.clone(), ..count_costs(&body) });
                 src += &format!("{}{}int {}(Ctx *c) {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", head, linkage, name, body);
             }
+            Err(why) if why.is_empty() => { zeros.push(None); reads.push(false); costs.push(Costs::default()); }
             Err(why) => {
                 zeros.push(None);
                 reads.push(false);
@@ -1695,21 +1697,22 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
             let mut slot_kinds: Vec<((Option<u32>, u32), K)> = Vec::new();
             let ret_kinds: Vec<(u32, K)> = Vec::new();
             let mut tries = 0;
-            let (res, body, specs) = loop {
+            let (res, body, specs, errs) = loop {
                 tries += 1;
                 let specs = std::cell::RefCell::new(done.clone());
                 let mut g = G::new(prog, api, &ep, &slot_kinds, &ret_kinds, &recursive, &specs);
                 g.test = true;
                 let mut env: Vec<Option<CV>> = vec![None; f.slots as usize];
                 let r = g.block(&f.body, &mut env);
-                let (widen, body, at) = (g.widen, std::mem::take(&mut g.body), g.at);
+                let (widen, body, at, errs) = (g.widen, std::mem::take(&mut g.body), g.at, std::mem::take(&mut g.errs));
                 drop(g);
                 let r = r.map_err(|e| place_err(at, e));
                 match (r, widen) {
                     (Err(_), Some(Widen::Slot(fr, sl, kk))) if tries < 32 => match slot_kinds.iter_mut().find(|x| x.0 == (fr, sl)) { Some(x) => x.1 = unify(x.1, kk), None => slot_kinds.push(((fr, sl), kk)) },
-                    (r, _) => break (r, body, specs.into_inner()),
+                    (r, _) => break (r, body, specs.into_inner(), errs),
                 }
             };
+            let res = report_recovered(&mut notes, &ep.text, errs, res);
             WHY.with(|w| w.borrow_mut().clear());
             match res.and_then(|_| check_profile(&body).map_err(|e| format!("C safety profile: {}", e))) {
                 Ok(()) => {
@@ -1719,6 +1722,7 @@ fn generate_once(prog: &Program, api: &Api, source: Option<(&str, &str)>, linkag
                     done = specs;
                     src += &format!("\n// {}\n{}int test{}(Ctx *c, Txt *tmsg) {{\n#undef AT_\n#define AT_ 0\n    int st; u8 *b = c->base; (void)st; (void)b; (void)tmsg; u8 *dr_ = c->dirty; u8 *cm_ = c->committed; int jn_ = c->jon; u8 *tx_ = c->text; (void)dr_; (void)cm_; (void)jn_; (void)tx_;\n{}    return 0;\n}}\n", ep.text, linkage, k, body);
                 }
+                Err(why) if why.is_empty() => {}
                 Err(why) => notes.push(match split_place(&why) { Some((place, rest)) => format!("{}{}: {}", place, ep.text, rest), None => format!("{}: {}", ep.text, why) }),
             }
         }
@@ -2345,4 +2349,13 @@ fn only_stmt(body: &[Stmt]) -> Option<&Stmt> {
     let mut it = body.iter().filter(|s| !matches!(s, Stmt::At(..)));
     let first = it.next()?;
     if it.next().is_some() { None } else { Some(first) }
+}
+
+/// The errors a body's statements recovered from (each statement that failed was skipped and the rest compiled), noted like a failed body's, in
+/// line order; a body with any is a failure whose own error, if it has one, comes last.
+fn report_recovered(notes: &mut Vec<String>, ep_text: &str, errs: Vec<String>, res: Result<(), String>) -> Result<(), String> {
+    for why in &errs {
+        notes.push(match split_place(why) { Some((place, rest)) => format!("{}{}: {}", place, ep_text, rest), None => format!("{}: {}", ep_text, why) });
+    }
+    match res { Ok(()) if !errs.is_empty() => Err(String::new()), r => r }
 }

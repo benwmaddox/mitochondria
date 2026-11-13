@@ -87,7 +87,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 
 /// Built-in functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum B { Sin, Cos, Tan, Asin, Acos, Atan, Sinh, Cosh, Tanh, Ln, Log2, Log10, Ceil, Round, Trunc, Cbrt, Hypot, Fmod, Atan2, Pow, InRange, F32, Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
+pub enum B { Sin, Cos, Tan, Asin, Acos, Atan, Sinh, Cosh, Tanh, Ln, Log2, Log10, Ceil, Round, Trunc, Cbrt, Hypot, Fmod, Atan2, Pow, InRange, Expect, F32, Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
     Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored, SocketSend, SocketClose, SocketSubscribe, SocketUnsubscribe, Broadcast, SocketSendAll, SocketTag, ByteAt, Lower, Upper, CacheGet, CachePut, CacheStart, CacheHole, CachePart, CacheLabel, DataVersion, Replace, TrimStart, TrimEnd, AllEmoji,
     HtmlParse, HtmlParseIn, NodeKind, NodeName, NodeParent, NodeFirst, NodeLast, NodeNext, NodePrev, NodeContent, NodeAttr, NodeAttrCount, NodeAttrName, NodeAttrValue,
     NodeSetAttr, NodeRemoveAttr, NodeNewElement, NodeNewText, NodeAppend, NodeInsertBefore, NodeDetach, NodeClone, NodeHtml, NodeInnerHtml, NodeSetText, NodeHtmlEscaped, Chr, AllWord, StdinText, ReadFile, FileExists, Eprint, Print, Flush, Math(u8) }
@@ -97,7 +97,7 @@ impl B {
         Some(match n {
             "body" => Body, "param" => Param, "query" => Query, "header" => Header, "fwd" => Fwd, "int" => Int, "str" => Str, "len" => Len, "now" => Now,
             "random" => Random, "min" => Min, "max" => Max, "count" => Count, "capacity" => Capacity, "slot" => Slot, "stat" => Stat, "token" => Token,
-            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "__mito__in" => InRange, "__mito__f32" => F32, "sin" => Sin, "cos" => Cos, "tan" => Tan, "asin" => Asin, "acos" => Acos, "atan" => Atan, "sinh" => Sinh, "cosh" => Cosh, "tanh" => Tanh, "ln" => Ln, "log2" => Log2, "log10" => Log10, "ceil" => Ceil, "round" => Round, "trunc" => Trunc, "cbrt" => Cbrt, "hypot" => Hypot, "fmod" => Fmod, "atan2" => Atan2, "pow" => Pow, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie, "set_header" => SetHeader, "__html_lit" => HtmlLit, "__html_esc" => HtmlEsc, "__html_esc_attr" => HtmlEscAttr, "__html_attr" => HtmlAttr, "html_raw" => HtmlRaw, "html_text" => HtmlEsc, "trim" => Trim,
+            "auth" => Auth, "worker_index" => WorkerIndex, "worker_count" => WorkerCount, "__crash" => Crash, "__mito__in" => InRange, "__mito__expect" => Expect, "__mito__f32" => F32, "sin" => Sin, "cos" => Cos, "tan" => Tan, "asin" => Asin, "acos" => Acos, "atan" => Atan, "sinh" => Sinh, "cosh" => Cosh, "tanh" => Tanh, "ln" => Ln, "log2" => Log2, "log10" => Log10, "ceil" => Ceil, "round" => Round, "trunc" => Trunc, "cbrt" => Cbrt, "hypot" => Hypot, "fmod" => Fmod, "atan2" => Atan2, "pow" => Pow, "or" => Or, "exists" => Exists, "maxlen" => MaxLen, "sqrt" => Sqrt, "exp" => Exp, "floor" => Floor, "abs" => Abs, "substr" => Substr, "text_from" => TextFrom, "wrapping_add" => WrapAdd, "wrapping_sub" => WrapSub, "wrapping_mul" => WrapMul, "log" => Log, "set_cookie" => SetCookie, "set_header" => SetHeader, "__html_lit" => HtmlLit, "__html_esc" => HtmlEsc, "__html_esc_attr" => HtmlEscAttr, "__html_attr" => HtmlAttr, "html_raw" => HtmlRaw, "html_text" => HtmlEsc, "trim" => Trim,
             "base64" => Base64, "base64_url" => Base64Url, "unbase64" => Unbase64, "hex" => Hex, "sha1" => Sha1, "sha256" => Sha256,
             "hmac_sha1" => HmacSha1, "hmac_sha256" => HmacSha256, "pbkdf2_sha256" => Pbkdf2Sha256, "random_bytes" => RandomBytes,
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
@@ -1013,11 +1013,11 @@ impl P {
             self.i += 1; let n = self.id()?;
             // `var acc: text<8192> = "";`: a var holding text of its own, up to its cap (its bytes in its scope's region)
             let mut cap = None;
-            let mut num: Option<u8> = None;
+            let mut num: Option<u8> = None; let mut expect: Option<i64> = None;
             if self.sym(":") {
                 let t = self.id()?;
                 if t == "u64" { return Err(format!("`{} {}: u64`: u64 is not a value in code yet (it is stored in a field; compute in i64, or in u32 pieces)", if is_var { "var" } else { "let" }, n)); }
-                if t == "i64" || t == "f64" { num = Some(255); }
+                if t == "i64" || t == "f64" { num = Some(255); expect = Some(if t == "i64" { 0 } else { 1 }); }
                 else if let Some(c) = num_code(&t) { num = Some(c); }
                 else if !is_var || t != "text" { return Err(format!("`{} {}: {}`: only a `var` declares a type, and only `text<N>` (its cap in bytes: `var {}: text<1024> = \"\";`)", if is_var { "var" } else { "let" }, n, t, n)); }
                 if num.is_none() {
@@ -1032,6 +1032,8 @@ impl P {
             let e = match cap { Some(k) => Expr::Call("__mito__text_cap".into(), vec![Expr::Int(k), e], CallRes::Unbound), None => e };
             // a typed number: the first value is tested (or rounded), and so is every later assignment (see the assignment below)
             let e = match num { Some(c) if c != 255 => typed_expr(e, c, &n), _ => e };
+            // `i64` and `f64` are checked against the first value's kind (a text for an `i64` is an error)
+            let e = match expect { Some(k) => Expr::Call("__mito__expect".into(), vec![e, Expr::Int(k), Expr::Str(n.clone())], CallRes::Unbound), None => e };
             self.typed.push((n.clone(), num.unwrap_or(255)));
             return Ok(if is_var { Stmt::Var(n, 0, e) } else { Stmt::Let(n, 0, e) });
         }

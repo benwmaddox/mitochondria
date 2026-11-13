@@ -1,0 +1,22 @@
+// A guestbook: at most 200 notes of at most 140 bytes; the 201st is refused, never silently dropped.
+struct Note { who: string<24>; text: string<140>; }
+struct Book { notes: pool<Note, 200> checked; }
+state book: Book;
+
+@post("/notes")
+fn sign(who: string<1..24>, text: string<1..140>) -> Response<{ id: Note }> {
+    if book.notes.count() >= book.notes.capacity() { fail 507 "the guestbook is full"; }
+    let n = book.notes.add { who: who, text: text };
+    return created({ id: n });
+}
+
+@get("/notes")
+fn list() -> Response<{ notes: [{ who: string<24>, text: string<140> }], room: i64 }> {
+    return ok({ notes: [foreach n in book.notes { who: n.who, text: n.text }], room: book.notes.capacity() - book.notes.count() });
+}
+
+test "a full book refuses the next note" {
+    foreach i in 1..200 { post("/notes", { who: "a", text: "hi" }); }
+    let late = post("/notes", { who: "b", text: "late" });
+    return late.status == 507;
+}

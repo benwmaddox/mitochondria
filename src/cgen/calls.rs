@@ -483,6 +483,8 @@ impl<'p> G<'p> {
                 return Ok(CV::Int(r));
             }
         }
+        // the searches of a text for a literal, in line (src/cgen/inline_search.rs)
+        if let Some(r) = self.inline_search(bi, &a) { return Ok(r); }
         // `int` of a number: an integer as it is; a float truncated in line, as the runtime's builtin does (NaN is 0, beyond i64 the nearest end)
         if bi == B::Int {
             match a.first() {

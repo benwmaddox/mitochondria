@@ -99,6 +99,7 @@ holding no live byte, one collection at a time, driven by pressure:
 | below `--soft` | never trim |
 | above `--soft` | after each request, trim the collection with the most committed memory |
 | above `--hard` | trim everything; refuse writes (503) until below; reads continue |
+
 At start the map of lines already marked saved (`dirty`) is filled for unlogged ranges a whole byte at a time (a per-line loop cost about 8 ms per declared GiB of text field); a declared capacity costs only reserved address space plus that map, so a large array or text field is free when unused.
 
 A collection whose trim released nothing is skipped until 256 of its items have gone since.

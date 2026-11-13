@@ -1,0 +1,88 @@
+// starts_with, ends_with, contains, index_of and last_index_of with a literal second argument are emitted in line (a compare of a
+// fixed number of bytes, or a byte search for one byte), for every kind of text the first argument can be: a literal, an input
+// text, a plain text field, a piece (`substr`) of an input and of a field, and a text column of a pool's item. The edges: an empty
+// needle, a needle longer than the text, at the start and at the end, repeated matches, bytes of 128 and above, a missing text
+--- program
+struct Note { text: string<8>; }
+struct App { name: string<16>; notes: pool<Note, 4>; }
+state app: App;
+
+@post("/set/{s}")
+fn set(s: utf8<16>) -> Response<{ len: i64 }> {
+    app.name = s;
+    let it = app.notes.add();
+    it.text = s;
+    return ok({ len: len(app.name) });
+}
+@post("/lit")
+fn lit() -> Response<{ a: bool, b: bool, c: bool, d: bool, e: bool, f: i64, g: i64, h: i64, i: i64 }> {
+    return ok({ a: starts_with("abcabc", "abc"), b: ends_with("abcabc", "bca"), c: contains("abcabc", "ca"), d: contains("", ""),
+                e: starts_with("ab", "abc"), f: index_of("abcabc", "bc"), g: last_index_of("abcabc", "bc"), h: index_of("", ""), i: last_index_of("ab", "") });
+}
+@post("/input")
+fn input(s: utf8<16>) -> Response<{ sw: bool, sw0: bool, ew: bool, ew0: bool, co: bool, co1: bool, co0: bool, ix: i64, ix1: i64, ix0: i64, lx: i64, lx1: i64, lx0: i64, lx3: i64 }> {
+    return ok({ sw: starts_with(s, "ab"), sw0: starts_with(s, ""), ew: ends_with(s, "ab"), ew0: ends_with(s, ""),
+                co: contains(s, "bab"), co1: contains(s, "b"), co0: contains(s, ""),
+                ix: index_of(s, "ab"), ix1: index_of(s, "b"), ix0: index_of(s, ""),
+                lx: last_index_of(s, "ab"), lx1: last_index_of(s, "b"), lx0: last_index_of(s, ""), lx3: last_index_of(s, "abababab") });
+}
+@post("/high")
+fn high(s: utf8<16>) -> Response<{ a: bool, b: bool, c: bool, d: i64, e: i64, f: i64 }> {
+    return ok({ a: starts_with(s, "é"), b: ends_with(s, "é"), c: contains(s, "éa"), d: index_of(s, "é"), e: last_index_of(s, "é"), f: index_of(s, "ÿ") });
+}
+@post("/piece")
+fn piece(s: utf8<16>) -> Response<{ a: bool, b: bool, c: bool, d: i64, e: i64 }> {
+    return ok({ a: starts_with(substr(s, 1, 3), "b"), b: ends_with(substr(s, 1, 3), "c"), c: contains(substr(s, 1, 3), "bc"), d: index_of(substr(s, 1, 3), "c"), e: last_index_of(substr(s, 1, 3), "b") });
+}
+@post("/field")
+fn field() -> Response<{ a: bool, b: bool, c: bool, d: i64, e: i64, f: bool, g: i64, h: i64 }> {
+    return ok({ a: starts_with(app.name, "he"), b: ends_with(app.name, "lo"), c: contains(app.name, "ll"), d: index_of(app.name, "l"), e: last_index_of(app.name, "l"),
+                f: contains(substr(app.name, 1, 3), "ell"), g: index_of(substr(app.name, 1, 3), "l"), h: last_index_of(substr(app.name, 1, 3), "x") });
+}
+@post("/col")
+fn col() -> Response<{ a: bool, b: bool, c: bool, d: i64, e: i64, f: i64 }> {
+    let it = app.notes[0];
+    return ok({ a: starts_with(it.text, "he"), b: ends_with(it.text, "lo"), c: contains(it.text, "ll"), d: index_of(it.text, "ll"), e: last_index_of(it.text, "l"), f: index_of(substr(it.text, 2, 3), "o") });
+}
+@post("/maybe")
+fn maybe(s: utf8<16>?) -> Response<{ a: bool }> {
+    return ok({ a: starts_with(s, "a") });
+}
+@post("/maybe2")
+fn maybe2(s: utf8<16>?) -> Response<{ a: i64 }> {
+    return ok({ a: index_of(s, "a") });
+}
+@post("/loop")
+fn lp(s: utf8<16>) -> Response<{ n: i64 }> {
+    var n = 0;
+    var i = 0;
+    while i < 4 { if contains(s, "ab") { n += 1; } if starts_with(s, "a") { n += 10; } i += 1; }
+    return ok({ n: n });
+}
+--- requests
+POST /set/hello
+POST /lit
+POST /input {"s": "ababab"}
+POST /input {"s": "abab"}
+POST /input {"s": "b"}
+POST /input {"s": "a"}
+POST /input {"s": ""}
+POST /input {"s": "xxbabxxab"}
+POST /input {"s": "abababababababab"}
+POST /high {"s": "café"}
+POST /high {"s": "éa"}
+POST /high {"s": "e"}
+POST /high {"s": "ÿ"}
+POST /high {"s": ""}
+POST /piece {"s": "abcd"}
+POST /piece {"s": "a"}
+POST /piece {"s": ""}
+POST /field
+POST /col
+POST /maybe {"s": "abc"}
+POST /maybe {"s": ""}
+POST /maybe
+POST /maybe2 {"s": "ba"}
+POST /maybe2
+POST /loop {"s": "abab"}
+POST /loop {"s": "bbb"}

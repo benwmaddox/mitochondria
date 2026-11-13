@@ -1106,6 +1106,20 @@ A step sets an acceleration, updates velocity and position, damps the position a
 
 The library path costs nothing over field arithmetic on either side (the helpers inline to the same C). The struct-return form is new in 0332c6a and costs about 4.1 ns more per step than the same arithmetic written on the fields: a returned struct is built in the scratch area and then copied into `w.pos` (I did not look at the generated C to say why it is not kept in registers). Writing the update with the in-place functions (`w.pos.plus(w.vel); w.pos.scale(k);`) stays at the field speed, so hot loops should prefer them until the struct-return step 3 lowers non-escaping locals to scalars.
 
+## `starts_with`, `ends_with`, `contains`, `index_of`, `last_index_of` of a literal in line (2026-11-13)
+
+When the second argument is a literal and the first is any text kind (input text, field, column, `substr` window, literal), these are emitted as a bounded compare (`memcmp` of a fixed length; `memchr` for a one-byte literal in `contains` and `index_of`) with no runtime call and no argument array. A missing text still fails 500 `expected a string argument`. A needle that is not a literal keeps the builtin. Code: `src/cgen/inline_search.rs`; C helpers `BSTARTS_`, `BENDS_`, `BFIND_`, `BRFIND_` in the prelude. `tests/cases/search_inline.case` was recorded with the old compiler and checked equal on the new one on the TinyCC, clang and undefined-behavior-check backends.
+
+No LangArena port, msgbatch or jx program calls these five, so none of their generated C changes; the only measurement is a microbenchmark made for this change (`bench/search/search.mito`: a 43-byte text field, a state counter stored every step so the searches are not hoisted, Linux/WSL, CPU 10, 5 rounds of 5 million steps, best round, base then after, twice, under the bench lock; same answers). Handler ns per step, base vs after (two runs each):
+
+| loop | before | after |
+|---|---:|---:|
+| `starts_with` + `ends_with` (two literals) | 20.5, 21.0 | 0.82, 0.82 |
+| `contains` of "lazy dog" and of "z" | 70.8, 71.1 | 9.9, 9.5 |
+| `index_of` + `last_index_of` | 24.9, 24.8 | 4.5, 4.5 |
+
+These are best cases (a short text, hot in cache); the saving is the call and argument setup, so a long text dominated by the scan gains less.
+
 ## Scalar replacement of struct locals (2026-11-12)
 
 `bench/structs/new.mito`, Linux (WSL), CPU 10, 5 rounds of 2000000 steps, base and scalar-replacement builds alternated twice under the bench lock, handler ns per step. The struct-return form (`let t = plus3(w.pos, w.vel); w.pos = scaled3(t, 0.99999999);`) went from 6.75-6.98 to 2.645-2.658 ns/step, the same as the field loop (2.60-2.67) and the library loop (2.62-2.71), which did not change. All three endpoints give identical answers. The 4.1 ns the old form lost was memory traffic through the scratch area: a zero and two 24-byte memmoves per call that clang turned into 16-byte vector loads of data stored as 8-byte values (a store-forwarding stall), and that kept `pos` and `vel` out of registers across iterations. With the fields in C locals none of it remains. See docs/design/struct-values.md, "Step 2 built".
@@ -1115,3 +1129,22 @@ The library path costs nothing over field arithmetic on either side (the helpers
 `byte_at(t, i)` used to be a call through the runtime's builtin table (number 58) for every byte, with the per-iteration text mark (`text_len`) kept next to it because the call might build text. It is now one load: `(u64)i < len ? byte : -1`, the same answer as the builtin (the byte, or -1 for an index below 0 or at or past the length; a missing text still fails 500) for an input text, a text column, a plain text field and a `substr` window; a literal indexed by a value the range analysis proves inside it has no test. The C of a loop over a text no longer has the call or the mark. `tests/cases/byte_at_inline.case` has every kind with in-range, past-the-end and negative indexes, recorded with the old compiler and checked equal on the new one.
 
 The jx scanner (examples of `D:\code\jx` main, built with `mito build` and the default flags, Windows, clang -O3, `users200000.json`, 16 MB, median of 15 alternating runs, identical output on both sides): `.users | length` 147.8 ms to 49.9 ms (2.96x), `.users[] | select(.age >= 85) | .n` 189.1 to 54.8 ms (3.45x), `.users[] | .addr.city` 177.9 to 59.8 ms (2.98x), `.users[0].n` 16.2 to 16.1 ms (it stops early). That beats the 64 ms the same scanner reached with `-mllvm -inline-threshold=10000`. The generated C of the LangArena ports that read text (base64_decode, csv_parse, template_parse, etc_words, distance_jaro, calculator_ast, calculator_interpreter) and of msgbatch is byte for byte the same as before (none of them calls `byte_at`), so their timings cannot change. Not done: a text length proven by a loop condition (`while i < len(t)`) does not remove the length test in the generated C; the test stays in the C (clang may fold it against the loop condition; not checked).
+
+## `chr` and `trim_start`/`trim_end` in line (2026-11-13)
+
+`chr(k)` with `k` proven 0 to 127 by the range analysis is now a window onto a 128-byte table of the ascii characters (no call, no write), and `trim_start`/`trim_end` of a text are a bounded byte loop and a window (a trimmed literal is folded when compiling). Both were calls through the runtime builtin table (98, 69, 70). No benchmark in the repository exercises these built-ins, so there are no timings: only the generated C changed (unit tests check the calls are gone; `tests/cases/inline_misc.case` has a record made with the unmodified compiler).
+
+Looked at and left alone: `min`/`max` already inline for every argument kind the generator produced in probes (typed inputs, fields, `or`, recursion); `worker_index`, `worker_count` and `data_version` need runtime fields the generated code cannot read under the safety profile (`Ctx` has none, and only `c->h->` member access is allowed); `lower`/`upper` of ascii text would write new bytes into the text area, which the profile allows only helpers to do.
+
+## Text compare read in line (2026-11-13)
+
+`==`, `!=`, `<`, `<=`, `>`, `>=` on a literal, a plain text field, a text column or a `substr` piece used to call the runtime (`str_cmp_lit`, `str_cmp_col`, `str_cmp_at`) for each compare. They are now emitted in line (`src/cgen/inline_eq.rs`): equality is "same length and `memcmp` equal" (a literal's length is a constant, so the C compiler folds the `memcmp`), ordering is `bcmp_` (first differing byte as unsigned, else the shorter first: the runtime's `bytes_cmp`). An input text (`Txt`) still goes through the generic path. `tests/cases/text_compare_inline.case` (empty text, prefix, one different byte, bytes at 128 and above, both operand orders) was recorded with the compiler before the change and matches after, on every backend including clang with undefined-behavior checks.
+
+`bench/textcmp` (`python3 -I run.py`, Linux/WSL, CPU 10 under the bench lock, 3 rounds of 20 million iterations, builds alternated before/after/after/before twice; same answers). Each iteration reads a pool item's text column and does two compares:
+
+| loop | before ns/iteration | after ns/iteration | after / before |
+|---|---:|---:|---:|
+| column `==` and `<` against literals | 4.81 to 5.17 | 2.34 to 2.39 | about 0.47x |
+| column `==` and `>=` against a field | 5.40 to 5.61 | 4.78 to 5.07 | about 0.89x |
+
+The literal loop's gain is larger because the compare against a constant length folds; the column-against-column loop still loads both lengths and calls `memcmp`. Only this microbenchmark was measured; no application benchmark was run for this change.

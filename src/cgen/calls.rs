@@ -147,6 +147,7 @@ impl<'p> G<'p> {
         let code = OPS.iter().position(|o| *o == op).ok_or_else(|| format!("operator `{}`", op))?;
         if compared {
             // a string column against a literal or another column is compared where it is, without copying it into the text area
+            if let Some(e) = self.inline_text_cmp(&l, &r, code) { return Ok(CV::Bool(e)); }
             let flip = [0, 1, 4, 5, 2, 3][code];
             // a window onto a plain field or a piece of a field: compared where it is, against a literal or another field
             let place = |g: &mut Self, v: &CV| -> Option<(i32, String, String)> { match v {
@@ -482,6 +483,8 @@ impl<'p> G<'p> {
                 return Ok(CV::Int(r));
             }
         }
+        // the searches of a text for a literal, in line (src/cgen/inline_search.rs)
+        if let Some(r) = self.inline_search(bi, &a) { return Ok(r); }
         // `int` of a number: an integer as it is; a float truncated in line, as the runtime's builtin does (NaN is 0, beyond i64 the nearest end)
         if bi == B::Int {
             match a.first() {
@@ -526,6 +529,7 @@ impl<'p> G<'p> {
                 return no(format!("`{}` takes {}", name, what));
             }
         }
+        if let Some(v) = self.inline_misc(bi, &a)? { return Ok(v); }
         // `str(n)` of a number or bool: its longest text, for the bounds of lets of built text
         let str_bound = self.builtin_bound(bi, &a);
         if let (true, Some(code)) = (generic, BUILTINS.iter().position(|x| *x == bi)) {

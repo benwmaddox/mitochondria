@@ -1,0 +1,82 @@
+// text compared (== != < <= > >=) is read where the texts are, in line: against a literal either way round, a field against a
+// field, a text column, and a piece (`substr`) of a field; edges: empty text, a prefix, same length with one different byte, and
+// bytes at 128 and above (ordering is by unsigned byte)
+--- program
+struct Note { text: string<8>; }
+struct App { a: string<16>; b: string<16>; notes: pool<Note, 4>; }
+state app: App;
+
+@post("/set")
+fn set(x: utf8<16>, y: utf8<16>) -> Response<{ n: i64 }> {
+    app.a = x;
+    app.b = y;
+    let it = app.notes.add();
+    it.text = x;
+    return ok({ n: len(app.a) });
+}
+@post("/lit")
+fn lit() -> Response<{ eq: bool, ne: bool, lt: bool, le: bool, gt: bool, ge: bool }> {
+    return ok({ eq: app.a == "abc", ne: app.a != "abc", lt: app.a < "abc", le: app.a <= "abc", gt: app.a > "abc", ge: app.a >= "abc" });
+}
+@post("/litflip")
+fn litflip() -> Response<{ eq: bool, ne: bool, lt: bool, le: bool, gt: bool, ge: bool }> {
+    return ok({ eq: "abc" == app.a, ne: "abc" != app.a, lt: "abc" < app.a, le: "abc" <= app.a, gt: "abc" > app.a, ge: "abc" >= app.a });
+}
+@post("/empty")
+fn empty() -> Response<{ eq: bool, ne: bool, lt: bool, gt: bool }> {
+    return ok({ eq: app.a == "", ne: app.a != "", lt: app.a < "", gt: app.a > "" });
+}
+@post("/hi")
+fn hi() -> Response<{ eq: bool, lt: bool, gt: bool }> {
+    return ok({ eq: app.a == "é", lt: app.a < "é", gt: app.a > "é" });
+}
+@post("/cols")
+fn cols() -> Response<{ eq: bool, ne: bool, lt: bool, le: bool, gt: bool, ge: bool }> {
+    return ok({ eq: app.a == app.b, ne: app.a != app.b, lt: app.a < app.b, le: app.a <= app.b, gt: app.a > app.b, ge: app.a >= app.b });
+}
+@post("/pool")
+fn pool() -> Response<{ eq: bool, lt: bool, same: bool }> {
+    let it = app.notes[0];
+    return ok({ eq: it.text == "abc", lt: it.text < "abd", same: it.text == app.a });
+}
+@post("/sub")
+fn sub() -> Response<{ eq: bool, ne: bool, lt: bool, vs: bool, vsl: bool }> {
+    return ok({ eq: substr(app.a, 0, 2) == "ab", ne: substr(app.a, 1, 1) != "b", lt: substr(app.a, 0, 2) < "ac", vs: substr(app.a, 0, 1) == substr(app.b, 0, 1), vsl: "b" <= substr(app.b, 1, 1) });
+}
+--- requests
+POST /set {"x": "abc", "y": "abc"}
+POST /lit
+POST /litflip
+POST /cols
+POST /pool
+POST /sub
+POST /set {"x": "", "y": "a"}
+POST /lit
+POST /empty
+POST /cols
+POST /set {"x": "ab", "y": "abc"}
+POST /lit
+POST /litflip
+POST /cols
+POST /sub
+POST /set {"x": "abcd", "y": "abc"}
+POST /lit
+POST /cols
+POST /set {"x": "abd", "y": "abc"}
+POST /lit
+POST /cols
+POST /pool
+POST /set {"x": "abb", "y": "abc"}
+POST /lit
+POST /litflip
+POST /cols
+POST /pool
+POST /set {"x": "é", "y": "z"}
+POST /hi
+POST /cols
+POST /set {"x": "ê", "y": "é"}
+POST /hi
+POST /cols
+POST /set {"x": "", "y": ""}
+POST /empty
+POST /cols

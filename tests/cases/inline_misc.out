@@ -1,0 +1,23 @@
+POST /minmax -> 200 {"lo":3,"hi":9,"lo2":3,"hi2":9}
+POST /minmax -> 200 {"lo":3,"hi":9,"lo2":3,"hi2":9}
+POST /minmax -> 200 {"lo":-9223372036854775808,"hi":9223372036854775807,"lo2":1,"hi2":9223372036854775807}
+POST /minmaxf -> 200 {"lo":1,"hi":2.5}
+POST /minmaxf -> 200 {"lo":2.5,"hi":7}
+POST /chr/0 -> 200 {"a":"A","b":"\u0000","c":""}
+POST /chr/66 -> 200 {"a":"A","b":"B","c":""}
+POST /chr/127 -> 200 {"a":"A","b":"","c":""}
+POST /chr_any/200 -> 200 {"a":"È"}
+POST /chr_any/0 -> 200 {"a":"\u0000"}
+POST /chr_any/-1 -> 500 {"error":"chr: not a Unicode scalar value","line":22}
+POST /chr_any/55296 -> 500 {"error":"chr: not a Unicode scalar value","line":22}
+POST /trim -> 200 {"a":"","b":"","la":0,"lb":0}
+POST /trim -> 200 {"a":"","b":"","la":0,"lb":0}
+POST /trim -> 200 {"a":"abc","b":"abc","la":3,"lb":3}
+POST /trim -> 200 {"a":"a b \t","b":"  a b","la":5,"lb":5}
+POST /trim -> 200 {"a":"x \r\n","b":" \u000b\u000c x","la":4,"lb":5}
+POST /trim_lit -> 200 {"a":"x y \t","b":"  x y","c":"","d":""}
+POST /trim_field -> 200 {"a":"hi  ","b":" hi"}
+POST /trim_field -> 200 {"a":"","b":""}
+state <plain values> 16
+state app.notes 61
+memory reserved=8192 committed=8192 live=77

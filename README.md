@@ -49,6 +49,7 @@ mito build examples/jx/jx.mito -o jx                                         # a
 | | Platform | |
 | --- | --- | --- |
 | [examples/scoreboard](examples/scoreboard) | web | the smallest program: state, endpoints, tests |
+| [examples/guestbook](examples/guestbook) | web | a first program: limits, a full collection, a test for it (see [your first hour](docs/first-hour.md)) |
 | [examples/chat](examples/chat), [chat-sharded](examples/chat-sharded) | web | sessions and rooms; workers on several threads |
 | [examples/todomvc](examples/todomvc) | web | server-rendered pages, tables in SQLite, the answer cache |
 | [examples/notes](examples/notes) | web | a multi-file app on tables: accounts, per-user notes, search |

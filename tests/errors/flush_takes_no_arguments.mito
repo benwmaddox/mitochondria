@@ -1,0 +1,3 @@
+// expect: `flush` takes no arguments
+struct A { n: i64; } state a: A;
+@main fn main() -> Response<text> { flush(1); return ok("x"); }

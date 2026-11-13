@@ -85,7 +85,7 @@ fn words(code: &str) -> Vec<&str> {
 }
 
 /// Built-ins that touch the process's own standard error, standard input and files: for a command-line program (`@main`) only.
-const CLI_ONLY: &[&str] = &["eprint", "stdin_text", "read_file", "file_exists"];
+const CLI_ONLY: &[&str] = &["eprint", "print", "flush", "stdin_text", "read_file", "file_exists"];
 
 /// The platform of a program, given what its entry file declares and what it has: an error saying what does not fit.
 pub fn resolve(declared: Option<(Platform, usize)>, api: &Api, code: &str) -> Result<Option<Platform>, String> {

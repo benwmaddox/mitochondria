@@ -123,9 +123,10 @@ int main(int argc, char **argv) {
     int code = mito_handle(app, "MAIN", 4, target, tn, pairs, np, 0, 0, "", 0);
     u32 bn; const char *body = mito_response(app, &bn);
     int exit_code = 0;
-    if (code >= 1256 && code <= 1511) { os_err(body, bn); return code - 1256; } /* `exit_error(n, body)`: the body as it is on standard error, exit code n */
+    if (code >= 1256 && code <= 1511) { os_out_flush(); os_err(body, bn); return code - 1256; } /* `exit_error(n, body)`: the body as it is on standard error, exit code n */
     if (code >= 1000 && code <= 1255) exit_code = code - 1000;                  /* `exit(n, body)`: the body on standard output, exit code n */
-    else if (code >= 400) { os_err(body, bn); os_err("\n", 1); return 1; }
+    else if (code >= 400) { os_out_flush(); os_err(body, bn); os_err("\n", 1); return 1; }
     while (bn) { u32 c = bn > CLI_READ_CHUNK ? CLI_READ_CHUNK : bn; os_out(body, c); body += c; bn -= c; }
+    os_out_flush();
     return exit_code;
 }

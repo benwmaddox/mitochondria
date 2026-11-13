@@ -1,0 +1,3 @@
+// expect: `print` takes one argument
+struct A { n: i64; } state a: A;
+@main fn main() -> Response<text> { print("a", "b"); return ok("x"); }

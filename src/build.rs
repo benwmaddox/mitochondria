@@ -597,6 +597,83 @@ int main(int argc, char **argv) {
         assert!(e.contains("eprint") && e.contains("command-line"), "{}", e);
     }
 
+    /// The program of the `print` tests: `lines N` prints N lines, `big` prints stdin around a short text, `order` mixes print, eprint and flush, `lazy` prints before it reads stdin.
+    const PRINT_SRC: &str = "struct A { n: i64; }\nstate a: A;\n@main\nfn main(mode: ascii<1..20> from arg(0), count: ascii<1..20> from arg(1)) -> Response<text> {\n    if mode == \"lines\" {\n        var i = 0;\n        let n = int(count);\n        while i < n {\n            print(str(i) + \"\n\");\n            i = i + 1;\n        }\n        return ok(\"done\n\");\n    }\n    if mode == \"big\" {\n        let d = stdin_text(6000000);\n        print(\"<\");\n        print(d);\n        print(\">\");\n        return ok(\"end\");\n    }\n    if mode == \"order\" {\n        print(\"p1\n\");\n        eprint(\"e1\n\");\n        print(\"p2\n\");\n        flush();\n        eprint(\"e2\n\");\n        print(\"p3\n\");\n        return exit(3, \"body\n\");\n    }\n    if mode == \"lazy\" {\n        print(\"ready\n\");\n        let d = stdin_text(100);\n        print(d);\n        return ok(\"!\");\n    }\n    return ok(\"\");\n}\n";
+
+    /// `print(text)` and `flush()`: standard output as the program runs, buffered, in order, before the answer's body; a text bigger than the buffer goes straight out.
+    #[test]
+    fn a_main_program_prints_as_it_runs() {
+        let Some((dir, exe)) = cli_build(PRINT_SRC, "print") else { return };
+        // many small lines, then the answer's body
+        let (c, o, e) = cli_run(&exe, &["lines", "100000"], "");
+        let mut want = String::new(); for i in 0..100000 { want.push_str(&i.to_string()); want.push('\n'); } want.push_str("done\n");
+        assert!(c == 0 && e.is_empty() && o == want, "{} {} {:?}", c, o.len(), e);
+        assert_eq!(cli_run(&exe, &["lines", "0"], ""), (0, "done\n".into(), "".into()));
+        // a text bigger than the buffer (5 MB, from stdin), between two small ones; bytes above 127 pass through
+        let mut big = "0123456789abcdef\n".repeat(300_000); big.push_str("é€");
+        let (c, o, e) = cli_run(&exe, &["big", "0"], &big);
+        assert!(c == 0 && e.is_empty() && o.len() == big.len() + 5 && o == format!("<{}>end", big), "{} {} {:?}", c, o.len(), e);
+        // print, eprint, flush and the exit body: each stream in its own order
+        assert_eq!(cli_run(&exe, &["order", "0"], ""), (3, "p1\np2\np3\nbody\n".into(), "e1\ne2\n".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // in a server it is an error when compiling
+        for call in ["print(\"a\")", "flush()"] {
+            let web = format!("struct A {{ n: i64; }}\nstate a: A;\n@get(\"/x\")\nfn x() -> Response<text> {{ {}; return ok(\"b\"); }}\n", call);
+            let (st, code) = crate::source::load(&web).unwrap();
+            let prog = crate::layout::Program::parse(&st).unwrap();
+            let api = crate::cgen::check(&prog, &code).unwrap();
+            let e = crate::platform::resolve(None, &api, &code).err().unwrap_or_default();
+            assert!(e.contains(&call[..call.find('(').unwrap()]) && e.contains("command-line"), "{}", e);
+        }
+    }
+
+    /// Standard output and standard error written by one program, in one stream (`2>&1`): print and eprint keep their order (print is flushed before eprint writes), and flush writes at once.
+    #[cfg(unix)]
+    #[test]
+    fn print_and_eprint_interleave_in_order() {
+        let Some((dir, exe)) = cli_build(PRINT_SRC, "printorder") else { return };
+        let o = std::process::Command::new("sh").arg("-c").arg(format!("'{}' order 0 2>&1", exe.display())).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "p1\ne1\np2\ne2\np3\nbody\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Output appears before the program reads stdin (so `tail -f log | prog` shows results as lines arrive): the first line is seen while stdin is still open.
+    #[test]
+    fn a_main_program_prints_before_it_reads_stdin() {
+        use std::io::{Read, Write};
+        let Some((dir, exe)) = cli_build(PRINT_SRC, "printlazy") else { return };
+        let mut c = std::process::Command::new(&exe).args(["lazy", "0"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let mut stdin = c.stdin.take().unwrap();
+        let mut out = c.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || { let mut b = [0u8; 6]; out.read_exact(&mut b).unwrap(); tx.send(b).unwrap(); let mut rest = Vec::new(); let _ = out.read_to_end(&mut rest); });
+        let first = rx.recv_timeout(std::time::Duration::from_secs(20));
+        let ok_first = first == Ok(*b"ready\n");
+        stdin.write_all(b"abc").unwrap();
+        drop(stdin);
+        let st = c.wait().unwrap();
+        assert!(ok_first, "the first line did not appear while stdin was open");
+        assert_eq!(st.code(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reader goes away (`prog | head -c 10`): the program stops at once and quietly, not after printing a billion lines.
+    #[cfg(unix)]
+    #[test]
+    fn a_main_program_stops_when_its_output_pipe_closes() {
+        let Some((dir, exe)) = cli_build(PRINT_SRC, "printpipe") else { return };
+        let started = std::time::Instant::now();
+        // SIGPIPE as every shell leaves it: the program is ended by the signal (status 141)
+        let o = std::process::Command::new("bash").arg("-c").arg(format!("'{}' lines 1000000000 2>/tmp/mito-pipe-err | head -c 10; echo \"${{PIPESTATUS[0]}}\"", exe.display())).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "0\n1\n2\n3\n4\n141\n");
+        // SIGPIPE ignored (a parent may leave it so): the write fails, and the program exits with code 2, saying nothing
+        let o = std::process::Command::new("bash").arg("-c").arg(format!("trap '' PIPE; '{}' lines 1000000000 2>/tmp/mito-pipe-err | head -c 10; echo \"${{PIPESTATUS[0]}}\"; wc -c < /tmp/mito-pipe-err", exe.display())).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "0\n1\n2\n3\n4\n2\n0\n");
+        assert!(started.elapsed().as_secs() < 30);
+        let _ = std::fs::remove_file("/tmp/mito-pipe-err");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Run a built command-line program that is given a stdin that stays open and silent: it must finish without reading it (20 seconds at most).
     fn cli_run_silent_stdin(exe: &std::path::Path, args: &[&str]) -> (i32, String) {
         use std::io::Read;

@@ -82,7 +82,8 @@ static u64 os_random(void) { u64 v = 0; BCryptGenRandom(0, (u8 *)&v, 8, 2); retu
 static void os_err(const void *p, u32 n) { u32 done = 0; WriteFile(GetStdHandle((u32)-12), p, n, &done, 0); } /* STD_ERROR_HANDLE */
 int ReadFile(void *h, void *b, u32 n, u32 *done, void *ov);
 /* standard output and input for command-line programs (runtime/cli.c): bytes as they are; os_in reads up to n bytes, 0 at the end of the input */
-static void os_out(const void *p, u32 n) { while (n) { u32 done = 0; if (!WriteFile(GetStdHandle((u32)-11), p, n, &done, 0) || !done) return; p = (const u8 *)p + done; n -= done; } }
+/* one write to standard output until all of it is out: 0 done, 1 the reader has gone (a broken pipe), 2 any other error. A handle is binary: nothing is translated */
+static int os_out_raw(const void *p, u32 n) { while (n) { u32 done = 0; if (!WriteFile(GetStdHandle((u32)-11), p, n, &done, 0)) { u32 e = GetLastError(); return e == 109 || e == 232 ? 1 : 2; } if (!done) return 2; p = (const u8 *)p + done; n -= done; } return 0; } /* ERROR_BROKEN_PIPE, ERROR_NO_DATA */
 static u32 os_in(void *p, u32 n) { u32 done = 0; if (!ReadFile(GetStdHandle((u32)-10), p, n, &done, 0)) return 0; return done; }
 /* make a directory (one level); 1 when it exists afterwards */
 static int os_mkdir(const char *path) { return CreateDirectoryA(path, 0) || GetLastError() == 183; } /* ERROR_ALREADY_EXISTS */
@@ -254,7 +255,8 @@ static u64 os_ticks_ms(void) { OsTime t; clock_gettime(1, &t); return (u64)t.sec
 static u64 os_perf_ns(void) { OsTime t; clock_gettime(1, &t); return (u64)t.sec * 1000000000ULL + (u64)t.nsec; }
 static u64 os_random(void) { u64 v = 0; while (getrandom(&v, 8, 0) != 8) {} return v; }
 static void os_err(const void *p, u32 n) { while (n) { i64 k = write(2, p, n); if (k <= 0) return; p = (const u8 *)p + k; n -= (u32)k; } }
-static void os_out(const void *p, u32 n) { while (n) { i64 k = write(1, p, n); if (k <= 0) return; p = (const u8 *)p + k; n -= (u32)k; } }
+/* one write to standard output until all of it is out: 0 done, 1 the reader has gone (EPIPE), 2 any other error */
+static int os_out_raw(const void *p, u32 n) { while (n) { i64 k = write(1, p, n); if (k < 0) { int e = *__errno_location(); if (e == 4) continue; return e == 32 ? 1 : 2; } if (k == 0) return 2; p = (const u8 *)p + k; n -= (u32)k; } return 0; } /* EINTR, EPIPE */
 static u32 os_in(void *p, u32 n) { i64 k = read(0, p, n); return k > 0 ? (u32)k : 0; }
 static int os_mkdir(const char *path) { return mkdir(path, 0755) == 0 || *__errno_location() == 17; } /* EEXIST */
 int open(const char *path, int flags, ...);
@@ -388,3 +390,20 @@ static Sock os_wake_open(void) { if (pipe2(g_os_wake, 0x800 | 0x80000) != 0) ret
 static void os_wake_ping(void) { (void)write(g_os_wake[1], "w", 1); }
 static void os_wake_drain(void) { char b[64]; while (read(g_os_wake[0], b, sizeof b) > 0) {} }
 #endif
+
+/* ---- a command-line program's standard output, buffered (print, flush, the answer's body: runtime/cli.c, mito.c sys_builtin) ----
+   Bytes go into a fixed block of OS_OBUF (64 KiB) and are written when it fills, on flush(), before standard input is read (stdin_text), before anything is
+   written to standard error (eprint, an error answer) and when the program ends: so output appears as the program runs, in large writes, in the order it was
+   written. A text of OS_OBUF bytes or more is written straight from where it lives (after what is buffered), never copied. When the reader has gone (a closed
+   pipe: `prog | head -1`) the program ends quietly with exit code 2 (on Linux the kernel's SIGPIPE usually ends it first, as it does any program); any other
+   write error ends it with exit code 2 and a short message on standard error. */
+#define OS_OBUF 65536u
+void exit(int code);
+static u8 g_os_obuf[OS_OBUF]; static u32 g_os_on;
+static void os_out_end(int r) { if (r == 2) os_err("error: cannot write to standard output\n", 40); exit(2); }
+static void os_out_flush(void) { if (g_os_on) { u32 n = g_os_on; g_os_on = 0; int r = os_out_raw(g_os_obuf, n); if (r) os_out_end(r); } }
+static void os_out(const void *p, u32 n) {
+    if (n >= OS_OBUF) { os_out_flush(); int r = os_out_raw(p, n); if (r) os_out_end(r); return; }
+    if (g_os_on + n > OS_OBUF) os_out_flush();
+    memcpy(g_os_obuf + g_os_on, p, n); g_os_on += n;
+}

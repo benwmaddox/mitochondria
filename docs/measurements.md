@@ -1106,6 +1106,20 @@ A step sets an acceleration, updates velocity and position, damps the position a
 
 The library path costs nothing over field arithmetic on either side (the helpers inline to the same C). The struct-return form is new in 0332c6a and costs about 4.1 ns more per step than the same arithmetic written on the fields: a returned struct is built in the scratch area and then copied into `w.pos` (I did not look at the generated C to say why it is not kept in registers). Writing the update with the in-place functions (`w.pos.plus(w.vel); w.pos.scale(k);`) stays at the field speed, so hot loops should prefer them until the struct-return step 3 lowers non-escaping locals to scalars.
 
+## `starts_with`, `ends_with`, `contains`, `index_of`, `last_index_of` of a literal in line (2026-11-13)
+
+When the second argument is a literal and the first is any text kind (input text, field, column, `substr` window, literal), these are emitted as a bounded compare (`memcmp` of a fixed length; `memchr` for a one-byte literal in `contains` and `index_of`) with no runtime call and no argument array. A missing text still fails 500 `expected a string argument`. A needle that is not a literal keeps the builtin. Code: `src/cgen/inline_search.rs`; C helpers `BSTARTS_`, `BENDS_`, `BFIND_`, `BRFIND_` in the prelude. `tests/cases/search_inline.case` was recorded with the old compiler and checked equal on the new one on the TinyCC, clang and undefined-behavior-check backends.
+
+No LangArena port, msgbatch or jx program calls these five, so none of their generated C changes; the only measurement is a microbenchmark made for this change (`bench/search/search.mito`: a 43-byte text field, a state counter stored every step so the searches are not hoisted, Linux/WSL, CPU 10, 5 rounds of 5 million steps, best round, base then after, twice, under the bench lock; same answers). Handler ns per step, base vs after (two runs each):
+
+| loop | before | after |
+|---|---:|---:|
+| `starts_with` + `ends_with` (two literals) | 20.5, 21.0 | 0.82, 0.82 |
+| `contains` of "lazy dog" and of "z" | 70.8, 71.1 | 9.9, 9.5 |
+| `index_of` + `last_index_of` | 24.9, 24.8 | 4.5, 4.5 |
+
+These are best cases (a short text, hot in cache); the saving is the call and argument setup, so a long text dominated by the scan gains less.
+
 ## Scalar replacement of struct locals (2026-11-12)
 
 `bench/structs/new.mito`, Linux (WSL), CPU 10, 5 rounds of 2000000 steps, base and scalar-replacement builds alternated twice under the bench lock, handler ns per step. The struct-return form (`let t = plus3(w.pos, w.vel); w.pos = scaled3(t, 0.99999999);`) went from 6.75-6.98 to 2.645-2.658 ns/step, the same as the field loop (2.60-2.67) and the library loop (2.62-2.71), which did not change. All three endpoints give identical answers. The 4.1 ns the old form lost was memory traffic through the scratch area: a zero and two 24-byte memmoves per call that clang turned into 16-byte vector loads of data stored as 8-byte values (a store-forwarding stall), and that kept `pos` and `vel` out of registers across iterations. With the fields in C locals none of it remains. See docs/design/struct-values.md, "Step 2 built".

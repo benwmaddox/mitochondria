@@ -1,0 +1,24 @@
+// Text-search microbenchmark: starts_with, ends_with, contains, index_of and last_index_of of a literal, over a text field.
+// A counter in state is stored every step, so the searches cannot be hoisted out of the loop. Same answers before and after.
+struct W { t: string<64>; k: i64; sum: i64; }
+state w: W;
+
+fn reset() { w.t = "the quick brown fox jumps over the lazy dog"; w.k = 0; w.sum = 0; }
+@post("/starts/{n}")
+fn run_starts(n: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    reset();
+    foreach i in 0..n - 1 { w.k = w.k + 1; if starts_with(w.t, "the quick") { w.sum = w.sum + 1; } if ends_with(w.t, "lazy dog") { w.sum = w.sum + 2; } }
+    return ok({ "sum": w.sum });
+}
+@post("/contains/{n}")
+fn run_contains(n: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    reset();
+    foreach i in 0..n - 1 { w.k = w.k + 1; if contains(w.t, "lazy dog") { w.sum = w.sum + 1; } if contains(w.t, "z") { w.sum = w.sum + 2; } }
+    return ok({ "sum": w.sum });
+}
+@post("/index/{n}")
+fn run_index(n: i64 in 1..100000000) -> Response<{ sum: i64 }> {
+    reset();
+    foreach i in 0..n - 1 { w.k = w.k + 1; w.sum = w.sum + index_of(w.t, "fox") + last_index_of(w.t, "o"); }
+    return ok({ "sum": w.sum });
+}

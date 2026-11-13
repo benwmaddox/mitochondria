@@ -3,7 +3,9 @@
    `from stdin` (header ":stdin"; read only when the program has one), and `--name value`, `--name=value` or a bare `--name` (true)
    is the input called `name` (a short flag, `-c`, is the input `c`, true). The answer's body is written to standard output and the exit code is 0; an answer of status 400 or
    more goes to standard error with exit code 1; `exit(n, body)` answers with exit code n (body on standard output), `exit_error(n, body)` with exit code n and the body on
-   standard error (the body as it is, no line break added); a program that fails to start exits 2. Memory is the program's own declared state. */
+   standard error (the body as it is, no line break added); a program that fails to start exits 2. Memory is the program's own declared state.
+   An input `from args` is every argument followed by a 0 byte, `from env` every `NAME=value` the same way; stdin_text, read_file, file_exists and eprint (mito.c, sys_builtin)
+   run in the request once mito_set_cli says it is `@main`. */
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 void *mito_start(u64 budget, u64 seed);

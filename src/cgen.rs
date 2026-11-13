@@ -222,6 +222,80 @@ double tan(double); double asin(double); double acos(double); double atan(double
 #define HYPOT_(x, y) hypot(x, y)
 #define FMOD_(x, y) fmod(x, y)
 #endif
+/* the rest of jq's math functions: the platform's math library, so a result is what its libm gives (libms may differ in the last bit);
+   what a library lacks (exp10, significand, drem, scalb, lgamma_r on Windows) is made of what it has */
+double asinh(double); double acosh(double); double atanh(double); double exp2(double); double expm1(double); double log1p(double); double logb(double);
+double nearbyint(double); double rint(double); double lgamma(double); double tgamma(double); double copysign(double, double); double remainder(double, double);
+double nextafter(double, double); double fmin(double, double); double fmax(double, double); double ldexp(double, int); double scalbn(double, int); double fma(double, double, double);
+double frexp(double, int *); double modf(double, double *); double fabs(double); double pow(double, double); double floor(double);
+#ifdef _WIN32
+double _j0(double); double _j1(double); double _y0(double); double _y1(double);
+#define J0_(x) _j0(x)
+#define J1_(x) _j1(x)
+#define Y0_(x) _y0(x)
+#define Y1_(x) _y1(x)
+static double mito_exp10(double x) { return pow(10.0, x); }
+static double mito_lgamma_r(double x, int *s) {
+    *s = 1;
+    if (x != x) return lgamma(x);
+    if (x < 0.0 && x == floor(x)) { *s = 1; return lgamma(x); }
+    if (x < 0.0 && floor(x) - 2.0 * floor(floor(x) / 2.0) != 0.0) *s = -1;
+    if (x == 0.0 && (1.0 / x) < 0.0) *s = -1;
+    return lgamma(x);
+}
+#else
+double j0(double); double j1(double); double y0(double); double y1(double); double exp10(double); double lgamma_r(double, int *);
+#define J0_(x) j0(x)
+#define J1_(x) j1(x)
+#define Y0_(x) y0(x)
+#define Y1_(x) y1(x)
+static double mito_exp10(double x) { return exp10(x); }
+static double mito_lgamma_r(double x, int *s) { return lgamma_r(x, s); }
+#endif
+static double mito_scalb(double x, double y) {
+    if (x != x || y != y) return x * y;
+    if (y - y != 0.0) return y > 0.0 ? x * y : x / (-y);
+    if (y != floor(y)) return (y - y) / (y - y);
+    return scalbn(x, y > 65000.0 ? 65000 : y < -65000.0 ? -65000 : (int)y);
+}
+static int mito_clampi(double y) { return y != y ? 0 : y > 100000.0 ? 100000 : y < -100000.0 ? -100000 : (int)y; }
+static double mito_significand(double x) { int e = 0; if (x == 0.0 || x != x || x - x != 0.0) return x; return frexp(x, &e) * 2.0; }
+static double mito_frexp_m(double x) { int e = 0; if (x == 0.0 || x != x || x - x != 0.0) return x; return frexp(x, &e); }
+static i64 mito_frexp_e(double x) { int e = 0; if (x == 0.0 || x != x || x - x != 0.0) return 0; frexp(x, &e); return e; }
+static double mito_modf_f(double x) { double ip; return modf(x, &ip); }
+static double mito_modf_i(double x) { double ip; modf(x, &ip); return ip; }
+static double mito_lgamma(double x) { int s; return mito_lgamma_r(x, &s); }
+static i64 mito_lgamma_s(double x) { int s; mito_lgamma_r(x, &s); return s; }
+#define ASINH_(x) asinh(x)
+#define ACOSH_(x) acosh(x)
+#define ATANH_(x) atanh(x)
+#define EXP2_(x) exp2(x)
+#define EXP10_(x) mito_exp10(x)
+#define POW10_(x) mito_exp10(x)
+#define EXPM1_(x) expm1(x)
+#define LOG1P_(x) log1p(x)
+#define LOGB_(x) logb(x)
+#define NEARBYINT_(x) nearbyint(x)
+#define RINT_(x) rint(x)
+#define SIGNIFICAND_(x) mito_significand(x)
+#define GAMMA_(x) mito_lgamma(x)
+#define LGAMMA_(x) mito_lgamma(x)
+#define TGAMMA_(x) tgamma(x)
+#define LGAMMA_SIGN_(x) mito_lgamma_s(x)
+#define FREXP_MANTISSA_(x) mito_frexp_m(x)
+#define FREXP_EXPONENT_(x) mito_frexp_e(x)
+#define MODF_FRACTION_(x) mito_modf_f(x)
+#define MODF_INTEGER_(x) mito_modf_i(x)
+#define COPYSIGN_(x, y) copysign(x, y)
+#define DREM_(x, y) remainder(x, y)
+#define NEXTAFTER_(x, y) nextafter(x, y)
+#define NEXTTOWARD_(x, y) nextafter(x, y)
+#define SCALB_(x, y) mito_scalb(x, y)
+#define FMIN_(x, y) fmin(x, y)
+#define FMAX_(x, y) fmax(x, y)
+#define LDEXP_(x, y) ldexp(x, mito_clampi(y))
+#define SCALBLN_(x, y) scalbn(x, mito_clampi(y))
+#define FMA_(x, y, z) fma(x, y, z)
 #define ABS_(r, x) i64 r; if (UNLIKELY((x) == I64MIN)) OVERFLOW_; r = (x) < 0 ? -(x) : (x)
 #define BAND(r, x, y) i64 r = (x) & (y)
 #define BOR(r, x, y) i64 r = (x) | (y)
@@ -5142,6 +5216,15 @@ impl<'p> G<'p> {
                 let (x, y) = match a.as_slice() { [p, q] => match (num(p), num(q)) { (Some(x), Some(y)) => (x, y), _ => return no(format!("`{}` takes two numbers", name)) }, _ => return no(format!("`{}` takes two numbers", name)) };
                 CV::Flt(format!("{}_({}, {})", name.to_uppercase(), x, y))
             }
+            B::Math(k) => {
+                // jq's other math functions (lang::MATH): the C macro NAME_ over doubles; an integer is taken as a float
+                let (name, arity, kind) = crate::lang::MATH[k as usize];
+                let num = |v: &CV| match v { CV::Flt(e) => Some(e.clone()), CV::Int(e) => Some(format!("(double)({})", e)), _ => None };
+                let xs: Vec<String> = a.iter().filter_map(num).collect();
+                if a.len() != arity || xs.len() != arity { return no(format!("`{}` takes {} number{}", name, arity, if arity == 1 { "" } else { "s" })); }
+                let call = format!("{}_({})", name.to_uppercase(), xs.join(", "));
+                if kind == 2 { CV::Int(call) } else { CV::Flt(call) }
+            }
             B::Sqrt | B::Exp | B::Floor | B::Sin | B::Cos | B::Tan | B::Asin | B::Acos | B::Atan | B::Sinh | B::Cosh | B::Tanh | B::Ln | B::Log2 | B::Log10 | B::Ceil | B::Round | B::Trunc | B::Cbrt => {
                 // IEEE results, as the platform's math library gives them (a negative square root is NaN)
                 let name = match bi { B::Sqrt => "sqrt", B::Exp => "exp", B::Sin => "sin", B::Cos => "cos", B::Tan => "tan", B::Asin => "asin", B::Acos => "acos", B::Atan => "atan", B::Sinh => "sinh", B::Cosh => "cosh", B::Tanh => "tanh", B::Ln => "ln", B::Log2 => "log2", B::Log10 => "log10", B::Ceil => "ceil", B::Round => "round", B::Trunc => "trunc", B::Cbrt => "cbrt", _ => "floor" };
@@ -6010,7 +6093,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
                 if !owners.iter().any(|o| ["CALL", "CALL_OR_DEAD", "TAIL"].contains(o)) { return err(i, "helper called without CALL or TAIL"); }
             } else if tok.starts_with("fn_") {
                 if !matches!(owners.last(), Some(&"CALL") | Some(&"CALL_OR_DEAD")) { return err(i, "generated function called without CALL"); }
-            } else if !CALLS.contains(&tok) && !MORE_CALLS.contains(&tok) && tok != "return" && !TYPES.contains(&tok) {
+            } else if !CALLS.contains(&tok) && !(tok.ends_with('_') && crate::lang::MATH.iter().any(|m| tok.len() == m.0.len() + 1 && tok[..tok.len() - 1].eq_ignore_ascii_case(m.0))) && !MORE_CALLS.contains(&tok) && tok != "return" && !TYPES.contains(&tok) {
                 return err(i, "call of something other than a helper or profile macro");
             }
         }

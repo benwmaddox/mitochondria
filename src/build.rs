@@ -569,6 +569,18 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// jq's math functions beyond the basic ones: exact cases, the same on every libm.
+    #[test]
+    fn a_main_program_has_jqs_math_functions() {
+        let src = "struct A { n: i64; }\nstate a: A;\n@main\nfn main(w: ascii<1..20> from arg(0)) -> Response<text> {\n    let x = 3.75;\n    if w == \"a\" { return ok(str(ldexp(1.5, 4)) + \" \" + str(scalbln(3.0, 2)) + \" \" + str(scalb(3.0, 2.0)) + \" \" + str(drem(10.0, 3.0)) + \" \" + str(drem(11.0, 3.0)) + \" \" + str(significand(12.0)) + \" \" + str(logb(10.0))); }\n    if w == \"b\" { return ok(str(frexp_mantissa(8.0)) + \" \" + str(frexp_exponent(8.0)) + \" \" + str(modf_fraction(x)) + \" \" + str(modf_integer(x)) + \" \" + str(nearbyint(2.5)) + \" \" + str(rint(3.5)) + \" \" + str(rint(-2.5)) + \" \" + str(copysign(3.0, -1.0))); }\n    if w == \"c\" { return ok(str(nextafter(1.0, 2.0)) + \" \" + str(fma(2.0, 3.0, 4.0)) + \" \" + str(exp2(10.0)) + \" \" + str(exp10(2.0)) + \" \" + str(tgamma(5.0)) + \" \" + str(lgamma(1.0)) + \" \" + str(lgamma_sign(-0.5)) + \" \" + str(lgamma_sign(2.5))); }\n    if w == \"d\" { return ok(str(expm1(0.0)) + \" \" + str(log1p(0.0)) + \" \" + str(asinh(0.0)) + \" \" + str(acosh(1.0)) + \" \" + str(atanh(0.0)) + \" \" + str(j0(0.0)) + \" \" + str(fmin(1.0, 2.0)) + \" \" + str(fmax(1.0, 2.0)) + \" \" + str(fabs(-2.5)) + \" \" + str(ldexp(1.0, 3))); }\n    return ok(w);\n}\n";
+        let Some((dir, exe)) = cli_build(src, "math") else { return };
+        assert_eq!(cli_run(&exe, &["a"], ""), (0, "24 12 12 1 -1 1.5 3".into(), "".into()));
+        assert_eq!(cli_run(&exe, &["b"], ""), (0, "0.5 4 0.75 3 2 4 -2 -3".into(), "".into()));
+        assert_eq!(cli_run(&exe, &["c"], ""), (0, "1.0000000000000002 10 1024 100 24 0 -1 1".into(), "".into()));
+        assert_eq!(cli_run(&exe, &["d"], ""), (0, "0 0 0 0 0 1 1 2 2.5 8".into(), "".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A text field declared with the largest size (4 GiB - 1) puts the fields after it beyond 4 GiB into the state: they must work (the plain-state
     /// handlers take 64-bit offsets).
     #[test]

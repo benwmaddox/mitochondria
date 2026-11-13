@@ -93,6 +93,7 @@ fit, 507 otherwise). There is no heap allocator anywhere.
 the system's commit charge, not physical memory (a page is backed when first written), and nothing is ever trimmed, so no store, add or
 helper tests or commits pages. Larger state, or any program with pressure marks, commits pages when first written. A trim returns pages
 holding no live byte, one collection at a time, driven by pressure:
+At start the map of lines already marked saved (`dirty`) is filled for unlogged ranges a whole byte at a time (a per-line loop cost about 8 ms per declared GiB of text field); a declared capacity costs only reserved address space plus that map, so a large array or text field is free when unused.
 
 | Committed memory | Behavior |
 |---|---|

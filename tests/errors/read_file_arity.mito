@@ -1,0 +1,3 @@
+// expect: `read_file` takes a path and the most bytes the file may have
+struct A { n: i64; } state a: A;
+@main fn main() -> Response<text> { return ok(or(read_file("a.txt"), "")); }

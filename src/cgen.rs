@@ -222,6 +222,80 @@ double tan(double); double asin(double); double acos(double); double atan(double
 #define HYPOT_(x, y) hypot(x, y)
 #define FMOD_(x, y) fmod(x, y)
 #endif
+/* the rest of jq's math functions: the platform's math library, so a result is what its libm gives (libms may differ in the last bit);
+   what a library lacks (exp10, significand, drem, scalb, lgamma_r on Windows) is made of what it has */
+double asinh(double); double acosh(double); double atanh(double); double exp2(double); double expm1(double); double log1p(double); double logb(double);
+double nearbyint(double); double rint(double); double lgamma(double); double tgamma(double); double copysign(double, double); double remainder(double, double);
+double nextafter(double, double); double fmin(double, double); double fmax(double, double); double ldexp(double, int); double scalbn(double, int); double fma(double, double, double);
+double frexp(double, int *); double modf(double, double *); double fabs(double); double pow(double, double); double floor(double);
+#ifdef _WIN32
+double _j0(double); double _j1(double); double _y0(double); double _y1(double);
+#define J0_(x) _j0(x)
+#define J1_(x) _j1(x)
+#define Y0_(x) _y0(x)
+#define Y1_(x) _y1(x)
+static double mito_exp10(double x) { return pow(10.0, x); }
+static double mito_lgamma_r(double x, int *s) {
+    *s = 1;
+    if (x != x) return lgamma(x);
+    if (x < 0.0 && x == floor(x)) { *s = 1; return lgamma(x); }
+    if (x < 0.0 && floor(x) - 2.0 * floor(floor(x) / 2.0) != 0.0) *s = -1;
+    if (x == 0.0 && (1.0 / x) < 0.0) *s = -1;
+    return lgamma(x);
+}
+#else
+double j0(double); double j1(double); double y0(double); double y1(double); double exp10(double); double lgamma_r(double, int *);
+#define J0_(x) j0(x)
+#define J1_(x) j1(x)
+#define Y0_(x) y0(x)
+#define Y1_(x) y1(x)
+static double mito_exp10(double x) { return exp10(x); }
+static double mito_lgamma_r(double x, int *s) { return lgamma_r(x, s); }
+#endif
+static double mito_scalb(double x, double y) {
+    if (x != x || y != y) return x * y;
+    if (y - y != 0.0) return y > 0.0 ? x * y : x / (-y);
+    if (y != floor(y)) return (y - y) / (y - y);
+    return scalbn(x, y > 65000.0 ? 65000 : y < -65000.0 ? -65000 : (int)y);
+}
+static int mito_clampi(double y) { return y != y ? 0 : y > 100000.0 ? 100000 : y < -100000.0 ? -100000 : (int)y; }
+static double mito_significand(double x) { int e = 0; if (x == 0.0 || x != x || x - x != 0.0) return x; return frexp(x, &e) * 2.0; }
+static double mito_frexp_m(double x) { int e = 0; if (x == 0.0 || x != x || x - x != 0.0) return x; return frexp(x, &e); }
+static i64 mito_frexp_e(double x) { int e = 0; if (x == 0.0 || x != x || x - x != 0.0) return 0; frexp(x, &e); return e; }
+static double mito_modf_f(double x) { double ip; return modf(x, &ip); }
+static double mito_modf_i(double x) { double ip; modf(x, &ip); return ip; }
+static double mito_lgamma(double x) { int s; return mito_lgamma_r(x, &s); }
+static i64 mito_lgamma_s(double x) { int s; mito_lgamma_r(x, &s); return s; }
+#define ASINH_(x) asinh(x)
+#define ACOSH_(x) acosh(x)
+#define ATANH_(x) atanh(x)
+#define EXP2_(x) exp2(x)
+#define EXP10_(x) mito_exp10(x)
+#define POW10_(x) mito_exp10(x)
+#define EXPM1_(x) expm1(x)
+#define LOG1P_(x) log1p(x)
+#define LOGB_(x) logb(x)
+#define NEARBYINT_(x) nearbyint(x)
+#define RINT_(x) rint(x)
+#define SIGNIFICAND_(x) mito_significand(x)
+#define GAMMA_(x) mito_lgamma(x)
+#define LGAMMA_(x) mito_lgamma(x)
+#define TGAMMA_(x) tgamma(x)
+#define LGAMMA_SIGN_(x) mito_lgamma_s(x)
+#define FREXP_MANTISSA_(x) mito_frexp_m(x)
+#define FREXP_EXPONENT_(x) mito_frexp_e(x)
+#define MODF_FRACTION_(x) mito_modf_f(x)
+#define MODF_INTEGER_(x) mito_modf_i(x)
+#define COPYSIGN_(x, y) copysign(x, y)
+#define DREM_(x, y) remainder(x, y)
+#define NEXTAFTER_(x, y) nextafter(x, y)
+#define NEXTTOWARD_(x, y) nextafter(x, y)
+#define SCALB_(x, y) mito_scalb(x, y)
+#define FMIN_(x, y) fmin(x, y)
+#define FMAX_(x, y) fmax(x, y)
+#define LDEXP_(x, y) ldexp(x, mito_clampi(y))
+#define SCALBLN_(x, y) scalbn(x, mito_clampi(y))
+#define FMA_(x, y, z) fma(x, y, z)
 #define ABS_(r, x) i64 r; if (UNLIKELY((x) == I64MIN)) OVERFLOW_; r = (x) < 0 ? -(x) : (x)
 #define BAND(r, x, y) i64 r = (x) & (y)
 #define BOR(r, x, y) i64 r = (x) | (y)
@@ -303,7 +377,7 @@ double tan(double); double asin(double); double acos(double); double atan(double
 
 /// Builtins run by the generic `builtin` helper, by position: the interpreter's own code computes them.
 /// The first 14 always go through it; min, max and slot only when an argument's kind is known only at run time.
-pub const BUILTINS: [B; 100] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
+pub const BUILTINS: [B; 104] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, B::Int, B::Str, B::Len, B::Now, B::Random, B::Token, B::Stat, B::WorkerIndex, B::WorkerCount, B::Min, B::Max, B::Slot,
     // bytes, encodings and cryptography (runtime/crypto.c): codes 17 to 34, always through the runtime's builtin
     B::Base64, B::Base64Url, B::Unbase64, B::Hex, B::Sha1, B::Sha256, B::HmacSha1, B::HmacSha256, B::Pbkdf2Sha256, B::RandomBytes, B::XorBytes,
     B::SecretEqual, B::GcmSeal, B::GcmOpen, B::BcryptHash, B::BcryptCheck, B::FormEncode, B::FormDecode,
@@ -328,7 +402,9 @@ pub const BUILTINS: [B; 100] = [B::Body, B::Param, B::Query, B::Header, B::Fwd, 
     // HTML fragments (runtime/html.c, gumbo linked in): 72 to 97
     B::HtmlParse, B::HtmlParseIn, B::NodeKind, B::NodeName, B::NodeParent, B::NodeFirst, B::NodeLast, B::NodeNext, B::NodePrev, B::NodeContent, B::NodeAttr, B::NodeAttrCount, B::NodeAttrName, B::NodeAttrValue, B::NodeSetAttr, B::NodeRemoveAttr, B::NodeNewElement, B::NodeNewText, B::NodeAppend, B::NodeInsertBefore, B::NodeDetach, B::NodeClone, B::NodeHtml, B::NodeInnerHtml, B::NodeSetText, B::NodeHtmlEscaped,
     // a code point as UTF-8: 98; every character a word character: 99
-    B::Chr, B::AllWord];
+    B::Chr, B::AllWord,
+    // command-line programs only (`@main`): standard error, as text: 100; stdin on demand: 101; a file named at run time: 102, 103
+    B::Eprint, B::StdinText, B::ReadFile, B::FileExists];
 /// The built-ins of HTML fragments: a program using one gets runtime/html.c and gumbo (program_c_full, build.rs).
 const HTML_BUILTINS: [B; 26] = [B::HtmlParse, B::HtmlParseIn, B::NodeKind, B::NodeName, B::NodeParent, B::NodeFirst, B::NodeLast, B::NodeNext, B::NodePrev, B::NodeContent, B::NodeAttr, B::NodeAttrCount, B::NodeAttrName, B::NodeAttrValue, B::NodeSetAttr, B::NodeRemoveAttr, B::NodeNewElement, B::NodeNewText, B::NodeAppend, B::NodeInsertBefore, B::NodeDetach, B::NodeClone, B::NodeHtml, B::NodeInnerHtml, B::NodeSetText, B::NodeHtmlEscaped];
 /// The built-ins that need the system's cryptography library (runtime/crypto.c linked in).
@@ -936,7 +1012,9 @@ pub fn program_exe(prog: &Program, api: &Api, source: Option<(&str, &str)>, web:
         let stdin = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":stdin"));
         // a program with `from args` reads the arguments as written and parses its own flags
         let raw = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":args"));
-        return Ok(vec![program_c(prog, api, source)? + if stdin { "#define MITO_CLI_STDIN 1\n" } else { "" } + if raw { "#define MITO_CLI_ARGS 1\n" } else { "" } + CLI]);
+        let env = e.inputs.iter().any(|i| matches!(&i.src, Src::Header(h) if h == ":env"));
+        let defs = [(stdin, "MITO_CLI_STDIN"), (raw, "MITO_CLI_ARGS"), (env, "MITO_CLI_ENV")].iter().filter(|d| d.0).map(|d| format!("#define {} 1\n", d.1)).collect::<String>();
+        return Ok(vec![program_c(prog, api, source)? + &defs + CLI]);
     }
     // a program whose entry is `@frame` is a game: its `main` is runtime/game.c, which loads SDL3 and OpenGL when it starts
     if api.eps.iter().any(|e| e.method == "FRAME") {
@@ -4043,6 +4121,8 @@ impl<'p> G<'p> {
             // a character's other case takes at most three times its bytes
             B::Lower | B::Upper => n(0).map(|x| 3 * x),
             B::Chr => Some(4),
+            B::StdinText => int(0),
+            B::ReadFile => int(1),
             B::RandomText => int(0).zip(n(1)).map(|(k, _)| 4 * k),
             B::Replace => match (n(0), n(1), n(2)) { (Some(x), Some(_), Some(z)) => match a.get(1) { Some(CV::Lit(s)) if !s.is_empty() => Some(x + x / s.len() * z), _ => None }, _ => None },
             _ => None,
@@ -5034,6 +5114,8 @@ impl<'p> G<'p> {
             B::SocketSubscribe => Some((4, "the socket, the stream, and the text before and after each message broadcast to it")),
             B::HmacSha1 | B::HmacSha256 | B::XorBytes | B::SecretEqual | B::BcryptHash | B::BcryptCheck | B::FormatTime | B::Contains | B::StartsWith | B::EndsWith | B::RandomText | B::AddYears | B::IndexOf | B::LastIndexOf | B::ByteAt | B::CacheHole => Some((2, "two arguments")),
             B::GcmSeal | B::GcmOpen => Some((3, "the key, the 12-byte nonce and the text")),
+            B::Eprint | B::FileExists | B::StdinText => Some((1, "one argument")),
+            B::ReadFile => Some((2, "a path and the most bytes the file may have")),
             B::Replace => Some((3, "the text, what to replace and what with")),
             B::Pbkdf2Sha256 => Some((4, "the password, the salt, the iterations and the length")),
             _ => None,
@@ -5043,7 +5125,7 @@ impl<'p> G<'p> {
                 let name = match bi { B::Base64 => "base64", B::Base64Url => "base64_url", B::Unbase64 => "unbase64", B::Hex => "hex", B::Sha1 => "sha1", B::Sha256 => "sha256",
                     B::RandomBytes => "random_bytes", B::Env => "env", B::EscapeHtml => "escape_html", B::JsonQuote => "json_quote", B::JsonUnquote => "json_unquote", B::RequestTarget => "request_target", B::Crc32 => "crc32", B::ByteAt => "byte_at", B::Lower => "lower", B::Upper => "upper", B::CacheGet => "cache_get", B::CachePut => "cache_put", B::CacheStart => "cache_start", B::CacheHole => "cache_hole", B::CachePart => "cache_part", B::CacheLabel => "cache_label", B::DataVersion => "data_version", B::Replace => "replace", B::TrimStart => "trim_start", B::TrimEnd => "trim_end", B::AllEmoji => "all_emoji", B::HtmlParse => "html_parse", B::HtmlParseIn => "html_parse_in", B::NodeKind => "node_kind", B::NodeName => "node_name", B::NodeParent => "node_parent", B::NodeFirst => "node_first", B::NodeLast => "node_last", B::NodeNext => "node_next", B::NodePrev => "node_prev", B::NodeContent => "node_content", B::NodeAttr => "node_attr", B::NodeAttrCount => "node_attr_count", B::NodeAttrName => "node_attr_name", B::NodeAttrValue => "node_attr_value", B::NodeSetAttr => "node_set_attr", B::NodeRemoveAttr => "node_remove_attr", B::NodeNewElement => "node_new_element", B::NodeNewText => "node_new_text", B::NodeAppend => "node_append", B::NodeInsertBefore => "node_insert_before", B::NodeDetach => "node_detach", B::NodeClone => "node_clone", B::NodeHtml => "node_html", B::NodeInnerHtml => "node_inner_html", B::NodeSetText => "node_set_text", B::NodeHtmlEscaped => "node_html_escaped", B::Chr => "chr", B::AllWord => "all_word", B::ReadStored => "read_stored", B::SocketSend => "socket_send", B::SocketClose => "socket_close", B::SocketSubscribe => "socket_subscribe", B::SocketUnsubscribe => "socket_unsubscribe", B::Broadcast => "broadcast", B::SocketSendAll => "socket_send_all", B::SocketTag => "socket_tag", B::RandomText => "random_text", B::AddYears => "add_years", B::IndexOf => "index_of", B::LastIndexOf => "last_index_of", B::FormEncode => "form_encode", B::FormDecode => "form_decode", B::HmacSha1 => "hmac_sha1", B::HmacSha256 => "hmac_sha256",
                     B::XorBytes => "xor_bytes", B::SecretEqual => "secret_equal", B::BcryptHash => "bcrypt_hash", B::BcryptCheck => "bcrypt_check", B::FormatTime => "format_time", B::Contains => "contains", B::StartsWith => "starts_with", B::EndsWith => "ends_with",
-                    B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
+                    B::Eprint => "eprint", B::StdinText => "stdin_text", B::ReadFile => "read_file", B::FileExists => "file_exists", B::GcmSeal => "aes256gcm_seal", B::GcmOpen => "aes256gcm_open", _ => "pbkdf2_sha256" };
                 return no(format!("`{}` takes {}", name, what));
             }
         }
@@ -5065,12 +5147,13 @@ impl<'p> G<'p> {
             return Ok(match bi {
                 B::Int | B::Len | B::Now | B::Random | B::Stat | B::WorkerIndex | B::WorkerCount | B::Min | B::Max | B::Slot | B::AddYears | B::IndexOf | B::LastIndexOf | B::Crc32 | B::ByteAt | B::CacheGet | B::DataVersion
                     | B::HtmlParse | B::HtmlParseIn | B::NodeKind | B::NodeParent | B::NodeFirst | B::NodeLast | B::NodeNext | B::NodePrev | B::NodeAttrCount | B::NodeNewElement | B::NodeNewText | B::NodeClone => CV::Int(format!("{}.i", r)),
-                B::SecretEqual | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith | B::AllEmoji | B::AllWord => CV::Bool(format!("({}.i != 0)", r)),
+                B::SecretEqual | B::FileExists | B::BcryptCheck | B::Contains | B::StartsWith | B::EndsWith | B::AllEmoji | B::AllWord => CV::Bool(format!("({}.i != 0)", r)),
                 B::Str | B::Token | B::Base64 | B::Base64Url | B::Hex | B::Sha1 | B::Sha256 | B::HmacSha1 | B::HmacSha256 | B::Pbkdf2Sha256 | B::RandomBytes
                     | B::XorBytes | B::GcmSeal | B::BcryptHash | B::FormEncode | B::FormatTime | B::EscapeHtml | B::RandomText | B::JsonQuote | B::RequestTarget | B::Lower | B::Upper | B::CacheLabel | B::Replace | B::TrimStart | B::TrimEnd
-                    | B::NodeName | B::NodeContent | B::NodeAttrName | B::NodeAttrValue | B::NodeHtml | B::NodeInnerHtml | B::NodeHtmlEscaped | B::Chr => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
+                    | B::NodeName | B::NodeContent | B::NodeAttrName | B::NodeAttrValue | B::NodeHtml | B::NodeInnerHtml | B::NodeHtmlEscaped | B::Chr | B::StdinText => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, 1 }};", t, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
                 // a text, or null: decoding or opening that failed
-                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env | B::JsonUnquote | B::ReadStored | B::NodeAttr => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
+                B::Param | B::Query | B::Header | B::Unbase64 | B::GcmOpen | B::FormDecode | B::Env | B::JsonUnquote | B::ReadStored | B::ReadFile | B::NodeAttr => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, r, r, r)); if let Some(b) = str_bound { self.txt_bounds.insert(t.clone(), b); } CV::Txt(t) }
+                B::Eprint => CV::Null,
                 _ => CV::Any(r),
             });
         }
@@ -5141,6 +5224,15 @@ impl<'p> G<'p> {
                 let num = |v: &CV| match v { CV::Flt(e) => Some(e.clone()), CV::Int(e) => Some(format!("(double)({})", e)), _ => None };
                 let (x, y) = match a.as_slice() { [p, q] => match (num(p), num(q)) { (Some(x), Some(y)) => (x, y), _ => return no(format!("`{}` takes two numbers", name)) }, _ => return no(format!("`{}` takes two numbers", name)) };
                 CV::Flt(format!("{}_({}, {})", name.to_uppercase(), x, y))
+            }
+            B::Math(k) => {
+                // jq's other math functions (lang::MATH): the C macro NAME_ over doubles; an integer is taken as a float
+                let (name, arity, kind) = crate::lang::MATH[k as usize];
+                let num = |v: &CV| match v { CV::Flt(e) => Some(e.clone()), CV::Int(e) => Some(format!("(double)({})", e)), _ => None };
+                let xs: Vec<String> = a.iter().filter_map(num).collect();
+                if a.len() != arity || xs.len() != arity { return no(format!("`{}` takes {} number{}", name, arity, if arity == 1 { "" } else { "s" })); }
+                let call = format!("{}_({})", name.to_uppercase(), xs.join(", "));
+                if kind == 2 { CV::Int(call) } else { CV::Flt(call) }
             }
             B::Sqrt | B::Exp | B::Floor | B::Sin | B::Cos | B::Tan | B::Asin | B::Acos | B::Atan | B::Sinh | B::Cosh | B::Tanh | B::Ln | B::Log2 | B::Log10 | B::Ceil | B::Round | B::Trunc | B::Cbrt => {
                 // IEEE results, as the platform's math library gives them (a negative square root is NaN)
@@ -6010,7 +6102,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
                 if !owners.iter().any(|o| ["CALL", "CALL_OR_DEAD", "TAIL"].contains(o)) { return err(i, "helper called without CALL or TAIL"); }
             } else if tok.starts_with("fn_") {
                 if !matches!(owners.last(), Some(&"CALL") | Some(&"CALL_OR_DEAD")) { return err(i, "generated function called without CALL"); }
-            } else if !CALLS.contains(&tok) && !MORE_CALLS.contains(&tok) && tok != "return" && !TYPES.contains(&tok) {
+            } else if !CALLS.contains(&tok) && !(tok.ends_with('_') && crate::lang::MATH.iter().any(|m| tok.len() == m.0.len() + 1 && tok[..tok.len() - 1].eq_ignore_ascii_case(m.0))) && !MORE_CALLS.contains(&tok) && tok != "return" && !TYPES.contains(&tok) {
                 return err(i, "call of something other than a helper or profile macro");
             }
         }

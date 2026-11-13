@@ -1,0 +1,3 @@
+// expect: `ldexp` takes 2 numbers
+struct A { n: i64; } state a: A;
+@main fn main() -> Response<text> { return ok(str(ldexp(1.0))); }

@@ -97,6 +97,29 @@ static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
                if (!ReadFile(h, buf + n, (u32)want, &got, 0)) { r = 0; break; } if (!got) break; n += got; }
     CloseHandle(h); *len = n; return r;
 }
+/* a file to read in steps (a command-line program's read_file): a handle, or 0 when it cannot be opened (a directory cannot) */
+static void *os_file_open(const char *path) { void *h = CreateFileA(path, 0x80000000u, 3, 0, 3, 0, 0); return h == (void *)(i64)-1 ? 0 : h; } /* GENERIC_READ, FILE_SHARE_READ | WRITE, OPEN_EXISTING */
+static u32 os_file_read(void *h, void *p, u32 n) { u32 done = 0; if (!ReadFile(h, p, n, &done, 0)) return 0; return done; }
+static void os_file_close(void *h) { CloseHandle(h); }
+/* the process's environment as `NAME=value` entries each followed by a 0 byte (UTF-8; Windows' hidden `=C:=...` entries left out), at most cap bytes: the length, or 0xFFFFFFFF when it does not fit */
+unsigned short *GetEnvironmentStringsW(void);
+int FreeEnvironmentStringsW(unsigned short *p);
+int WideCharToMultiByte(u32 cp, u32 flags, const unsigned short *w, int nw, char *out, int nout, const char *def, int *used);
+static u32 os_environ(char *buf, u32 cap) {
+    unsigned short *blk = GetEnvironmentStringsW(); u32 n = 0;
+    if (!blk) return 0;
+    for (unsigned short *p = blk; *p;) {
+        u32 wl = 0; while (p[wl]) wl++;
+        if (p[0] != '=') {
+            if (n >= cap) { n = 0xFFFFFFFFu; break; }
+            int k = WideCharToMultiByte(65001, 0, p, (int)wl + 1, buf + n, (int)(cap - n), 0, 0); /* CP_UTF8, with the 0 */
+            if (k <= 0) { n = 0xFFFFFFFFu; break; }
+            n += (u32)k;
+        }
+        p += wl + 1;
+    }
+    FreeEnvironmentStringsW(blk); return n;
+}
 
 /* threads: a record that lives as long as the thread (the caller's) */
 typedef struct { void *h; } OsThread;
@@ -241,6 +264,26 @@ static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
     u64 n = 0; int r = 1;
     for (;;) { if (n == cap) { u8 x; if (read(fd, &x, 1) == 1) r = 2; break; } i64 k = read(fd, buf + n, cap - n); if (k < 0) { r = 0; break; } if (!k) break; n += (u64)k; }
     close(fd); *len = n; return r;
+}
+/* a file to read in steps (a command-line program's read_file): a handle (the descriptor plus one), or 0 when it cannot be opened (a directory cannot) */
+static void *os_file_open(const char *path) {
+    int d = open(path, 0x90000); /* O_RDONLY | O_CLOEXEC | O_DIRECTORY: this opens only a directory */
+    if (d >= 0) { close(d); return 0; }
+    int fd = open(path, 0x80000); /* O_RDONLY | O_CLOEXEC */
+    return fd < 0 ? 0 : (void *)(u64)(fd + 1);
+}
+static u32 os_file_read(void *h, void *p, u32 n) { i64 k = read((int)(u64)h - 1, p, n); return k > 0 ? (u32)k : 0; }
+static void os_file_close(void *h) { close((int)(u64)h - 1); }
+/* the process's environment as `NAME=value` entries each followed by a 0 byte, at most cap bytes: the length, or 0xFFFFFFFF when it does not fit */
+extern char **environ;
+static u32 os_environ(char *buf, u32 cap) {
+    u32 n = 0;
+    for (char **e = environ; e && *e; e++) {
+        u64 l = 0; while ((*e)[l]) l++;
+        if (n + l + 1 > cap) return 0xFFFFFFFFu;
+        memcpy(buf + n, *e, l + 1); n += (u32)(l + 1);
+    }
+    return n;
 }
 
 /* threads, locks and condition variables (pthreads; the types are opaque blocks of glibc's sizes) */

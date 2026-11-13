@@ -3,7 +3,9 @@
    `from stdin` (header ":stdin"; read only when the program has one), and `--name value`, `--name=value` or a bare `--name` (true)
    is the input called `name` (a short flag, `-c`, is the input `c`, true). The answer's body is written to standard output and the exit code is 0; an answer of status 400 or
    more goes to standard error with exit code 1; `exit(n, body)` answers with exit code n (body on standard output), `exit_error(n, body)` with exit code n and the body on
-   standard error (the body as it is, no line break added); a program that fails to start exits 2. Memory is the program's own declared state. */
+   standard error (the body as it is, no line break added); a program that fails to start exits 2. Memory is the program's own declared state.
+   An input `from args` is every argument followed by a 0 byte, `from env` every `NAME=value` the same way; stdin_text, read_file, file_exists and eprint (mito.c, sys_builtin)
+   run in the request once mito_set_cli says it is `@main`. */
 int mito_handle(void *m, const char *method, u32 mn, const char *target, u32 tn, const MitoPair *h, u32 nh, const MitoPair *f, u32 nf, const char *body, u32 bn);
 const char *mito_response(void *m, u32 *len);
 void *mito_start(u64 budget, u64 seed);
@@ -17,6 +19,7 @@ void mito_set_areas(u64 text_max, u64 out_max);
 void mito_set_loop_budget(void *m, i64 n);
 u8 *mito_text_room(void *m, u64 n);
 void mito_text_input(void *m, u64 n);
+void mito_set_cli(void *m);
 #define CLI_TARGET_MAX 8192
 
 /* a flag's name or value, percent-encoded into the target; 0 when it does not fit */
@@ -80,6 +83,12 @@ int main(int argc, char **argv) {
 #ifdef MITO_CLI_ARGS
     pairs[np].k = ":args"; pairs[np].kn = 5; pairs[np].v = argbuf; pairs[np].vn = an; np++; /* every argument, each followed by a 0 byte */
 #endif
+#ifdef MITO_CLI_ENV
+    static char envbuf[4 << 20];
+    { u32 en = os_environ(envbuf, sizeof envbuf);
+      if (en == 0xFFFFFFFFu) { os_err("error: the environment is too long\n", 35); return 2; }
+      pairs[np].k = ":env"; pairs[np].kn = 4; pairs[np].v = envbuf; pairs[np].vn = en; np++; } /* every `NAME=value`, each followed by a 0 byte */
+#endif
     if (mito_has_tables()) { os_err("error: a command-line program has no tables yet\n", 48); return 2; }
     mito_set_areas(0xFFFFFFFFULL, 0xFFFFFFFFULL); /* the request text and the answer: 4 GiB - 1 of address space each, committed as used */
     void *app = mito_start(1ULL << 40, 0);
@@ -110,6 +119,7 @@ int main(int argc, char **argv) {
     np++;
     mito_set_loop_budget(app, 100000000 + 64 * (i64)inn); /* the step budget grows with the input: a pass over every byte of it takes several steps */
 #endif
+    mito_set_cli(app); /* from here the built-ins that touch the system (eprint, stdin_text, read_file, file_exists) may run */
     int code = mito_handle(app, "MAIN", 4, target, tn, pairs, np, 0, 0, "", 0);
     u32 bn; const char *body = mito_response(app, &bn);
     int exit_code = 0;

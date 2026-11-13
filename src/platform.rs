@@ -84,8 +84,22 @@ fn words(code: &str) -> Vec<&str> {
     out
 }
 
+/// Built-ins that touch the process's own standard error, standard input and files: for a command-line program (`@main`) only.
+const CLI_ONLY: &[&str] = &["eprint", "stdin_text", "read_file", "file_exists"];
+
 /// The platform of a program, given what its entry file declares and what it has: an error saying what does not fit.
 pub fn resolve(declared: Option<(Platform, usize)>, api: &Api, code: &str) -> Result<Option<Platform>, String> {
+    let r = resolve_entries(declared, api, code)?;
+    if let Some(p) = r {
+        if p != Platform::Cli {
+            let w = words(code);
+            for (i, word) in w.iter().enumerate() { if CLI_ONLY.contains(word) && (i == 0 || w[i - 1] != "fn") { return Err(format!("platform {}: `{}` belongs to a command-line program (`@main`, platform cli): a {} has no standard input or command line", p.name(), word, if p == Platform::Web { "server" } else { "program of this platform" })); } }
+        }
+    }
+    Ok(r)
+}
+
+fn resolve_entries(declared: Option<(Platform, usize)>, api: &Api, code: &str) -> Result<Option<Platform>, String> {
     let Some((p, _)) = declared else { return Ok(inferred(api)) };
     let main = api.eps.iter().any(|e| e.method == "MAIN");
     let frame = api.eps.iter().any(|e| e.method == "FRAME");

@@ -1,0 +1,13 @@
+GET /zero -> 200 {"a":0,"b":0,"o":0}
+POST /set/7/5 -> 200 {"a":5}
+POST /set/16777215/9 -> 200 {"a":9}
+POST /set/1000003/2 -> 200 {"a":2}
+GET /get/7 -> 200 {"a":5,"b":5}
+GET /get/16777215 -> 200 {"a":9,"b":9}
+GET /get/1000003 -> 200 {"a":2,"b":2}
+GET /get/8 -> 200 {"a":0,"b":0}
+POST /text -> 200 {"n":11}
+POST /text -> 200 {"n":22}
+GET /zero -> 200 {"a":9,"b":0,"o":22}
+state <plain values> 687865872
+memory reserved=687869952 committed=687869952 live=687865872

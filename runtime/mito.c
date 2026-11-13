@@ -2886,7 +2886,11 @@ MITO_API void *MITO(start)(u64 budget, u64 seed) {
         if (b <= a) continue;
         u64 d0 = (a / PAGE) * (PAGE / 64 / 8) & ~(PAGE - 1), d1 = up(((b - 1) / PAGE + 1) * (PAGE / 64 / 8), PAGE);
         if (!os_commit(mem->dirty + d0, d1 - d0)) return 0;
-        for (u64 l = a / LINE; l < (b + LINE - 1) / LINE; l++) mem->dirty[l >> 3] |= (u8)(1u << (l & 7));
+        /* whole bytes of the map at once (a loop over every line costs about 8 ms per GiB: a declared 4 GiB text field took 30 ms to start) */
+        u64 l = a / LINE, le = (b + LINE - 1) / LINE;
+        for (; l < le && (l & 7); l++) mem->dirty[l >> 3] |= (u8)(1u << (l & 7));
+        if (le - l >= 8) { memset(mem->dirty + (l >> 3), 0xFF, (le - l) >> 3); l += ((le - l) >> 3) << 3; }
+        for (; l < le; l++) mem->dirty[l >> 3] |= (u8)(1u << (l & 7));
     }
     return m;
 }

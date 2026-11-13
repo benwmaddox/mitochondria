@@ -1,0 +1,26 @@
+// large arrays and a big text field cost nothing at start: an untouched array reads as zeros, sparse writes read back, and the
+// text field (unlogged, 512 MiB) appends in place
+--- program
+struct Big { a: i64[16777216]; b: u8[16777216]; n: i64; out: utf8<536870912>; }
+state big: Big;
+
+@get("/zero")
+fn zero() -> Response<{ a: i64, b: i64, o: i64 }> { return ok({ a: big.a[16777215], b: big.b[12345], o: len(big.out) }); }
+@post("/set/{i}/{v}")
+fn set(i: i64, v: i64) -> Response<{ a: i64 }> { big.a[i] = v; big.b[i] = v; return ok({ a: big.a[i] }); }
+@get("/get/{i}")
+fn get(i: i64) -> Response<{ a: i64, b: i64 }> { return ok({ a: big.a[i], b: big.b[i] }); }
+@post("/text")
+fn text() -> Response<{ n: i64 }> { big.out += "hello"; big.out += " world"; return ok({ n: len(big.out) }); }
+--- requests
+GET /zero
+POST /set/7/5
+POST /set/16777215/9
+POST /set/1000003/2
+GET /get/7
+GET /get/16777215
+GET /get/1000003
+GET /get/8
+POST /text
+POST /text
+GET /zero

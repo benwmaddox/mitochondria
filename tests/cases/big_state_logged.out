@@ -1,0 +1,10 @@
+GET /zero -> 200 {"c":0}
+POST /log/4194303/3 -> 200 {"c":3}
+POST /logfail/4194303 -> 422 {"error":"no","line":9}
+POST /logfail/17 -> 422 {"error":"no","line":9}
+GET /logget/4194303 -> 200 {"c":3,"n":0}
+GET /logget/17 -> 200 {"c":0,"n":0}
+POST /log/17/4 -> 200 {"c":4}
+GET /logget/17 -> 200 {"c":4,"n":0}
+state <plain values> 33554440
+memory reserved=33558528 committed=33558528 live=33554440

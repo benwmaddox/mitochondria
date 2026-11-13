@@ -1,0 +1,22 @@
+// a large logged array: untouched elements read as zeros, a failed request's writes (a sparse one and the last element) are undone
+--- program
+struct Log { c: i64[4194304]; n: i64; }
+state lg: Log logged;
+
+@get("/zero")
+fn zero() -> Response<{ c: i64 }> { return ok({ c: lg.c[4194303] }); }
+@post("/log/{i}/{v}")
+fn setlog(i: i64, v: i64) -> Response<{ c: i64 }> { lg.c[i] = v; return ok({ c: lg.c[i] }); }
+@post("/logfail/{i}")
+fn logfail(i: i64) -> Response<{}> { lg.c[i] = 99; lg.n += 1; fail 422 "no"; }
+@get("/logget/{i}")
+fn logget(i: i64) -> Response<{ c: i64, n: i64 }> { return ok({ c: lg.c[i], n: lg.n }); }
+--- requests
+GET /zero
+POST /log/4194303/3
+POST /logfail/4194303
+POST /logfail/17
+GET /logget/4194303
+GET /logget/17
+POST /log/17/4
+GET /logget/17

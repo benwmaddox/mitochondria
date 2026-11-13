@@ -1829,7 +1829,7 @@ fn kind(v: &CV) -> Option<K> {
 /// only themselves.)
 fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return v == k; } k == K::Any || unify(v, k) == k }
 
-mod state; mod stores; mod stmts; mod values; mod calls; mod places; mod inline_search;
+mod state; mod stores; mod stmts; mod values; mod calls; mod places; mod inline_search; mod inline_misc;
 #[cfg(test)] mod profile_tests;
 
 

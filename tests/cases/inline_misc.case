@@ -1,0 +1,60 @@
+// min/max of run-time-kind values, chr of a code point proven 0..127, trim_start/trim_end: the same answers whether or not the call is inline
+--- program
+struct Note { text: string<8>; n: i64; }
+struct App { notes: pool<Note, 4>; n: i64; f: f64; }
+state app: App;
+
+fn pick(a: i64, b: i64) -> i64 { if a > b { return a; } return b; }
+
+@post("/minmax")
+fn minmax(a: i64 from body, b: i64 from body) -> Response<{ lo: i64, hi: i64, lo2: i64, hi2: i64 }> {
+    return ok({ lo: min(a, b), hi: max(a, b), lo2: min(pick(a, 1), b), hi2: max(a, pick(b, 2)) });
+}
+@post("/minmaxf")
+fn minmaxf(a: i64 from body) -> Response<{ lo: f64, hi: f64 }> {
+    app.f = 2.5;
+    return ok({ lo: min(a, app.f), hi: max(app.f, a) });
+}
+@post("/chr/{i}")
+fn chrs(i: i64) -> Response<{ a: string<4>, b: string<4>, c: string<4> }> {
+    return ok({ a: chr(65), b: chr(i % 128 + 0), c: chr(127) });
+}
+@post("/chr_any/{i}")
+fn chr_any(i: i64) -> Response<{ a: string<4> }> {
+    return ok({ a: chr(i) });
+}
+@post("/trim")
+fn trims(s: utf8<32>) -> Response<{ a: string<32>, b: string<32>, la: i64, lb: i64 }> {
+    return ok({ a: trim_start(s), b: trim_end(s), la: len(trim_start(s)), lb: len(trim_end(s)) });
+}
+@post("/trim_lit")
+fn trim_lit() -> Response<{ a: string<32>, b: string<32>, c: string<32>, d: string<32> }> {
+    return ok({ a: trim_start("  x y \t"), b: trim_end("  x y \t"), c: trim_start("   "), d: trim_end("") });
+}
+@post("/trim_field")
+fn trim_field(s: utf8<8>) -> Response<{ a: string<8>, b: string<8> }> {
+    let it = app.notes.add();
+    it.text = s;
+    return ok({ a: trim_start(it.text), b: trim_end(it.text) });
+}
+--- requests
+POST /minmax {"a": 3, "b": 9}
+POST /minmax {"a": 9, "b": 3}
+POST /minmax {"a": -9223372036854775808, "b": 9223372036854775807}
+POST /minmaxf {"a": 1}
+POST /minmaxf {"a": 7}
+POST /chr/0
+POST /chr/66
+POST /chr/127
+POST /chr_any/200
+POST /chr_any/0
+POST /chr_any/-1
+POST /chr_any/55296
+POST /trim {"s": ""}
+POST /trim {"s": "   "}
+POST /trim {"s": "abc"}
+POST /trim {"s": "  a b \t"}
+POST /trim {"s": " \u000b\u000c x \r\n"}
+POST /trim_lit
+POST /trim_field {"s": " hi  "}
+POST /trim_field {"s": "        "}

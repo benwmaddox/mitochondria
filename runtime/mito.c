@@ -6,10 +6,10 @@
    It reproduces the Rust runtime's behavior exactly (tests/cases check both against the same records). */
 
 /* The operating system's part (memory, clock, randomness, standard error) is runtime/os.c, included before this file. */
-/* Size: the runtime is compiled for small code (clang's `minsize`) except the parts a hot loop runs through (HOT_BEGIN .. HOT_END: item
-   allocation, freeing and stores), which stay at the program's own optimization level. Measured: about 27% smaller executables, with no
-   benchmark slower beyond noise once these parts are exempt. Other compilers ignore the markers. */
-#if defined(__clang__) && !defined(MITO_NO_MINSIZE)
+/* Size, opt-in: `--cflag -O3 --cflag -DMITO_MINSIZE` compiles the runtime for small code (clang's `minsize`), except the parts a hot loop runs
+   through (HOT_BEGIN .. HOT_END: items, stores, element access), which keep the program's own optimization level. Off by default: it saves
+   about 8% more of an executable, and the hot parts above had to be found by measurement. Other compilers ignore the markers. */
+#if defined(__clang__) && defined(MITO_MINSIZE)
 #define COLD_BEGIN _Pragma("clang attribute push(__attribute__((minsize)), apply_to=function)")
 #define COLD_END   _Pragma("clang attribute pop")
 #define HOT_BEGIN  _Pragma("clang attribute pop")

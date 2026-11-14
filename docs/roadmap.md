@@ -71,8 +71,9 @@ Decided against, for now: request-local scratch arrays (unlogged state, now the 
 - Measured on the 11 ports whose fake bounds became `while` (5 rounds, median): within 2% except Sort::Quick, 4.5% slower: its inner
   `while so.t[i] < pivot { i += 1; }` loops are two instructions and the budget test is a third. A first version that decremented a
   budget in memory each round cost 11% (BF::Array) and 16% (Sort::Quick).
-- Not yet: `foreach` over a fixed array (`foreach x, i in app.arr`), and the ports' flag variables (`while going == 1`) rewritten
-  with `break`.
+- Done (2026-11-14): `foreach x, i in app.arr` over a fixed array of numbers or bools (a state field, or a field of a pool item), with `reverse`, `where` and
+  `limit`; the counter has the interval 0 to length - 1, so the element reads carry no bounds test (`tests/cases/foreach_array.case`). Arrays of structs are
+  not walked yet. Not yet: the ports' flag variables (`while going == 1`) rewritten with `break`.
 
 ### 2.2 One meaning for `..`: both ends included (done 2026-11-05, with 2.1)
 - `a..b` includes both ends everywhere: `n: i64 in 0..100` (as inputs and fields already mean), `foreach i in 1..10` (ten values),
@@ -126,7 +127,7 @@ signature there is nothing to guess.
   starts with (so `enum Cmd: u8 { Plus = 43, Minus = 45 }` accepts 0..45: a range check, not a membership check); parameters of an
   enum type are integers; answer fields declared with an enum type are written as names (`"op":"Plus"`), others as numbers. Both BF
   ports use enums (`Op` in BF::Recursion, the byte-valued `Cmd` in BF::Array), at the same speed.
-- Not yet: enum inputs (an endpoint parameter `op: Op` reading a name), enums kept apart from integers (an `i64` can be assigned
+- Done (2026-11-14): enum inputs: an endpoint parameter `op: Op` (path, query, body or header; a default `Op.Plus`) reads the name of a value, anything else is a 400 listing them (`tests/cases/enum_input.case`). Not yet: enums kept apart from integers (an `i64` can be assigned
   to an `Op` field, checked only by its range), and the compress ports.
 
 ### 2.5 `match` (done 2026-11-05)
@@ -174,8 +175,10 @@ signature there is nothing to guess.
   not make a request inside a loop over a collection (the loop reads the collection's extent once). `mito check` compiles tests;
   `build`, `serve` and `emit-c` never include them. The scoreboard (5 tests, the full-pool 503 one included) and chat (3, with
   sessions) examples ship with tests; `cargo test` runs them and a program whose failing tests must name their lines.
-- Not yet: `app.test.mito` beside the program (lines would need a file offset), `--dir`, a `.case` file run by `mito test` with
-  `--bless` (the recorded form is still `cargo test cases`), tests of a system of workers, and answers stored past `let r = ...`.
+- Done (2026-11-14): `app.test.mito` beside `app.mito` is read as if the program ended with `use "app.test.mito";`, and a failure in any `use`d file is
+  reported at that file and its own line (it said the merged program's line before). Not yet: `--dir` (it is unclear which program each file there tests), a
+  `.case` file run by `mito test` with `--bless` (the recorded form is still `cargo test cases`), tests of a system of workers, and answers stored past
+  `let r = ...`.
 
 ## Phase 4: text
 
@@ -399,7 +402,9 @@ so the app writes that pipeline in Mitochondria, over the other options (an app'
   xlink, implied `<tbody>` and `</li>`), walking, attribute edits, insertion and moves, a parse in a `<table>` context: every output
   checked against Nokogiri::HTML5 in the reference image's Ruby, byte for byte.
 
-## Phase 9: built-ins emitted in line (proposed 2026-11-13)
+## Phase 9: built-ins emitted in line (done 2026-11-13)
+
+Status: items 1 to 4 and 8 are built (PRs #44, #50: `byte_at`, `starts_with`/`ends_with`/`contains`/`index_of`/`last_index_of` with a literal, text `==` and ordering, `chr` of a proven ascii code, `trim_start`/`trim_end`), measured in `docs/measurements.md`. Items 5, 6 and 7 were looked at and left on purpose: `min`/`max` already inline for every kind the generator produces; `worker_index`, `worker_count` and `data_version` need runtime fields the generated code cannot read under the safety profile; `lower`/`upper` of ascii text would write bytes, which only helpers may. The list below is the original proposal.
 
 `byte_at` is a load in the generated C (PR #44). Other built-ins still go through `c->h->builtin(c, code, argv, n, &r)` (the `Val`
 array and the runtime's `switch`) or through a `c->h->...` helper. These are the ones worth turning into plain C, most useful first

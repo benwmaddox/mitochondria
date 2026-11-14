@@ -1,0 +1,5 @@
+POST /fill -> 200 {"ok":true}
+GET /sum -> 200 {"total":30,"weighted":100,"big":3,"first_two":3,"last":4,"set":4,"cell":60}
+state <plain values> 48
+state app.cells 56
+memory reserved=8192 committed=8192 live=104

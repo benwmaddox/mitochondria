@@ -1,0 +1,5 @@
+// expect: input `op`: the default must be a value of `Op`: Op.Plus, Op.Minus
+enum Op { Plus, Minus }
+struct App { n: i64; }
+state app: App;
+@get("/a") fn a(op: Op = Op.Nope) -> Response<{ n: i64 }> { return ok({ n: 1 }); }

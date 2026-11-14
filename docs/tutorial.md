@@ -190,7 +190,8 @@ test "an unbelievable score changes nothing" {
 ```
 
 `mito test examples/scoreboard/score.mito` runs each test on an empty state (the clock fixed at 2026-01-01) and prints the
-line of the `return` that failed one, or of the statement whose error ended it. Tests are never part of a built or served program.
+line of the `return` that failed one, or of the statement whose error ended it. Tests are never part of a built or served program. More tests can go in
+`score.test.mito` beside the program: `mito test` reads it without a `use`, and a failure in it names that file and line.
 
 The compiler's own tests record whole conversations: a case in `tests/cases/` is the program and its requests:
 

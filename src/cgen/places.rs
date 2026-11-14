@@ -390,7 +390,9 @@ impl<'p> G<'p> {
         if let Some(v) = it.via { return self.walk(it, v, env, body); }
         if let Some(hi) = &it.hi { return self.range_loop(it, hi, env, body); }
         if let Expr::Call(f, args, _) = &it.coll { if f == "split" { return self.split_loop(it, args, env, body); } }
-        let CV::Coll(c, inst) = self.expr(&it.coll, env, None)? else { return no("each over something other than a collection") };
+        let cv = self.expr(&it.coll, env, None)?;
+        if let CV::PlainArr(..) | CV::ArrCol(..) = cv { return self.array_loop(it, cv, env, body); }
+        let CV::Coll(c, inst) = cv else { return no("each over something other than a collection") };
         if let Some(t) = tab(c) { return self.table_loop(it, t, inst, env, collect, loop_body, body); }
         if let Some(f) = &it.by { return no(format!("`by {}`: only a table is walked in a field's order (a list keeps insertion order; keep other orders in the data)", f)); }
         if it.after.is_some() { return no("`after`: only a table's rows are paged this way"); }
@@ -546,6 +548,48 @@ impl<'p> G<'p> {
         }
         self.line(&format!("{}++;", hits));
         self.round_start(it, env, &hits);
+        body(self, env, &hits)?;
+        self.loop_round_end();
+        self.close("}");
+        self.close("}");
+        self.loop_exit();
+        Ok(())
+    }
+
+    /// `foreach x, i in app.arr`: the elements of a fixed array of numbers or bools, in order (`reverse` last to first), with `where` and
+    /// `limit` as over a collection; `i` is the element's index. The counter has the interval 0 to length - 1, so the element reads
+    /// need no bounds test. Reads the array as it is at each round (a store in the body to a later element shows up in it).
+    pub(super) fn array_loop(&mut self, it: &'p Iter, arr: CV, env: &mut Vec<Option<CV>>, body: impl FnOnce(&mut Self, &mut Vec<Option<CV>>, &str) -> R<()>) -> R<()> {
+        let n = match &arr {
+            CV::PlainArr(_, Ty::Scalar(_), n) => *n as i64,
+            CV::ArrCol(c, _, ci) => match self.prog.colls[*c].cols[*ci].kind { CKind::Arr(_, n) => n as i64, _ => return no("foreach over a column that is not an array") },
+            _ => return no("`foreach` over an array of structs: not supported yet (an array of numbers or bools, or a collection)"),
+        };
+        if it.by.is_some() || it.after.is_some() || it.last || it.from.is_some() || it.whil.is_some() { return no("a loop over an array takes `reverse`, `where` and `limit`"); }
+        let arr = self.freeze_place(arr, &|w: &str| format!("foreach over {}", w))?;
+        let lim = match &it.limit { Some(e) => { let v = self.expr(e, env, None)?; Some(self.int_or(v, 400, "bad limit")) } None => None };
+        let lim = lim.map(|l| self.hold_int(l));
+        if let Some(l) = &lim { self.line(&format!("if ({} < 0) FAIL(400, \"bad limit\", 9);", l)); }
+        let (k, hits) = (self.tmp("k"), self.tmp("hits"));
+        self.loop_enter();
+        self.open("{");
+        self.line(&format!("i64 {} = 0;", hits));
+        if it.reverse { self.open(&format!("for (i64 {k} = {n}; {k}-- > 0;) {{")); } else { self.open(&format!("for (i64 {k} = 0; {k} < {n}; {k}++) {{")); }
+        if n > 0 { self.ranges.insert(k.clone(), (0, n - 1)); }
+        if let Some(l) = &lim { self.line(&format!("if ({} >= {}) break;", hits, l)); }
+        // the element: the array indexed by the counter, read where it is used (a held copy, so a store in the body does not change `x` under it)
+        let mut tmp: Vec<Option<CV>> = vec![Some(arr), Some(CV::Int(k.clone()))];
+        let at = Box::leak(Box::new(Expr::Index(Box::new(Expr::Var("__a".into(), VarRes::Local(0))), Box::new(Expr::Var("__ak".into(), VarRes::Local(1))))));
+        let v = self.expr(at, &mut tmp, None)?;
+        let v = self.hold(v, false)?;
+        env[it.slot as usize] = Some(v);
+        if let Some(w) = &it.wher {
+            let wv = self.expr(w, env, None)?;
+            let wc = self.cond(wv)?;
+            self.line(&format!("if (!({})) continue;", wc));
+        }
+        self.line(&format!("{}++;", hits));
+        if let Some((_, slot)) = &it.index { env[*slot as usize] = Some(CV::Int(k.clone())); }
         body(self, env, &hits)?;
         self.loop_round_end();
         self.close("}");

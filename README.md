@@ -54,6 +54,7 @@ mito build examples/jx/jx.mito -o jx                                         # a
 | [examples/todomvc](examples/todomvc) | web | server-rendered pages, tables in SQLite, the answer cache |
 | [examples/notes](examples/notes) | web | a multi-file app on tables: accounts, per-user notes, search |
 | [examples/jx](examples/jx) | cli | a small jq in three files |
+| [examples/regex](examples/regex) | web | regular expressions as generated code: patterns become plain functions, with captures as windows |
 | [examples/world](examples/world) | game | an open world to walk through, painted in broad brush strokes by one fragment shader |
 
 **Web pages.** Programs can answer HTML written as markup in the code, take HTML form posts and cookies, and serve their

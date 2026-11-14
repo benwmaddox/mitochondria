@@ -194,6 +194,10 @@ fn read_program(files: &[&String]) -> (String, String, bool) {
 /// A program file's text, its `use`s expanded (the pieces kept for errors' places).
 fn load_text(f: &str) -> Result<String, String> {
     let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {}", f, e))?;
+    expand_text(f, text)
+}
+/// The same for the text of `f` as given (`mito test` adds the `use` of the tests file).
+fn expand_text(f: &str, text: String) -> Result<String, String> {
     if source::is_system(&text) || !text.lines().any(|l| l.trim_start().starts_with("use \"")) { PIECES.with(|p| p.borrow_mut().clear()); return Ok(text); }
     let (mut out, mut pieces) = (String::new(), Vec::new());
     let root = std::fs::canonicalize(f).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| f.to_string());
@@ -387,9 +391,39 @@ fn sigs(args: &[String]) {
 }
 
 /// `test <program> [--clang]`: the program's tests, built with TinyCC (or clang) into a runner and run; exits 1 if any fails.
+/// `app.test.mito` beside `app.mito` holds more tests of it: `mito test app.mito` reads it as if `app.mito` ended with `use "app.test.mito";`
+/// (unless it already uses it, or the file given is itself a tests file).
+fn read_program_with_tests(files: &[&String]) -> (String, String, bool) {
+    let [f] = files else { eprintln!("{}", USAGE); std::process::exit(2) };
+    let mut text = std::fs::read_to_string(f.as_str()).unwrap_or_else(|e| die(format!("{}: {}", f, e)));
+    let system = source::is_system(&text);
+    let path = std::path::Path::new(f.as_str());
+    if !system && !path.to_string_lossy().ends_with(".test.mito") {
+        let tests = path.with_extension("test.mito");
+        let name = tests.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if tests.is_file() && !text.contains(&format!("use \"{}\"", name)) { text.push_str(&format!("\nuse \"{}\";\n", name)); }
+    }
+    let text = expand_text(f, text).unwrap_or_else(|e| die(e));
+    (f.to_string(), text, system)
+}
+
+/// The test runner reports a failure at `file:line` of the merged program; say the file and line it was written in (`use`d files, `app.test.mito`).
+fn test_places(out: &str, file: &str) -> String {
+    let prefix = format!("      {}:", file);
+    let mut r = String::new();
+    for line in out.lines() {
+        let place = line.strip_prefix(&prefix).and_then(|r| r.split_once(": ")).and_then(|(n, rest)| n.parse::<usize>().ok().map(|n| (n, rest)));
+        match place.and_then(|(n, rest)| origin(n).map(|(f2, l2, _)| (f2, l2, rest))) {
+            Some((f2, l2, rest)) => r += &format!("      {}:{}: {}\n", f2, l2, rest),
+            None => { r += line; r.push('\n'); }
+        }
+    }
+    r
+}
+
 fn test(args: &[String]) {
     let files = inputs(args);
-    let (f, text, system) = read_program(&files);
+    let (f, text, system) = read_program_with_tests(&files);
     if system { die(format!("{}: a system's tests are not supported yet: test each worker's program", f)); }
     let path = std::path::Path::new(&f);
     let file = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
@@ -401,9 +435,10 @@ fn test(args: &[String]) {
     let units = cgen::program_test_exe(&prog, &a, Some((&file, &code))).unwrap_or_else(|e| die(e));
     let exe = std::env::temp_dir().join(format!("mito-test-{}-{}{}", name, std::process::id(), std::env::consts::EXE_SUFFIX));
     build::exe(&units, &exe, !args.iter().any(|a| a == "--clang"), &[]).unwrap_or_else(|e| die(e));
-    let status = std::process::Command::new(&exe).arg(&file).status().unwrap_or_else(|e| die(format!("{}: {}", exe.display(), e)));
+    let out = std::process::Command::new(&exe).arg(&file).stderr(std::process::Stdio::inherit()).output().unwrap_or_else(|e| die(format!("{}: {}", exe.display(), e)));
     let _ = std::fs::remove_file(&exe);
-    std::process::exit(status.code().unwrap_or(1));
+    print!("{}", test_places(&String::from_utf8_lossy(&out.stdout), &file));
+    std::process::exit(out.status.code().unwrap_or(1));
 }
 
 /// `check <program> --kinds`: every local's kind as the compiler sees it, by function and endpoint, with its line.
@@ -423,6 +458,34 @@ fn kinds(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
+    /// `app.test.mito` beside `app.mito` is read as part of it, its tests run, and a failure in it names that file and its own line;
+    /// a program that already uses the file, or the tests file given by itself, is not read twice.
+    #[test]
+    fn a_tests_file_beside_the_program_is_read() {
+        let dir = std::env::temp_dir().join(format!("mito-testsfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = dir.join("app.mito");
+        std::fs::write(&app, "struct App { n: i64; }\nstate app: App;\n@post(\"/n\") fn bump() -> Response<{ n: i64 }> { app.n += 1; return ok({ n: app.n }); }\ntest \"inline\" { return post(\"/n\", {}).status == 200; }\n").unwrap();
+        std::fs::write(dir.join("app.test.mito"), "// more tests\ntest \"twice\" {\n    post(\"/n\", {});\n    post(\"/n\", {});\n    return app.n == 2;\n}\ntest \"wrong\" {\n    post(\"/n\", {});\n    return app.n == 9;\n}\n").unwrap();
+        let f = app.to_string_lossy().into_owned();
+        let (_, text, _) = super::read_program_with_tests(&[&f]);
+        assert!(text.contains("test \"inline\"") && text.contains("test \"twice\""), "{}", text);
+        let (s, code) = crate::source::load(&text).unwrap();
+        let prog = crate::layout::Program::parse(&s).unwrap();
+        let api = crate::cgen::check(&prog, &code).unwrap();
+        assert_eq!(crate::cgen::test_names(&api).len(), 3);
+        // a failure at a line of the merged text is placed in the file it came from
+        let l = text.lines().position(|x| x.contains("return app.n == 9")).unwrap() + 1;
+        let said = super::test_places(&format!("FAIL  wrong\n      app.mito:{}: returned false\nother line\n", l), "app.mito");
+        assert!(said.contains("app.test.mito:9: returned false") && !said.contains("app.mito:") && said.contains("other line"), "{}", said);
+        // a program that uses the file itself does not get it twice
+        std::fs::write(&app, format!("{}use \"app.test.mito\";\n", std::fs::read_to_string(&app).unwrap())).unwrap();
+        let (_, twice, _) = super::read_program_with_tests(&[&f]);
+        assert_eq!(twice.matches("test \"twice\"").count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn std_files_come_from_the_compiler() {
         // a program anywhere (here: a directory with no lib/ at all) can use the embedded library files

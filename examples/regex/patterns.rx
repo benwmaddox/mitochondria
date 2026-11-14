@@ -1,0 +1,10 @@
+// name  pattern        (see tools/regexgen/main.go for the syntax)
+slug     [a-z0-9]+(?:-[a-z0-9]+)*
+email    [a-z0-9._-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+
+number   -?\d+(?:\.\d+)?
+date     \d{4}-\d{2}-\d{2}
+ident    [A-Za-z_]\w*
+// with groups: name_match / name_search also fill in where each group matched
+datep    (\d{4})-(\d{2})-(\d{2})
+pair     ([A-Za-z_]\w*)=("[^"]*"|\w*)
+mail     ([a-z0-9._-]+)@([a-z0-9-]+(?:\.[a-z0-9-]+)+)

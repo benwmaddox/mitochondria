@@ -1,0 +1,29 @@
+// `foreach x, i in array`: the elements of a fixed array of numbers or bools (a state field, or a field of a pool item), with reverse, where and limit; the index is the element's position
+--- program
+struct Cell { vals: i64[3]; tag: i64; }
+struct A { arr: i64[5]; flags: bool[4]; cells: pool<Cell, 4>; }
+state app: A;
+
+@post("/fill")
+fn fill() -> Response<{ ok: bool }> {
+    for i = 0; i < 5; i += 1 { app.arr[i] = i * i; }
+    app.flags[1] = true; app.flags[3] = true;
+    let c = app.cells.add { tag: 1 };
+    c.vals[0] = 10; c.vals[1] = 20; c.vals[2] = 30;
+    return ok({ ok: true });
+}
+
+@get("/sum")
+fn sum() -> Response<{ total: i64, weighted: i64, big: i64, first_two: i64, last: i64, set: i64, cell: i64 }> {
+    var t = 0; var w = 0; var b = 0; var f = 0; var l = -1; var s = 0; var cs = 0;
+    foreach x, i in app.arr { t += x; w += x * i; }
+    foreach x in app.arr where x > 3 { b += 1; }
+    foreach x in app.arr limit 2 { f += x + 1; }
+    foreach x, i in app.arr reverse { if l < 0 { l = i; } }
+    foreach on, i in app.flags where on { s += i; }
+    foreach c in app.cells { foreach v in c.vals { cs += v; } }
+    return ok({ total: t, weighted: w, big: b, first_two: f, last: l, set: s, cell: cs });
+}
+--- requests
+POST /fill
+GET /sum

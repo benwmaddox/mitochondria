@@ -211,4 +211,5 @@ Plain library files, embedded in the compiler: `use "std/math.mito";` (a line of
 | `examples/todomvc` | web | server-rendered pages, tables in SQLite, the answer cache (53 browser checks) |
 | `examples/notes` | web | a multi-file app on tables: accounts with bcrypt, per-user notes, search and tags |
 | `examples/jx` | cli | a small jq in three files: positions in the input text, no tree, no allocation |
+| `examples/regex` | web | regular expressions as generated code: `tools/regexgen` turns `patterns.rx` into plain functions (a state table, captures as windows), used by endpoints and tests |
 | `examples/world` | game | an open world to walk through, painted in broad brush strokes by one fragment shader from a seed: terrain, lakes, sky, sun, fog |

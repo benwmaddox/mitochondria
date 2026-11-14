@@ -1,0 +1,174 @@
+// Regular expressions as compile-time expansion: patterns.rx is turned into patterns.mito by tools/regexgen (a DFA written out as
+// plain loops over bytes), and this program uses the functions it made. To change a pattern: edit patterns.rx, then, from the repository root,
+//   (cd tools/regexgen && go run . ../../examples/regex/patterns.rx > ../../examples/regex/patterns.mito) && mito fmt examples/regex/patterns.mito --write
+use "patterns.mito";
+
+struct Seen { checked: i64; }
+state seen: Seen;
+
+// where each group of a match is, filled in by name_match / name_search; a request's own scratch, so nothing is left behind
+struct Work { d: datep_m; kv: pair_m; who: mail_m; }
+request work: Work;
+
+@get("/valid")
+fn valid(kind: ascii<1..16>, text: utf8<0..200>) -> Response<{ valid: bool }> {
+    seen.checked += 1;
+    if kind == "slug" { return ok({ valid: slug_full(text) }); }
+    if kind == "email" { return ok({ valid: email_full(text) }); }
+    if kind == "number" { return ok({ valid: number_full(text) }); }
+    if kind == "date" { return ok({ valid: date_full(text) }); }
+    if kind == "ident" { return ok({ valid: ident_full(text) }); }
+    fail 404 "no such pattern";
+}
+
+// where the first number in a text starts, and where it ends (-1 for none)
+@get("/first-number")
+fn first_number(text: utf8<0..200>) -> Response<{ from: i64, to: i64 }> {
+    let a = number_find(text, 0);
+    if a < 0 { return ok({ from: -1, to: -1 }); }
+    return ok({ from: a, to: number_at(text, a) });
+}
+
+// the sum of every number in a text: find, then continue from the end of the match (an empty match cannot happen: a number has digits)
+@get("/sum")
+fn sum(text: utf8<0..200>) -> Response<{ sum: i64, count: i64 }> {
+    var total = 0;
+    var n = 0;
+    var p = number_find(text, 0);
+    while p >= 0 {
+        let e = number_at(text, p);
+        total += int_of(substr(text, p, e - p));
+        n += 1;
+        p = number_find(text, e);
+    }
+    return ok({ sum: total, count: n });
+}
+
+// ints only: a number with a fraction counts by its whole part
+fn int_of(t: text) -> i64 {
+    var v = 0;
+    var i = 0;
+    var neg = false;
+    if byte_at(t, 0) == 45 { neg = true; i = 1; }
+    while i < len(t) && byte_at(t, i) >= 48 && byte_at(t, i) <= 57 { v = v * 10 + byte_at(t, i) - 48; i += 1; }
+    if neg { return 0 - v; }
+    return v;
+}
+
+test "slugs" {
+    if !slug_full("hello-world-2") { return "hello-world-2 should match"; }
+    if slug_full("-hello") { return "a leading hyphen is not a slug"; }
+    if slug_full("hello-") { return "a trailing hyphen is not a slug"; }
+    if slug_full("Hello") { return "capitals are not in the class"; }
+    return !slug_full("");
+}
+
+test "emails" {
+    if !email_full("ben.maddox@example.co.uk") { return "a plain address should match"; }
+    if email_full("ben@example") { return "a host needs a dot"; }
+    if email_full("@example.com") { return "a name is required"; }
+    return !email_full("a b@example.com");
+}
+
+test "numbers and dates" {
+    if !number_full("-12.50") { return "-12.50 should match"; }
+    if number_full("12.") { return "12. is not a number here"; }
+    if !date_full("2026-11-14") { return "a date should match"; }
+    return !date_full("2026-1-14");
+}
+
+test "greedy: 12.5 is one number" {
+    // "12.5" is one number, not 12 then 5
+    return number_at("12.5x", 0) == 4 && number_at("12.x", 0) == 2 && number_at("x", 0) == -1;
+}
+
+test "find and continue" {
+    let t = "a 3, b -4 and 10.5";
+    var n = 0;
+    var p = number_find(t, 0);
+    while p >= 0 { n += 1; p = number_find(t, number_at(t, p)); }
+    return n == 3;
+}
+
+test "endpoints" {
+    let r = get("/sum?text=" + "a 3, b -4 and 10.5");
+    if r.status != 200 { return "status " + str(r.status); }
+    return field(r.body, "sum") == "9" && field(r.body, "count") == "3";
+}
+
+// ---- captures: the groups of a match are windows onto the text, nothing is copied
+
+// a date's parts: 2026-11-14 -> year 2026, month 11, day 14
+@get("/date")
+fn date(text: utf8<0..200>) -> Response<{ year: i64, month: i64, day: i64 }> {
+    if !datep_search(text, 0, work.d) { fail 404 "no date in the text"; }
+    return ok({
+        year: int_of(substr(text, work.d.lo[1], work.d.hi[1] - work.d.lo[1])),
+        month: int_of(substr(text, work.d.lo[2], work.d.hi[2] - work.d.lo[2])),
+        day: int_of(substr(text, work.d.lo[3], work.d.hi[3] - work.d.lo[3])),
+    });
+}
+
+// every key=value in a text, as [{key, value}]; a value in quotes loses them (group 2 includes them: we take the inside)
+@get("/pairs")
+fn pairs(text: utf8<0..200>) -> Response<{ count: i64, last_key: string<32>, last_value: string<64> }> {
+    var n = 0;
+    var p = 0;
+    var ka = 0;
+    var kb = 0;
+    var va = 0;
+    var vb = 0;
+    while pair_search(text, p, work.kv) {
+        n += 1;
+        ka = work.kv.lo[1];
+        kb = work.kv.hi[1];
+        va = work.kv.lo[2];
+        vb = work.kv.hi[2];
+        if vb - va >= 2 && byte_at(text, va) == 34 { va += 1; vb -= 1; }
+        p = work.kv.hi[0];
+        if p == work.kv.lo[0] { p += 1; }
+    }
+    return ok({ count: n, last_key: substr(text, ka, kb - ka), last_value: substr(text, va, vb - va) });
+}
+
+test "captures: a date" {
+    let r = get("/date?text=" + "on 2026-11-14 we met");
+    if r.status != 200 { return "status " + str(r.status); }
+    if field(r.body, "year") != "2026" { return "year " + field(r.body, "year"); }
+    if field(r.body, "month") != "11" { return "month " + field(r.body, "month"); }
+    return field(r.body, "day") == "14";
+}
+
+test "captures: no date is a 404" {
+    return get("/date?text=" + "2026-1-14").status == 404;
+}
+
+test "captures: pairs, quoted and bare" {
+    let r = get("/pairs?text=" + "a=1 b=\"two words\" c=3");
+    if field(r.body, "count") != "3" { return "count " + field(r.body, "count"); }
+    return field(r.body, "last_key") == "c" && field(r.body, "last_value") == "3";
+}
+
+test "captures: the quoted value keeps its inside" {
+    let r = get("/pairs?text=" + "name=\"ben m\"");
+    return field(r.body, "last_key") == "name" && field(r.body, "last_value") == "ben m";
+}
+
+// where an address is, and its two parts (the user and the host)
+@get("/mail")
+fn mail(text: utf8<0..200>) -> Response<{ from: i64, to: i64, user: string<64>, host: string<128> }> {
+    if !mail_search(text, 0, work.who) { fail 404 "no address in the text"; }
+    return ok({
+        from: work.who.lo[0],
+        to: work.who.hi[0],
+        user: substr(text, work.who.lo[1], work.who.hi[1] - work.who.lo[1]),
+        host: substr(text, work.who.lo[2], work.who.hi[2] - work.who.lo[2]),
+    });
+}
+
+test "captures: group positions" {
+    let r = get("/mail?text=" + "mail ben@example.com now");
+    if r.status != 200 { return "status " + str(r.status); }
+    if field(r.body, "from") != "5" || field(r.body, "to") != "20" { return "span " + r.body; }
+    return field(r.body, "user") == "ben" && field(r.body, "host") == "example.com";
+}

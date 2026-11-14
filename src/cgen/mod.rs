@@ -1014,7 +1014,9 @@ static const unsigned char mito_lits[] = {{ {} }};
     if g.src.contains("/*html*/") { o += "#define MITO_USES_HTML 1\n"; o += HTML; }
     // lower / upper (builtins 59, 60): Unicode's case tables
     if g.src.contains("builtin(c, 59,") || g.src.contains("builtin(c, 60,") { o += "#define MITO_UNICASE 1\n"; o += UNICASE; }
+    if std::env::var("MITO_MS").is_ok() { o += "#pragma clang attribute push(__attribute__((minsize)), apply_to=function)\n"; }
     o += RUNTIME;
+    if std::env::var("MITO_MS").is_ok() { o += "#pragma clang attribute pop\n"; }
     o += &direct(&crate::scalar::replace(&g.src[PRELUDE.len()..]));
     Ok(o)
 }

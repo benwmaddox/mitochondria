@@ -327,7 +327,7 @@ fills for the first time) is recorded as one "zeros" entry instead of a copy, so
 `remove` takes effect when the request succeeds, so a removed slot cannot be reused in the same request.
 
 **Loops.** `foreach x in c where cond limit n` visits the live items of a collection (`foreach x, i in c`: `i` counts the items
-visited), `reverse` for newest first, `foreach i in lo..hi` both ends included (with `while` to stop early); the same clauses build
+visited), `reverse` for newest first, `foreach i in lo..hi` both ends included (with `while` to stop early); `foreach x, i in app.arr` walks a fixed array of numbers or bools (`reverse`, `where`, `limit` as over a collection; `i` is the position); the same clauses build
 JSON arrays (`[foreach x in c expr]`). Order is kept in the data, never computed when read. `for i = 0; i < n; i += 1 { }` and
 `while cond { }` loop as long as needed, `break` and `continue` work in every loop, and parentheses around a head are allowed but
 never required. A `foreach` is bounded by a capacity or a range; a `while` or `for` counts its rounds against the request's step
@@ -362,8 +362,8 @@ standard error, with the line it was called from (`log: line 12: n is 5`); it is
 and `delete` make requests (`post("/players", { name: "ann" }, { "X-Session": token })`) answering `.status` and `.body`,
 `field(text, "name")` reads a field of a JSON answer, and the state is read directly (changed only through requests). It returns
 `true`, `false` or a text saying what went wrong. `mito test app.mito` runs each test on a fresh state with the clock and
-randomness fixed, and prints the line of the `return` that failed one, or of the statement whose error ended it. Tests are never
-part of a built or served program.
+randomness fixed, and prints the line of the `return` that failed one, or of the statement whose error ended it (in the file it is written in). Tests may be in
+files the program `use`s, and `app.test.mito` beside `app.mito` is read without a `use`. Tests are never part of a built or served program.
 
 **Ranges of variables.** Integer arithmetic is always checked; the compiler drops a check when it can show the operation cannot overflow, from the interval each operand lies in. A literal,
 a range-typed field and an input with a range have one. A `var` has what the code gives it at each point, worked out as it is compiled: its first value; the interval of what an
@@ -566,8 +566,8 @@ Limits:
   endpoint; a text argument's size bound is part of that combination (rounded up to a power of two), so a large function's
   text keeps known sizes, and its region text counts against each caller's as if inlined. Recursion is limited to 64 nested
   calls.
-- Only a string input can be optional; a number takes a default. An item input cannot be optional yet, nor an enum input
-  read by name.
+- Only a string input can be optional; a number takes a default. An item input cannot be optional yet, nor can an enum input
+  (give it a default: `op: Op = Op.Plus`). An enum input is read by the name of its value (path, query, body or header) and any other text is a 400.
 - A stored id (`Player?` field) names only items of a top-level pool, not of a nested collection.
 - A real fault in the C code ends the whole process, every worker with it.
 - Pressure marks are absolute megabytes; no idle trim yet.

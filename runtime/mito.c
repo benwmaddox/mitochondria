@@ -6,6 +6,21 @@
    It reproduces the Rust runtime's behavior exactly (tests/cases check both against the same records). */
 
 /* The operating system's part (memory, clock, randomness, standard error) is runtime/os.c, included before this file. */
+/* Size: the runtime is compiled for small code (clang's `minsize`) except the parts a hot loop runs through (HOT_BEGIN .. HOT_END: item
+   allocation, freeing and stores), which stay at the program's own optimization level. Measured: about 27% smaller executables, with no
+   benchmark slower beyond noise once these parts are exempt. Other compilers ignore the markers. */
+#if defined(__clang__) && !defined(MITO_NO_MINSIZE)
+#define COLD_BEGIN _Pragma("clang attribute push(__attribute__((minsize)), apply_to=function)")
+#define COLD_END   _Pragma("clang attribute pop")
+#define HOT_BEGIN  _Pragma("clang attribute pop")
+#define HOT_END    _Pragma("clang attribute push(__attribute__((minsize)), apply_to=function)")
+#else
+#define COLD_BEGIN
+#define COLD_END
+#define HOT_BEGIN
+#define HOT_END
+#endif
+COLD_BEGIN
 static u64 up(u64 n, u64 to) { return (n + to - 1) / to * to; }
 
 /* A reservation used as a growing array: committed in 64 KB steps as it fills. */
@@ -363,6 +378,7 @@ static void shrank(Mem *m, u32 c) { m->shrinks[root(m, c)]++; }
 
 static void reset_instance(Mem *m, u32 c, u64 inst);
 static void reset_children(Mem *m, u32 c, u64 idx) { const MitoColl *k = coll(m, c); for (u32 i = 0; i < k->nkids; i++) reset_instance(m, k->kids[i].coll, idx); }
+HOT_BEGIN
 static void zero_item(Mem *m, u32 c, u64 idx) {
     const MitoColl *k = coll(m, c);
     for (u32 i = 0; i < k->ncols; i++) if (k->cols[i].kind != 3) zero(m, k->cols[i].off + idx * k->cols[i].size, k->cols[i].size);
@@ -472,6 +488,7 @@ static void free_item(Mem *m, u32 c, u64 idx) {
     }
     hset4(m, c, inst, nhw, cnt - 1, hint < s ? hint : s, ever);
 }
+HOT_END
 
 /* ---- live ranges: the bytes in use, as trims and the live counts see them ---- */
 typedef void (*RangeFn)(Mem *m, u64 a, u64 b, void *ctx);
@@ -730,6 +747,7 @@ static Val scalar_val(Mito *m, u64 a, u32 s) {
 }
 static int bad_type(Mito *m) { err(m, E_BAD, 400); a_str(&m->emsg, "wrong type for this field"); return -1; }
 /* Store a number or bool in a scalar of kind `s`, refusing what does not fit (as the Rust runtime's store_scalar). */
+HOT_BEGIN
 static int store_scalar(Mito *m, u64 a, u32 s, const Val *v) {
     u64 bits;
     if (s == 9 || s == 10) {
@@ -777,6 +795,7 @@ static int store_col(Mito *m, u32 c, u64 idx, u32 ci, i64 j, const Val *v) {
     if (col->kind == 2) { err(m, E_BAD, 400); a_str(&m->emsg, "expected a string"); return -1; }
     return bad_type(m);
 }
+HOT_END
 /* Copy a string column into the text area. */
 static int col_txt(Mito *m, u32 c, u64 idx, u32 ci, T *out) {
     u64 a = caddr(m, c, idx, ci); u32 n = (u32)rd(&m->mem, a, 4);
@@ -1411,6 +1430,7 @@ static int h_move_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 to, i64 count
     memmove(m->base + base + (u64)to * esize, m->base + base + (u64)from * esize, (u64)count * esize);
     return 0;
 }
+HOT_BEGIN
 static int h_store(Ctx *c, u32 cid, u32 idx, u32 ci, const Val *v) { RD_ANY(M_(c)); return store_col(M_(c), cid, idx, ci, -1, v); }
 static int h_store_elem(Ctx *c, u32 cid, u32 idx, u32 ci, i64 k, const Val *v) { RD_ANY(M_(c)); return store_col(M_(c), cid, idx, ci, k, v); }
 /* A plain value at `off`: code 1..11 a scalar, 20 a string<cap>, 30 a reference to top-level pool `cap`. */
@@ -1449,6 +1469,7 @@ static int h_free_val(Ctx *c, const Val *v) { RD_ANY(M_(c));
     if (v->tag != 5) return fail(m, 500, "free needs an item");
     return h_free(c, v->a, v->b);
 }
+HOT_END
 static i64 kind_of(Mito *m, const char *p, u32 n) { for (u32 k = 0; k < m->nkinds; k++) if (c_eq(m->kind_names[k], (const u8 *)p, n)) return k; return -1; }
 static int h_fwd_begin(Ctx *c, const char *p, u32 n) {
     Mito *m = M_(c);
@@ -3320,3 +3341,4 @@ MITO_API u32 MITO(stats)(void *mp_, char *buf, u32 cap) { Mito *m = (Mito *)mp_;
     else { a_str(&a, "stats refusing="); a_str(&a, m->pr.refusing ? "true" : "false"); a_str(&a, " full_trims="); a_u64(&a, m->pr.full_trims); }
     return a.len;
 }
+COLD_END

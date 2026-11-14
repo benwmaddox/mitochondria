@@ -968,9 +968,9 @@ pub fn program_c_named(prog: &Program, api: &Api, source: Option<(&str, &str)>, 
 fn program_c_full(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefix: &str, tests: bool) -> Result<String, String> {
     let g = generate_with(prog, api, source, "static ", tests);
     if let Some(n) = g.notes.first() { return Err(n.clone()); }
-    // The profile was checked on `c->h->helper`; in the unit itself the helper table is the runtime's own constant
-    // `mito_h`, so the optimizer sees the calls go straight to the helpers and can inline them.
-    let direct = |s: &str| s.replace("c->h->", "mito_h.");
+    // The profile was checked on `c->h->helper`; in the unit itself a helper is the runtime's own static function `h_helper`, called by name,
+    // so the optimizer inlines the calls it likes and drops the helpers no call reaches (there is no table of them to keep them alive).
+    let direct = |s: &str| direct_helpers(s);
     let mut o = String::from("#if defined(__AVX2__)
 #include <immintrin.h>
 #endif
@@ -2360,4 +2360,21 @@ fn report_recovered(notes: &mut Vec<String>, ep_text: &str, errs: Vec<String>, r
         notes.push(match split_place(why) { Some((place, rest)) => format!("{}{}: {}", place, ep_text, rest), None => format!("{}: {}", ep_text, why) });
     }
     match res { Ok(()) if !errs.is_empty() => Err(String::new()), r => r }
+}
+
+/// Generated code names helpers as `c->h->name(`; in a built unit that is the runtime's static function `h_name` (`free_` is `h_free`: `free` is a C library name).
+fn direct_helpers(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("c->h->") {
+        o.push_str(&rest[..i]);
+        rest = &rest[i + 6..];
+        let n = rest.bytes().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').count();
+        let name = &rest[..n];
+        o.push_str("h_");
+        o.push_str(if name == "free_" { "free" } else { name });
+        rest = &rest[n..];
+    }
+    o.push_str(rest);
+    o
 }

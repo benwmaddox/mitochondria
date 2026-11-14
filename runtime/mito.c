@@ -1245,6 +1245,7 @@ static int h_fields(Ctx *c, const char *names, u32 n) {
     return 0;
 }
 static int not_live(Mito *m, const char *a, i64 k, const char *b) { err(m, E_NOTLIVE, 404); a_str(&m->emsg, a); a_i64(&m->emsg, k); a_str(&m->emsg, b); return -1; }
+HOT_BEGIN
 static int h_index(Ctx *c, u32 cid, u32 inst, i64 k, u32 *out) {
     Mito *m = M_(c); const MitoColl *col = coll(&m->mem, cid);
     if (k < 0) return not_live(m, "index ", k, " is negative");
@@ -1256,6 +1257,7 @@ static int h_index(Ctx *c, u32 cid, u32 inst, i64 k, u32 *out) {
     if ((u64)k >= col->cap || inst >= col->mult || (u64)k >= hget(&m->mem, cid, HW, inst) || !bit(&m->mem, cid, inst, (u64)k)) return not_live(m, "slot ", k, " is not live");
     *out = (u32)((u64)inst * col->cap + (u64)k); return 0;
 }
+HOT_END
 static int h_lit(Ctx *c, const char *p, u32 n, Txt *out) { Mito *m = M_(c); T t; if (t_push(m, p, n, &t)) return -1; out->off = t.off; out->len = t.len; out->present = 1; return 0; }
 static int h_fail(Ctx *c, int code, const char *p, u32 n) { Mito *m = M_(c); err(m, E_FAIL, code); a_put(&m->emsg, p, n); return -1; }
 static int h_dead(Ctx *c) { return err(M_(c), E_DEAD, 404); }
@@ -1361,7 +1363,9 @@ static int h_truthy(Ctx *c, const Val *v, int *out) { if (v->tag == 3) { *out = 
 static int h_wr_int(Ctx *c, u64 off, u32 size, i64 v) { RD_AT(M_(c), off, size); wr(&M_(c)->mem, off, size, (u64)v); return 0; }
 /* The same for plain state: ensure(0, plain_end) committed it at start and the live-page marking keeps trim from decommitting it, so the page is
    known committed and only the undo log needs a look. */
+HOT_BEGIN
 static int h_clear_coll(Ctx *c, u32 cid, u32 inst) { RD_ANY(M_(c)); reset_instance(&M_(c)->mem, cid, inst); return 0; }
+HOT_END
 static int h_save_line(Ctx *c, u64 a, u32 size) { if (M_(c)->reader) { RD_AT(M_(c), a, size); return 0; } save(&M_(c)->mem, a, size); return 0; }
 static int h_commit_range(Ctx *c, u64 a, u32 size) { ensure(&M_(c)->mem, a, a + size); return 0; }
 /* the text area's length now, and cutting it back to an earlier length: a loop body that keeps none of its strings past the iteration gives their space back */
@@ -1374,6 +1378,7 @@ static int h_text_cut(Ctx *c, u32 len) { Mito *m = M_(c); m->text.len = len < m-
 static int h_wr_plain(Ctx *c, u64 off, u32 size, i64 v) { RD_AT(M_(c), off, size); Mem *m = &M_(c)->mem; save(m, off, size); u64 x = (u64)v; memcpy(m->base + off, &x, size); return 0; }
 /* `count` elements of `esize` bytes of an array at byte offset `base`, from position `from`, are set to the value whose bits are `bits`: one commit
    (not for plain state, committed at start), one undo-log pass over the range, one fill (the generated code checked the range and that the value fits). */
+HOT_BEGIN
 static int h_fill_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 count, i64 bits, int plain) { if (count > 0) RD_AT(M_(c), base + (u64)from * esize, (u64)count * esize);
     if (count <= 0) return 0;
     Mem *m = &M_(c)->mem;
@@ -1387,6 +1392,7 @@ static int h_fill_elems(Ctx *c, u64 base, u32 esize, i64 from, i64 count, i64 bi
     else { u64 x = (u64)bits; for (u64 i = 0; i < n; i++) memcpy(p + i * 8, &x, 8); }
     return 0;
 }
+HOT_END
 /* `count` elements of `esize` bytes move within an array at byte offset `base`, from position `from` to `to`: one commit, one
    undo-log pass over the range they write, one memmove (the generated code checked the range). */
 
@@ -1493,12 +1499,14 @@ static int h_forward(Ctx *c, const char *p, u32 n, i64 key) {
     return err(m, E_FORWARD, 0);
 }
 static int h_crash(Ctx *c) { Mito *m = M_(c); m->crashed = 1; return fail(m, 500, "worker failed and was restarted"); }
+HOT_BEGIN
 static int h_elem(Ctx *c, i64 k, u32 n) {
     Mito *m = M_(c);
     if (k < 0) return not_live(m, "index ", k, " is negative");
     if (k >= (i64)n) { err(m, E_BAD, 400); a_str(&m->emsg, "index "); a_i64(&m->emsg, k); a_str(&m->emsg, " out of range (fixed size "); a_u64(&m->emsg, n); a_str(&m->emsg, ")"); return -1; }
     return 0;
 }
+HOT_END
 /* Field `name` of an item held as a value (only top-level struct fields of items reach here at run time). */
 static int h_field_val(Ctx *c, const Val *base, const char *p, u32 n, Val *out) {
     Mito *m = M_(c);
@@ -2886,14 +2894,6 @@ static int h_txt_set(Ctx *c, Txt *dst, u32 cap, int clear, const Val *v, u32 nv)
     return 0;
 }
 
-static const H mito_h = {
-    h_out, h_json_i64, h_json_col, h_json_txt, h_json_val, h_auth, h_index, h_lit, h_fail, h_dead, h_col_txt, h_plain_txt,
-    h_binop, h_truthy, h_store, h_store_plain, h_alloc, h_free, h_fwd_begin, h_fwd_put, h_forward, h_crash, h_builtin,
-    h_json_f64, h_elem, h_store_elem, h_sel_mark, h_sel_add, h_sel_limit, h_sel_get, h_sel_end, h_field_val, h_store_field, h_free_val, h_was_dead, h_input, h_fields, h_json_id, h_wr_plain, h_wr_int, h_move_elems, h_sort_elems, h_fill_elems, h_clear_coll, h_count_below, h_str_cmp_lit, h_str_cmp_col, h_save_line, h_commit_range, h_save_range, h_text_len, h_arr_txt, h_text_cut,
-    h_rq_put, h_rq_send, h_json_field, h_str_app, h_str_app_at, h_str_set, h_json_at, h_str_cmp_at, h_id_get, h_id_of, h_log,
-    h_answer, h_raw_txt, h_raw_at, h_raw_col, h_see_other, h_set_cookie, h_html_txt, h_html_at, h_html_col, h_etag, h_trim, h_tget, h_tset, h_tadd, h_tdel, h_tcount, h_tfind, h_titer, h_tnext, h_tclose, h_tclear, h_texists, h_tmerge, h_set_header, h_tinsert, h_found, h_split_next,
-    h_txt_cap, h_txt_set,
-};
 
 /* ---------------------------------------------------------------- the interface: mito_* */
 /* Start the program: reserve its layout (refusing if over `budget` bytes), commit plain values and top-level headers.
@@ -3174,7 +3174,7 @@ MITO_API int MITO(handle)(void *mp_, const char *method, u32 mn, const char *tar
         else for (u32 z = 0; z < zr->nzero; z++) memset(m->mem.base + zr->zero[2 * z], 0, zr->zero[2 * z + 1] - zr->zero[2 * z]);
     }
     /* a reader journals nothing, but its writes go through the journal's test (its line map is clear), so each reaches save_line */
-    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->reader ? 1 : m->mem.jon, m->text.p, 0, m->loop_budget };
+    Ctx ctx = { m->mem.base, m, 0, m->mem.dirty, m->mem.committed, m->reader ? 1 : m->mem.jon, m->text.p, 0, m->loop_budget };
 #ifdef MITO_USES_SQLITE
     if (!store_begin(&m->store)) { rollback(&m->mem); out_err_c(m, "the database could not start a transaction"); return 500; }
 #endif
@@ -3220,7 +3220,7 @@ MITO_API int MITO(run_test)(void *mp_, u32 k, char *msg, u32 cap, u32 *line) { M
     m->out.len = 0; m->text.len = MITO_LITS_LEN; m->text_base = MITO_LITS_LEN; m->ekind = E_NONE; m->nrqh = 0;
     m->now = m->fixed_clock ? m->clock : os_now_ms();
     m->frees.len = 0; m->sel.len = 0;
-    Ctx ctx = { m->mem.base, m, &mito_h, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p, 0, m->loop_budget };
+    Ctx ctx = { m->mem.base, m, 0, m->mem.dirty, m->mem.committed, m->mem.jon, m->text.p, 0, m->loop_budget };
     Txt r = { 0, 0, 0 };
     int res = mito_tests[k](&ctx, &r);
     *line = ctx.at;

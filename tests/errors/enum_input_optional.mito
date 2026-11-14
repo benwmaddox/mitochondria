@@ -1,0 +1,5 @@
+// expect: input `op`: only a string can be optional (null when absent); give an enum a default instead
+enum Op { Plus, Minus }
+struct App { n: i64; }
+state app: App;
+@get("/a") fn a(op: Op?) -> Response<{ n: i64 }> { return ok({ n: 1 }); }

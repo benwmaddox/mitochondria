@@ -1,0 +1,43 @@
+// an enum as an endpoint input: read by the name of its value (path, query or body), with a default (`Op.Plus`); another name, another case, a number, an empty text or no value is a 400 naming the values
+--- program
+enum Op { Plus, Minus, Times }
+enum Cmd: u8 { Up = 43, Down = 45 }
+
+struct S { n: i64; }
+state s: S;
+
+@get("/calc")
+fn calc(op: Op = Op.Plus, a: i64 = 6, b: i64 = 3) -> Response<{ r: i64 }> {
+    var r = 0;
+    match op {
+        Op.Plus => { r = a + b; }
+        Op.Minus => { r = a - b; }
+        Op.Times => { r = a * b; }
+    }
+    return ok({ r: r });
+}
+
+@get("/path/{op}")
+fn by_path(op: Op) -> Response<{ r: i64 }> {
+    if op == Op.Times { return ok({ r: 1 }); }
+    return ok({ r: 0 });
+}
+
+@post("/cmd")
+fn cmd(c: Cmd, label: string<0..8> = "x") -> Response<{ code: i64 }> {
+    return ok({ code: c });
+}
+--- requests
+GET /calc?op=Minus
+GET /calc?op=Times&a=4&b=5
+GET /calc
+GET /calc?op=Divide
+GET /calc?op=minus
+GET /calc?op=
+GET /path/Times
+GET /path/Plus
+GET /path/Nope
+POST /cmd {"c": "Down"}
+POST /cmd {"c": "Up"}
+POST /cmd {"c": 45}
+POST /cmd {}

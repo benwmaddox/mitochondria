@@ -21,6 +21,8 @@ impl<'p> G<'p> {
                 InTy::Flt => (2, 0, 0, 0),
                 InTy::Bool => (3, 0, 0, 0),
                 InTy::Str(a, b, ascii) => (if *ascii { 7 } else { 4 }, *a, *b, 0),
+                // an enum is read as text (up to 256 bytes: a longer one is no name of a value anyway) and matched below
+                InTy::Enum(_) => (4, 0, 256, 0),
                 InTy::Item(t, p) => { let c = self.item_pool(&inp.name, t, p.as_deref())?; (match inp.src { Src::Header(_) => 5, Src::Cookie(_) => 8, _ => 6 }, c as i64, 0, c) }
             };
             let v = self.tmp("in");
@@ -46,6 +48,24 @@ impl<'p> G<'p> {
                 InTy::Flt => { let x = self.tmp("f"); self.line(&format!("double {} = {}.f;", x, v)); CV::Flt(x) }
                 InTy::Bool => { let x = self.tmp("b"); self.line(&format!("int {} = {}.i != 0;", x, v)); CV::Bool(x) }
                 InTy::Str(_, hi, _) => { let t = self.tmp("t"); self.line(&format!("Txt {} = {{ {}.a, {}.b, {}.tag == 4 }};", t, v, v, v)); self.txt_bounds.insert(t.clone(), *hi as usize); CV::Txt(t) }
+                InTy::Enum(en) => {
+                    let Some(e) = self.prog.enums.iter().position(|x| x.name == *en) else { return no(format!("input `{}`: `{}` is not an enum", inp.name, en)) };
+                    let vals = self.prog.enums[e].values.clone();
+                    let (x, m) = (self.tmp("i"), self.tmp("m"));
+                    // a default arrives as its integer; a sent value is text: its name picks the integer
+                    self.line(&format!("i64 {} = {}.i; int {} = 1;", x, v, m));
+                    self.open(&format!("if ({}.tag == 4) {{", v));
+                    self.line(&format!("{} = 0;", m));
+                    for (vn, vv) in &vals {
+                        self.line(&format!("if (!{m} && {v}.b == {}ULL && BSTARTS_(TXP_({v}.a), (u64){v}.b, TXP_({}ULL), {}ULL)) {{ {x} = {}; {m} = 1; }}", vn.len(), intern_lit(vn.as_bytes()), vn.len(), c_i64(*vv)));
+                    }
+                    let names = vals.iter().map(|x| x.0.as_str()).collect::<Vec<_>>().join(", ");
+                    let msg = format!("`{}`: not a value of {} ({})", inp.name, en, names);
+                    self.line(&format!("if (!{}) FAIL(400, {}, {});", m, c_lit(msg.as_bytes()), msg.len()));
+                    self.close("}");
+                    if let (Some(lo), Some(hi)) = (vals.iter().map(|x| x.1).min(), vals.iter().map(|x| x.1).max()) { self.ranges.insert(x.clone(), (lo, hi)); }
+                    CV::Int(x)
+                }
                 InTy::Item(..) if inp.optional => { let (s, x) = (self.tmp("r"), self.tmp("i")); self.line(&format!("u32 {} = {}.tag != 0, {} = {}.b;", s, v, x, v)); CV::Ref(pool, s, x) }
                 InTy::Item(..) => { let x = self.tmp("i"); self.line(&format!("u32 {} = {}.b;", x, v)); CV::Item(pool, x) }
             };

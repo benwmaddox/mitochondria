@@ -1,0 +1,15 @@
+GET /calc?op=Minus -> 200 {"r":3}
+GET /calc?op=Times&a=4&b=5 -> 200 {"r":20}
+GET /calc -> 200 {"r":9}
+GET /calc?op=Divide -> 400 {"error":"`op`: not a value of Op (Plus, Minus, Times)"}
+GET /calc?op=minus -> 400 {"error":"`op`: not a value of Op (Plus, Minus, Times)"}
+GET /calc?op= -> 400 {"error":"`op`: not a value of Op (Plus, Minus, Times)"}
+GET /path/Times -> 200 {"r":1}
+GET /path/Plus -> 200 {"r":0}
+GET /path/Nope -> 400 {"error":"`op`: not a value of Op (Plus, Minus, Times)"}
+POST /cmd -> 200 {"code":45}
+POST /cmd -> 200 {"code":43}
+POST /cmd -> 400 {"error":"`c`: expected a string"}
+POST /cmd -> 400 {"error":"`c` is required"}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

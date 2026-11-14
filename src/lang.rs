@@ -225,7 +225,9 @@ pub enum Src { Path, Body, Query, Header(String), Fwd, Cookie(String) }
 /// An input's type: an integer in lo..hi, a number, a bool, a string of lo..hi bytes, or an item (`Player`, or
 /// `Player in game.players`): from the path an id, from a header a session token.
 #[derive(Debug, Clone, PartialEq)]
-pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64, bool), Item(String, Option<String>) }
+pub enum InTy { Int(i64, i64), Flt, Bool, Str(i64, i64, bool), Item(String, Option<String>),
+    /// an enum read by the name of its value (`op: Op`); the parser cannot tell it from an item, the binder turns an `Item` naming an enum into this
+    Enum(String) }
 #[derive(Debug, Clone)]
 /// A function. A module instance's functions are named `instance.name` (written by `modules::expand`); `public` ones
 /// (`pub fn`) can be called from outside the module.
@@ -707,7 +709,7 @@ impl P {
             t => { let pool = if self.is_kw("in") { self.i += 1; let mut p = self.id()?; while self.sym(".") { p = format!("{}.{}", p, self.id()?); } Some(p) } else { None }; InTy::Item(t.to_string(), pool) }
         };
         let optional = self.sym("?");
-        let default = if self.sym("=") { Some(match self.t.get(self.i).cloned() { Some(Tok::Int(n)) => { self.i += 1; Expr::Int(n) } Some(Tok::Sym(m)) if m == "-" => { self.i += 1; Expr::Int(-self.int()?) } Some(Tok::Flt(f)) => { self.i += 1; Expr::Float(f) } Some(Tok::Str(s)) => { self.i += 1; Expr::Str(s) } Some(Tok::Id(b)) if b == "true" || b == "false" => { self.i += 1; Expr::Bool(b == "true") } _ => return Err(format!("input `{}`: a default is a literal", name)) }) } else { None };
+        let default = if self.sym("=") { Some(match self.t.get(self.i).cloned() { Some(Tok::Int(n)) => { self.i += 1; Expr::Int(n) } Some(Tok::Sym(m)) if m == "-" => { self.i += 1; Expr::Int(-self.int()?) } Some(Tok::Flt(f)) => { self.i += 1; Expr::Float(f) } Some(Tok::Str(s)) => { self.i += 1; Expr::Str(s) } Some(Tok::Id(b)) if b == "true" || b == "false" => { self.i += 1; Expr::Bool(b == "true") } Some(Tok::Id(en)) if matches!(self.t.get(self.i + 1), Some(Tok::Sym(d)) if d == ".") => { self.i += 2; let v = self.id()?; Expr::Field(Box::new(Expr::Var(en, VarRes::Unbound)), v) } _ => return Err(format!("input `{}`: a default is a literal (or an enum's value, `Op.Plus`)", name)) }) } else { None };
         let in_path = segs.iter().any(|s| matches!(s, Seg::Param(_, n) if *n == name));
         let src = if self.is_kw("from") {
             self.i += 1;
@@ -752,15 +754,13 @@ impl P {
             else { self.kw("header")?; self.eat("(")?; let h = match self.t.get(self.i) { Some(Tok::Str(s)) => { self.i += 1; s.clone() } _ => return Err(format!("input `{}`: `from header(\"Name\")`, `from cookie(\"name\")`, `from query` or `from body`", name)) }; self.eat(")")?; Src::Header(h) }
         } else if forwarded { Src::Fwd } else if in_path { Src::Path } else if matches!(method, "GET" | "DELETE" | "MAIN" | "FRAME" | "SHADER") { Src::Query } else { Src::Body };
         if in_path && src != Src::Path { return Err(format!("input `{}` is named in the path, so it comes from the path", name)); }
-        if let InTy::Item(..) = ty { if default.is_some() || (optional && !matches!(src, Src::Cookie(_))) { return Err(format!("input `{}`: an item cannot have a default, and only one from a cookie can be optional (null when absent or not valid)", name)); } }
+        // an input of a name that is not a type here is an item or an enum; which it is, and what follows from that, is checked when binding (`check_item_input`)
         if optional && !matches!(ty, InTy::Str(..) | InTy::Item(..)) { return Err(format!("input `{}`: only a string can be optional (null when absent); give it a default instead", name)); }
         match (&ty, &default) {
-            (_, None) | (InTy::Int(..), Some(Expr::Int(_))) | (InTy::Flt, Some(Expr::Float(_) | Expr::Int(_))) | (InTy::Bool, Some(Expr::Bool(_))) | (InTy::Str(..), Some(Expr::Str(_))) => {}
+            (_, None) | (InTy::Item(..), Some(Expr::Field(..))) | (InTy::Int(..), Some(Expr::Int(_))) | (InTy::Flt, Some(Expr::Float(_) | Expr::Int(_))) | (InTy::Bool, Some(Expr::Bool(_))) | (InTy::Str(..), Some(Expr::Str(_))) => {}
             _ => return Err(format!("input `{}`: the default is not of its type", name)),
         }
         if let (InTy::Int(lo, hi), Some(Expr::Int(d))) = (&ty, &default) { if d < lo || d > hi { return Err(format!("input `{}`: the default {} is outside {}..{}", name, d, lo, hi)); } }
-        if matches!(ty, InTy::Item(..)) && !matches!(src, Src::Path | Src::Header(_) | Src::Cookie(_)) { return Err(format!("input `{}`: an item comes from the path (an id), a header or a cookie (a session token)", name)); }
-        if let Src::Header(h) = &src { if matches!(ty, InTy::Item(..)) && !h.eq_ignore_ascii_case("X-Session") { return Err(format!("input `{}`: a session item comes from `header(\"X-Session\")`", name)); } }
         Ok(Input { name, src, ty, default, optional, pending, limits })
     }
     fn signed(&mut self) -> R<i64> { if self.sym("-") { Ok(-self.int()?) } else { self.int() } }
@@ -1460,6 +1460,7 @@ fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums
     for e in &mut api.eps {
         let mut b = Binder { typed_first: typed_first.clone(), names: Vec::new(), next: 0, max: 0, globals, fns: fns.clone(), place: format!("endpoint {}", e.text), owner: None, hidden: 0, at: (0, 0), loops: 0, enums, test: false, coll_loops: 0, consts };
         for i in &mut e.inputs { if let Err(m) = resolve_bounds(i, consts) { errs.push(format!("endpoint {} ({}): {}", e.name, e.text, m)); } }
+        for i in &mut e.inputs { if let Err(m) = check_item_input(i, enums) { errs.push(format!("endpoint {} ({}): {}", e.name, e.text, m)); } }
         for i in &e.inputs { b.declare(&i.name, false); } // slots 0.. in order: the inputs
         if let Err(e) = b.block(&mut e.body) { errs.push(e); continue; }
         e.slots = b.max;
@@ -1467,6 +1468,29 @@ fn bind_with_inner(api: &mut Api, globals: &dyn Fn(&str) -> Option<usize>, enums
     }
     // every function and endpoint is bound on its own: their errors are independent, one per line
     if errs.is_empty() { Ok(()) } else { Err(errs.join("\n")) }
+}
+
+/// An input whose type is a name that is not a struct of the program's own: an enum read by the name of its value (`op: Op`, a default
+/// `Op.Plus`), or else an item, with the rules an item has (from the path, a header or a cookie; no default; only one from a cookie is optional).
+fn check_item_input(i: &mut Input, enums: &Enums) -> R<()> {
+    let InTy::Item(t, pool) = &i.ty else { return Ok(()) };
+    if let Some((_, values)) = enums.iter().find(|x| x.0 == *t) {
+        if pool.is_some() { return Err(format!("input `{}`: `{}` is an enum, not an item of a pool", i.name, t)); }
+        if i.optional { return Err(format!("input `{}`: only a string can be optional (null when absent); give an enum a default instead", i.name)); }
+        if let Some(d) = i.default.take() {
+            let named = match &d { Expr::Field(b, v) => match &**b { Expr::Var(n, _) if n == t => values.iter().find(|x| x.0 == *v).map(|x| x.1), _ => None }, _ => None };
+            let Some(v) = named else { return Err(format!("input `{}`: the default must be a value of `{}`: {}", i.name, t, values.iter().map(|x| format!("{}.{}", t, x.0)).collect::<Vec<_>>().join(", "))) };
+            i.default = Some(Expr::Int(v));
+        }
+        if matches!(i.src, Src::Cookie(_)) { return Err(format!("input `{}`: an enum comes from the path, the query, the body or a header", i.name)); }
+        i.ty = InTy::Enum(t.clone());
+        return Ok(());
+    }
+    if let Some(Expr::Field(..)) = &i.default { return Err(format!("input `{}`: `{}` is not an enum, and an item cannot have a default", i.name, t)); }
+    if i.default.is_some() || (i.optional && !matches!(i.src, Src::Cookie(_))) { return Err(format!("input `{}`: an item cannot have a default, and only one from a cookie can be optional (null when absent or not valid)", i.name)); }
+    if !matches!(i.src, Src::Path | Src::Header(_) | Src::Cookie(_)) { return Err(format!("input `{}`: an item comes from the path (an id), a header or a cookie (a session token)", i.name)); }
+    if let Src::Header(h) = &i.src { if !h.eq_ignore_ascii_case("X-Session") { return Err(format!("input `{}`: a session item comes from `header(\"X-Session\")`", i.name)); } }
+    Ok(())
 }
 
 /// An input's range written with constants (`in 0..Limits.MAX`): the constants' values go in, and the range is checked as a written one is.

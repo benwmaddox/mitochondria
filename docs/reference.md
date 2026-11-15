@@ -11,7 +11,7 @@ A test (`docs_mention_everything` in src/platform.rs) fails when a built-in, opt
 | Command | What it does |
 | --- | --- |
 | `check <program>` | reports the problems found, or says the program loads. `--kinds` lists the kind of every local; `--costs` lists each endpoint's work (bytes zeroed, queries, row reads, table writes, text built). |
-| `build <program> [-o app.exe] [--tcc] [--cflag X]` | an executable: a server (platform web) or a tool (platform cli). Built with clang `-O3`; `--tcc` builds in milliseconds with TinyCC, unoptimized; `--cflag X` (repeatable) hands X to clang in place of `-O3` (`--cflag -O2 --cflag -mavx2`). |
+| `build <program> [-o app.exe] [--tcc] [--cpu L] [--cflag X]` | an executable: a server (platform web) or a tool (platform cli). Built with clang `-O3`; `--tcc` builds in milliseconds with TinyCC, unoptimized; `--cflag X` (repeatable) hands X to clang in place of `-O3` (`--cflag -O2 --cflag -mavx2`); `--cpu baseline\|x86-64-v2\|x86-64-v3\|native` builds for that CPU level (clang's `-march`; not with `--tcc`). |
 | `run <program> [--clang] [-- args]` | builds and runs a command-line program (`@main`) at once. Its stdin may be up to 4 GiB - 1 bytes (read straight into the request text area, held once) and its answer as long (address space reserved, committed as used). What follows `--` is its command line; stdin and stdout are yours. The exit code is the program's. |
 | `serve <program> [--clang] [--watch] [executable options]` | builds with TinyCC (or clang) and runs a server at once; `--watch` rebuilds and restarts when a file of the program changes (state starts empty each time). |
 | `test <program> [--clang]` | runs the program's `test "name" { ... }` blocks, each on a fresh state with the clock fixed; exit code 1 if one fails. |
@@ -94,6 +94,31 @@ A function can take a plain struct (a struct that is a field of the state, also 
 **Struct values.** A struct local is a second name for the place it is bound to (a view): `let c = world.pos;` names it, `let c = Pos { ..world.pos };` is a copy of its own (one move into the scratch area). A new struct is built by a literal: `var v = Vec3 { x: 1.0, y: 0.0, z: 0.0 };`, `let z = Vec3 {};` (all zero), `Vec3 { ..base, y: 5.0 }` (a copy of `base` with `y` changed). A literal names its fields, in any order, and gives every one (except `{}` and the `..base` form); it is the whole value of `let`, `var` or `=`.
 `v = other;` and `world.pos = v;` copy whole structs (an assignment copies already); `v.x += 1.0;` writes a field of a `var` local. The copy holds numbers, nested structs, fixed arrays and sized text (a range-declared field keeps its range), at most 256 bytes, no collection or stored id; reads and logging treat a copy out of the state as a read and a copy into it as the writes it is. A local passes to a function that takes the struct, and a `write` parameter's writes change the local.
 Not yet: returning a struct from a recursive function, comparing, answering with one, a local inside a recursive function (each says so; "Struct values" in DESIGN.md and docs/design/struct-values.md).
+
+## Byte vectors
+
+`u8x16`, `u8x32` and `u8x64` hold 16, 32 or 64 bytes ("lanes") and work on all of them at once, for scanning text fast (docs/design/vectors.md). They live in locals, parameters and results; a field of the state cannot hold one yet.
+
+| form | what it is |
+|---|---|
+| `u8x32(b)` | every lane `b` (0 to 255) |
+| `u8x16(b0, ..., b15)` | a table of 16 constants, for `lookup` |
+| `t.load_u8x32(i)`, `t.load_u8x16(i)`, `t.load_u8x64(i)` | bytes `i` to `i + 31` (15, 63) of text `t`; a lane before the start or past the end is 0 |
+| `a & b`, `\|`, `^`, `+`, `-` | lane by lane (`+`, `-` wrap around 256); an integer on one side is that byte in every lane |
+| `a == b`, `!=`, `<`, `<=`, `>`, `>=` | lane by lane, unsigned: 255 where true, 0 where false |
+| `v >> k` | every lane shifted right by `k` (0 to 7) |
+| `v.mask()` | an integer whose bit k is the top bit of lane k: after a compare, which lanes were true (a `u8x64` uses all 64 bits) |
+| `v.lane(k)` | lane `k` as an integer 0 to 255 |
+| `table.lookup(idx)` | each lane `table[idx & 15]`, or 0 where `idx` is 128 or more (x86's `pshufb`); `table` is a `u8x16` |
+| `x.popcount()`, `x.trailing_zeros()`, `x.leading_zeros()` | of an integer's 64 bits (64 zeros for 0) |
+| `x.prefix_xor()` | bit k is the xor of bits 0 to k: in a mask of quotes, the bytes inside quoted text |
+
+```
+let quotes = (t.load_u8x64(i) == 34).mask();   // which of the 64 bytes are `"`
+n += quotes.popcount();
+```
+
+A lane index, shift count or byte outside its range is a compile error when it is a constant and fails the request otherwise. `mito build --cpu x86-64-v3` (or `native`) uses AVX2; the default build runs on any x86-64 and gives the same answers. TinyCC builds give the same answers too, more slowly.
 
 ## Const groups
 

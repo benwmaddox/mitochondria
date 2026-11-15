@@ -731,6 +731,18 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A file far bigger than the text area's first commit: the area grows in steps of a sixteenth of what it has, and every step must start on a page
+    /// (an unaligned step failed on Linux past about 256 MB with "the request text area is full"). A sparse file costs no disk.
+    #[test]
+    fn a_main_program_reads_a_file_of_several_hundred_megabytes() {
+        let src = "struct A { n: i64; }\nstate a: A;\n@main\nfn main(p: utf8<1..1000> from arg(0)) -> Response<text> {\n    return ok(str(len(or(read_file(p, 4294967295), \"\"))));\n}\n";
+        let Some((dir, exe)) = cli_build(src, "bigfile") else { return };
+        let f = dir.join("big.bin");
+        std::fs::File::create(&f).unwrap().set_len(600_000_000).unwrap();
+        assert_eq!(cli_run(&exe, &[f.to_str().unwrap()], ""), (0, "600000000".into(), "".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `from env`: the process environment as `NAME=value` entries each followed by a 0 byte (and `env("NAME")` still reads one variable).
     #[test]
     fn a_main_program_can_read_the_environment() {

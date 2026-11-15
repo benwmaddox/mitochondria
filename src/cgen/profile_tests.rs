@@ -290,6 +290,29 @@ state app: A;
         assert!(open.contains("< 3ULL"), "{}", open);
     }
 
+    /// Vectors (docs/design/vectors.md) are compiled in line: every kind of text loads through `VLD..` (no runtime helper), the operators and built-ins
+    /// are `V...` macros the safety profile allows, and a program without a vector gets no vector prelude.
+    #[test]
+    fn vectors_are_in_line_and_in_profile() {
+        let gen = |body: &str| {
+            let src = format!("struct A {{ s: string<64>; n: i64 in 0..2; }}\nstate app: A;\n@post(\"/t\") fn t(x: utf8<64>) -> Response<{{ v: i64 }}> {{ {} }}\n", body);
+            let (state, api) = crate::source::load(&src).unwrap();
+            let prog = Program::parse(&state).unwrap();
+            let mut api = crate::lang::parse(&api).unwrap();
+            crate::lang::bind(&mut api, &|n| prog.global(n)).unwrap();
+            let g = generate(&prog, &api);
+            assert!(g.notes.is_empty(), "{:?}", g.notes); // the generator checks every body against the safety profile: a failure is a note
+            g.src[g.src.find("int ep0(Ctx").unwrap()..].to_string()
+        };
+        let body = gen("let a = x.load_u8x32(app.n); let b = app.s.load_u8x64(1); let c = substr(app.s, 1, 20).load_u8x16(0); let d = \"abcdefghijklmnopq\".load_u8x16(0); \
+            let t = u8x16(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15); \
+            let m = ((a == 34) | (a < u8x32(32))).mask() + (b ^ 1).mask().popcount() + t.lookup(c >> 4).lane(3) + (d - 1).mask().trailing_zeros() + app.n.prefix_xor(); \
+            return ok({ v: m });");
+        assert!(!body.contains("builtin(c,"), "vectors call no runtime helper: {}", body);
+        for m in ["VLD32(", "VLD64(", "VLD16(", "VEQ32(", "VOR32(", "VMASK32(", "VLOOK16(", "VSHR16(", "VPOPCNT(", "VTZCNT(", "VPXOR("] { assert!(body.contains(m), "{} missing: {}", m, body); }
+        assert!(!uses_vectors(&gen("return ok({ v: app.n });")));
+    }
+
     /// The five searches of a text for a literal are emitted in line for every kind of text: no runtime call (builtins 37 to 39, 44 and
     /// 45), and the body passes the safety profile (no note of a fallback). A needle that is not a literal keeps the call.
     #[test]

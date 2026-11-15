@@ -1,0 +1,24 @@
+POST /ops -> 200 {"eq":324,"bs":32,"lt":3221225828,"ge":1073741467,"ne":4294967295,"gt":1073741440,"le":3221225855,"sh":2,"add":98,"sub":96,"x":0,"o":4294967295,"up":66}
+POST /ops -> 200 {"eq":0,"bs":0,"lt":4294967295,"ge":0,"ne":0,"gt":0,"le":4294967295,"sh":0,"add":1,"sub":255,"x":0,"o":4294967295,"up":0}
+POST /loads -> 200 {"m16":65535,"m32":8388607,"m64":8388607,"l0":48,"l15":102,"q":2,"first":16}
+POST /loads -> 200 {"m16":7,"m32":7,"m64":7,"l0":34,"l15":0,"q":2,"first":16}
+POST /loads -> 200 {"m16":65504,"m32":268435424,"m64":268435424,"l0":0,"l15":97,"q":2,"first":16}
+POST /loads -> 200 {"m16":0,"m32":0,"m64":0,"l0":0,"l15":0,"q":2,"first":16}
+POST /loads -> 200 {"m16":0,"m32":0,"m64":0,"l0":0,"l15":0,"q":0,"first":-1}
+POST /loads -> 200 {"m16":65535,"m32":4294967295,"m64":-1,"l0":34,"l15":34,"q":70,"first":-1}
+POST /bits -> 200 {"pc":0,"tz":64,"lz":64,"px":0}
+POST /bits -> 200 {"pc":1,"tz":0,"lz":63,"px":-1}
+POST /bits -> 200 {"pc":2,"tz":0,"lz":61,"px":3}
+POST /bits -> 200 {"pc":64,"tz":0,"lz":0,"px":6148914691236517205}
+POST /bits -> 200 {"pc":1,"tz":63,"lz":0,"px":-9223372036854775808}
+POST /bits -> 200 {"pc":32,"tz":0,"lz":1,"px":3689348814741910323}
+POST /lookup -> 200 {"a":12,"b":15,"c":9,"d":0,"top":3456}
+POST /fail -> 200 {"v":7}
+POST /fail -> 500 {"error":"lane out of range","line":53}
+POST /fail -> 500 {"error":"lane out of range","line":53}
+POST /fail -> 200 {"v":0}
+POST /fail -> 500 {"error":"shift count out of range","line":54}
+POST /fail -> 200 {"v":4294967295}
+POST /fail -> 500 {"error":"a lane holds 0 to 255","line":55}
+state <plain values> 8
+memory reserved=4096 committed=4096 live=8

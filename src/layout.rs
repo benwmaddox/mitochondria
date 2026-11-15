@@ -719,6 +719,7 @@ fn contains_coll(p: &Program, t: &Ty) -> bool {
 
 fn resolve(t: Ty, names: &HashMap<String, usize>) -> Result<Ty, String> {
     Ok(match t {
+        Ty::Named(n) if matches!(n.as_str(), "u8x16" | "u8x32" | "u8x64") => return Err(format!("a {} in the state is not supported yet: vectors live in locals, parameters and results (docs/design/vectors.md)", n)),
         Ty::Named(n) => Ty::Struct(*names.get(&n).ok_or(format!("unknown type `{}`", n))?),
         Ty::Arr(e, n) => Ty::Arr(Box::new(resolve(*e, names)?), n),
         Ty::List(e, n, f) => Ty::List(Box::new(resolve(*e, names)?), n, f),

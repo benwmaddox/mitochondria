@@ -163,8 +163,6 @@ pub const VEC_CALLS: &[&str] = &["VSPLAT16", "VSPLAT32", "VSPLAT64", "VTAB16", "
     "VADD16", "VADD32", "VADD64", "VSUB16", "VSUB32", "VSUB64", "VEQ16", "VEQ32", "VEQ64", "VNE16", "VNE32", "VNE64", "VLT16", "VLT32", "VLT64", "VLE16", "VLE32", "VLE64",
     "VGT16", "VGT32", "VGT64", "VGE16", "VGE32", "VGE64", "VSHR16", "VSHR32", "VSHR64", "VLANE16", "VLANE32", "VLANE64", "VLD16", "VLD32", "VLD64", "VMASK16", "VMASK32", "VMASK64",
     "VLOOK16", "VLOOK32", "VLOOK64", "VPOPCNT", "VTZCNT", "VLZCNT", "VPXOR"];
-/// The C types of vectors (declarations the safety profile allows).
-pub const VEC_TYPES: [&str; 3] = ["V16", "V32", "V64"];
 
 /// A vector type's name in the language, for errors.
 pub fn vec_name(n: u8) -> String { format!("u8x{}", n) }
@@ -186,7 +184,7 @@ impl<'p> G<'p> {
         match iv.or_else(|| self.interval(&x)) {
             Some((lo, hi)) if lo >= 0 && hi <= 255 => {}
             Some((lo, hi)) if lo == hi => return no(format!("{} takes an integer 0 to 255, given {}", what, lo)),
-            _ => self.line(&format!("if (UNLIKELY((u64)({}) > 255)) FAIL(500, \"a lane holds 0 to 255\", 22);", x)),
+            _ => self.line(&format!("if (UNLIKELY((u64)({}) > 255)) FAIL(500, \"a lane holds 0 to 255\", 21);", x)),
         }
         Ok(x)
     }

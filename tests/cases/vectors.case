@@ -1,0 +1,83 @@
+// byte vectors (docs/design/vectors.md): loads (inside, straddling either end, empty text), lane operators against vectors and integers, masks of
+// every width (u8x64 sets bit 63), lane, lookup (an index with its top bit set gives 0), the bit helpers, and the run-time failures (a lane index,
+// a shift count, a byte out of range). Every backend must give the same answers.
+--- program
+struct App { n: i64; }
+state app: App;
+
+fn quotes(t: string) -> i64 {
+    let q = u8x64(34);
+    var i = 0;
+    var n = 0;
+    while i < len(t) {
+        n += (t.load_u8x64(i) == q).mask().popcount();
+        i += 64;
+    }
+    return n;
+}
+fn first_of(t: string, b: i64) -> i64 {
+    var i = 0;
+    while i < len(t) {
+        let m = (t.load_u8x16(i) == b).mask();
+        if m != 0 { return i + m.trailing_zeros(); }
+        i += 16;
+    }
+    return -1;
+}
+fn to_upper(v: u8x32) -> u8x32 { return v - ((v >= 97) & (v <= 122) & 32); }
+
+@post("/ops")
+fn ops(t: utf8<0..200>) -> Response<{ eq: i64, bs: i64, lt: i64, ge: i64, ne: i64, gt: i64, le: i64, sh: i64, add: i64, sub: i64, x: i64, o: i64, up: i64 }> {
+    let v = t.load_u8x32(0);
+    return ok({ eq: (v == 34).mask(), bs: (v == u8x32(92)).mask(), lt: (v < u8x32(97)).mask(), ge: (v >= 97).mask(), ne: (v != 0).mask(),
+        gt: (v > 100).mask(), le: (v <= 100).mask(), sh: (v >> 4).lane(2), add: (v + 1).lane(0), sub: (v - u8x32(1)).lane(0),
+        x: (v ^ v).mask(), o: ((v & 15) | 128).mask(), up: to_upper(v).lane(1) });
+}
+@post("/loads")
+fn loads(t: utf8<0..200>, i: i64) -> Response<{ m16: i64, m32: i64, m64: i64, l0: i64, l15: i64, q: i64, first: i64 }> {
+    let a = t.load_u8x16(i);
+    return ok({ m16: (a != 0).mask(), m32: (t.load_u8x32(i) != 0).mask(), m64: (t.load_u8x64(i) != 0).mask(), l0: a.lane(0), l15: a.lane(15),
+        q: quotes(t), first: first_of(t, 61) });
+}
+@post("/bits")
+fn bits(x: i64) -> Response<{ pc: i64, tz: i64, lz: i64, px: i64 }> {
+    return ok({ pc: x.popcount(), tz: x.trailing_zeros(), lz: x.leading_zeros(), px: x.prefix_xor() });
+}
+@post("/lookup")
+fn lookup(t: utf8<0..200>) -> Response<{ a: i64, b: i64, c: i64, d: i64, top: i64 }> {
+    let tab = u8x16(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    let rev = u8x16(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    let hi = t.load_u8x64(0) >> 4;
+    return ok({ a: tab.lookup(rev).lane(3), b: rev.lookup(hi).lane(0), c: rev.lookup(t.load_u8x32(0)).lane(31), d: tab.lookup(u8x16(200)).lane(0),
+        top: (rev.lookup(t.load_u8x64(0)) == 0).mask() });
+}
+@post("/fail")
+fn fail(k: i64) -> Response<{ v: i64 }> {
+    let v = u8x16(7);
+    if k < 20 { return ok({ v: v.lane(k) }); }
+    if k < 40 { return ok({ v: (v >> (k - 20)).mask() }); }
+    return ok({ v: u8x32(k).mask() });
+}
+--- requests
+POST /ops {"t": "ab\"cd\\\"e\"fghijklmnopqrstuvwxyz0123456789"}
+POST /ops {"t": ""}
+POST /loads {"t": "0123456789abcdef=hij\"k\"", "i": 0}
+POST /loads {"t": "0123456789abcdef=hij\"k\"", "i": 20}
+POST /loads {"t": "0123456789abcdef=hij\"k\"", "i": -5}
+POST /loads {"t": "0123456789abcdef=hij\"k\"", "i": 1000}
+POST /loads {"t": "", "i": 0}
+POST /loads {"t": "\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"", "i": 0}
+POST /bits {"x": 0}
+POST /bits {"x": 1}
+POST /bits {"x": 5}
+POST /bits {"x": -1}
+POST /bits {"x": -9223372036854775808}
+POST /bits {"x": 6148914691236517205}
+POST /lookup {"t": "\u0001\u0002\u0003 abcÿ \u0080xyz0123456789012345678901234567890123456789012345678901234567890"}
+POST /fail {"k": 15}
+POST /fail {"k": 16}
+POST /fail {"k": -1}
+POST /fail {"k": 27}
+POST /fail {"k": 28}
+POST /fail {"k": 255}
+POST /fail {"k": 256}

@@ -28,8 +28,9 @@ const USAGE: &str = "usage: mito <command> <program> [options]
 A program is one `.mito` file: a program, or a system of workers (a file holding `system { ... }`).
 
   check  <program> [--kinds|--costs] report the problems found, or say it loads; --kinds lists every local's kind; --costs each endpoint's work
-  build  <program> [-o app.exe] [--tcc] [--cpu baseline|x86-64-v2|x86-64-v3|native]
-                                    an executable serving HTTP (clang -O3; --tcc builds in milliseconds, unoptimized)
+  build  <program> [-o app.exe] [--tcc] [--cpu level]
+                                    an executable serving HTTP (clang -O3; --tcc builds in milliseconds, unoptimized;
+                                    --cpu: baseline, x86-64-v2, x86-64-v3 (AVX2) or native)
   run    <program> [--clang] [-- args]   serve, for a command-line program (`@main`): what follows `--` is its command line, stdin and stdout are yours
   serve  <program> [--clang] [--watch] [executable options]
                                     build with TinyCC (or clang) and run it at once; --watch rebuilds and restarts
@@ -250,10 +251,9 @@ fn build_exe(args: &[String]) {
     // `--cpu L` builds for that CPU level (docs/design/vectors.md): clang's `-march`, ahead of any `--cflag` (which keeps its meaning: in place of `-O3`)
     let mut cflags: Vec<String> = cflags;
     if let Some(i) = args.iter().position(|a| a == "--cpu") {
-        let march = match args.get(i + 1).map(|s| s.as_str()) {
-            Some("baseline") => "-march=x86-64", Some("x86-64-v2") => "-march=x86-64-v2", Some("x86-64-v3") => "-march=x86-64-v3", Some("native") => "-march=native",
-            other => die(format!("--cpu takes baseline, x86-64-v2, x86-64-v3 or native, given {}", other.unwrap_or("nothing"))),
-        };
+        const LEVELS: [(&str, &str); 4] = [("baseline", "-march=x86-64"), ("x86-64-v2", "-march=x86-64-v2"), ("x86-64-v3", "-march=x86-64-v3"), ("native", "-march=native")];
+        let given = args.get(i + 1).map_or("nothing", |s| s.as_str());
+        let Some(&(_, march)) = LEVELS.iter().find(|l| l.0 == given) else { die(format!("--cpu takes baseline, x86-64-v2, x86-64-v3 or native, given {}", given)) };
         if tcc { die("--cpu and --tcc together: TinyCC builds for one CPU level only; drop --cpu, or build with clang".to_string()); }
         if cflags.is_empty() { cflags.push("-O3".into()); }
         cflags.insert(0, march.into());

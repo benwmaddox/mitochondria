@@ -330,6 +330,7 @@ impl<'p> G<'p> {
             K::Coll(c) => (format!("u32 {}_v = 0;", var), CV::Coll(c, format!("{}_v", var))),
             K::Plain(sd, o) => (String::new(), CV::Plain(sd, o)),
             K::Null => (String::new(), CV::Null),
+            K::Vec(n) => (format!("V{} {}_v = {{0}};", n, var), CV::Vec(n, format!("{}_v", var))),
         };
         if !decl.is_empty() { self.line(&decl); }
         if let Some(h) = &ret.sel { self.line(&format!("u32 {};", h)); self.call(&format!("c->h->sel_mark(c, &{})", h)); }
@@ -736,6 +737,7 @@ impl<'p> G<'p> {
             CV::Any(v) => self.call(&format!("c->h->json_val(c, &{})", v)),
             CV::StateStr(c, idx, ci) => self.call(&format!("c->h->json_col(c, {}, {}, {})", c, idx, ci)),
             CV::Null => self.out("null"),
+            CV::Vec(n, _) => return no(format!("a {} cannot be written into an answer: read its lanes with `.lane(k)` or `.mask()`", vectors::vec_name(n))),
             CV::Ref(t, s, k) if tab(t).is_some() => { self.line(&format!("if ({} == 0) {{ CALL(c->h->out(c, \"null\", 4)); }}", s)); self.line(&format!("else CALL(c->h->json_i64(c, (i64)({})));", k)); }
             CV::Ref(t, s, k) => {
                 if self.prog.colls[t].parent.is_some() { return no("an item of a collection inside another's items has no id; write `slot(x)`"); }

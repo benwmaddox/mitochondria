@@ -90,7 +90,7 @@ pub fn cookie_name_ok(c: &str) -> bool { !c.is_empty() && c.len() <= 64 && c.byt
 pub enum B { Sin, Cos, Tan, Asin, Acos, Atan, Sinh, Cosh, Tanh, Ln, Log2, Log10, Ceil, Round, Trunc, Cbrt, Hypot, Fmod, Atan2, Pow, InRange, Expect, F32, Body, Param, Query, Header, Fwd, Int, Str, Len, Now, Random, Min, Max, Count, Capacity, Slot, Stat, Token, Auth, WorkerIndex, WorkerCount, Crash, Or, Exists, MaxLen, CountBelow, Sqrt, Exp, Floor, Abs, Substr, TextFrom, WrapAdd, WrapSub, WrapMul, ReqGet, ReqPost, ReqPut, ReqPatch, ReqDelete, JsonField, Truncate, Log, SetCookie, SetHeader, HtmlLit, HtmlEsc, HtmlEscAttr, HtmlAttr, HtmlRaw, Trim,
     Base64, Base64Url, Unbase64, Hex, Sha1, Sha256, HmacSha1, HmacSha256, Pbkdf2Sha256, RandomBytes, XorBytes, SecretEqual, GcmSeal, GcmOpen, BcryptHash, BcryptCheck, FormEncode, FormDecode, Env, FormatTime, Contains, StartsWith, EndsWith, NoDefaultHeaders, EscapeHtml, RandomText, AddYears, IndexOf, LastIndexOf, JsonQuote, JsonUnquote, RequestTarget, Crc32, ReadStored, SocketSend, SocketClose, SocketSubscribe, SocketUnsubscribe, Broadcast, SocketSendAll, SocketTag, ByteAt, Lower, Upper, CacheGet, CachePut, CacheStart, CacheHole, CachePart, CacheLabel, DataVersion, Replace, TrimStart, TrimEnd, AllEmoji,
     HtmlParse, HtmlParseIn, NodeKind, NodeName, NodeParent, NodeFirst, NodeLast, NodeNext, NodePrev, NodeContent, NodeAttr, NodeAttrCount, NodeAttrName, NodeAttrValue,
-    NodeSetAttr, NodeRemoveAttr, NodeNewElement, NodeNewText, NodeAppend, NodeInsertBefore, NodeDetach, NodeClone, NodeHtml, NodeInnerHtml, NodeSetText, NodeHtmlEscaped, Chr, AllWord, StdinText, ReadFile, FileExists, Eprint, Print, Flush, Math(u8) }
+    NodeSetAttr, NodeRemoveAttr, NodeNewElement, NodeNewText, NodeAppend, NodeInsertBefore, NodeDetach, NodeClone, NodeHtml, NodeInnerHtml, NodeSetText, NodeHtmlEscaped, Chr, AllWord, StdinText, ReadFile, FileExists, Eprint, Print, Flush, Math(u8), Simd(u8) }
 impl B {
     fn from(n: &str) -> Option<B> {
         use B::*;
@@ -103,10 +103,17 @@ impl B {
             "xor_bytes" => XorBytes, "secret_equal" => SecretEqual, "aes256gcm_seal" => GcmSeal, "aes256gcm_open" => GcmOpen,
             "bcrypt_hash" => BcryptHash, "bcrypt_check" => BcryptCheck, "form_encode" => FormEncode, "form_decode" => FormDecode, "env" => Env, "json_field" => JsonField, "format_time" => FormatTime, "contains" => Contains, "starts_with" => StartsWith, "ends_with" => EndsWith, "no_default_headers" => NoDefaultHeaders, "escape_html" => EscapeHtml, "random_text" => RandomText, "add_years" => AddYears, "index_of" => IndexOf, "last_index_of" => LastIndexOf, "json_quote" => JsonQuote, "json_unquote" => JsonUnquote, "request_target" => RequestTarget, "crc32" => Crc32, "read_stored" => ReadStored, "socket_send" => SocketSend, "socket_close" => SocketClose, "socket_subscribe" => SocketSubscribe,
             "socket_unsubscribe" => SocketUnsubscribe, "broadcast" => Broadcast, "socket_send_all" => SocketSendAll, "socket_tag" => SocketTag, "byte_at" => ByteAt, "lower" => Lower, "upper" => Upper, "cache_get" => CacheGet, "cache_put" => CachePut, "cache_start" => CacheStart, "cache_hole" => CacheHole, "cache_part" => CachePart, "cache_label" => CacheLabel, "data_version" => DataVersion, "replace" => Replace, "trim_start" => TrimStart, "trim_end" => TrimEnd, "all_emoji" => AllEmoji, "html_parse" => HtmlParse, "html_parse_in" => HtmlParseIn, "node_kind" => NodeKind, "node_name" => NodeName, "node_parent" => NodeParent, "node_first" => NodeFirst, "node_last" => NodeLast, "node_next" => NodeNext, "node_prev" => NodePrev, "node_content" => NodeContent, "node_attr" => NodeAttr, "node_attr_count" => NodeAttrCount, "node_attr_name" => NodeAttrName, "node_attr_value" => NodeAttrValue, "node_set_attr" => NodeSetAttr, "node_remove_attr" => NodeRemoveAttr, "node_new_element" => NodeNewElement, "node_new_text" => NodeNewText, "node_append" => NodeAppend, "node_insert_before" => NodeInsertBefore, "node_detach" => NodeDetach, "node_clone" => NodeClone, "node_html" => NodeHtml, "node_inner_html" => NodeInnerHtml, "node_set_text" => NodeSetText, "node_html_escaped" => NodeHtmlEscaped, "chr" => Chr, "all_word" => AllWord, "stdin_text" => StdinText, "read_file" => ReadFile, "file_exists" => FileExists, "eprint" => Eprint, "print" => Print, "flush" => Flush,
+            _ if SIMD.iter().any(|m| m.0 == n) => Simd(SIMD.iter().position(|m| m.0 == n).unwrap() as u8),
             _ => return MATH.iter().position(|m| m.0 == n).map(|i| Math(i as u8)),
         })
     }
 }
+/// The vector built-ins (docs/design/vectors.md): name, and whether it is written as a method of its first argument (`t.load_u8x32(i)`, `v.mask()`, `x.popcount()`).
+/// The index is the `Simd` code. Each is compiled in line (src/cgen/vectors.rs); none is a runtime helper.
+pub const SIMD: &[(&str, bool)] = &[
+    ("u8x16", false), ("u8x32", false), ("u8x64", false), ("load_u8x16", true), ("load_u8x32", true), ("load_u8x64", true),
+    ("mask", true), ("lane", true), ("lookup", true), ("popcount", true), ("trailing_zeros", true), ("leading_zeros", true), ("prefix_xor", true),
+];
 /// The math functions beyond the basic ones (docs/reference.md, Built-in functions): name, number of arguments, and what the C macro `NAME_` returns
 /// (0: a float from floats; 1: a float from a float and an integer exponent; 2: an integer from a float). The names are jq 1.8's.
 pub const MATH: &[(&str, usize, u8)] = &[
@@ -1589,7 +1596,8 @@ impl Binder<'_> {
         if n.starts_with('.') || self.fns.iter().any(|f| f.0 == *n) { return; }
         let Some((recv, op)) = n.rsplit_once('.') else { return };
         let declared = self.declared_method(op);
-        if !declared && !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
+        let vector = SIMD.iter().any(|m| m.1 && m.0 == op); // `t.load_u8x32(i)`, `v.mask()`, `x.popcount()`: the vector built-ins
+        if !declared && !vector && !matches!(op, "add" | "try_add" | "remove" | "move" | "copy_from" | "sort" | "fill" | "clear" | "truncate" | "count_below" | "count" | "capacity") { return; }
         let mut parts = recv.split('.');
         let mut r = Expr::Var(parts.next().unwrap_or_default().to_string(), VarRes::Unbound);
         for f in parts { r = Expr::Field(Box::new(r), f.to_string()); }
@@ -1743,6 +1751,7 @@ impl Binder<'_> {
                     (".fill", _) => return self.err("`array.fill(from, count, value)` is a statement".into()),
                     // a function declared for a type: which one is known when the receiver's type is
                     _ if self.declared_method(&n[1..]) => CallRes::Unbound,
+                    _ if SIMD.iter().any(|m| m.1 && m.0 == &n[1..]) => CallRes::Builtin(B::from(&n[1..]).unwrap()),
                     _ => return self.err(format!("unknown function `{}`", &n[1..])),
                 };
             }

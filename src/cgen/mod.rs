@@ -621,6 +621,7 @@ enum CV {
     ArrCol(usize, String, usize),   // a fixed-array field of an item: collection, item index, column
     Elem(usize, String, String, String), // one struct of an item's array of structs: collection, item index, path of the array, element index (held)
     PlainArr(usize, Ty, usize),     // a plain fixed array: offset, element type, length
+    Vec(u8, String),                // a byte vector of 16, 32 or 64 lanes (docs/design/vectors.md): C expression of type V16, V32 or V64
     Resp(String, String),           // a test's request's answer: its status (i64) and body (Txt), read as `.status` and `.body`
     Null,
 }
@@ -709,7 +710,7 @@ struct ScratchUse { unique: std::collections::HashMap<(String, usize), (usize, u
 
 /// The kind of a value that a `var` or a function's result holds, when it must be the same everywhere.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum K { Null, Int, Flt, Bool, Txt, Any, Item(usize), Ref(usize), Coll(usize), Plain(usize, usize) }
+enum K { Null, Int, Flt, Bool, Txt, Any, Item(usize), Ref(usize), Coll(usize), Plain(usize, usize), Vec(u8) }
 
 /// The smallest kind that holds values of both kinds: null joins strings and references (which have their own empty
 /// value) or becomes a general value; an item and a reference to the same pool join as a reference.
@@ -760,6 +761,7 @@ fn type_text(prog: &Program, v: &CV) -> String {
         CV::Item(c, _) => item(*c), CV::Ref(c, ..) => format!("{}?", item(*c)),
         CV::Coll(c, _) => format!("coll {}", coll_name(prog, *c)),
         CV::Plain(sd, o) => format!("plain {}@{}", prog.structs[*sd].name, o),
+        CV::Vec(n, _) => vectors::vec_name(*n),
         CV::Part(..) => "part".into(), CV::ArrCol(..) => "arrcol".into(), CV::Elem(..) => "elem".into(), CV::Resp(..) => "response".into(), CV::PlainArr(_, t, n) => format!("plainarr {:?}[{}]", t, n),
     }
 }
@@ -876,6 +878,8 @@ struct G<'p> {
     immut: std::collections::HashSet<(Option<u32>, u32)>,
 }
 type R<T> = Result<T, String>;
+/// Does generated code hold a vector (then the program's C gets `vectors::VEC_C`)?
+fn uses_vectors(src: &str) -> bool { ["V16 ", "V32 ", "V64 "].iter().any(|t| src.contains(t)) }
 fn no<T>(what: impl Into<String>) -> R<T> { Err(what.into()) }
 fn is_name(e: &str) -> bool { e.chars().all(|c| c.is_alphanumeric() || c == '_') }
 
@@ -978,6 +982,7 @@ fn program_c_full(prog: &Program, api: &Api, source: Option<(&str, &str)>, prefi
     o += &direct(PRELUDE);
     o += OS;
     o += RUNTIME_TYPES;
+    if uses_vectors(&g.src) { o += vectors::VEC_C; }
     o += &format!("#define MITO(x) {}##x\n", prefix);
     o += &layout_c(prog, api, &g.zeros, &g.reads, g.scratch);
     if tests {
@@ -1830,15 +1835,15 @@ fn kind(v: &CV) -> Option<K> {
     Some(match v {
         CV::Int(_) => K::Int, CV::Flt(_) => K::Flt, CV::Bool(_) => K::Bool, CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..) => K::Txt,
         CV::Any(_) => K::Any, CV::Item(c, _) => K::Item(*c), CV::Ref(c, ..) => K::Ref(*c), CV::Null => K::Null,
-        CV::Coll(c, _) => K::Coll(*c), CV::Plain(s, o) => K::Plain(*s, *o),
+        CV::Coll(c, _) => K::Coll(*c), CV::Plain(s, o) => K::Plain(*s, *o), CV::Vec(n, _) => K::Vec(*n),
         CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) | CV::Resp(..) => return None,
     })
 }
 /// Can a value of kind `v` be stored where kind `k` is held? (Collections and structs are places, not values: they fit
 /// only themselves.)
-fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..)) { return v == k; } k == K::Any || unify(v, k) == k }
+fn fits(v: K, k: K) -> bool { if matches!(v, K::Coll(_) | K::Plain(..) | K::Vec(_)) || matches!(k, K::Vec(_)) { return v == k; } k == K::Any || unify(v, k) == k }
 
-mod state; mod stores; mod stmts; mod values; mod calls; mod places; mod inline_search; mod inline_misc; mod inline_eq;
+mod state; mod stores; mod stmts; mod values; mod calls; mod places; mod inline_search; mod inline_misc; mod inline_eq; mod vectors;
 #[cfg(test)] mod profile_tests;
 
 
@@ -1868,7 +1873,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
     const MORE_CALLS: [&str; 2] = ["LD_F32", "LD_F64"];
     const FORBIDDEN: [&str; 24] = ["while", "do", "switch", "static", "extern", "register", "volatile", "asm", "__asm", "__asm__", "sizeof", "union", "struct", "typedef", "enum",
         "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "alloca", "setjmp"];
-    const TYPES: [&str; 6] = ["i64", "u32", "int", "Val", "Txt", "double"];
+    const TYPES: [&str; 9] = ["i64", "u32", "int", "Val", "Txt", "double", "V16", "V32", "V64"];
     let is_id = |s: &str| s.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_');
     let is_num = |s: &str| s.chars().next().map_or(false, |c| c.is_ascii_digit());
     let mut declared: Vec<&str> = vec!["st", "b", "c"];
@@ -1903,7 +1908,7 @@ pub fn check_profile_in(body: &str, params: &[String]) -> Result<(), String> {
                 if !owners.iter().any(|o| ["CALL", "CALL_OR_DEAD", "TAIL"].contains(o)) { return err(i, "helper called without CALL or TAIL"); }
             } else if tok.starts_with("fn_") {
                 if !matches!(owners.last(), Some(&"CALL") | Some(&"CALL_OR_DEAD")) { return err(i, "generated function called without CALL"); }
-            } else if !CALLS.contains(&tok) && !(tok.ends_with('_') && crate::lang::MATH.iter().any(|m| tok.len() == m.0.len() + 1 && tok[..tok.len() - 1].eq_ignore_ascii_case(m.0))) && !MORE_CALLS.contains(&tok) && tok != "return" && !TYPES.contains(&tok) {
+            } else if !CALLS.contains(&tok) && !(tok.ends_with('_') && crate::lang::MATH.iter().any(|m| tok.len() == m.0.len() + 1 && tok[..tok.len() - 1].eq_ignore_ascii_case(m.0))) && !MORE_CALLS.contains(&tok) && !vectors::VEC_CALLS.contains(&tok) && tok != "return" && !TYPES.contains(&tok) {
                 return err(i, "call of something other than a helper or profile macro");
             }
         }

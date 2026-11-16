@@ -404,7 +404,7 @@ impl<'p> G<'p> {
             // a character's other case takes at most three times its bytes
             B::Lower | B::Upper => n(0).map(|x| 3 * x),
             B::Chr => Some(4),
-            B::StdinText => int(0),
+            B::StdinText | B::StdinNext => int(0),
             B::ReadFile => int(1),
             B::RandomText => int(0).zip(n(1)).map(|(k, _)| 4 * k),
             B::Replace => match (n(0), n(1), n(2)) { (Some(x), Some(_), Some(z)) => match a.get(1) { Some(CV::Lit(s)) if !s.is_empty() => Some(x + x / s.len() * z), _ => None }, _ => None },

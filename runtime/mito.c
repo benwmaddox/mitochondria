@@ -2285,10 +2285,27 @@ static int sys_builtin(Ctx *c, Mito *m, int code, const Val *a, u32 n, Val *out)
         os_out(t_ptr(m, x), x.len); *out = v_null(); return 0;
     }
     if (code == 105) { os_out_flush(); *out = v_null(); return 0; } /* flush() */
+    if (code == 107) { /* stdin_size(): the bytes left on standard input when it is a file that can be mapped (stdin_text then costs nothing), else -1 */
+        u64 pos, left; *out = v_int(os_file_span(0, &pos, &left) ? (i64)left : -1); return 0;
+    }
     if (code != 103) { /* the most bytes: the last argument, an integer */
-        const Val *mv = &a[code == 101 ? 0 : 1];
-        if (n < (code == 101 ? 1u : 2u) || mv->tag != 1 || mv->i < 0) return fail(m, 500, "the most bytes is a non-negative integer");
+        int first = code == 101 || code == 106;
+        const Val *mv = &a[first ? 0 : 1];
+        if (n < (first ? 1u : 2u) || mv->tag != 1 || mv->i < 0) return fail(m, 500, "the most bytes is a non-negative integer");
         max = mv->i > 0xFFFFFFFFLL ? 0xFFFFFFFFULL : (u64)mv->i;
+    }
+    if (code == 106) { /* stdin_next(max): the next bytes of standard input, up to max (fewer only at its end, "" after it). Not kept: the text
+                          belongs to the region that asked, so a loop that reads a piece in a function and returns a number reuses the same memory. */
+        os_out_flush();
+        while (got < max) {
+            u64 room = max - got; if (room > (16ULL << 20)) room = 16ULL << 20;
+            if (!text_has(m, got + room)) return fail(m, 507, "stdin_next: the request text area is full");
+            u32 k = os_in(m->text.p + m->text.len + got, (u32)room);
+            if (!k) break;
+            got += k;
+        }
+        c->steps += 64 * (i64)got;
+        m->text.len = (u32)(start + got); *out = v_str(t_since(m, start)); return 0;
     }
     if (code == 101) { /* stdin_text(max) */
         if (m->stdin_done) { if (m->stdin_n > max) return too_long(m, "stdin", max); *out = v_str((T){ m->stdin_off, m->stdin_n }); return 0; }

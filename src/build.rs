@@ -743,6 +743,32 @@ int main(int argc, char **argv) {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `stdin_next(max)`: standard input in pieces of at most max bytes ("" at its end), each piece freed when the function that read it returns a
+    /// number; `stdin_size()`: -1 for a pipe.
+    #[test]
+    fn a_main_program_reads_stdin_in_pieces() {
+        let src = "struct A { n: i64; out: utf8<1000>; }
+state a: A;
+fn step() -> i64 {
+    let t = stdin_next(7);
+    if len(t) == 0 { return 0; }
+    a.n += 1;
+    a.out += t + \"|\";
+    return 1;
+}
+@main
+fn main(x: utf8<0..20> from args) -> Response<text> {
+    let size = stdin_size();
+    while step() == 1 { }
+    return ok(str(size) + \" \" + str(a.n) + \" \" + a.out);
+}
+";
+        let Some((dir, exe)) = cli_build(src, "stdinnext") else { return };
+        assert_eq!(cli_run(&exe, &[], "abcdefghijklmnopqrstuvwxyz"), (0, "-1 4 abcdefg|hijklmn|opqrstu|vwxyz|".into(), "".into()));
+        assert_eq!(cli_run(&exe, &[], ""), (0, "-1 0 ".into(), "".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `from env`: the process environment as `NAME=value` entries each followed by a 0 byte (and `env("NAME")` still reads one variable).
     #[test]
     fn a_main_program_can_read_the_environment() {

@@ -2241,9 +2241,22 @@ static int bytes_builtin(Mito *m, int code, const Val *a, u32 n, Val *out) {
 static int text_has(Mito *m, u64 n) { return (u64)m->text.len + n <= m->text.cap || a_grow(&m->text, (u64)m->text.len + n); }
 /* up to max bytes, then one more to see whether there are more: h is a file (os_file_read), or stdin when 0. 0: all of it is at the end of the text area, its length in *got;
    2: more than max bytes; 3: the text area is full */
-static int read_into_text(Mito *m, void *h, u64 max, u64 *got) {
+static int read_into_text(Mito *m, void *h, u64 max, u64 *got, u64 *at) {
     u64 n = 0;
+    *at = m->text.len;
     if (!h) os_out_flush(); /* what the program printed is out before it waits for input */
+    /* A command-line program reading a regular file maps it into the area, at the next page, instead of copying it: one call, whatever its size (a
+       server reads: its area is reused by the next request). What cannot be mapped (a pipe, a terminal, Windows for now) is read below. */
+    u64 fpos, fn;
+    if (m->cli_main && os_file_span(h, &fpos, &fn)) {
+        if (fn > max) return 2;
+        u64 a = up(m->text.len, 4096);
+        if (a + fn <= m->text.max && (a <= m->text.cap || a_grow(&m->text, a)) && os_file_map(h, m->text.p + a, fpos, fn)) {
+            u64 end = up(a + fn, 4096);
+            if (end > m->text.cap) m->text.cap = (u32)(end < m->text.max ? end : m->text.max);
+            *at = a; *got = fn; return 0;
+        }
+    }
     for (;;) {
         u64 room = 16ULL << 20; if (room > max + 1 - n) room = max + 1 - n;
         while (room > 1 && !text_has(m, n + room)) room >>= 1;
@@ -2279,9 +2292,11 @@ static int sys_builtin(Ctx *c, Mito *m, int code, const Val *a, u32 n, Val *out)
     }
     if (code == 101) { /* stdin_text(max) */
         if (m->stdin_done) { if (m->stdin_n > max) return too_long(m, "stdin", max); *out = v_str((T){ m->stdin_off, m->stdin_n }); return 0; }
-        int r = read_into_text(m, 0, max, &got);
+        u64 at;
+        int r = read_into_text(m, 0, max, &got, &at);
         if (r == 2) return too_long(m, "stdin", max);
         if (r) return fail(m, 507, "stdin: the request text area is full");
+        start = (u32)at;
         m->stdin_off = start; m->stdin_n = (u32)got; m->stdin_done = 1;
         c->steps += 64 * (i64)got; /* a pass over every byte of it takes several steps */
         m->text.len = (u32)(start + got); m->text_pin = m->text.len; *out = v_str(t_since(m, start)); return 0;
@@ -2294,10 +2309,12 @@ static int sys_builtin(Ctx *c, Mito *m, int code, const Val *a, u32 n, Val *out)
     void *h = os_file_open(path);
     if (code == 103) { if (h) os_file_close(h); *out = v_int(h != 0); return 0; }
     if (!h) { *out = v_null(); return 0; }
-    int r = read_into_text(m, h, max, &got);
+    u64 at;
+    int r = read_into_text(m, h, max, &got, &at);
     os_file_close(h);
     if (r == 2) return too_long(m, "read_file", max);
     if (r) return fail(m, 507, "read_file: the request text area is full");
+    start = (u32)at;
     c->steps += 64 * (i64)got;
     m->text.len = (u32)(start + got); m->text_pin = m->text.len; *out = v_str(t_since(m, start)); return 0;
 }

@@ -102,6 +102,9 @@ static int os_read_file(const char *path, u8 *buf, u64 cap, u64 *len) {
 static void *os_file_open(const char *path) { void *h = CreateFileA(path, 0x80000000u, 3, 0, 3, 0, 0); return h == (void *)(i64)-1 ? 0 : h; } /* GENERIC_READ, FILE_SHARE_READ | WRITE, OPEN_EXISTING */
 static u32 os_file_read(void *h, void *p, u32 n) { u32 done = 0; if (!ReadFile(h, p, n, &done, 0)) return 0; return done; }
 static void os_file_close(void *h) { CloseHandle(h); }
+/* mapping a file into the text area: not on Windows yet (the area is one reservation; mapping into it needs placeholders), so files are read */
+static int os_file_span(void *h, u64 *pos, u64 *n) { (void)h; (void)pos; (void)n; return 0; }
+static int os_file_map(void *h, void *at, u64 pos, u64 n) { (void)h; (void)at; (void)pos; (void)n; return 0; }
 /* the process's environment as `NAME=value` entries each followed by a 0 byte (UTF-8; Windows' hidden `=C:=...` entries left out), at most cap bytes: the length, or 0xFFFFFFFF when it does not fit */
 unsigned short *GetEnvironmentStringsW(void);
 int FreeEnvironmentStringsW(unsigned short *p);
@@ -276,6 +279,26 @@ static void *os_file_open(const char *path) {
 }
 static u32 os_file_read(void *h, void *p, u32 n) { i64 k = read((int)(u64)h - 1, p, n); return k > 0 ? (u32)k : 0; }
 static void os_file_close(void *h) { close((int)(u64)h - 1); }
+i64 lseek(int fd, i64 off, int whence);
+/* A file opened for reading (a handle, or 0 for standard input) that can be mapped: its read position (a page boundary) and the bytes from there to its end.
+   0 for what cannot be mapped (a pipe, a terminal, a device, an empty file): it is read instead. */
+static int os_file_span(void *h, u64 *pos, u64 *n) {
+    int fd = h ? (int)(u64)h - 1 : 0;
+    i64 p = lseek(fd, 0, 1); /* SEEK_CUR */
+    if (p < 0 || (p & 4095)) return 0;
+    i64 e = lseek(fd, 0, 2); /* SEEK_END */
+    lseek(fd, p, 0);
+    if (e <= p) return 0;
+    *pos = (u64)p; *n = (u64)(e - p); return 1;
+}
+/* n bytes of the file from pos mapped at `at` (a page inside a reservation), private and writable: the pages are the system's file cache until written,
+   and a write stays in the process. The read position moves past them, as reading would. */
+static int os_file_map(void *h, void *at, u64 pos, u64 n) {
+    int fd = h ? (int)(u64)h - 1 : 0;
+    if (mmap(at, n, 3, 0x02 | 0x10, fd, (i64)pos) != at) return 0; /* PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED */
+    lseek(fd, (i64)(pos + n), 0);
+    return 1;
+}
 /* the process's environment as `NAME=value` entries each followed by a 0 byte, at most cap bytes: the length, or 0xFFFFFFFF when it does not fit */
 extern char **environ;
 static u32 os_environ(char *buf, u32 cap) {

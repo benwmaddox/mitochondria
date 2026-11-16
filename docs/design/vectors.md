@@ -57,9 +57,11 @@ On clang with the matching `-march` level, `trailing_zeros` and `leading_zeros` 
 
 `prefix_xor` is a carry-less multiply by all-ones (PCLMUL). The C code uses `#if defined(__PCLMUL__)` for that instruction and a shift-xor cascade otherwise, including under tcc.
 
-### PCLMUL finding (verified, clang 18.1.3)
+### PCLMUL (clang 18.1.3)
 
-`x86-64-v3` does **not** define `__PCLMUL__`. Only `native` on this machine defines it. Consequence: under `--cpu x86-64-v3`, `prefix_xor` uses the shift-xor cascade. The cascade is correct, just slower. Users who want the PCLMUL path must pass `--cpu native` (or add `--cflag -mpclmul`).
+`-march=x86-64-v3` does not define `__PCLMUL__`, although every CPU with AVX2 has the instruction, so `--cpu x86-64-v3` passes
+`-mpclmul` as well: `prefix_xor` is one carry-less multiply there and under `native`, and the shift-xor cascade elsewhere (baseline,
+x86-64-v2, TinyCC). Measured on jx's `--selective` skip loop over 2.9 GB: 2-4% faster than the cascade.
 
 ## 6. `table.lookup(idx)`
 
@@ -74,7 +76,7 @@ This is the `pshufb` rule, with the 16-byte table broadcast to each 128-bit half
     mito build <program> [--cpu baseline|x86-64-v2|x86-64-v3|native] [--cflag ...]
 
 - Maps to `-march=` placed before user `--cflag` values, so a user `--cflag -march=...` still wins.
-- `baseline` is `-march=x86-64` (SSE2 only). `x86-64-v2` adds SSSE3, SSE4.2, POPCNT. `x86-64-v3` adds AVX2 and BMI, without PCLMUL. `native` is the host.
+- `baseline` is `-march=x86-64` (SSE2 only). `x86-64-v2` adds SSSE3, SSE4.2, POPCNT. `x86-64-v3` adds AVX2, BMI and (by `--cpu`, not the level itself) PCLMUL. `native` is the host.
 - Absent `--cpu`, no `-march` is passed, so existing builds are unchanged. (`src/` contains no existing `-march` or `-Werror`.)
 - `--cpu` combined with `--tcc` is an error that names both flags. TinyCC does not take `-march` for these levels, and silently ignoring it would be a silent fallback.
 - Gating: 256-bit movemask needs `__AVX2__`, pshufb needs `__SSSE3__`. Without the gate, the helper uses a portable path, so baseline builds still compile.

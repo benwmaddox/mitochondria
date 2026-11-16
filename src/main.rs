@@ -251,12 +251,13 @@ fn build_exe(args: &[String]) {
     // `--cpu L` builds for that CPU level (docs/design/vectors.md): clang's `-march`, ahead of any `--cflag` (which keeps its meaning: in place of `-O3`)
     let mut cflags: Vec<String> = cflags;
     if let Some(i) = args.iter().position(|a| a == "--cpu") {
-        const LEVELS: [(&str, &str); 4] = [("baseline", "-march=x86-64"), ("x86-64-v2", "-march=x86-64-v2"), ("x86-64-v3", "-march=x86-64-v3"), ("native", "-march=native")];
+        // x86-64-v3 also gets carry-less multiply (every AVX2 CPU has it; the level does not name it): `prefix_xor` in one instruction
+        const LEVELS: [(&str, &str); 4] = [("baseline", "-march=x86-64"), ("x86-64-v2", "-march=x86-64-v2"), ("x86-64-v3", "-march=x86-64-v3 -mpclmul"), ("native", "-march=native")];
         let given = args.get(i + 1).map_or("nothing", |s| s.as_str());
         let Some(&(_, march)) = LEVELS.iter().find(|l| l.0 == given) else { die(format!("--cpu takes baseline, x86-64-v2, x86-64-v3 or native, given {}", given)) };
         if tcc { die("--cpu and --tcc together: TinyCC builds for one CPU level only; drop --cpu, or build with clang".to_string()); }
         if cflags.is_empty() { cflags.push("-O3".into()); }
-        cflags.insert(0, march.into());
+        for f in march.split(' ').rev() { cflags.insert(0, f.into()); }
     }
     let cflags: Vec<&str> = cflags.iter().map(|s| s.as_str()).collect();
     build::exe(&units, &out, tcc, &cflags).unwrap_or_else(|e| die(e));

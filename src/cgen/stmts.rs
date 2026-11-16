@@ -809,7 +809,7 @@ impl<'p> G<'p> {
         let v = self.coerce(v, k, false)?;
         if self.ret.last().unwrap().func {
             match &v {
-                CV::Int(e) | CV::Flt(e) | CV::Bool(e) | CV::Txt(e) | CV::Any(e) | CV::Item(_, e) => self.line(&format!("*ret_v = {};", e)),
+                CV::Int(e) | CV::Flt(e) | CV::Bool(e) | CV::Txt(e) | CV::Any(e) | CV::Item(_, e) | CV::Vec(_, e) => self.line(&format!("*ret_v = {};", e)),
                 CV::Coll(_, e) => self.line(&format!("*ret_v = (u32)({});", e)),
                 CV::Ref(_, s, i) => self.line(&format!("*ret_s = {}; *ret_v = {};", s, i)),
                 CV::Null | CV::Plain(..) => {}

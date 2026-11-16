@@ -17,6 +17,8 @@ impl<'p> G<'p> {
             return Ok(CV::Bool(t));
         }
         let (l, r) = (self.expr(a, env, dead)?, self.expr(b, env, dead)?);
+        // a vector on either side: lane by lane (src/cgen/vectors.rs)
+        if matches!(l, CV::Vec(..)) || matches!(r, CV::Vec(..)) { return self.vec_bin(op, l, r); }
         if op == "==" || op == "!=" {
             let neg = if op == "!=" { "!" } else { "" };
             let inline = match (&l, &r) {
@@ -317,6 +319,8 @@ impl<'p> G<'p> {
     pub(super) fn builtin(&mut self, bi: B, n: &str, _args: &'p [Expr], a: Vec<CV>, lit: impl Fn(Option<&Expr>) -> Option<String>,
         int_out: impl Fn(&mut Self, String) -> CV, txt_out: impl Fn(&mut Self, String) -> CV, val_out: impl Fn(&mut Self, String) -> CV) -> R<CV> {
         let _ = (&lit, &txt_out, &val_out);
+        // the vector built-ins, in line (src/cgen/vectors.rs)
+        if let B::Simd(k) = bi { return self.simd_builtin(k, &a); }
         if bi == B::Log {
             // `log(...)`: for debugging, to standard error; not part of the answer
             let mut names = Vec::new();

@@ -11,7 +11,7 @@ A test (`docs_mention_everything` in src/platform.rs) fails when a built-in, opt
 | Command | What it does |
 | --- | --- |
 | `check <program>` | reports the problems found, or says the program loads. `--kinds` lists the kind of every local; `--costs` lists each endpoint's work (bytes zeroed, queries, row reads, table writes, text built). |
-| `build <program> [-o app.exe] [--tcc] [--cflag X]` | an executable: a server (platform web) or a tool (platform cli). Built with clang `-O3`; `--tcc` builds in milliseconds with TinyCC, unoptimized; `--cflag X` (repeatable) hands X to clang in place of `-O3` (`--cflag -O2 --cflag -mavx2`). |
+| `build <program> [-o app.exe] [--tcc] [--cpu L] [--cflag X]` | an executable: a server (platform web) or a tool (platform cli). Built with clang `-O3`; `--tcc` builds in milliseconds with TinyCC, unoptimized; `--cflag X` (repeatable) hands X to clang in place of `-O3` (`--cflag -O2 --cflag -mavx2`); `--cpu baseline\|x86-64-v2\|x86-64-v3\|native` builds for that CPU level (clang's `-march`; not with `--tcc`). |
 | `run <program> [--clang] [-- args]` | builds and runs a command-line program (`@main`) at once. Its stdin may be up to 4 GiB - 1 bytes (read straight into the request text area, held once) and its answer as long (address space reserved, committed as used). What follows `--` is its command line; stdin and stdout are yours. The exit code is the program's. |
 | `serve <program> [--clang] [--watch] [executable options]` | builds with TinyCC (or clang) and runs a server at once; `--watch` rebuilds and restarts when a file of the program changes (state starts empty each time). |
 | `test <program> [--clang]` | runs the program's `test "name" { ... }` blocks, each on a fresh state with the clock fixed; exit code 1 if one fails. |
@@ -95,6 +95,31 @@ A function can take a plain struct (a struct that is a field of the state, also 
 `v = other;` and `world.pos = v;` copy whole structs (an assignment copies already); `v.x += 1.0;` writes a field of a `var` local. The copy holds numbers, nested structs, fixed arrays and sized text (a range-declared field keeps its range), at most 256 bytes, no collection or stored id; reads and logging treat a copy out of the state as a read and a copy into it as the writes it is. A local passes to a function that takes the struct, and a `write` parameter's writes change the local.
 Not yet: returning a struct from a recursive function, comparing, answering with one, a local inside a recursive function (each says so; "Struct values" in DESIGN.md and docs/design/struct-values.md).
 
+## Byte vectors
+
+`u8x16`, `u8x32` and `u8x64` hold 16, 32 or 64 bytes ("lanes") and work on all of them at once, for scanning text fast (docs/design/vectors.md). They live in locals, parameters and results; a field of the state cannot hold one yet.
+
+| form | what it is |
+|---|---|
+| `u8x32(b)` | every lane `b` (0 to 255) |
+| `u8x16(b0, ..., b15)` | a table of 16 constants, for `lookup` |
+| `t.load_u8x32(i)`, `t.load_u8x16(i)`, `t.load_u8x64(i)` | bytes `i` to `i + 31` (15, 63) of text `t`; a lane before the start or past the end is 0 |
+| `a & b`, `\|`, `^`, `+`, `-` | lane by lane (`+`, `-` wrap around 256); an integer on one side is that byte in every lane |
+| `a == b`, `!=`, `<`, `<=`, `>`, `>=` | lane by lane, unsigned: 255 where true, 0 where false |
+| `v >> k` | every lane shifted right by `k` (0 to 7) |
+| `v.mask()` | an integer whose bit k is the top bit of lane k: after a compare, which lanes were true (a `u8x64` uses all 64 bits) |
+| `v.lane(k)` | lane `k` as an integer 0 to 255 |
+| `table.lookup(idx)` | each lane `table[idx & 15]`, or 0 where `idx` is 128 or more (x86's `pshufb`); `table` is a `u8x16` |
+| `x.popcount()`, `x.trailing_zeros()`, `x.leading_zeros()` | of an integer's 64 bits (64 zeros for 0) |
+| `x.prefix_xor()` | bit k is the xor of bits 0 to k: in a mask of quotes, the bytes inside quoted text |
+
+```
+let quotes = (t.load_u8x64(i) == 34).mask();   // which of the 64 bytes are `"`
+n += quotes.popcount();
+```
+
+A lane index, shift count or byte outside its range is a compile error when it is a constant and fails the request otherwise. `mito build --cpu x86-64-v3` (or `native`) uses AVX2; the default build runs on any x86-64 and gives the same answers. TinyCC builds give the same answers too, more slowly.
+
 ## Const groups
 
 `const Limits { MAX_HP: i64 = 100; MAX_NAME = 16; DOUBLE: i64 = Limits.MAX_HP * 2; }` names compile-time constants, used as `Limits.MAX_HP`. The type is optional for integers (a value that does not fit the type is an error); a float needs one (`const Tune { GRAVITY: f64 = 9.8; }`). A value is a number, an earlier constant of any group, and `- + * / % << >> & | ^ ( )` of them, folded when read; overflow is an error naming the constant. A constant is usable in code (also as a `match` arm), in a field's `in lo..hi`, and in a size (`string<Limits.MAX_NAME>`, `u8[Limits.MAX_NAME]`, `pool<Item, Limits.N>`), not yet in an endpoint input's range (`DESIGN.md`, Const groups). An endpoint input's range may use them: `fn get(n: i64 in 0..Limits.MAX_HP)` (either end, with an optional minus sign).
@@ -126,7 +151,7 @@ A command-line program's system access (`@main` and the functions it calls; a se
 | `read_file(path, max)` | the bytes of the file named by `path` (a text of 1 to 4095 bytes with no 0 byte), or `null` when it does not exist, is a directory or cannot be read (`or(read_file(p, n), "")`, `exists(t)`). Like stdin it is read into the end of the text area, takes that much of it until the program ends, and is not copied; more than `max` bytes fails the request with 413. Each call reads again (the file is not cached). The bytes are as they are: no UTF-8 check, no line-ending change |
 | `file_exists(path)` | `true` when `path` is a file that can be opened for reading (a directory is not) |
 
-Memory: nothing is allocated beyond the program's declared areas. Both texts live in the request text area (at most 4 GiB - 1 for a command-line program), which holds every text a request builds, so a program that reads several files adds their sizes, and the loop step budget grows by 64 steps per byte read, as it does for `from stdin`. A `path` is passed to the system as bytes (on Windows as the ANSI path the C library gets).
+Memory: nothing is allocated beyond the program's declared areas. On Linux a regular file (`read_file`, or `stdin_text` with `< file`) is mapped into the request text area instead of copied, so even a large one takes no time to read (private: a write stays in the program; a pipe is read as before). Both texts live in the request text area (at most 4 GiB - 1 for a command-line program), which holds every text a request builds, so a program that reads several files adds their sizes, and the loop step budget grows by 64 steps per byte read, as it does for `from stdin`. A `path` is passed to the system as bytes (on Windows as the ANSI path the C library gets).
 
 A game's `@frame` function takes its inputs from the window: `dt: f64 from time` (seconds since the last frame), `w: bool from key("w")` (whether a key is down; a letter, a digit, `space`, `up`, `down`, `left`, `right`, `shift` or `escape`) and `look: f64 from mouse("dx")` (`dx` or `dy`, the pointer's movement since the last frame; reading it captures the pointer).
 

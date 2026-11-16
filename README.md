@@ -55,6 +55,7 @@ mito build examples/jx/jx.mito -o jx                                         # a
 | [examples/notes](examples/notes) | web | a multi-file app on tables: accounts, per-user notes, search |
 | [examples/jx](examples/jx) | cli | a small jq in three files |
 | [examples/regex](examples/regex) | web | regular expressions as generated code: patterns become plain functions, with captures as windows |
+| [examples/vectors](examples/vectors) | cli | byte vectors: counts the quotes in standard input 64 bytes at a time, or one byte at a time to compare |
 | [examples/world](examples/world) | game | an open world to walk through, painted in broad brush strokes by one fragment shader |
 
 **Web pages.** Programs can answer HTML written as markup in the code, take HTML form posts and cookies, and serve their

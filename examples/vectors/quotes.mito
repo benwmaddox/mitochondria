@@ -1,0 +1,41 @@
+// Count the `"` bytes of standard input that do not follow a `\`, 64 bytes at a time (docs/design/vectors.md),
+// or one byte at a time when given any argument (`quotes bytes`), to compare. `mito build quotes.mito --cpu x86-64-v3`
+platform cli;
+struct Q { n: i64; }
+state q: Q;
+
+fn count_vectors(t: string) -> i64 {
+    var i = 0;
+    var n = 0;
+    var carry = 0; // 1 when the byte before this block is a backslash
+    while i < len(t) {
+        let v = t.load_u8x64(i);
+        let quotes = (v == 34).mask();
+        let slashes = (v == 92).mask();
+        let after_slash = (slashes << 1) | carry;
+        n += (quotes ^ (quotes & after_slash)).popcount();
+        carry = slashes >>> 63;
+        i += 64;
+    }
+    return n;
+}
+
+fn count_bytes(t: string) -> i64 {
+    var i = 0;
+    var n = 0;
+    var prev = 0;
+    while i < len(t) {
+        let c = byte_at(t, i);
+        if c == 34 && prev != 92 { n += 1; }
+        prev = c;
+        i += 1;
+    }
+    return n;
+}
+
+@main
+fn main(args: utf8<0..100> from args) -> Response<text> {
+    let t = stdin_text(4294967295);
+    if len(args) > 0 { return ok(str(count_bytes(t))); }
+    return ok(str(count_vectors(t)));
+}

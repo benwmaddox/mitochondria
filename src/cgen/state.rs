@@ -348,6 +348,7 @@ impl<'p> G<'p> {
                 }
                 CV::Int(e) => { pks.push(PK::V(K::Int)); cargs.push(e); }
                 CV::Flt(e) => { pks.push(PK::V(K::Flt)); cargs.push(e); }
+                CV::Vec(n, e) => { pks.push(PK::V(K::Vec(n))); cargs.push(e); }
                 CV::Bool(e) => { pks.push(PK::V(K::Bool)); cargs.push(e); }
                 CV::Any(e) => { pks.push(PK::V(K::Any)); cargs.push(e); }
                 CV::Item(c, e) => { pks.push(PK::V(K::Item(c))); cargs.push(e); }
@@ -383,6 +384,7 @@ impl<'p> G<'p> {
             K::Ref(c) => (Some(format!("u32 {}_s = 0, {} = 0;", r, r)), CV::Ref(c, format!("{}_s", r), r.clone())),
             K::Coll(c) => (Some(format!("u32 {} = 0;", r)), CV::Coll(c, r.clone())),
             K::Plain(sd, o) => (None, CV::Plain(sd, o)),
+            K::Vec(n) => (Some(format!("V{} {} = {{0}};", n, r)), CV::Vec(n, r.clone())),
         };
         if let Some(d) = decl { self.line(&d); }
         if let K::Ref(_) = ret { a.push(format!("&{}_s", r)); }
@@ -409,6 +411,7 @@ impl<'p> G<'p> {
                 PK::V(K::Null) | PK::Plain(..) => {}
                 PK::V(K::Coll(_)) => proto += &format!(", u32 p{}", i),
                 PK::V(K::Plain(..)) => {}
+                PK::V(K::Vec(n)) => proto += &format!(", V{} p{}", n, i),
             }
         }
         let rec = self.recursive[k as usize];
@@ -419,7 +422,7 @@ impl<'p> G<'p> {
             self.specs.borrow_mut()[si].ret = cand;
             match self.spec_body(k, pks, cand) {
                 Ok((body, peak, kept, ret_bound)) => {
-                    let rp = match cand { K::Null | K::Plain(..) => "", K::Int => ", i64 *ret_v", K::Flt => ", double *ret_v", K::Bool => ", int *ret_v", K::Txt => ", Txt *ret_v", K::Any => ", Val *ret_v", K::Item(_) | K::Coll(_) => ", u32 *ret_v", K::Ref(_) => ", u32 *ret_s, u32 *ret_v" };
+                    let rp = match cand { K::Null | K::Plain(..) => "", K::Int => ", i64 *ret_v", K::Flt => ", double *ret_v", K::Bool => ", int *ret_v", K::Txt => ", Txt *ret_v", K::Any => ", Val *ret_v", K::Item(_) | K::Coll(_) => ", u32 *ret_v", K::Ref(_) => ", u32 *ret_s, u32 *ret_v", K::Vec(16) => ", V16 *ret_v", K::Vec(32) => ", V32 *ret_v", K::Vec(_) => ", V64 *ret_v" };
                     let mut sp = self.specs.borrow_mut();
                     sp[si].proto = format!("{}{})", proto, rp);
                     sp[si].body = Some(if matches!(cand, K::Plain(..)) { format!("/*SCRALL*/
@@ -464,6 +467,7 @@ impl<'p> G<'p> {
                     PK::V(K::Null) => CV::Null,
                     PK::Plain(sd, o) | PK::V(K::Plain(sd, o)) => CV::Plain(*sd, *o),
                     PK::V(K::Coll(c)) => CV::Coll(*c, format!("p{}", i)),
+                    PK::V(K::Vec(n)) => CV::Vec(*n, format!("p{}", i)),
                 });
             }
             let r = g.block(&f.body, &mut fenv);
@@ -510,7 +514,7 @@ impl<'p> G<'p> {
         let inst = f.rsplit_once('.').map(|x| format!("{}.", x.0));
         let scalar = |n: &str| -> Option<K> { Some(match n {
             "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => K::Int, "f32" | "f64" => K::Flt, "bool" => K::Bool,
-            "string" | "utf8" | "ascii" | "text" => K::Txt, _ => return None }) };
+            "string" | "utf8" | "ascii" | "text" => K::Txt, "u8x16" => K::Vec(16), "u8x32" => K::Vec(32), "u8x64" => K::Vec(64), _ => return None }) };
         if let Some(fld) = &t.field {
             // `T.key`: the type of a struct's field
             let Some(sd) = self.prog.structs.iter().find(|x| x.name == t.name) else { return no(format!("`{}` is not a struct", t.name)) };

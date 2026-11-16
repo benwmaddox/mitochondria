@@ -52,6 +52,7 @@ impl<'p> G<'p> {
         match (cur, v) {
             (CV::Int(t), CV::Int(e)) | (CV::Bool(t), CV::Bool(e)) | (CV::Flt(t), CV::Flt(e)) => self.line(&format!("{} = {};", t, e)),
             (CV::Item(a, t), CV::Item(b, e)) if *a == b => self.line(&format!("{} = {};", t, e)),
+            (CV::Vec(a, t), CV::Vec(b, e)) if *a == b => self.line(&format!("{} = {};", t, e)),
             (CV::Txt(t), v @ (CV::Txt(_) | CV::Lit(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..))) => { let s = self.txt_of(v)?; self.line(&format!("{} = {};", t, s)); }
             (CV::Any(t), v) => { let s = self.val(v)?; self.line(&format!("{} = {};", t, s)); }
             (CV::Txt(t), CV::Null) => self.line(&format!("{} = (Txt){{ 0, 0, 0 }};", t)),
@@ -216,6 +217,7 @@ impl<'p> G<'p> {
             v @ (CV::Lit(_) | CV::Txt(_) | CV::StateStr(..) | CV::PlainStr(..) | CV::Sub(..)) => { let x = self.txt_of(v)?; self.line(&format!("Val {} = {{ {}.present ? 4 : 0, {}.off, {}.len, 0, 0 }};", t, x, x, x)); }
             CV::Coll(..) | CV::Plain(..) | CV::Part(..) | CV::ArrCol(..) | CV::Elem(..) | CV::PlainArr(..) => return no("a collection, array or struct used as a value is not compiled here yet (a struct can be copied into a local or a struct field with `let`, `var` or `=`; passing, returning, comparing and answering with struct values come in later steps of \"Struct values\" in DESIGN.md)"),
             CV::Resp(..) => return no("an answer is read through `.status` and `.body`"),
+            CV::Vec(n, _) => return no(format!("a {} is not a value of any kind: read its lanes with `.lane(k)` or `.mask()`", vectors::vec_name(n))),
         }
         Ok(t)
     }

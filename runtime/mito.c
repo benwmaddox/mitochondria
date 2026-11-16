@@ -42,7 +42,7 @@ typedef struct { u8 *p; u32 cap, len, max; } Area;
 static int a_grow(Area *a, u64 end) {
     if (end > a->max) return 0;
     u64 step = a->cap / 16; if (step < (1u << 20)) step = 1u << 20;
-    u64 nc = a->cap + step; if (nc < end) nc = up(end, 65536); if (nc > a->max) nc = a->max;
+    u64 nc = up(a->cap + step, 65536); if (nc < end) nc = up(end, 65536); /* page-aligned: Linux's mprotect refuses an address inside a page */ if (nc > a->max) nc = a->max;
     if (!os_commit(a->p + a->cap, nc - a->cap)) return 0;
     a->cap = (u32)nc; return 1;
 }
